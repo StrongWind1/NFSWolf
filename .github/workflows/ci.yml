@@ -1,0 +1,394 @@
+# =============================================================================
+# ci.yml -- fast verification that the code still compiles, passes lints, and
+# passes tests. Runs on every push to main and on every pull request. This is
+# the gate that blocks merges.
+#
+# Jobs are split into small parallel units so the overall wall-clock time is
+# roughly "slowest single job" rather than "sum of everything". When everything
+# was serialized inside a single `make check-all` step the run took ~6 minutes;
+# this workflow parallelizes the same work so wall time is closer to 3 minutes.
+#
+# WHEN THINGS RUN
+#   push to main      -> every job runs. (Main should always be green.)
+#   pull request      -> every job runs. (Gate for merges.)
+#   workflow_dispatch -> can be triggered manually from the Actions tab.
+#
+# Tag pushes are handled by release.yml, not here. Scheduled supply-chain
+# scans live in security.yml.
+#
+# GLOSSARY for readers unfamiliar with Rust tooling
+#   cargo       -- Rust's build tool / package manager. Analogous to npm/pip.
+#   cargo fmt   -- automatic code formatter (like Prettier or Black).
+#   cargo check -- fast "does this compile?" without producing a binary.
+#   cargo test  -- compiles and runs unit + integration tests.
+#   cargo doc   -- builds HTML API documentation from doc-comments in source.
+#   clippy      -- the Rust linter. Part of the standard toolchain.
+#   MSRV        -- Minimum Supported Rust Version. This project requires 1.94.
+#   feature     -- a compile-time flag that turns optional code on/off.
+#                  nfswolf exposes one: `fuse` (Linux FUSE support).
+# =============================================================================
+
+name: CI
+
+# The label shown for each run in the Actions tab. By default GitHub uses the
+# commit message, which makes it impossible to tell CI / Security / Release
+# runs apart at a glance. Prefixing with the workflow name fixes that.
+# When the trigger is a tag push there is no head_commit, so we fall back to
+# the ref name (e.g. "v0.1.0").
+run-name: "CI -- ${{ github.event.head_commit.message || github.ref_name }}"
+
+on:
+  # Run after every commit that reaches main (post-merge verification).
+  push:
+    branches: [main]
+  # Run on every pull request, regardless of target branch, so reviewers see
+  # a green check before approving.
+  pull_request:
+  # Allows a maintainer to re-run the whole suite on demand from the Actions
+  # tab without pushing a commit.
+  workflow_dispatch:
+
+# If a new commit lands on a branch while an earlier CI run for that same
+# branch is still in flight, cancel the older run. Saves runner minutes and
+# avoids confusing "old commit failed, new commit passed" signals.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default to bash on every runner (Windows runners would otherwise use PowerShell).
+defaults:
+  run:
+    shell: bash
+
+# Workflow-wide permissions: everything read-only. Individual jobs override
+# this if they need to write (none of the jobs in this file do; release.yml
+# is where write permissions live).
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # fmt -- is every .rs file formatted according to the project's rustfmt
+  # rules? This is a seconds-long check but important: it prevents merge
+  # conflicts caused by unrelated whitespace rewrites.
+  # ---------------------------------------------------------------------------
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        # rust-toolchain.toml at the repo root pins the exact Rust version.
+        # `rustup show` reads that file and installs whatever it requests.
+        run: rustup show
+
+      - name: cargo fmt --check
+        # --check exits non-zero when any file would be reformatted, instead
+        # of rewriting files in place. Equivalent to `prettier --check`.
+        run: cargo fmt --all -- --check
+
+  # ---------------------------------------------------------------------------
+  # clippy -- the Rust linter. Catches common mistakes, unidiomatic patterns,
+  # and performance footguns. This project's Cargo.toml sets clippy rules to
+  # warn or deny; --all-targets --all-features ensures tests and examples are
+  # linted too, not just the library.
+  # ---------------------------------------------------------------------------
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      # FUSE development headers are required to compile the `fuse` feature,
+      # which is on by default. Without these, `cargo check` errors before
+      # the linter even runs.
+      - name: Install FUSE headers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libfuse3-dev pkg-config
+
+      # actions/cache (official) reuses the compiled dependency artifacts
+      # between runs. Without this, every CI job would recompile tokio,
+      # serde, clap, etc. from scratch (several minutes). With it, only the
+      # crate-under-test rebuilds.
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ubuntu-cargo-clippy-
+            ubuntu-cargo-
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- --deny warnings
+
+  # ---------------------------------------------------------------------------
+  # test -- the real test gate. Runs the same three feature combinations as
+  # `make test-matrix`, but as three parallel jobs instead of serially. Each
+  # configuration needs its own compile because feature flags change which
+  # code is included.
+  # ---------------------------------------------------------------------------
+  test:
+    name: test (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # fail-fast: false means "run all matrix entries even if one fails" so
+      # we see the full picture rather than just the first failure.
+      fail-fast: false
+      matrix:
+        include:
+          # Default build: `fuse` feature enabled. This is what Linux users
+          # installing from source will get.
+          - label: all-features
+            flags: --all-features
+          # Minimal build: no optional features. This mirrors the musl static
+          # binary shipped in releases for users who only need scan/analyze.
+          - label: no-default-features
+            flags: --no-default-features
+          # Explicit fuse-only build: detects accidental cross-feature
+          # coupling (e.g. a `fuse` path relying on something gated behind
+          # another feature).
+          - label: fuse-only
+            flags: --no-default-features --features fuse
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install FUSE headers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libfuse3-dev pkg-config
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          # Distinct cache key per feature combination: different features =
+          # different compiled target/ tree, so sharing a cache would miss or
+          # bust constantly.
+          key: ubuntu-cargo-test-${{ matrix.label }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ubuntu-cargo-test-${{ matrix.label }}-
+            ubuntu-cargo-
+
+      - name: cargo test ${{ matrix.flags }}
+        run: cargo test --all-targets ${{ matrix.flags }}
+
+  # ---------------------------------------------------------------------------
+  # cross-platform-check -- does the code still COMPILE on macOS and Windows?
+  # We do not run tests on these platforms; that would more than double CI
+  # runtime for little extra coverage, since the protocol logic is OS-agnostic.
+  # This catches things like an accidental Linux-only crate import.
+  #
+  # FUSE is disabled (--no-default-features) because libfuse3 is Linux-only.
+  # ---------------------------------------------------------------------------
+  cross-platform-check:
+    name: cross-check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-cross-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cross-
+            ${{ runner.os }}-cargo-
+
+      - name: cargo check --no-default-features
+        run: cargo check --all-targets --no-default-features
+
+  # ---------------------------------------------------------------------------
+  # msrv -- Minimum Supported Rust Version. Cargo.toml declares
+  # `rust-version = "1.94"`. This job proves we haven't accidentally used a
+  # language feature newer than that (for example `let-else` in edition 2021
+  # code, or a freshly stabilised API).
+  # ---------------------------------------------------------------------------
+  msrv:
+    name: msrv (1.94)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.94 toolchain
+        # --profile minimal skips extras like miri we don't need. rust-toolchain.toml
+        # pins a different version for the primary jobs; here we install a second
+        # toolchain side-by-side and make it the default for this job only.
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --component clippy
+          rustup default 1.94.0
+
+      - name: Install FUSE headers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libfuse3-dev pkg-config
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo check on MSRV
+        # `check` not `test` or `build`: compiling all the way to linked
+        # binaries adds 30+ seconds for no additional coverage of whether
+        # the source uses too-new APIs.
+        run: cargo check --all-targets --all-features
+
+  # ---------------------------------------------------------------------------
+  # docs -- does `cargo doc` succeed with rustdoc warnings treated as errors?
+  # Broken intra-doc links and missing doc comments on public items are
+  # treated as hard failures. Important because the project publishes the
+  # rendered docs to docs.rs.
+  # ---------------------------------------------------------------------------
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install FUSE headers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libfuse3-dev pkg-config
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-cargo-docs-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ubuntu-cargo-docs-
+            ubuntu-cargo-
+
+      - name: cargo doc
+        env:
+          # Turns rustdoc warnings into errors so broken links fail CI.
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --all-features --no-deps
+
+  # ---------------------------------------------------------------------------
+  # hygiene -- repository-hygiene checks that do not involve compiling Rust.
+  # Fast (single-digit seconds). Caught early so reviewers do not spend time
+  # on a PR that will be blocked on tab characters or CRLF line endings.
+  # ---------------------------------------------------------------------------
+  hygiene:
+    name: hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run hygiene targets
+        # The Makefile encodes the ASCII/LF policy the project has chosen.
+        # Keeping the rules in the Makefile means contributors can run the
+        # same check locally with one command.
+        run: make hygiene
+
+  # ---------------------------------------------------------------------------
+  # unused-deps -- cargo-machete flags dependencies listed in Cargo.toml that
+  # are never referenced from source. Keeps the dependency graph honest.
+  # ---------------------------------------------------------------------------
+  unused-deps:
+    name: unused deps (machete)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo tool install
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/bin/cargo-machete
+            ~/.cargo/registry/index/
+          key: ubuntu-cargo-machete-v1
+
+      - name: Install cargo-machete
+        # --locked installs exactly what the tool's published Cargo.lock
+        # resolves to, which is deterministic across CI runs.
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-machete > /dev/null 2>&1; then
+            cargo install cargo-machete --locked
+          fi
+
+      - name: cargo machete
+        run: cargo machete

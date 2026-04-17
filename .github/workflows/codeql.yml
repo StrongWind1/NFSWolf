@@ -1,0 +1,65 @@
+# =============================================================================
+# codeql.yml -- GitHub CodeQL static analysis for security vulnerabilities.
+#
+# WHEN THINGS RUN
+#   push to main      -> full analysis on every merge.
+#   pull request      -> analysis on every PR so findings block merges.
+#   weekly (Monday)   -> catches new CodeQL rules against existing code.
+#   workflow_dispatch -> manual re-trigger from the Actions tab.
+# =============================================================================
+
+name: CodeQL
+
+run-name: "CodeQL -- ${{ github.event.head_commit.message || github.ref_name }}"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (Rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install FUSE headers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libfuse3-dev pkg-config
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@ce64ddcb0d8d890d2df4a9d1c04ff297367dea2a  # v3.35.2
+        with:
+          languages: rust
+          queries: security-extended
+
+      - name: Build for CodeQL
+        run: cargo build --all-features
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@ce64ddcb0d8d890d2df4a9d1c04ff297367dea2a  # v3.35.2
+        with:
+          category: rust
