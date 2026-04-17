@@ -1,0 +1,43 @@
+[graph]
+# Analyse the full dependency graph, not just direct deps
+all-features = false
+
+[advisories]
+# Deny all known vulnerabilities
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
+
+[licenses]
+version = 2
+# Only allow OSI-approved permissive/copyleft licenses actually used by current deps.
+# Add entries here only when a new dep requires it  --  speculative allowances cause
+# license-not-encountered noise and obscure real license creep.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "Unicode-3.0",
+  # BSL-1.0: Boost Software License, OSI-approved, permissive (clipboard-win via rustyline)
+  "BSL-1.0",
+  # MPL-2.0: Mozilla Public License, OSI-approved (colored)
+  "MPL-2.0",
+  # Unlicense: public domain dedication (several crates)
+  "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Allow multiple versions of the same crate. Transitive deps (windows-sys,
+# syn, socket2, etc.) routinely carry multiple versions in a single ecosystem
+# snapshot; denying or warning on these is pure noise for a single binary.
+multiple-versions = "allow"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

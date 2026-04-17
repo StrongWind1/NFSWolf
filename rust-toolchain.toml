@@ -1,0 +1,13 @@
+[toolchain]
+# Pinned to a concrete stable release for reproducible builds.
+# Update this value in tandem with `rust-version` in Cargo.toml and the MSRV job
+# in .github/workflows/ci.yml when raising the supported baseline.
+channel = "1.94.0"
+# Use the `default` profile so we don't pull miri / rustc-codegen-cranelift
+# which are not always published alongside every stable point release and
+# which we don't need for this project.
+profile = "default"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
+# Targets are installed on-demand by each Makefile build target (rustup target add)
+# and by the GitHub Actions release workflow per native runner.
+# See Makefile for the full set of supported target triples.
