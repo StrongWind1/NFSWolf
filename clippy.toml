@@ -1,0 +1,11 @@
+# Allow expect() and unwrap() inside #[test] functions. Test assertions are
+# supposed to panic on invariant violations  --  that's the point. Suppressing
+# these in production code while permitting them in tests is the right split.
+# Requires Clippy >= 1.82 (Rust 1.82, released 2024-10). MSRV is 1.94, so safe.
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+# Test helpers build slices of known length; the lint adds no value there.
+allow-indexing-slicing-in-tests = true
+# Integration test files in tests/ suppress all compiler and clippy lints via
+# #![allow(unused_qualifications, ..., clippy::all, ...)] in each file header.
+# This covers: unused_qualifications, missing_docs, single_use_lifetimes, etc.

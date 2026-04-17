@@ -1,0 +1,251 @@
+[package]
+name = "nfswolf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Fast native NFS security scanner and analysis toolkit"
+license = "Apache-2.0"
+repository = "https://github.com/StrongWind1/NFSWolf"
+homepage = "https://github.com/StrongWind1/NFSWolf"
+documentation = "https://docs.rs/nfswolf"
+keywords = ["nfs", "security", "scanner", "pentest"]
+categories = ["command-line-utilities", "network-programming"]
+readme = "README.md"
+include = [
+  "src/**/*",
+  "Cargo.toml",
+  "Cargo.lock",
+  "README.md",
+  "LICENSE",
+  "CHANGELOG.md",
+]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# NFS protocol (NFSv3 + MOUNT + portmapper  --  pure Rust, no C deps)
+nfs3_client = { version = "0.8", features = ["tokio"] }
+nfs3_types = "0.5"
+
+# Networking
+socket2 = { version = "0.6", features = ["all"] }
+dashmap = "6"
+
+# FUSE
+fuser = { version = "0.17", optional = true }
+
+# TUI / Shell
+rustyline = "18"
+indicatif = "0.18"
+
+# Output / Reporting
+colored = "3"
+tabled = { version = "0.20", features = ["ansi"] }
+
+# Cryptography
+sha2 = "0.11"
+
+# Utilities
+rand = "0.10"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ipnet = "2"
+
+[dev-dependencies]
+proptest = "1"
+assert_cmd = "2"
+predicates = "3"
+nfs3_server = { version = "0.11", features = ["memfs"] }
+
+[features]
+default = ["fuse"]
+fuse = ["dep:fuser"]
+
+[[bin]]
+name = "nfswolf"
+path = "src/main.rs"
+
+[[test]]
+name = "scan_test"
+path = "tests/integration/scan_test.rs"
+
+[[test]]
+name = "nfs3_protocol_test"
+path = "tests/integration/nfs3_protocol_test.rs"
+
+[[test]]
+name = "escape_test"
+path = "tests/integration/escape_test.rs"
+
+[[test]]
+name = "analyzer_test"
+path = "tests/integration/analyzer_test.rs"
+
+[[test]]
+name = "attack_test"
+path = "tests/integration/attack_test.rs"
+
+# ---------------------------------------------------------------------------
+# [patch.crates-io]
+#
+# nfs3_client 0.8.0 as published on crates.io does not expose a way to swap
+# the AUTH_SYS credential on an already-established connection; the
+# `RpcClient::credential` field is private and no setter exists. nfswolf
+# needs that capability to reuse a single mount session while spraying
+# different UID/GID pairs (see `src/proto/conn.rs::access_as`).
+#
+# Until upstream (Vaiz/nfs3) ships a release with a public setter, we patch
+# 0.8.0 locally via `vendor/nfs3_client/`, which contains the pristine
+# crates.io source plus two minimal additions:
+#
+#   * vendor/nfs3_client/src/nfs.rs   -- adds `pub fn set_credential`
+#   * vendor/nfs3_client/src/rpc.rs   -- exposes `credential`/`verifier` as pub
+#
+# Run `diff -u /path/to/crates.io-tarball/ vendor/nfs3_client/` to audit the
+# deviation. When upstream merges equivalent API, remove this patch and
+# bump the `nfs3_client` version in `[dependencies]` above.
+# ---------------------------------------------------------------------------
+[patch.crates-io]
+nfs3_client = { path = "vendor/nfs3_client" }
+
+[profile.dev]
+# Catch integer overflows in debug builds rather than wrapping silently.
+overflow-checks = true
+
+[profile.release]
+opt-level = 3
+# Full link-time optimisation for maximum performance and smaller binary.
+lto = true
+# Single codegen unit forces cross-crate inlining; required for full LTO.
+codegen-units = 1
+# Abort on panic  --  no unwinding machinery in the binary.
+panic = "abort"
+# Catch overflows in release too; remove only if profiling proves the cost.
+overflow-checks = true
+# Strip debug symbols from the release binary.
+strip = "symbols"
+
+[profile.test]
+# Overflow checks in tests to catch arithmetic bugs.
+overflow-checks = true
+
+# --- Lint policy ---
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "allow"
+unused_import_braces = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+elided_lifetimes_in_paths = "warn"
+explicit_outlives_requirements = "warn"
+keyword_idents = { level = "deny", priority = 1 }
+macro_use_extern_crate = "deny"
+non_ascii_idents = "forbid"
+single_use_lifetimes = "warn"
+unused_extern_crates = "warn"
+dead_code = "allow"
+variant_size_differences = "warn"
+
+[lints.clippy]
+# Lint groups  --  enable everything, then allow specific false-positive-prone lints below.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# --- Restriction lints (cherry-picked, not the whole group) ---
+# Each must be justified; the restriction group contains contradictory lints.
+# No #[allow(...)] without a reason string.
+allow_attributes_without_reason = "warn"
+# No dbg!() in committed code.
+dbg_macro = "deny"
+# Prefer .clone() / .to_owned() over .to_string() for non-Display conversions.
+str_to_string = "warn"
+# No std::mem::forget  --  almost always a bug.
+mem_forget = "deny"
+# No indexing into slices  --  use .get() for safe access.
+indexing_slicing = "warn"
+# No unwrap/expect in library code  --  force proper error propagation.
+unwrap_used = "warn"
+expect_used = "warn"
+# No panic!  --  handle errors properly.
+panic = "warn"
+# Detect lossy float-to-int or int-to-float casts.
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_precision_loss = "warn"
+cast_possible_wrap = "warn"
+# Warn on large enum variant size differences (consider Box).
+large_enum_variant = "warn"
+# No .unwrap() on mutex locks  --  can panic on poisoning.
+mutex_atomic = "warn"
+# Explicit iteration: prefer .iter() / .iter_mut() over implicit deref.
+explicit_iter_loop = "warn"
+explicit_into_iter_loop = "warn"
+# Require `Self` in impl blocks where possible.
+use_self = "warn"
+# Warn on needlessly borrowed references.
+needless_borrow = "warn"
+needless_pass_by_value = "warn"
+
+# --- Allow list (justify every entry) ---
+# module_name_repetitions: common in idiomatic Rust (e.g. error::Error).
+module_name_repetitions = "allow"
+# wildcard_imports: deny everywhere; selectively #[allow] in test modules.
+wildcard_imports = "deny"
+# missing_errors_doc / missing_panics_doc: too noisy for an internal toolkit; every public fn would
+# need boilerplate docs. The crate is not published as a stable library API.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# multiple_crate_versions: transitive dependency duplicates we cannot control.
+multiple_crate_versions = "allow"
+# missing_docs_in_private_items: too pedantic for an internal toolkit.
+missing_docs_in_private_items = "allow"
+# doc_markdown: automatic backtick insertion is overly aggressive for
+# identifiers like "AUTH_SYS", "NFSv2", etc. that are not Rust items.
+doc_markdown = "allow"
+# must_use_candidate / must_use_attribute: too noisy; we add #[must_use] where
+# meaningful (e.g. builder patterns) but not on every getter.
+must_use_candidate = "allow"
+# missing_fields_in_debug: too pedantic.
+missing_fields_in_debug = "allow"
+# similar_names: false-positive prone (file_uid/file_gid are intentional).
+similar_names = "allow"
+# many_single_char_names: algorithmic functions (datetime conversion) legitimately
+# use single-char variables to match mathematical notation.
+many_single_char_names = "allow"
+# struct_excessive_bools: CLI args and config structs legitimately use many bool flags.
+struct_excessive_bools = "allow"
+# fn_params_excessive_bools: same rationale as struct_excessive_bools.
+fn_params_excessive_bools = "allow"
+# too_many_arguments: internal attack/protocol functions legitimately take many params
+# (e.g. run_brute_handle needs host, fs_type, seed, max_attempts, fixed_inode, gen_start,
+# gen_end, stealth). This is an application, not a library; grouping into a struct would
+# be artificial ceremony for single-call-site helpers.
+too_many_arguments = "allow"
+# too_many_lines: some command implementations are long by nature (attack modules, shell
+# dispatch) and splitting them would hurt readability without improving correctness.
+too_many_lines = "allow"
+# option_if_let_else: map_or_else is often less readable than if let/else for multi-line
+# closures, especially when early-return or side-effects are involved.
+option_if_let_else = "allow"
+# unused_self / needless_pass_by_ref_mut: local-filesystem shell commands (lcd, lls,
+# lpwd, lmkdir) live in NfsShell impl for dispatch consistency but don't touch shell
+# state. Using &self keeps the dispatch API uniform; the lint is a false positive here.
+unused_self = "allow"
+needless_pass_by_ref_mut = "allow"
