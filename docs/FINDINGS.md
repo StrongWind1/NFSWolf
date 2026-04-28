@@ -347,40 +347,15 @@ File handles are bearer tokens — possession is authorization.
 
 ---
 
-## Category 6: Denial of Service
+## Category 6: Denial of Service (out of scope)
 
-### F-6.1: NLM Lock Exhaustion / Lock Theft
-
-| Field | Value |
-|-------|-------|
-| Severity | Medium |
-| RFC Basis | RFC 1813 §6.0, §6.1.4 |
-| Precondition | NLM service reachable |
-| Detection | Check NLM registration in portmapper |
-
-**Why the RFC allows this**: NLM's `caller_name` is a self-reported hostname string (RFC 1813 §6.1.4). An attacker can send UNLOCK with a forged caller_name to release other clients' locks. Lock state is separate from NFS state, creating a split-brain authorization model.
-
-### F-6.2: NFSv4 Grace Period Blocking
-
-| Field | Value |
-|-------|-------|
-| Severity | Medium |
-| RFC Basis | RFC 7530 §8.6.2 |
-| Precondition | NFSv4 server |
-| Detection | Monitor for NFS4ERR_GRACE responses after server restart |
-
-**Why the RFC allows this**: "During the grace period, the server must reject READ and WRITE operations and non-reclaim locking requests with an error of NFS4ERR_GRACE." (RFC 7530 §8.6.2). An attacker who can trigger server restarts can maintain continuous service denial.
-
-### F-6.3: SETCLIENTID State Destruction
-
-| Field | Value |
-|-------|-------|
-| Severity | Medium |
-| RFC Basis | RFC 7530 §19, RFC 7931 §5.2.1 |
-| Precondition | NFSv4, attacker can guess client ID string |
-| Detection | Monitor for NFS4ERR_CLID_INUSE |
-
-**Why the RFC allows this**: "the operations SETCLIENTID/SETCLIENTID_CONFIRM are responsible for the release of client state" (RFC 7530 §19). Without integrity protection, an attacker could force state destruction. RFC 7931 §5.2.1 adds principal checking but this only helps when RPCSEC_GSS is used.
+NLM/NSM lock attacks (F-6.1), NFSv4 grace-period blocking (F-6.2), and
+SETCLIENTID state destruction (F-6.3) were initially scoped but are
+intentionally not implemented. The lock-DoS module was removed along with
+the NLM and NSM clients, and grace-period / SETCLIENTID DoS were never
+implemented. Detailed write-ups remain in `docs/findings/F-6.1-*.md`,
+`F-6.2-*.md`, and `F-6.3-*.md` for completeness, but no nfswolf
+subcommand exercises these findings.
 
 ---
 
@@ -458,36 +433,36 @@ File handles are bearer tokens — possession is authorization.
 
 | Finding | Detail Doc | Severity | Detected by |
 |---------|-----------|----------|-------------|
-| F-1.1 | [UID/GID Spoofing](findings/F-1.1-uid-gid-spoofing.md) | Critical | `attack uid-spray`, `shell uid/impersonate`, `mount --uid` |
-| F-1.2 | [Root Squash Bypass](findings/F-1.2-root-squash-bypass.md) | High | `analyze` (squash probe), `attack write --uid 999` |
-| F-1.3 | [Auxiliary Group Injection](findings/F-1.3-auxiliary-group-injection.md) | High | `analyze` (shadow GID 42/15), `shell gid`, `attack read --gid 42` |
-| F-1.4 | [Machine Name Spoofing](findings/F-1.4-machine-name-spoofing.md) | Low | `attack` / `shell` via `--hostname` flag |
+| F-1.1 | [UID/GID Spoofing](findings/F-1.1-uid-gid-spoofing.md) | Critical | `uid-spray`, `shell uid/impersonate`, `mount --uid` |
+| F-1.2 | [Root Squash Bypass](findings/F-1.2-root-squash-bypass.md) | High | `analyze` (squash probe), `shell uid 0` once `escape` returns a handle |
+| F-1.3 | [Auxiliary Group Injection](findings/F-1.3-auxiliary-group-injection.md) | High | `analyze` (shadow GID 42/15), `shell gid`, `mount --aux-gids` |
+| F-1.4 | [Machine Name Spoofing](findings/F-1.4-machine-name-spoofing.md) | Low | `--hostname` global flag (every subcommand), `shell hostname` |
 | F-1.5 | [Credential Replay](findings/F-1.5-credential-replay.md) | High | Passive only -- precondition detected via F-3.1 |
 | F-1.6 | [NFSv2 Downgrade](findings/F-1.6-nfsv2-downgrade.md) | High | `scan` (portmapper version matrix), `analyze` |
-| F-2.1 | [Export Escape](findings/F-2.1-export-escape.md) | Critical | `attack escape`, `analyze`, `shell escape-root` |
-| F-2.2 | [File Handle Guessing](findings/F-2.2-file-handle-guessing.md) | High | `analyze` (entropy), `attack handle-brute` |
+| F-2.1 | [Export Escape](findings/F-2.1-export-escape.md) | Critical | `escape`, `analyze`, `shell escape-root` |
+| F-2.2 | [File Handle Guessing](findings/F-2.2-file-handle-guessing.md) | High | `analyze` (entropy), `brute-handle` |
 | F-2.3 | [Windows Handle Signing](findings/F-2.3-windows-handle-signing.md) | Critical | `analyze` (`FileHandleAnalyzer::check_windows_signing`) |
-| F-2.4 | [BTRFS Subvolume Escape](findings/F-2.4-btrfs-subvolume-escape.md) | High | `attack escape` (subvol 5 + 256+), `shell escape-root` |
-| F-2.5 | [Stale Handle Persistence](findings/F-2.5-stale-handle-persistence.md) | Medium | `attack read/write --handle <hex>`, `shell mount-handle` |
-| F-2.6 | [Bind Mount Escape](findings/F-2.6-bind-mount-escape.md) | High | `attack escape` (fsid-based handle), `analyze` |
+| F-2.4 | [BTRFS Subvolume Escape](findings/F-2.4-btrfs-subvolume-escape.md) | High | `escape` (subvol 5 + 256+), `shell escape-root` |
+| F-2.5 | [Stale Handle Persistence](findings/F-2.5-stale-handle-persistence.md) | Medium | `shell --handle <hex>`, `mount --handle <hex>`, `shell mount-handle` |
+| F-2.6 | [Bind Mount Escape](findings/F-2.6-bind-mount-escape.md) | High | `escape` (fsid-based handle), `analyze` |
 | F-3.1 | [Plaintext Wire Protocol](findings/F-3.1-plaintext-wire-protocol.md) | High | `analyze` (TLS probe; precondition check) |
 | F-3.2 | [Portmapper Amplification](findings/F-3.2-portmapper-amplification.md) | Medium | `scan` (UDP DUMP amplification factor), `analyze` |
 | F-3.3 | [IP Spoofing](findings/F-3.3-ip-spoofing-host-trust.md) | High | `analyze` (host-based ACL detection; no active exploit) |
-| F-3.4 | [STRIPTLS Downgrade](findings/F-3.4-striptls-downgrade.md) | High | `analyze` (AUTH_TLS probe); NFSv4 SECINFO (Phase 8) |
+| F-3.4 | [STRIPTLS Downgrade](findings/F-3.4-striptls-downgrade.md) | High | `analyze` (AUTH_TLS probe); NFSv4 SECINFO |
 | F-3.5 | [Portmapper Tunnel Bypass](findings/F-3.5-portmapper-tunnel-bypass.md) | Medium | `scan` (direct port 2049 probe when 111 filtered) |
-| F-4.1 | [no_root_squash](findings/F-4.1-no-root-squash.md) | Critical | `analyze`, `attack write --uid 0`, `shell uid 0` |
-| F-4.2 | [SUID/SGID Escalation](findings/F-4.2-suid-sgid-escalation.md) | High | `shell suid-scan`, `attack upload --suid` |
-| F-4.3 | [Device Node Creation](findings/F-4.3-device-node-creation.md) | High | `shell mknod`, `attack` (manual MKNOD via shell) |
-| F-4.4 | [Symlink Escape](findings/F-4.4-symlink-escape.md) | High | `attack symlink-swap`, `analyze` (writable parent detection) |
+| F-4.1 | [no_root_squash](findings/F-4.1-no-root-squash.md) | Critical | `analyze`, `mount --uid 0 --allow-write`, `shell uid 0` |
+| F-4.2 | [SUID/SGID Escalation](findings/F-4.2-suid-sgid-escalation.md) | High | `shell suid-scan`, `mount` + `chmod u+s` via regular tools |
+| F-4.3 | [Device Node Creation](findings/F-4.3-device-node-creation.md) | High | `shell mknod` |
+| F-4.4 | [Symlink Escape](findings/F-4.4-symlink-escape.md) | High | `analyze` (writable parent detection), `shell ln -s` |
 | F-4.5 | [SELinux Label Bypass](findings/F-4.5-selinux-label-bypass.md) | Medium | `analyze` (MAC label check on created file) |
 | F-5.1 | [Export List Enumeration](findings/F-5.1-export-list-enumeration.md) | Medium | `scan` (MNTPROC_EXPORT), `analyze` |
-| F-5.2 | [READDIRPLUS Harvesting](findings/F-5.2-readdirplus-handle-harvesting.md) | High | `attack harvest`, `shell ls`, `mount` (transparent via FUSE) |
+| F-5.2 | [READDIRPLUS Harvesting](findings/F-5.2-readdirplus-handle-harvesting.md) | High | `shell ls`, `shell find`, `mount` (transparent via FUSE) |
 | F-5.3 | [NIS Credential Extraction](findings/F-5.3-nis-credential-extraction.md) | High | `scan` / `analyze` (portmapper 100004/100007 detect) |
 | F-5.4 | [RPC Service Enumeration](findings/F-5.4-rpc-service-enumeration.md) | Low | `scan` (PMAPPROC_DUMP full dump) |
-| F-5.5 | [NFSv4 Pseudo-FS Leakage](findings/F-5.5-nfsv4-pseudo-fs-leakage.md) | Low | `scan` (Nfs4Client::map_pseudo_fs -- Phase 8) |
-| F-6.1 | [NLM Lock Attacks](findings/F-6.1-nlm-lock-attacks.md) | Medium | `attack lock-dos` (NLM4 lock/cancel/unlock) |
-| F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | `attack v4-grace` (NFSv4 restart trigger) |
-| F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | `attack v4-state` (NFSv4 SETCLIENTID) |
+| F-5.5 | [NFSv4 Pseudo-FS Leakage](findings/F-5.5-nfsv4-pseudo-fs-leakage.md) | Low | `scan` (Nfs4Client::map_pseudo_fs) |
+| F-6.1 | [NLM Lock Attacks](findings/F-6.1-nlm-lock-attacks.md) | Medium | Out of scope -- lock-DoS module removed |
+| F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | Out of scope -- never implemented |
+| F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | Out of scope -- never implemented |
 | F-7.1 | [Wildcard Exports](findings/F-7.1-wildcard-export-policy.md) | High | `scan` + `analyze` (ACL pattern match on EXPORT output) |
 | F-7.2 | [Privileged Port Bypass](findings/F-7.2-privileged-port-bypass.md) | Medium | `analyze` (insecure port probe) |
 | F-7.3 | [nohide/crossmnt Exposure](findings/F-7.3-nohide-crossmnt-exposure.md) | Medium | `analyze` (crossmnt LOOKUP traversal), `shell` |

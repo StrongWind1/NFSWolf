@@ -71,11 +71,6 @@ fn analyze_help_succeeds() {
 }
 
 #[test]
-fn attack_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["attack", "--help"]).assert().success();
-}
-
-#[test]
 fn convert_help_succeeds() {
     Command::cargo_bin("nfswolf").expect("binary must be built").args(["convert", "--help"]).assert().success();
 }
@@ -109,23 +104,18 @@ fn mount_help_succeeds() {
 }
 
 #[test]
-fn attack_escape_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["attack", "escape", "--help"]).assert().success();
+fn escape_help_succeeds() {
+    Command::cargo_bin("nfswolf").expect("binary must be built").args(["escape", "--help"]).assert().success();
 }
 
 #[test]
-fn attack_read_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["attack", "read", "--help"]).assert().success();
+fn brute_handle_help_succeeds() {
+    Command::cargo_bin("nfswolf").expect("binary must be built").args(["brute-handle", "--help"]).assert().success();
 }
 
 #[test]
-fn attack_write_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["attack", "write", "--help"]).assert().success();
-}
-
-#[test]
-fn attack_uid_spray_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["attack", "uid-spray", "--help"]).assert().success();
+fn uid_spray_help_succeeds() {
+    Command::cargo_bin("nfswolf").expect("binary must be built").args(["uid-spray", "--help"]).assert().success();
 }
 
 // --- Scanner coverage: MemFs-based export enumeration ---

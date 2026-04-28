@@ -6,6 +6,5 @@
 pub mod analyzer;
 pub mod credential;
 pub mod file_handle;
-pub mod fs_walker;
 pub mod scanner;
 pub mod uid_sprayer;

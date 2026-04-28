@@ -92,10 +92,6 @@ path = "tests/integration/escape_test.rs"
 name = "analyzer_test"
 path = "tests/integration/analyzer_test.rs"
 
-[[test]]
-name = "attack_test"
-path = "tests/integration/attack_test.rs"
-
 # ---------------------------------------------------------------------------
 # [patch.crates-io]
 #

@@ -4,7 +4,6 @@
 //! Adds: AUTH_SYS stamp injection, connection pooling, circuit breaker,
 //! auto-UID resolution, SOCKS5 transport, privileged port binding.
 //! NFSv4 COMPOUND encoder is custom (minimal, ~6 ops).
-//! NLM and NSM clients are custom (not in nfs3-rs).
 
 pub mod auth;
 pub mod auto_uid;
@@ -14,8 +13,6 @@ pub mod mount;
 pub mod nfs2;
 pub mod nfs3;
 pub mod nfs4;
-pub mod nlm;
-pub mod nsm;
 pub mod pool;
 pub mod portmap;
 pub mod udp;
