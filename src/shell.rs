@@ -504,35 +504,40 @@ impl NfsShell {
     /// Flags:
     ///   `-r`               recurse into directories (mirrors tree locally)
     ///   `--verify <hash>`  assert SHA-256 of downloaded file matches `<hash>`
+    ///
+    /// Flags may appear in any position (before or after the positional
+    /// args). This matters in non-interactive mode (`shell -c "get foo
+    /// bar --verify HEX"`) where clap is not in the loop and we have to
+    /// tokenise the line ourselves.
     async fn cmd_get(&self, line: &str) {
-        // Parse leading flags before remote/local args.
+        let tokens: Vec<&str> = line.split_whitespace().collect();
         let mut recursive = false;
         let mut verify_hash: Option<String> = None;
-        let mut rest = line.trim();
-
-        loop {
-            if let Some(r) = rest.strip_prefix("-r") {
-                recursive = true;
-                rest = r.trim_start();
-            } else if let Some(r) = rest.strip_prefix("--verify") {
-                let r = r.trim_start();
-                let (hash_tok, after) = split2(r);
-                if hash_tok.is_empty() {
-                    eprintln!("{}", "get: --verify requires a hex SHA-256 hash".red());
+        let mut positional: Vec<&str> = Vec::with_capacity(2);
+        let mut iter = tokens.iter().copied();
+        while let Some(tok) = iter.next() {
+            match tok {
+                "-r" => recursive = true,
+                "--verify" => {
+                    if let Some(h) = iter.next() {
+                        verify_hash = Some(h.to_owned());
+                    } else {
+                        eprintln!("{}", "get: --verify requires a hex SHA-256 hash".red());
+                        return;
+                    }
+                },
+                t if t.starts_with("--") => {
+                    eprintln!("{}", format!("get: unknown flag {t}").red());
                     return;
-                }
-                verify_hash = Some(hash_tok.to_owned());
-                rest = after;
-            } else {
-                break;
+                },
+                t => positional.push(t),
             }
         }
-
-        let (remote, local) = split2(rest);
-        if remote.is_empty() {
+        let Some(&remote) = positional.first() else {
             eprintln!("{}", "usage: get [-r] [--verify <sha256>] <remote> [local]".yellow());
             return;
-        }
+        };
+        let local = positional.get(1).copied().unwrap_or("");
 
         let (fh, attrs) = match self.lookup_path(remote).await {
             Ok(pair) => pair,

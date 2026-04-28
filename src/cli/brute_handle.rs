@@ -13,10 +13,9 @@ use clap::Parser;
 use colored::Colorize as _;
 use nfs3_types::nfs3::Nfs3Result;
 
-use crate::cli::probe::{make_client, parse_addr};
+use crate::cli::probe::{make_client, make_mount_client, parse_addr};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
 use crate::engine::file_handle::FileHandleAnalyzer;
-use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
 use crate::util::stealth::StealthConfig;
@@ -71,20 +70,20 @@ pub struct BruteHandleArgs {
 /// Run the brute-handle command.
 pub async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
-    run_inner(&args.target, &args.fs_type, &args.seed_handle, args.max_attempts, args.fixed_inode, args.gen_start, args.gen_end, &stealth).await?;
+    run_inner(&args.target, &args.fs_type, &args.seed_handle, args.max_attempts, args.fixed_inode, args.gen_start, args.gen_end, &stealth, globals).await?;
     crate::cli::emit_replay(globals);
     Ok(())
 }
 
 #[expect(clippy::too_many_arguments, reason = "CLI dispatch -- each arg maps to a clap field")]
-async fn run_inner(host: &str, fs_type: &str, seed_handle: &str, max_attempts: u64, fixed_inode: Option<u32>, gen_start: u32, gen_end: u32, stealth: &StealthConfig) -> anyhow::Result<()> {
+async fn run_inner(host: &str, fs_type: &str, seed_handle: &str, max_attempts: u64, fixed_inode: Option<u32>, gen_start: u32, gen_end: u32, stealth: &StealthConfig, globals: &GlobalOpts) -> anyhow::Result<()> {
     let mode = if let Some(inode) = fixed_inode { format!("inode={inode} gen-sweep") } else { format!("inode-sweep {fs_type}") };
     eprintln!("{}", crate::output::status_info(&format!("Brute-forcing handles on {host} [{mode}] (max {max_attempts})")));
 
     let seed = FileHandle::from_hex(seed_handle).context("invalid --seed-handle")?;
     let addr = parse_addr(host)?;
 
-    let mount = NfsMountClient::new();
+    let mount = make_mount_client(globals);
     let exports = mount.list_exports(addr).await.unwrap_or_default();
     let export_path = exports.first().map_or("/", |e| e.path.as_str()).to_owned();
     let (_, _, client) = make_client(addr, &export_path, 0, 0, &[], stealth.clone());

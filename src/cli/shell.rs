@@ -12,12 +12,12 @@ use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 
+use crate::cli::probe::{build_gid_list, make_mount_client};
 use crate::cli::target::Source as TargetSource;
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_IDENTITY, H_PERMISSIONS, H_TARGET};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
-use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::pool::{ConnectionPool, PoolKey};
@@ -104,7 +104,8 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         None => ConnectionPool::default_config(),
     });
     let circuit = Arc::new(CircuitBreaker::default_config());
-    let cred = Credential::Sys(AuthSys::new(uid, gid, &globals.hostname));
+    let gids = build_gid_list(gid, &globals.aux_gids);
+    let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &globals.hostname));
 
     // When --handle is given, skip MOUNT for the root handle.
     // The raw handle is used as the shell root (file handles are bearer tokens per RFC 1094
@@ -117,7 +118,7 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         eprintln!("{}", crate::output::status_info(&format!("Using raw handle: {hex}")));
 
         let nfs_port = globals.nfs_port.unwrap_or(2049);
-        let mc = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
+        let mc = make_mount_client(globals);
 
         match mc.list_exports(addr).await {
             Ok(exports) if !exports.is_empty() => {
@@ -136,7 +137,7 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
             },
         }
     } else {
-        let mount_client = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
+        let mount_client = make_mount_client(globals);
         eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
         let mount_result = mount_client.mount(addr, &export).await?;
         let key = PoolKey { host: addr, export: export.clone(), uid, gid };

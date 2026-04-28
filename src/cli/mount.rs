@@ -71,10 +71,10 @@ pub async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::R
 
     use fuser::MountOption;
 
+    use crate::cli::probe::make_mount_client;
     use crate::proto::auth::{AuthSys, Credential};
     use crate::proto::circuit::CircuitBreaker;
     use crate::proto::conn::ReconnectStrategy;
-    use crate::proto::mount::NfsMountClient;
     use crate::proto::nfs3::client::Nfs3Client;
     use crate::proto::nfs3::types::FileHandle;
     use crate::proto::pool::{ConnectionPool, PoolKey};
@@ -128,7 +128,7 @@ pub async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::R
     let root_fh = if let Some(hex) = &handle_hex {
         FileHandle::from_hex(hex)?
     } else {
-        let mc = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
+        let mc = make_mount_client(globals);
         eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
         let mr = mc.mount(addr, export).await?;
 
@@ -157,7 +157,10 @@ pub async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::R
     let circuit = Arc::new(CircuitBreaker::default_config());
     // Build the AUTH_SYS credential once; the FUSE adapter takes its own
     // copy via `default_cred` so we clone rather than rebuild from scratch.
-    let cred = Credential::Sys(AuthSys::new(globals.uid, globals.gid, &globals.hostname));
+    // `--aux-gids` from the global flag is folded in here so FUSE callbacks
+    // inherit the same group set (e.g. shadow GID 42 to read /etc/shadow).
+    let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
+    let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
     let pool_key = PoolKey { host: addr, export: export.to_owned(), uid: globals.uid, gid: globals.gid };
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let nfs3 = Arc::new(if let Some(nfs_port) = direct_nfs_port {

