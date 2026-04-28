@@ -12,10 +12,9 @@
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::probe::{lookup_path, make_client, parse_addr};
+use crate::cli::probe::{lookup_path, make_client, make_mount_client, parse_addr};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_IDENTITY, H_STEALTH, H_TARGET};
 use crate::engine::uid_sprayer::{SprayConfig, UidSprayer, access_bits};
-use crate::proto::mount::NfsMountClient;
 use crate::util::stealth::StealthConfig;
 
 /// Spray UID/GID combinations to find which identities can access a path.
@@ -59,10 +58,6 @@ pub struct UidSprayArgs {
     #[arg(long, default_value = "/", help_heading = H_BEHAVIOR)]
     pub path: String,
 
-    /// Auxiliary GIDs to include in each attempt (comma-separated)
-    #[arg(long, value_delimiter = ',', help_heading = H_IDENTITY)]
-    pub aux_gids: Vec<u32>,
-
     /// Delay between attempts in ms (independent of global --delay)
     #[arg(long, default_value = "0", help_heading = H_STEALTH)]
     pub attempt_delay: u64,
@@ -79,20 +74,20 @@ pub async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Result<()>
     eprintln!("{}", format!("[*] Spraying UIDs {}-{} on {host}:{export}", args.uid_start, args.uid_end).yellow());
 
     let addr = parse_addr(&host)?;
-    let (_, circuit, client) = make_client(addr, &export, 0, 0, &[], stealth.clone());
+    let (_, circuit, client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone());
 
     // Mount to get the root handle, then walk to the target path.
-    let mount = NfsMountClient::new();
+    let mount = make_mount_client(globals);
     let mnt = mount.mount(addr, &export).await?;
     let target_fh = if args.path == "/" {
         mnt.handle
     } else {
-        let (_, _, lookup_client) = make_client(addr, &export, 0, 0, &[], stealth.clone());
+        let (_, _, lookup_client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone());
         lookup_path(&lookup_client, &mnt.handle, &args.path).await?
     };
 
     let sprayer = UidSprayer::new(client, circuit, stealth.clone());
-    let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range: args.gid_start..=args.gid_end, auxiliary_gids: args.aux_gids, target_path: args.path, concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };
+    let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range: args.gid_start..=args.gid_end, auxiliary_gids: globals.aux_gids.clone(), target_path: args.path, concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };
 
     let results = sprayer.spray(&config, &target_fh).await;
     eprintln!("{}", format!("[+] {} credential(s) granted access", results.len()).green());

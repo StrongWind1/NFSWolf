@@ -70,6 +70,13 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "localhost", value_name = "NAME", help_heading = H_IDENTITY)]
     pub hostname: String,
 
+    /// Auxiliary GIDs in AUTH_SYS (comma-separated, e.g. `--aux-gids 42,15`).
+    /// Capped at 16 per RFC 1057 S9.2. Useful for the shadow GID trick:
+    /// add 42 (Debian/Ubuntu shadow group) or 15 (SUSE shadow) to read
+    /// /etc/shadow without no_root_squash.
+    #[arg(long, global = true, value_delimiter = ',', value_name = "G1,G2,...", help_heading = H_IDENTITY)]
+    pub aux_gids: Vec<u32>,
+
     /// Bind from a privileged source port (<1024). Required by servers with
     /// the `secure` export option. Needs root or CAP_NET_BIND_SERVICE.
     #[arg(long, global = true, help_heading = H_NETWORK)]
@@ -174,6 +181,8 @@ pub struct GlobalOpts {
     pub gid: u32,
     /// Spoofed client hostname in AUTH_SYS credentials.
     pub hostname: String,
+    /// Auxiliary GIDs added to AUTH_SYS credentials (capped at 16 per RFC 1057 S9.2).
+    pub aux_gids: Vec<u32>,
     /// Whether to bind to a privileged port (<1024).
     pub privileged_port: bool,
     /// Optional SOCKS5 proxy address.
@@ -211,6 +220,7 @@ impl Cli {
             uid: self.uid,
             gid: self.gid,
             hostname: self.hostname.clone(),
+            aux_gids: self.aux_gids.clone(),
             privileged_port: self.privileged_port,
             proxy: self.proxy.clone(),
             transport_udp: self.transport_udp,

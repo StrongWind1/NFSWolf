@@ -11,14 +11,26 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 
+use crate::cli::GlobalOpts;
 use crate::engine::credential::escalation_list;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
+use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::util::stealth::StealthConfig;
+
+/// Build a MOUNT client honouring the global `--mount-port` and
+/// `--privileged-port` flags.
+///
+/// Used by every subcommand that calls `MNT` (escape, shell, mount,
+/// uid-spray, brute-handle) so the same flags propagate everywhere.
+pub fn make_mount_client(globals: &GlobalOpts) -> NfsMountClient {
+    let base = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
+    if globals.privileged_port { base.require_privileged() } else { base }
+}
 
 /// Parse a host string into a `SocketAddr` using NFS port 2049.
 ///
@@ -49,7 +61,10 @@ pub fn make_client(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids:
 }
 
 /// Build the GID list for AUTH_SYS: primary GID first, then aux GIDs (deduped).
-fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
+///
+/// Public so the shell, mount, and FUSE adapters can build the same shape
+/// of `gids` vector when constructing `AuthSys::with_groups`.
+pub fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
     let mut gids = vec![gid];
     for &g in aux_gids {
         if !gids.contains(&g) {
