@@ -1,41 +1,53 @@
-//! Report generation and export.
+//! Offline format converter for analyze results.
 //!
-//! Reads a JSON file produced by `analyze --output results.json`, then
-//! renders it in the requested format for sharing or archiving.
+//! `convert` reads the JSON dump produced by `nfswolf analyze --json` and
+//! re-renders it as HTML, Markdown, CSV, plain text, or ANSI-coloured
+//! console output. It is purely offline -- no NFS server is contacted.
 
 use std::fs;
 use std::io::BufWriter;
 
 use clap::Parser;
 
-use crate::cli::GlobalOpts;
+use crate::cli::{GlobalOpts, H_OUTPUT};
 use crate::engine::analyzer::AnalysisResult;
 use crate::report;
 
-/// Generate a security assessment report from analyze output.
+/// Convert an `analyze` JSON dump into a presentation format.
 ///
-/// First run `nfswolf analyze --output results.json`, then convert to any format:
+/// `convert` is the offline renderer half of the analyze pipeline. It does
+/// not contact any NFS server -- it reads the JSON that `analyze --json`
+/// produced earlier and re-emits it as HTML/Markdown/CSV/TXT/console.
+///
+/// Pipeline:
+///   1. nfswolf analyze --json target > results.json     # capture findings
+///   2. nfswolf convert  -i results.json -f html -o report.html
+///
+/// Re-running `analyze` to regenerate a different format would re-execute
+/// every check (including the squash/no-root-squash probes that write to
+/// the server). Use `convert` instead -- it operates entirely on the
+/// captured JSON and is safe to run repeatedly.
 ///
 /// Examples:
-///   nfswolf export -i results.json -f html  -o report.html
-///   nfswolf export -i results.json -f csv   -o findings.csv
-///   nfswolf export -i results.json -f markdown -o report.md --title "Client NFS Audit"
+///   nfswolf convert -i results.json -f html     -o report.html
+///   nfswolf convert -i results.json -f markdown -o report.md --title "Client NFS Audit"
+///   nfswolf convert -i results.json -f csv      -o findings.csv
 #[derive(Parser)]
-pub struct ExportArgs {
-    /// JSON input file produced by `analyze --output FILE`
-    #[arg(short = 'i', long, value_name = "FILE")]
+pub struct ConvertArgs {
+    /// JSON input file produced by `analyze --json > FILE`
+    #[arg(short = 'i', long, value_name = "FILE", help_heading = H_OUTPUT)]
     pub input: String,
 
     /// Output format (see below for descriptions)
-    #[arg(short = 'f', long, value_enum, default_value = "html")]
+    #[arg(short = 'f', long, value_enum, default_value = "html", help_heading = H_OUTPUT)]
     pub format: ReportFormat,
 
     /// Output file path
-    #[arg(short = 'o', long, value_name = "FILE")]
+    #[arg(short = 'o', long, value_name = "FILE", help_heading = H_OUTPUT)]
     pub output: String,
 
     /// Report title embedded in the output
-    #[arg(long, default_value = "NFS Security Assessment", value_name = "TEXT")]
+    #[arg(long, default_value = "NFS Security Assessment", value_name = "TEXT", help_heading = H_OUTPUT)]
     pub title: String,
 }
 
@@ -56,11 +68,11 @@ pub enum ReportFormat {
     Csv,
 }
 
-/// Run the export command.
+/// Run the convert command.
 ///
 /// Reads `args.input` as JSON, deserialises it as `Vec<AnalysisResult>`,
 /// then writes the rendered report to `args.output`.
-pub fn run(args: &ExportArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+pub fn run(args: &ConvertArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     tracing::info!(input = %args.input, output = %args.output, "generating report");
 
     let content = fs::read_to_string(&args.input).map_err(|e| anyhow::anyhow!("cannot read {}: {e}", args.input))?;
@@ -77,5 +89,6 @@ pub fn run(args: &ExportArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     if !globals.quiet {
         eprintln!("{}", crate::output::status_ok(&format!("Report written -> {}  ({} host(s), {} finding(s), {:?} format)", args.output, results.len(), finding_count, args.format,)));
     }
+    crate::cli::emit_replay(globals);
     Ok(())
 }

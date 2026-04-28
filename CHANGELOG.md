@@ -4,6 +4,25 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+### CLI cleanup
+
+- `--help` is now grouped into seven sections (Target / Identity / Permissions / Network / Stealth / Output / Behavior) on every subcommand, replacing the flat alphabetical list.
+- Unified positional `<TARGET>` accepts `host`, `host:/export`, or bracketed IPv6 (`[2001:db8::1]:/srv`) on every subcommand that touches a single export. `--export` and `--handle` still work as flags; the parser rejects ambiguous combinations with a clear error.
+- `--export` now consistently has `-e` as its short form on every subcommand (`scan`, `mount`, `shell`, `attack read|write|upload|harvest|uid-spray|symlink-swap|lock-dos`).
+- `--nfs-port` and `--mount-port` are now global flags (apply to every subcommand). They were previously duplicated on `mount` and `shell`.
+- Successful subcommand runs print a `# rerun: nfswolf …` line on stderr that can be pasted back into the shell. Suppressed by `--quiet` or `--json`.
+- `scan`: dropped `--fast`, `--no-rpc-enum`, `--check-portmap-amplification`, `--check-v2-downgrade`, `--check-nis`, `--check-portmap-bypass`. Every scan now runs the full check matrix unconditionally. The only knobs are concurrency, ports, and timeout.
+- `analyze`: dropped `-A/--check-all`, `--skip-version-check`, `--no-exploit`, `--check-v4`, `--check-no-root-squash`, `--check-insecure-port`, `--check-nohide`, `--check-v2-downgrade`, `--check-portmap-amplification`, `--check-nis`, `--probe-squash`. Every analysis now runs the full check matrix unconditionally; the only per-run knobs are `--test-read PATH`, `--test-read-uids`, `--test-read-gids`, and `--v4-depth`. `--test-read` defaults to `/etc/shadow` when no paths are supplied.
+- `mount`: dropped `--auto-uid`, `--allow-root`, `--suid`, `--dev`, `--allow-other`, `--elevate-perms`. The credential ladder, owner-bit elevation, suid/dev passthrough, and shared-mount visibility are always on -- this is a security toolkit, the goal is unobstructed access. `-e` short for `--export` was added.
+- `shell`: dropped `--auto-uid`. The credential ladder is always on (it never had a real off-state, since the shell falls through to escalated credentials whenever the server returns NFS3ERR_ACCES).
+- `attack`: dropped `--escape` from every sub-module. To reach files outside the export boundary, run `attack escape` first to obtain a root handle, then pass the resulting hex string back via `--handle HEX`. The escape module is the single entry point for export-escape; it no longer gets duplicated as an inline flag.
+- FUSE: fixed `--elevate-perms` shift offset (now correctly copies owner bits to other; previously copied group bits, leaving 0700 unchanged) -- behavior is now always-on.
+- FUSE: fixed `--nfs-port` being silently ignored when `--export` was used (it was only honored with `--handle`).
+- FUSE: fixed `--proxy` not being passed to the connection pool, so `--handle` mounts now tunnel through SOCKS5.
+- FUSE: every `Nfs3Client` procedure is now wired through a `Filesystem` callback (lookup, getattr, setattr, access, readlink, mknod, mkdir, symlink, create, unlink, rmdir, rename, link, readdir, read, write, fsync, statfs); auto-UID escalation runs on every callback and caches the resolved credential per inode.
+- FUSE: server-side symlink resolution and the null-attr READDIRPLUS fix-up are always on.
+- Renamed `export` subcommand to `convert` and clarified the pipeline relationship: `analyze` produces the JSON, `convert` renders it. `analyze` lost its per-subcommand `--output FILE` and `--txt FILE` flags; instead, the global `--json` flag now causes `analyze` to emit a JSON array on stdout. Capture with shell redirection (`> results.json`) and feed to `nfswolf convert` to render HTML/Markdown/CSV/TXT/console. Re-running `analyze` to regenerate a different format would re-execute every check (including the squash/no-root-squash probes that touch the server); `convert` is the safe, offline path for re-rendering.
+
 ## [0.1.0] - 2026-04-17
 
 First public release. Covers the full NFS attack path: recon → enumeration → analysis → exploitation → shell. For authorized security research only.

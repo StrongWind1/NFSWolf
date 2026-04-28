@@ -76,8 +76,8 @@ fn attack_help_succeeds() {
 }
 
 #[test]
-fn export_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["export", "--help"]).assert().success();
+fn convert_help_succeeds() {
+    Command::cargo_bin("nfswolf").expect("binary must be built").args(["convert", "--help"]).assert().success();
 }
 
 #[test]

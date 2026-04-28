@@ -247,28 +247,16 @@ use crate::proto::portmap::PortmapClient;
 use crate::util::stealth::StealthConfig;
 
 /// Configuration for a full analysis run against one host.
+///
+/// Every check the analyzer knows about runs unconditionally; the only
+/// per-run knobs are which paths/UIDs/GIDs to use for the file-access
+/// probes.
 #[derive(Debug)]
 pub struct AnalyzeConfig {
     /// Target hostname or IP address.
     pub host: String,
     /// NFS port (default 2049).
     pub port: u16,
-    /// Probe for no_root_squash by writing a test file.
-    pub check_no_root_squash: bool,
-    /// Probe squash config by creating a file and inspecting resulting ownership.
-    pub probe_squash: bool,
-    /// Test whether the server accepts connections from unprivileged ports.
-    pub check_insecure_port: bool,
-    /// Detect nohide/crossmnt by attempting sub-mount traversal.
-    pub check_nohide: bool,
-    /// Check for NFSv2 downgrade risk.
-    pub check_v2_downgrade: bool,
-    /// Check portmapper UDP amplification factor.
-    pub check_portmap_amplification: bool,
-    /// Detect NIS (ypserv/ypbind) co-hosted with NFS.
-    pub check_nis: bool,
-    /// Skip exploitative checks (safe audit mode).
-    pub no_exploit: bool,
     /// Paths to test for readability (e.g., "/etc/shadow").
     pub test_paths: Vec<String>,
     /// UIDs to use when testing file readability.
@@ -318,16 +306,10 @@ impl Analyzer {
         let nfs_versions = self.portmap.detect_nfs_versions(addr).await.unwrap_or_default();
         let version_strings: Vec<String> = nfs_versions.iter().map(|v| format!("NFSv{v}")).collect();
 
-        // Global checks that don't need a mounted export.
-        if config.check_v2_downgrade {
-            check_v2_downgrade(&nfs_versions, &mut findings);
-        }
-        if config.check_nis {
-            run_nis_check(&self.portmap, addr, &mut findings).await;
-        }
-        if config.check_portmap_amplification {
-            run_amplification_check(&self.portmap, addr, &mut findings).await;
-        }
+        // Global checks that don't need a mounted export -- always run.
+        check_v2_downgrade(&nfs_versions, &mut findings);
+        run_nis_check(&self.portmap, addr, &mut findings).await;
+        run_amplification_check(&self.portmap, addr, &mut findings).await;
         // NLM service detection (F-6.1): checks portmapper for program 100021.
         run_nlm_check(&self.portmap, addr, &mut findings).await;
         // NSM/statd detection (F-6.1 corollary): confirms whether statd is actively monitoring.
@@ -396,11 +378,8 @@ impl Analyzer {
         check_windows_signing(&fh, &entry.path, findings);
         check_handle_entropy(&fh, &entry.path, findings);
 
-        // Export escape check  --  only if not in safe-audit mode.
-        if !config.no_exploit {
-            let escaped = check_escape(&export_nfs3, &fh, &entry.path, findings).await;
-            ea.escape_possible = escaped;
-        }
+        // Export escape check (F-2.x).
+        ea.escape_possible = check_escape(&export_nfs3, &fh, &entry.path, findings).await;
 
         // BTRFS subvolume escape (F-2.4)  --  if handle fingerprints as BTRFS.
         check_btrfs_escape(&export_nfs3, &fh, &entry.path, findings).await;
@@ -408,26 +387,16 @@ impl Analyzer {
         // Bind mount escape (F-2.6)  --  if fsid from FSSTAT differs from handle-derived fsid.
         check_bind_mount_escape(&export_nfs3, &fh, &entry.path, findings).await;
 
-        // nohide/crossmnt detection (F-7.3, opt-in).
-        if config.check_nohide {
-            check_nohide(&export_nfs3, &fh, &entry.path, findings).await;
-        }
+        // nohide/crossmnt detection (F-7.3).
+        check_nohide(&export_nfs3, &fh, &entry.path, findings).await;
 
         // Symlink attack preconditions (F-4.4)  --  writable dirs owned by non-root.
         check_symlink_preconditions(&export_nfs3, &fh, &entry.path, findings).await;
 
-        // Squash probes are write-based  --  skip when no_exploit or not opted-in.
-        if !config.no_exploit {
-            if config.check_no_root_squash {
-                check_no_root_squash(&export_nfs3, &fh, &entry.path, findings).await;
-            }
-            if config.probe_squash {
-                check_squash_config(&export_nfs3, &fh, &entry.path, findings).await;
-            }
-            if config.check_insecure_port {
-                check_insecure_port(addr, &entry.path, findings).await;
-            }
-        }
+        // Squash probes write a small payload, then clean up.
+        check_no_root_squash(&export_nfs3, &fh, &entry.path, findings).await;
+        check_squash_config(&export_nfs3, &fh, &entry.path, findings).await;
+        check_insecure_port(addr, &entry.path, findings).await;
 
         // File access tests from --test-read paths (F-1.3: auxiliary group injection).
         for path in &config.test_paths {

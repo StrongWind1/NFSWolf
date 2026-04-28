@@ -1,7 +1,8 @@
 //! Network scanner for NFS service discovery.
 //!
 //! Detects NFS servers, enumerates exports, checks version support,
-//! and flags amplification/downgrade issues.
+//! and flags amplification/downgrade issues. Every scan runs the full
+//! check set -- there are no opt-in flags for individual checks.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -11,75 +12,51 @@ use colored::Colorize as _;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
-use crate::cli::GlobalOpts;
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
 use crate::engine::scanner::{HostResult, ScanConfig, Scanner};
 use crate::util::stealth::StealthConfig;
 
 /// Discover NFS servers on a network.
 ///
 /// Accepts IPs, CIDR ranges, hostnames, or files containing one target per line.
+/// Every scan runs the full check matrix: portmapper, version detection, export
+/// enumeration, amplification, NFSv2 downgrade, NIS, and portmap-bypass.
 ///
 /// Examples:
 ///   nfswolf scan 192.168.1.0/24
 ///   nfswolf scan 10.0.0.1 10.0.0.2 10.0.0.3
 ///   nfswolf scan -f hosts.txt
-///   nfswolf scan 192.168.1.0/24 --check-downgrade --check-nis
 #[derive(Parser)]
 pub struct ScanArgs {
     /// Targets: IPs, CIDRs, hostnames. Omit if using -f.
-    #[arg(required_unless_present = "targets_file")]
+    #[arg(required_unless_present = "targets_file", help_heading = H_TARGET)]
     pub targets: Vec<String>,
 
     /// REQUIRED (when no positional targets): file of targets, one per line
-    #[arg(short = 'f', long = "file", value_name = "FILE")]
+    #[arg(short = 'f', long = "file", value_name = "FILE", help_heading = H_TARGET)]
     pub targets_file: Option<String>,
 
     /// Maximum concurrent probe connections
-    #[arg(short = 'c', long, default_value = "256", value_name = "N")]
+    #[arg(short = 'c', long, default_value = "256", value_name = "N", help_heading = H_BEHAVIOR)]
     pub concurrency: usize,
 
-    /// Fast mode: skip portmapper and version detection, only probe port 2049
-    #[arg(long)]
-    pub fast: bool,
-
     /// Additional ports to probe (default: 111, 2049)
-    #[arg(long, value_delimiter = ',', value_name = "PORT,...")]
+    #[arg(long, value_delimiter = ',', value_name = "PORT,...", help_heading = H_BEHAVIOR)]
     pub ports: Vec<u16>,
 
-    /// Disable portmapper enumeration (portmapper/111 queries skipped)
-    #[arg(long)]
-    pub no_rpc_enum: bool,
-
-    /// Check for portmapper UDP amplification (DDoS reflector risk).
-    /// Measures the UDP response amplification factor for port 111.
-    #[arg(long)]
-    pub check_amplification: bool,
-
-    /// Report NFSv2 enabled alongside v3/v4 (downgrade / Kerberos bypass risk)
-    #[arg(long)]
-    pub check_downgrade: bool,
-
-    /// Report NIS/YP services co-hosted with NFS (credential theft risk)
-    #[arg(long)]
-    pub check_nis: bool,
-
-    /// Report servers where port 111 is filtered but port 2049 is reachable
-    #[arg(long)]
-    pub check_portmap_bypass: bool,
-
     /// Save results to file (.json or .csv extension determines format)
-    #[arg(short = 'o', long, value_name = "FILE")]
+    #[arg(short = 'o', long, value_name = "FILE", help_heading = H_OUTPUT)]
     pub output: Option<String>,
 
     /// Only display hosts that have at least one accessible export
-    #[arg(long)]
+    #[arg(long, help_heading = H_BEHAVIOR)]
     pub accessible_only: bool,
 }
 
 impl ScanArgs {
     /// Effective ports to scan. Falls back to 111 + 2049 if none specified.
     pub fn effective_ports(&self) -> Vec<u16> {
-        if self.ports.is_empty() { if self.fast { vec![2049] } else { vec![111, 2049] } } else { self.ports.clone() }
+        if self.ports.is_empty() { vec![111, 2049] } else { self.ports.clone() }
     }
 
     /// Merge positional targets and file-based targets into one list.
@@ -110,17 +87,7 @@ pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         eprintln!("{}", crate::output::status_info(&format!("Scanning {} host(s)...", targets.len())));
     }
 
-    let config = ScanConfig {
-        concurrency: args.concurrency,
-        timeout: Duration::from_millis(globals.timeout),
-        fast_mode: args.fast,
-        enumerate_rpc: !args.no_rpc_enum && !args.fast,
-        check_amplification: args.check_amplification,
-        check_downgrade: args.check_downgrade,
-        check_nis: args.check_nis,
-        check_portmap_bypass: args.check_portmap_bypass,
-        transport_udp: globals.transport_udp,
-    };
+    let config = ScanConfig { concurrency: args.concurrency, timeout: Duration::from_millis(globals.timeout), transport_udp: globals.transport_udp };
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let scanner = Scanner::new(config, stealth);
@@ -143,6 +110,7 @@ pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         }
     }
 
+    crate::cli::emit_replay(globals);
     Ok(())
 }
 

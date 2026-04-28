@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Mount(args) => cli::mount::run(args, &globals).await,
         cli::Command::Shell(args) => cli::shell::run(args, &globals).await,
         cli::Command::Attack(args) => cli::attack::run(args, &globals).await,
-        cli::Command::Export(args) => cli::export::run(&args, &globals),
+        cli::Command::Convert(args) => cli::convert::run(&args, &globals),
         cli::Command::Completions(args) => {
             cli::completions(&args);
             Ok(())

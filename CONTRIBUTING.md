@@ -7,7 +7,7 @@ Thanks for your interest in improving nfswolf. This document is the short-form e
 - nfswolf is an **authorized-use** security tool.
 - Every protocol constant, flag, and wire value must be traceable to an RFC section or documented as a deliberate deviation.
 - Pure Rust only — no new C dependencies. The primary distribution is a static musl binary.
-- Keep the threat model in mind: nfswolf connects to potentially hostile NFS servers. Server-controlled data must be bounded and validated.
+- Keep the project's role in mind: nfswolf is the *attacker* against misconfigured NFS servers in authorized engagements. The server is the target, not the threat. Code does not need to defend against malicious server replies.
 
 ## Prerequisites
 

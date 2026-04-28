@@ -14,7 +14,7 @@ pub mod txt;
 
 use std::io::Write;
 
-use crate::cli::export::ReportFormat;
+use crate::cli::convert::ReportFormat;
 use crate::engine::analyzer::{AnalysisResult, Finding, Severity};
 
 /// Dispatch to the correct renderer for `format` and write to `out`.

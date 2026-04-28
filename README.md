@@ -89,21 +89,29 @@ cargo install nfswolf --locked
 
 ## Quick start
 
+The positional `<TARGET>` accepts the colon shorthand `host:/export` on
+every subcommand; `--export` and `--handle` still work as flags. See
+`nfswolf <subcommand> --help` for the per-section flag layout.
+
 ```sh
 # Discover NFS infrastructure on a /24:
 nfswolf scan 192.168.1.0/24
 
-# Deep security analysis of a single host:
-nfswolf analyze 192.168.1.10 --html report.html
+# Deep security analysis of a single host (capture JSON, render HTML offline):
+nfswolf analyze --json 192.168.1.10 > results.json
+nfswolf convert -i results.json -f html -o report.html
 
 # Interactive shell against an export:
 nfswolf shell 192.168.1.10:/srv/nfs --uid 0
 
 # Mount an export locally via FUSE, spoofing UID 0:
-sudo nfswolf mount 192.168.1.10:/srv/nfs /mnt/target --uid 0 --allow-other
+sudo nfswolf --uid 0 mount 192.168.1.10:/srv/nfs /mnt/target
 
-# UID spray to find accessible files:
-nfswolf attack uid-spray --host 192.168.1.10 --export /srv/nfs --uid-range 0-5000 --path /etc/shadow
+# UID spray to find accessible files (colon-form supplies the export):
+nfswolf attack uid-spray 192.168.1.10:/srv/nfs --uid-start 0 --uid-end 5000 --path /etc/shadow
+
+# Re-runnable replay: every successful command prints a `# rerun: ...`
+# line on stderr that you can paste back into your shell.
 ```
 
 ## CLI reference

@@ -4,7 +4,7 @@
 //! so the operator can browse the filesystem without a kernel NFS client.
 //! A single `--command` flag lets it run headlessly (useful in scripts).
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -12,7 +12,8 @@ use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 
-use crate::cli::GlobalOpts;
+use crate::cli::target::Source as TargetSource;
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_IDENTITY, H_PERMISSIONS, H_TARGET};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
@@ -28,62 +29,50 @@ use crate::util::stealth::StealthConfig;
 /// Opens a readline REPL over NFS so you can browse exports without a kernel
 /// NFS client.  Use -c for non-interactive (scripting) mode.
 ///
-/// Target formats:
-///   host              mount nothing  --  requires --export or --handle
+/// Target formats (same shape across every subcommand):
+///   host              mount root /, no export needed  (rare)
 ///   host:/export      mount the named export
-///   host              + --export /path    (same as above, explicit form)
-///   host              + --handle HEX      bypass MOUNT, use raw file handle
+///   host --export /p  same, but supplied as a flag
+///   host --handle HEX bypass MOUNT, use a raw root file handle
 ///
 /// Examples:
 ///   nfswolf shell 192.168.1.10:/srv
-///   nfswolf shell 192.168.1.10 --export /srv
 ///   nfswolf shell 192.168.1.10 -c "ls /etc"
 ///   nfswolf shell 192.168.1.10 --handle 01000200abcdef... --allow-write
 ///   nfswolf shell 192.168.1.10:/srv --uid 0
 #[derive(Parser)]
 pub struct ShellArgs {
-    /// Target host: IP or hostname, with optional :/export suffix
+    /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
+    #[arg(help_heading = H_TARGET)]
     pub target: String,
 
     /// Export path (alternative to host:/export in the positional target)
-    #[arg(short = 'e', long, value_name = "PATH")]
+    #[arg(short = 'e', long, value_name = "PATH", help_heading = H_TARGET)]
     pub export: Option<String>,
 
     /// UID for NFS operations (overrides global --uid for this session)
-    #[arg(long, value_name = "UID")]
+    #[arg(long, value_name = "UID", help_heading = H_IDENTITY)]
     pub uid: Option<u32>,
 
     /// GID for NFS operations (overrides global --gid for this session)
-    #[arg(long, value_name = "GID")]
+    #[arg(long, value_name = "GID", help_heading = H_IDENTITY)]
     pub gid: Option<u32>,
 
-    /// Auto-detect the UID/GID that maximises file access on each operation
-    #[arg(long)]
-    pub auto_uid: bool,
-
     /// Enable write operations (CREATE, WRITE, MKDIR, REMOVE, etc.)
-    #[arg(long)]
+    #[arg(long, help_heading = H_PERMISSIONS)]
     pub allow_write: bool,
 
     /// Run a single shell command then exit (non-interactive / scripting mode)
-    #[arg(short = 'c', long, value_name = "CMD")]
+    #[arg(short = 'c', long, value_name = "CMD", help_heading = H_BEHAVIOR)]
     pub command: Option<String>,
 
     /// Use a raw file handle (hex) as the shell root  --  skips MOUNT entirely.
     /// Obtain handles from `attack escape` or `attack brute-handle`.
-    #[arg(long, value_name = "HEX")]
+    #[arg(long, value_name = "HEX", help_heading = H_TARGET)]
     pub handle: Option<String>,
 
-    /// Override NFS port (skips portmapper lookup; use when port 111 is filtered)
-    #[arg(long, value_name = "PORT")]
-    pub nfs_port: Option<u16>,
-
-    /// Override mount daemon port (skips portmapper lookup)
-    #[arg(long, value_name = "PORT")]
-    pub mount_port: Option<u16>,
-
     /// NFS protocol version (2, 3, or 4)
-    #[arg(long, default_value = "3", value_name = "VER")]
+    #[arg(long, default_value = "3", value_name = "VER", help_heading = H_BEHAVIOR)]
     pub nfs_version: u32,
 }
 
@@ -96,9 +85,16 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         return run_nfs4_shell(args, globals).await;
     }
 
-    let (host, parsed_export) = parse_target(&args.target)?;
-    // --export flag overrides the :/path suffix in the positional target.
-    let export = args.export.clone().unwrap_or(parsed_export);
+    // Parse `<TARGET>` + --export + --handle into the unified form. The
+    // shell tolerates a bare host (no source) by defaulting to "/", since
+    // `shell host` was historically a valid invocation.
+    let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
+    let host = target.host;
+    let (export, handle_hex_arg): (String, Option<String>) = match &target.source {
+        TargetSource::Export(p) => (p.clone(), None),
+        TargetSource::Handle(h) => (String::from("/"), Some(h.clone())),
+        TargetSource::None => (String::from("/"), None),
+    };
     let uid = args.uid.unwrap_or(globals.uid);
     let gid = args.gid.unwrap_or(globals.gid);
 
@@ -116,12 +112,12 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     // Strategy:
     //   1. List exports via portmapper to find a mountable one.
     //   2. If portmapper is filtered, fall back to a direct NFS port connection.
-    let (root_fh, pool_key, direct_nfs_port) = if let Some(ref hex) = args.handle {
+    let (root_fh, pool_key, direct_nfs_port) = if let Some(ref hex) = handle_hex_arg {
         let fh = FileHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?;
         eprintln!("{}", crate::output::status_info(&format!("Using raw handle: {hex}")));
 
-        let nfs_port = args.nfs_port.unwrap_or(2049);
-        let mc = args.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
+        let nfs_port = globals.nfs_port.unwrap_or(2049);
+        let mc = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
 
         match mc.list_exports(addr).await {
             Ok(exports) if !exports.is_empty() => {
@@ -140,7 +136,7 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
             },
         }
     } else {
-        let mount_client = args.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
+        let mount_client = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
         eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
         let mount_result = mount_client.mount(addr, &export).await?;
         let key = PoolKey { host: addr, export: export.clone(), uid, gid };
@@ -160,6 +156,7 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     if let Some(cmd) = args.command {
         // Non-interactive: run one command and return.
         shell.dispatch(&cmd).await;
+        crate::cli::emit_replay(globals);
         return Ok(());
     }
 
@@ -191,33 +188,12 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
             },
         }
     }
+    crate::cli::emit_replay(globals);
     Ok(())
 }
 
-/// Split `host:/export` or `host` into (`IpAddr`, export_path).
-///
-/// When no export is given, defaults to `/`. Accepts IPv6 addresses in
-/// bracket notation `[::1]:/export`.
-fn parse_target(target: &str) -> anyhow::Result<(IpAddr, String)> {
-    // Try `host:/export` split on the first colon not inside brackets.
-    if let Some(colon) = target.find(":/") {
-        let host_part = &target[..colon];
-        let export_part = target[colon + 1..].to_owned();
-        let ip = resolve_host(host_part)?;
-        return Ok((ip, export_part));
-    }
-
-    // No colon  --  treat as bare host, default export `/`.
-    let ip = resolve_host(target)?;
-    Ok((ip, "/".to_owned()))
-}
-
-/// Resolve a hostname or IP string to an `IpAddr`.
-fn resolve_host(host: &str) -> anyhow::Result<IpAddr> {
-    // Strip IPv6 brackets.
-    let bare = host.trim_matches(|c| c == '[' || c == ']');
-    bare.parse::<IpAddr>().map_err(|_| anyhow::anyhow!("cannot resolve host '{host}'  --  use a numeric IP address"))
-}
+// `parse_target` / `resolve_host` removed -- target parsing now lives in
+// `crate::cli::target`, shared by all subcommands.
 
 // =============================================================================
 // NFSv4 shell  --  minimal REPL for NFSv4-only servers
@@ -232,8 +208,10 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use rustyline::DefaultEditor;
 
-    let (host, _) = parse_target(&args.target)?;
-    let nfs_port = args.nfs_port.unwrap_or(2049);
+    let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
+    let host = target.host;
+    let _ = target.source; // NFSv4 path doesn't use MOUNT or raw handle
+    let nfs_port = globals.nfs_port.unwrap_or(2049);
     let addr = SocketAddr::new(host, nfs_port);
     let mut uid = args.uid.unwrap_or(globals.uid);
     let mut gid = args.gid.unwrap_or(globals.gid);
@@ -252,6 +230,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     // Non-interactive mode: run one command and return.
     if let Some(ref cmd) = args.command {
         dispatch_nfs4(&mut client, cmd, &mut cwd_fh, &mut cwd_path, args.allow_write, &mut uid, &mut gid, &mut hostname).await;
+        crate::cli::emit_replay(globals);
         return Ok(());
     }
 
@@ -275,6 +254,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
             },
         }
     }
+    crate::cli::emit_replay(globals);
     Ok(())
 }
 
