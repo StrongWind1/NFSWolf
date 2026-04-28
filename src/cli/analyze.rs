@@ -1,4 +1,14 @@
 //! Deep security analysis of NFS servers.
+//!
+//! Every analysis runs the full check matrix -- there are no opt-in flags
+//! for individual checks. Some of those checks are mildly intrusive (squash
+//! probes write a test file, no_root_squash detection creates a directory);
+//! all of them clean up after themselves.
+//!
+//! Output split: human-readable to stdout by default; pass the global
+//! `--json` flag to emit machine-readable JSON instead. Capture that JSON
+//! with shell redirection (`> results.json`) and feed it to `nfswolf
+//! convert` to render HTML/Markdown/CSV/etc.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -6,7 +16,7 @@ use std::sync::Arc;
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::GlobalOpts;
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
 use crate::engine::analyzer::{AnalysisResult, AnalyzeConfig, Analyzer};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
@@ -20,104 +30,52 @@ use crate::util::stealth::StealthConfig;
 /// Deep security audit of one or more NFS servers.
 ///
 /// Enumerates exports, detects authentication weaknesses, tests for escape
-/// vulnerabilities, and reports all findings with severity ratings.
+/// vulnerabilities, and reports all findings with severity ratings. Every
+/// check runs unconditionally; the only knobs are which file paths to test
+/// and which UIDs/GIDs to spray across them.
+///
+/// Output:
+///   default      ANSI-coloured human-readable summary on stdout
+///   --json       machine-readable JSON on stdout (capture with `> file.json`
+///                and pass to `nfswolf convert` to render HTML/MD/CSV/TXT)
 ///
 /// Examples:
-///   nfswolf analyze 192.168.1.10           # quick audit
-///   nfswolf analyze 192.168.1.10 -A        # all checks (recommended)
-///   nfswolf analyze -f hosts.txt -A        # batch audit from file
-///   nfswolf analyze 10.0.0.1 --check-no-root-squash --test-read /etc/shadow
+///   nfswolf analyze 192.168.1.10
+///   nfswolf analyze -f hosts.txt
+///   nfswolf analyze 10.0.0.1 --test-read /etc/shadow --test-read-gids 0,42
+///   nfswolf analyze --json target > results.json && \
+///     nfswolf convert -i results.json -f html -o report.html
 #[derive(Parser)]
 pub struct AnalyzeArgs {
     /// Target NFS server: IP or hostname. Omit if using -f.
-    #[arg(required_unless_present = "targets_file")]
+    #[arg(required_unless_present = "targets_file", help_heading = H_TARGET)]
     pub target: Option<String>,
 
     /// REQUIRED (when no positional target): file of targets, one per line
-    #[arg(short = 'f', long = "file", alias = "targets", value_name = "FILE")]
+    #[arg(short = 'f', long = "file", alias = "targets", value_name = "FILE", help_heading = H_TARGET)]
     pub targets_file: Option<String>,
-
-    /// Run all vulnerability checks  --  equivalent to enabling every --check-* flag.
-    /// Recommended for comprehensive assessments. Some checks write to the server.
-    #[arg(short = 'A', long = "check-all", alias = "all-checks")]
-    pub check_all: bool,
-
-    /// Test for no_root_squash by creating a test directory as root.
-    /// WARNING: this writes (then immediately removes) a directory on the server.
-    #[arg(long)]
-    pub check_no_root_squash: bool,
-
-    /// Skip version detection (faster)
-    #[arg(long)]
-    pub skip_version_check: bool,
 
     /// Test if a remote file is readable after export escape.
     /// Tries multiple credentials (root, shadow GIDs, current uid).
     /// Can be specified multiple times for different paths.
-    /// Default when --check-all: /etc/shadow
-    #[arg(long = "test-read", value_name = "PATH")]
+    /// Defaults to /etc/shadow when omitted.
+    #[arg(long = "test-read", value_name = "PATH", help_heading = H_BEHAVIOR)]
     pub test_read_paths: Vec<String>,
 
     /// GIDs to try when testing file readability (comma-separated).
     /// Applied to each --test-read path. Default: 0,42,15
     /// (root, Debian shadow, SuSE shadow).
-    #[arg(long = "test-read-gids", value_delimiter = ',')]
+    #[arg(long = "test-read-gids", value_delimiter = ',', help_heading = H_BEHAVIOR)]
     pub test_read_gids: Vec<u32>,
 
     /// UIDs to try when testing file readability (comma-separated).
     /// Applied to each --test-read path. Default: 0
-    #[arg(long = "test-read-uids", value_delimiter = ',')]
+    #[arg(long = "test-read-uids", value_delimiter = ',', help_heading = H_BEHAVIOR)]
     pub test_read_uids: Vec<u32>,
 
     /// NFSv4 directory tree depth for overview
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value = "2", help_heading = H_BEHAVIOR)]
     pub v4_depth: u32,
-
-    /// Run checks over NFSv4 even when v3 is available
-    #[arg(long)]
-    pub check_v4: bool,
-
-    /// Probe squash configuration per export.
-    /// Creates a test file to detect anonuid/anongid, root_squash, all_squash.
-    /// WARNING: writes (and removes) a test file on the server.
-    #[arg(long)]
-    pub probe_squash: bool,
-
-    /// Test whether the server accepts connections from unprivileged ports
-    /// (detects the `insecure` export option).
-    #[arg(long)]
-    pub check_insecure_port: bool,
-
-    /// Detect `nohide`/`crossmnt` export options by probing for sub-mount
-    /// traversal beneath each export. Reveals hidden filesystems.
-    #[arg(long)]
-    pub check_nohide: bool,
-
-    /// Detect NFSv2 downgrade risk (v2 enabled alongside v3/v4).
-    /// If v3 requires sec=krb5 but v2 accepts AUTH_SYS, reports critical bypass.
-    #[arg(long)]
-    pub check_v2_downgrade: bool,
-
-    /// Check if portmapper responds to UDP DUMP requests (DDoS amplification).
-    #[arg(long)]
-    pub check_portmap_amplification: bool,
-
-    /// Detect NIS (YP) services co-hosted with NFS. If found, attempt
-    /// domain name enumeration and credential map extraction.
-    #[arg(long)]
-    pub check_nis: bool,
-
-    /// Do not perform any exploitative checks (safe audit mode)
-    #[arg(long)]
-    pub no_exploit: bool,
-
-    /// Output results to file
-    #[arg(short, long)]
-    pub output: Option<String>,
-
-    /// Also output plain text report
-    #[arg(long)]
-    pub txt: Option<String>,
 }
 
 impl AnalyzeArgs {
@@ -136,52 +94,64 @@ impl AnalyzeArgs {
         if self.test_read_uids.is_empty() { vec![0] } else { self.test_read_uids.clone() }
     }
 
-    /// Effective paths to test readability on.
-    /// When --check-all is set and no explicit paths given, defaults to /etc/shadow.
+    /// Effective paths to test readability on.  Defaults to /etc/shadow when
+    /// the operator did not supply any explicit `--test-read` paths.
     pub fn effective_test_paths(&self) -> Vec<String> {
-        if self.test_read_paths.is_empty() && self.check_all { vec!["/etc/shadow".to_owned()] } else { self.test_read_paths.clone() }
+        if self.test_read_paths.is_empty() { vec!["/etc/shadow".to_owned()] } else { self.test_read_paths.clone() }
     }
 }
 
 /// Run the analyze command.
 pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     let targets = collect_targets(&args)?;
+    let mut all_results: Vec<AnalysisResult> = Vec::with_capacity(targets.len());
 
     for host in &targets {
         tracing::info!(%host, "analyzing NFS server");
-        if !globals.quiet {
+        if !globals.quiet && !globals.json {
             eprintln!("{}", crate::output::status_info(&format!("Analyzing {host}...")));
         }
         let start = std::time::Instant::now();
         let result = run_single(host, &args, globals).await?;
-        print_result(&result);
-        if !globals.quiet {
-            eprintln!("{}", crate::output::status_info(&format!("Completed in {}  --  {} finding(s)", crate::output::elapsed(start), result.findings.len(),)));
-        }
-        if let Some(out) = &args.output {
-            write_json(out, &result)?;
+        if globals.json {
+            // Defer printing until every host has been analysed so the JSON
+            // output is a single array.
+        } else {
+            print_result(&result);
             if !globals.quiet {
-                eprintln!("{}", crate::output::status_ok(&format!("JSON saved -> {out}")));
+                eprintln!("{}", crate::output::status_info(&format!("Completed in {}  --  {} finding(s)", crate::output::elapsed(start), result.findings.len(),)));
             }
         }
-        if let Some(txt) = &args.txt {
-            write_txt(txt, &result)?;
-            if !globals.quiet {
-                eprintln!("{}", crate::output::status_ok(&format!("Text report saved -> {txt}")));
-            }
-        }
+        all_results.push(result);
     }
+
+    if globals.json {
+        let json = serde_json::to_string_pretty(&all_results)?;
+        println!("{json}");
+    }
+
+    crate::cli::emit_replay(globals);
     Ok(())
 }
 
 /// Collect target strings from CLI arg or targets file.
+///
+/// `<HOST>:/path` is accepted but the export portion is ignored -- analyze
+/// enumerates exports itself, so the colon syntax is a convenience for
+/// users running mixed pipelines (`nfswolf shell host:/srv` followed by
+/// `nfswolf analyze host:/srv`).
 fn collect_targets(args: &AnalyzeArgs) -> anyhow::Result<Vec<String>> {
     if let Some(ref file) = args.targets_file {
         let content = std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("read targets file {file}: {e}"))?;
-        Ok(content.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect())
+        Ok(content.lines().filter(|l| !l.is_empty()).map(strip_export).collect())
     } else {
-        Ok(args.target.iter().cloned().collect())
+        Ok(args.target.iter().map(|t| strip_export(t)).collect())
     }
+}
+
+/// Strip the trailing `:/...` from a target string, if present.
+fn strip_export(s: &str) -> String {
+    s.find(":/").map_or_else(|| s.to_owned(), |idx| s[..idx].to_owned())
 }
 
 /// Analyze a single NFS host and return all findings.
@@ -196,21 +166,7 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
     let nfs3 = Arc::new(Nfs3Client::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent));
 
     let analyzer = Analyzer::new(nfs3, NfsMountClient::new(), PortmapClient::default_port());
-    let config = AnalyzeConfig {
-        host: host.to_owned(),
-        port: 2049,
-        check_no_root_squash: args.check_no_root_squash || args.check_all,
-        probe_squash: args.probe_squash && !args.no_exploit,
-        check_insecure_port: args.check_insecure_port || args.check_all,
-        check_nohide: args.check_nohide || args.check_all,
-        check_v2_downgrade: args.check_v2_downgrade || args.check_all,
-        check_portmap_amplification: args.check_portmap_amplification,
-        check_nis: args.check_nis || args.check_all,
-        no_exploit: args.no_exploit,
-        test_paths: args.effective_test_paths(),
-        test_uids: args.effective_test_uids(),
-        test_gids: args.effective_test_gids(),
-    };
+    let config = AnalyzeConfig { host: host.to_owned(), port: 2049, test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
     analyzer.analyze(&config).await
 }
 
@@ -267,25 +223,4 @@ fn print_result(r: &AnalysisResult) {
     println!();
     crate::output::print_findings(&r.findings);
     println!();
-}
-
-/// Write analysis result as JSON.
-fn write_json(path: &str, result: &AnalysisResult) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(result)?;
-    std::fs::write(path, json)?;
-    tracing::info!(%path, "JSON report written");
-    Ok(())
-}
-
-/// Write analysis result as plain text.
-fn write_txt(path: &str, result: &AnalysisResult) -> anyhow::Result<()> {
-    use std::fmt::Write as _;
-    let mut buf = format!("NFS Security Analysis: {}\n", result.host);
-    let _ = writeln!(buf, "Timestamp: {}\n", result.timestamp);
-    for f in &result.findings {
-        let _ = writeln!(buf, "[{:?}] {}: {}\n  {}", f.severity, f.id, f.title, f.description);
-    }
-    std::fs::write(path, buf)?;
-    tracing::info!(%path, "text report written");
-    Ok(())
 }

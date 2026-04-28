@@ -61,24 +61,15 @@ pub struct ExportInfo {
 }
 
 /// Scanner configuration.
+///
+/// Every check the scanner knows about runs unconditionally; the only knobs
+/// here are concurrency, timeout, and transport.
 #[derive(Debug)]
 pub struct ScanConfig {
     /// Maximum number of hosts to scan simultaneously.
     pub concurrency: usize,
     /// Timeout for each TCP connection probe.
     pub timeout: Duration,
-    /// Fast mode: skip portmapper, only probe NFS port.
-    pub fast_mode: bool,
-    /// Enumerate RPC services via portmapper DUMP.
-    pub enumerate_rpc: bool,
-    /// Check portmapper UDP amplification factor.
-    pub check_amplification: bool,
-    /// Report NFSv2 alongside v3/v4 as a downgrade risk.
-    pub check_downgrade: bool,
-    /// Detect NIS (ypserv/ypbind) co-hosted with NFS.
-    pub check_nis: bool,
-    /// Detect portmapper firewall bypass (port 111 filtered, 2049 open).
-    pub check_portmap_bypass: bool,
     /// Use UDP instead of TCP for portmapper DUMP/GETPORT queries.
     /// Needed when TCP/111 is firewalled but UDP/111 is open.
     pub transport_udp: bool,
@@ -86,7 +77,7 @@ pub struct ScanConfig {
 
 impl Default for ScanConfig {
     fn default() -> Self {
-        Self { concurrency: 256, timeout: Duration::from_secs(5), fast_mode: false, enumerate_rpc: true, check_amplification: false, check_downgrade: false, check_nis: false, check_portmap_bypass: false, transport_udp: false }
+        Self { concurrency: 256, timeout: Duration::from_secs(5), transport_udp: false }
     }
 }
 
@@ -121,7 +112,7 @@ impl Scanner {
             let permit = Arc::clone(&sem);
             let portmap = self.portmap.clone();
             let mount = self.mount_client.clone();
-            let job = ScanJob { timeout: self.config.timeout, fast: self.config.fast_mode, enumerate_rpc: self.config.enumerate_rpc, check_nis: self.config.check_nis, check_downgrade: self.config.check_downgrade, transport_udp: self.config.transport_udp };
+            let job = ScanJob { timeout: self.config.timeout, transport_udp: self.config.transport_udp };
 
             let handle = tokio::spawn(async move {
                 let _permit = permit.acquire_owned().await;
@@ -170,24 +161,14 @@ impl Scanner {
 }
 
 /// Per-host scan parameters extracted from `ScanConfig` for task spawn.
-///
-/// Bundles the boolean flags so `scan_host` stays within the argument-count limit.
 struct ScanJob {
     timeout: Duration,
-    fast: bool,
-    enumerate_rpc: bool,
-    check_nis: bool,
-    check_downgrade: bool,
     transport_udp: bool,
 }
 
 /// Probe a single host and return its `HostResult`.
 async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, job: ScanJob) -> HostResult {
     let probe_timeout = job.timeout;
-    let fast = job.fast;
-    let enumerate_rpc = job.enumerate_rpc;
-    let check_nis = job.check_nis;
-    let check_downgrade = job.check_downgrade;
     let addr = SocketAddr::new(ip, 111);
     let nfs_addr = SocketAddr::new(ip, 2049);
 
@@ -198,19 +179,13 @@ async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, jo
         return HostResult { addr, nfs_port_open, portmap_open, nfs_versions: vec![], exports: vec![], os_guess: None, connected_clients: vec![], nfs4_reachable: false };
     }
 
-    let nfs_versions = if !fast && (enumerate_rpc || check_downgrade) {
-        if job.transport_udp {
-            // UDP portmapper: bypass TCP/111 firewalls by querying PMAPPROC_DUMP over UDP.
-            detect_nfs_versions_udp(addr, probe_timeout).await
-        } else if portmap_open {
-            portmap.detect_nfs_versions(addr).await.unwrap_or_default()
-        } else if nfs_port_open {
-            vec![3] // portmapper closed, NFS port open -- assume v3
-        } else {
-            vec![]
-        }
+    let nfs_versions = if job.transport_udp {
+        // UDP portmapper: bypass TCP/111 firewalls by querying PMAPPROC_DUMP over UDP.
+        detect_nfs_versions_udp(addr, probe_timeout).await
+    } else if portmap_open {
+        portmap.detect_nfs_versions(addr).await.unwrap_or_default()
     } else if nfs_port_open {
-        vec![3] // fast mode or no rpc enum -- assume v3
+        vec![3] // portmapper closed, NFS port open -- assume v3
     } else {
         vec![]
     };
@@ -240,12 +215,11 @@ async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, jo
         exports.push(ExportInfo { path: entry.path, allowed_hosts: entry.allowed_hosts, auth_flavors, file_handle });
     }
 
-    // Connected clients from MNTPROC_DUMP
-    let connected_clients = if fast { vec![] } else { mount.dump_clients(addr).await.unwrap_or_default().into_iter().map(|c| c.hostname).collect() };
+    // Connected clients from MNTPROC_DUMP -- always enumerated.
+    let connected_clients = mount.dump_clients(addr).await.unwrap_or_default().into_iter().map(|c| c.hostname).collect();
 
-    // NIS detection (optional)
-    if check_nis
-        && portmap_open
+    // NIS detection -- always probed when portmapper is reachable.
+    if portmap_open
         && let Ok(nis) = portmap.detect_nis(addr).await
         && nis.ypserv_present
     {

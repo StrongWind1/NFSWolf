@@ -100,7 +100,7 @@ Reconnaissance          Identity / Access           Post-Exploitation
 
 ## Key Insight
 
-NFSv3's security model is fundamentally broken for adversarial networks. The protocol was designed for trusted LANs in the 1980s and has no cryptographic authentication in its default configuration. The **only** effective remediation is:
+NFSv3's security model is fundamentally broken on shared or routable networks. The protocol was designed for trusted LANs in the 1980s and has no cryptographic authentication in its default configuration. The **only** effective remediation is:
 
 1. Kerberos authentication (`sec=krb5p`) — or —
 2. Complete network isolation (dedicated VLAN, strict firewalling)

