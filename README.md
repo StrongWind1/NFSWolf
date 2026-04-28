@@ -24,7 +24,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 | Export escape (ext4/XFS/BTRFS) | yes | no | no | no | no | no |
 | Interactive NFS shell (35+ commands) | yes | no | no | no | no | yes |
 | FUSE mount (`nfswolf mount`) | yes | no | no | no | no | no |
-| NLM / NSM / portmapper clients | yes | no | no | no | no | no |
+| Portmapper / mountd enumeration | yes | partial | no | no | no | no |
 | Self-contained HTML / JSON / CSV reports | yes | no | no | no | no | no |
 | Static musl binary (no C deps) | yes | no | no | no | no | no |
 | SOCKS5 proxy + privileged-port binding | yes | no | no | no | no | no |
@@ -32,10 +32,10 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 
 ## Features at a glance
 
-- **36 documented security findings** (F-1.1 through F-7.6) across seven attack categories — full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
-- **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, NLM v4, NSM, portmapper v2.
-- **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, 9-step auto-UID resolution, handle-oracle disambiguation (STALE vs BADHANDLE).
-- **Attack modules**: `uid-spray`, `brute-handle`, `escape`, `download`, `upload`, `symlink-swap`, `dir-nuke`, `lock-dos`, `harvest`.
+- **Documented security findings** across export, transport, file-handle, and credential attack categories — full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
+- **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2.
+- **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
+- **Offensive subcommands**: `escape` (export breakout), `brute-handle` (handle oracle), `uid-spray` (last-resort credential discovery).
 - **Interactive shell** with tab completion, `get -r` / `put -r`, `--verify <sha256>`, and all standard POSIX-style verbs.
 - **FUSE**: mount any NFS export locally with spoofed credentials via `nfswolf mount`.
 - **Six report formats**: HTML, JSON, CSV, Markdown, plain-text, ANSI console.
@@ -50,7 +50,7 @@ Download from the [Releases page](https://github.com/StrongWind1/NFSWolf/release
 
 | File | Link | FUSE / `nfswolf mount` | When to use it |
 |---|---|:---:|---|
-| `nfswolf-linux-x86_64` | musl, static | **no** | Zero-dependency binary, runs on any Linux kernel (Alpine, distroless, CI runners). You only need `scan` / `analyze` / `shell` / `attack`. |
+| `nfswolf-linux-x86_64` | musl, static | **no** | Zero-dependency binary, runs on any Linux kernel (Alpine, distroless, CI runners). You only need `scan` / `analyze` / `shell` / `escape` / `brute-handle` / `uid-spray`. |
 | `nfswolf-linux-x86_64-full` | glibc, dynamic | **yes** | `nfswolf mount` (FUSE). Requires libfuse3 on the host. |
 | `nfswolf-linux-arm64`, `nfswolf-linux-arm64-full` | same split on ARM64 | same split | Same trade-off on ARM64. |
 | `nfswolf-macos-universal`, `nfswolf-macos-arm64`, `nfswolf-macos-x86_64` | macOS | macFUSE required | macOS has no bundled FUSE; install [macFUSE](https://osxfuse.github.io/) separately if you want `mount`. |
@@ -107,8 +107,11 @@ nfswolf shell 192.168.1.10:/srv/nfs --uid 0
 # Mount an export locally via FUSE, spoofing UID 0:
 sudo nfswolf --uid 0 mount 192.168.1.10:/srv/nfs /mnt/target
 
-# UID spray to find accessible files (colon-form supplies the export):
-nfswolf attack uid-spray 192.168.1.10:/srv/nfs --uid-start 0 --uid-end 5000 --path /etc/shadow
+# Construct an escape handle to reach the underlying filesystem root:
+nfswolf escape 192.168.1.10:/srv/nfs
+
+# Last-resort UID/GID brute force when the auto-UID ladder doesn't find a hit:
+nfswolf uid-spray 192.168.1.10:/srv/nfs --uid-start 0 --uid-end 5000 --path /etc/shadow
 
 # Re-runnable replay: every successful command prints a `# rerun: ...`
 # line on stderr that you can paste back into your shell.
@@ -119,11 +122,13 @@ nfswolf attack uid-spray 192.168.1.10:/srv/nfs --uid-start 0 --uid-end 5000 --pa
 | Subcommand | Purpose |
 |---|---|
 | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
-| `analyze` | Per-host security audit against the 36-finding catalog |
+| `analyze` | Per-host security audit against the documented finding catalog |
 | `shell` | Interactive REPL over NFSv3 or NFSv4, with `get -r` / `put -r` / `--verify` |
 | `mount` | FUSE mount with spoofed AUTH_SYS credentials (`--features fuse`) |
-| `attack <module>` | Targeted exploitation: `uid-spray`, `brute-handle`, `escape`, `download`, `upload`, `symlink-swap`, `dir-nuke`, `lock-dos`, `harvest` |
-| `export` | Render a saved analysis result to HTML / JSON / CSV / Markdown / text |
+| `escape` | Construct ext4 / XFS / BTRFS escape handles to break out of an export |
+| `brute-handle` | Brute-force file handles using the STALE / BADHANDLE oracle |
+| `uid-spray` | Last-resort UID/GID brute force when auto-UID escalation fails |
+| `convert` | Render a saved analysis result to HTML / JSON / CSV / Markdown / text |
 | `completions <shell>` | Generate shell completions for bash, zsh, fish, PowerShell |
 
 Global flags common to every subcommand:
@@ -149,12 +154,11 @@ See `nfswolf <subcommand> --help` for per-subcommand flags.
 - Does not exploit RPCSEC_GSS / Kerberized mounts (detection only).
 - Does not attack NFS-over-TLS channels (detects `NONE`/`TLS_V1` negotiation only).
 - Does not modify server state without `--allow-write`.
-- Does not perform destructive operations (rmdir, lock-DoS) without `--allow-destructive`.
 - Does not run without an authorized target specified on the command line.
 
 ## Platform support
 
-| Platform | Scan / Analyze / Attack | `mount` (FUSE) |
+| Platform | Scan / Analyze / Escape / Spray | `mount` (FUSE) |
 |---|:---:|:---:|
 | Linux x86_64 (glibc) | yes | yes |
 | Linux x86_64 (musl static) | yes | no |

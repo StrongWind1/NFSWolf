@@ -1,8 +1,8 @@
 //! Portmapper client  --  wraps nfs3_client::PortmapperClient for service enumeration.
 //!
 //! Exposes PMAPPROC_DUMP (all registered RPC services) and PMAPPROC_GETPORT
-//! (port resolution for NFS/mountd/NLM/NSM). Also measures UDP amplification
-//! factor (F-3.2) and detects NIS (F-5.3) and NetApp services.
+//! (port resolution for NFS/mountd). Also measures UDP amplification factor
+//! (F-3.2) and detects NIS (F-5.3) and NetApp services.
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::net::SocketAddr;
@@ -18,10 +18,6 @@ use nfs3_types::portmap::{IPPROTO_TCP, IPPROTO_UDP};
 const PROG_NFS: u32 = 100_003;
 /// NFS MOUNT protocol (program 100005, RFC 1813 Appendix I).
 const PROG_MOUNT: u32 = 100_005;
-/// Network Lock Manager (program 100021, RFC 1813 Appendix II).
-const PROG_NLM: u32 = 100_021;
-/// Network Status Monitor / statd (program 100024).
-const PROG_NSM: u32 = 100_024;
 /// NIS / ypserv (program 100004, vulnerable to map dump).
 const PROG_YPSERV: u32 = 100_004;
 /// NIS ypbind (program 100007).
@@ -113,16 +109,6 @@ impl PortmapClient {
     /// Resolve the mountd port (program 100005).
     pub async fn detect_mount_port(&self, addr: SocketAddr) -> anyhow::Result<u16> {
         self.query_port(addr, PROG_MOUNT, 3).await
-    }
-
-    /// Resolve the NLM port (program 100021), if present.
-    pub async fn detect_nlm(&self, addr: SocketAddr) -> anyhow::Result<Option<u16>> {
-        Ok(self.query_port(addr, PROG_NLM, 4).await.ok())
-    }
-
-    /// Resolve the NSM/statd port (program 100024), if present.
-    pub async fn detect_nsm(&self, addr: SocketAddr) -> anyhow::Result<Option<u16>> {
-        Ok(self.query_port(addr, PROG_NSM, 1).await.ok())
     }
 
     /// Check for NIS (ypserv / ypbind) in the portmapper dump.

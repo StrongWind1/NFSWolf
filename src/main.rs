@@ -35,7 +35,9 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "fuse")]
         cli::Command::Mount(args) => cli::mount::run(args, &globals).await,
         cli::Command::Shell(args) => cli::shell::run(args, &globals).await,
-        cli::Command::Attack(args) => cli::attack::run(args, &globals).await,
+        cli::Command::Escape(args) => cli::escape::run(args, &globals).await,
+        cli::Command::BruteHandle(args) => cli::brute_handle::run(args, &globals).await,
+        cli::Command::UidSpray(args) => cli::uid_spray::run(args, &globals).await,
         cli::Command::Convert(args) => cli::convert::run(&args, &globals),
         cli::Command::Completions(args) => {
             cli::completions(&args);

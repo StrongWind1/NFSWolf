@@ -58,7 +58,12 @@ For the summary catalog with RFC rationale, see [FINDINGS.md](../FINDINGS.md).
 | F-5.4 | [RPC Service Enumeration](F-5.4-rpc-service-enumeration.md) | Low |
 | F-5.5 | [NFSv4 Pseudo-FS Structure Leakage](F-5.5-nfsv4-pseudo-fs-leakage.md) | Low |
 
-### Category 6: Denial of Service
+### Category 6: Denial of Service (out of scope)
+
+The DoS findings are documented for completeness but are **not exercised
+by any nfswolf subcommand**. The lock-DoS module that drove F-6.1 was
+removed along with the NLM and NSM clients; F-6.2 and F-6.3 were never
+implemented.
 
 | ID | Finding | Severity |
 |----|---------|----------|

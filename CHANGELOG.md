@@ -23,6 +23,15 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - FUSE: server-side symlink resolution and the null-attr READDIRPLUS fix-up are always on.
 - Renamed `export` subcommand to `convert` and clarified the pipeline relationship: `analyze` produces the JSON, `convert` renders it. `analyze` lost its per-subcommand `--output FILE` and `--txt FILE` flags; instead, the global `--json` flag now causes `analyze` to emit a JSON array on stdout. Capture with shell redirection (`> results.json`) and feed to `nfswolf convert` to render HTML/Markdown/CSV/TXT/console. Re-running `analyze` to regenerate a different format would re-execute every check (including the squash/no-root-squash probes that touch the server); `convert` is the safe, offline path for re-rendering.
 
+### Attack-module pruning
+
+- Removed `attack read`, `attack write`, `attack upload`, `attack harvest`, and `attack symlink-swap`. With `shell` and `mount` providing full read/write/recursive-walk coverage with the same credential ladder, the standalone primitives were duplicating functionality that the interactive surfaces handled better. Use `shell` (`get`, `put`, `get -r`, `put -r`, `cat`, `find`) or `mount` (regular filesystem tools) instead.
+- Removed `attack lock-dos` entirely. Lock-storm DoS was the only NLM-dependent feature; with it gone, the NLM and NSM clients (`src/proto/nlm/`, `src/proto/nsm/`), the F-6.1 NLM lock-attack analyzer check, and the portmapper helpers `detect_nlm` / `detect_nsm` are removed. F-6.2 / F-6.3 (grace-period DoS, SETCLIENTID state destruction) were never implemented and are documented as out of scope.
+- Removed `attack v4-grace` (was placeholder-only; never had a working implementation).
+- Promoted `attack escape`, `attack brute-handle`, and `attack uid-spray` to top-level subcommands: `nfswolf escape ...`, `nfswolf brute-handle ...`, `nfswolf uid-spray ...`. The `attack` parent verb is gone.
+- Reframed `uid-spray` in its help text as a last-resort fallback. The auto-UID escalation ladder built into `shell` and `mount` already tries owner, root, and common service UIDs on every `NFS3ERR_ACCES`, and `escape` bypasses export-level access checks entirely. `uid-spray` is included for the rare case where those don't pin down a working credential.
+- Removed `src/engine/fs_walker.rs` (recursive walker used only by `harvest`) and the `CredentialManager` struct from `src/engine/credential.rs` (used only by removed attack modules). The `escalation_list` helper survives — it's shared by `shell`, `mount`, and the three offensive subcommands.
+
 ## [0.1.0] - 2026-04-17
 
 First public release. Covers the full NFS attack path: recon → enumeration → analysis → exploitation → shell. For authorized security research only.

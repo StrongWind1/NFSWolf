@@ -310,10 +310,6 @@ impl Analyzer {
         check_v2_downgrade(&nfs_versions, &mut findings);
         run_nis_check(&self.portmap, addr, &mut findings).await;
         run_amplification_check(&self.portmap, addr, &mut findings).await;
-        // NLM service detection (F-6.1): checks portmapper for program 100021.
-        run_nlm_check(&self.portmap, addr, &mut findings).await;
-        // NSM/statd detection (F-6.1 corollary): confirms whether statd is actively monitoring.
-        run_nsm_check(&self.portmap, addr, &config.host, &mut findings).await;
 
         // Per-export checks.
         let exports = self.mount.list_exports(addr).await.unwrap_or_default();
@@ -720,67 +716,6 @@ fn check_os_fingerprint(fh: &FileHandle) -> String {
 }
 
 // --- Missing check implementations ---
-
-/// Check NSM/statd service registration and probe live state (F-6.1 corollary).
-///
-/// NSM (program 100024) runs alongside NLM to provide crash/reboot notification.
-/// When NSM is exposed AND the server reports an active reboot counter, this
-/// confirms the host has live NLM-based lock state that can be exploited via
-/// lock theft or denial-of-service (F-6.1).
-async fn run_nsm_check(portmap: &PortmapClient, addr: SocketAddr, host: &str, findings: &mut Vec<Finding>) {
-    use crate::proto::nsm::client::NsmClient;
-
-    let Ok(Some(nsm_port)) = portmap.detect_nsm(addr).await else { return };
-    let nsm_addr = SocketAddr::new(addr.ip(), nsm_port);
-
-    // SM_STAT: check whether the server is actively monitoring us.
-    // state counter: odd = reboot in progress, even = stable.
-    let stat = NsmClient::probe_stat(nsm_addr, host).await;
-    let (monitoring_msg, evidence) = match stat {
-        Some(res) if res.stat == 1 => ("NSM actively monitoring  --  confirms live NLM lock state", format!("NSM port={nsm_port} stat=monitoring state={}", res.state)),
-        Some(res) => ("NSM registered but not monitoring  --  lock state may be stale", format!("NSM port={nsm_port} stat=not-monitoring state={}", res.state)),
-        None => ("NSM registered in portmapper but did not respond", format!("NSM port={nsm_port} (unresponsive)")),
-    };
-    findings.push(make_finding(
-        &FindingSpec {
-            id: "F-6.1",
-            title: "NSM/statd exposed  --  lock state enumerable",
-            desc: &format!(
-                "NSM (statd, program 100024) is registered at port {nsm_port}. {monitoring_msg}. \
-                 An attacker can query SM_STAT to fingerprint lock clients and reboot state, \
-                 or issue SM_MON/SM_UNMON to disrupt crash recovery.",
-            ),
-            evidence: &evidence,
-            remediation: "Block portmapper (port 111) and statd port from untrusted hosts. \
-                          Upgrade to NFSv4 which does not use NSM/statd.",
-            export: None,
-        },
-        Severity::Low,
-    ));
-}
-
-/// Check NLM service registration in portmapper (F-6.1).
-///
-/// NLM (program 100021) exposes advisory lock operations. An attacker can
-/// forge the caller_name string (RFC 1813 S6.1.4) to release other clients'
-/// locks or exhaust the server's lock table. Detection only  --  no lock probing.
-async fn run_nlm_check(portmap: &PortmapClient, addr: SocketAddr, findings: &mut Vec<Finding>) {
-    let Ok(Some(port)) = portmap.detect_nlm(addr).await else { return };
-    findings.push(make_finding(
-        &FindingSpec {
-            id: "F-6.1",
-            title: "NLM service exposed  --  lock exhaustion and lock theft possible",
-            desc: "The NLM daemon (program 100021) is registered in portmapper. \
-                   NLM's caller_name is a self-reported string (RFC 1813 S6.1.4), \
-                   so any client can forge it to release or steal other clients' locks.",
-            evidence: &format!("NLM registered at port {port}"),
-            remediation: "Restrict portmapper access to trusted hosts. \
-                          Upgrade to NFSv4 which uses stateful lease-based locking.",
-            export: None,
-        },
-        Severity::Medium,
-    ));
-}
 
 /// Check for BTRFS subvolume handle construction (F-2.4).
 ///

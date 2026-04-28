@@ -1,12 +1,15 @@
 //! CLI argument parsing and subcommand dispatch.
 
 pub mod analyze;
-pub mod attack;
+pub mod brute_handle;
 pub mod convert;
+pub mod escape;
 pub mod mount;
+pub mod probe;
 pub mod scan;
 pub mod shell;
 pub mod target;
+pub mod uid_spray;
 
 use clap::{Parser, Subcommand};
 
@@ -48,9 +51,9 @@ pub const H_BEHAVIOR: &str = "Behavior";
 ///
 /// Common workflows:
 ///   nfswolf scan 192.168.1.0/24            # discover NFS servers
-///   nfswolf analyze 192.168.1.10 -A        # full security audit
+///   nfswolf analyze 192.168.1.10           # full security audit
 ///   nfswolf shell 192.168.1.10:/srv        # interactive exploration
-///   nfswolf attack escape 192.168.1.10:/srv
+///   nfswolf escape 192.168.1.10:/srv       # subtree-check bypass -> root handle
 ///   nfswolf shell 192.168.1.10 --handle HEX  # HEX = output from escape
 #[derive(Parser)]
 #[command(name = "nfswolf", version, about, long_about = None)]
@@ -139,8 +142,14 @@ pub enum Command {
     /// Interactive NFS exploration shell
     Shell(shell::ShellArgs),
 
-    /// Automated exploitation modules
-    Attack(attack::AttackArgs),
+    /// Escape an export to the filesystem root via subtree_check bypass
+    Escape(escape::EscapeArgs),
+
+    /// Brute-force NFS file handles using the STALE/BADHANDLE oracle
+    BruteHandle(brute_handle::BruteHandleArgs),
+
+    /// UID/GID spray (last-resort credential discovery)
+    UidSpray(uid_spray::UidSprayArgs),
 
     /// Convert an `analyze --json` dump into HTML/Markdown/CSV/TXT/console
     Convert(convert::ConvertArgs),
