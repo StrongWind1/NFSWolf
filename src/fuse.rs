@@ -13,9 +13,9 @@
 //!   nested exports) return entries with `name_attributes = None` /
 //!   `name_handle = None`. We re-LOOKUP those entries so the kernel sees
 //!   complete metadata.
-//! - **Auto-UID ladder.** When `--auto-uid` is set, any callback that
-//!   returns NFS3ERR_ACCES triggers the same credential-escalation ladder
-//!   the interactive shell uses (`engine::credential::escalation_list`),
+//! - **Auto-UID ladder (always on).** Any callback that returns
+//!   NFS3ERR_ACCES triggers the same credential-escalation ladder the
+//!   interactive shell uses (`engine::credential::escalation_list`),
 //!   and the resolved (uid, gid) is cached per inode so future calls
 //!   skip the search.
 //!
@@ -350,10 +350,10 @@ impl NfsFuse {
     /// Run an NFS3 operation with the credential-escalation ladder.
     ///
     /// Tries, in order: any per-inode cached credential, the default
-    /// credential, and (when `--auto-uid` is set) every rung of
-    /// `escalation_list(caller, owner)`. The first attempt that does not
-    /// return `NFS3ERR_ACCES` / `NFS3ERR_PERM` wins; the winning credential
-    /// is cached for `subject_ino` so subsequent calls skip the search.
+    /// credential, and every rung of `escalation_list(caller, owner)`.
+    /// The first attempt that does not return `NFS3ERR_ACCES` /
+    /// `NFS3ERR_PERM` wins; the winning credential is cached for
+    /// `subject_ino` so subsequent calls skip the search.
     ///
     /// `op` is invoked with a fresh `Nfs3Client` that carries the credential
     /// for the rung being tried; the closure builds the args and calls the

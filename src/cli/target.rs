@@ -14,8 +14,8 @@
 //! - `--export` + `--handle`: already mutually exclusive in clap
 //!   (`group = "source"`); we also reject here as a safety net.
 //! - Bare host with no source: the caller decides whether that is
-//!   allowed.  Some subcommands only need the host (e.g. `attack
-//!   brute-handle`); most require an explicit export.
+//!   allowed.  Some subcommands only need the host (e.g. `brute-handle`,
+//!   `scan`, `analyze`); most require an explicit export.
 
 use std::net::IpAddr;
 
@@ -39,7 +39,7 @@ pub enum Source {
     /// Caller is responsible for hex-decoding.
     Handle(String),
     /// No source given.  Subcommands that don't need an export
-    /// (e.g. `attack brute-handle`) accept this; others reject it.
+    /// (e.g. `brute-handle`) accept this; others reject it.
     None,
 }
 

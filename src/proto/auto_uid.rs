@@ -1,9 +1,10 @@
 //! Auto-UID/GID access resolution  --  9-step tiered strategy.
 //!
-//! When --auto-uid is set, nfswolf tries the cheapest credential first and
-//! escalates to more expensive strategies only on failure. Each step tries
-//! both UID and GID dimensions since AUTH_SYS includes both and the server
-//! checks user/group/other permission bits independently.
+//! Every NFS surface (shell, mount, escape) runs this ladder unconditionally:
+//! nfswolf tries the cheapest credential first and escalates to more expensive
+//! strategies only on failure. Each step tries both UID and GID dimensions
+//! since AUTH_SYS includes both and the server checks user/group/other
+//! permission bits independently.
 //!
 //! Steps (cheapest first):
 //! 1. NFSv2 downgrade (if server supports v2  --  bypasses all v3/v4 security)

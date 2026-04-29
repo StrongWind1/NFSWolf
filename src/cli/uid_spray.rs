@@ -2,8 +2,8 @@
 //!
 //! Most of the time you should NOT need this: `shell` and `mount` already
 //! run an automatic credential ladder (owner -> root -> common service
-//! UIDs) on every NFS3ERR_ACCES, and `attack escape` produces a root
-//! handle that bypasses export-level access checks entirely. Reach for
+//! UIDs) on every NFS3ERR_ACCES, and `escape` produces a root handle
+//! that bypasses export-level access checks entirely. Reach for
 //! `uid-spray` only when both of those have failed and you genuinely need
 //! to enumerate the UID/GID space against a single path -- typically to
 //! confirm whether an export is truly inaccessible or to map which

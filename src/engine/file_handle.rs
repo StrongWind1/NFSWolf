@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn windows_signing_disabled_all_zeros() {
         // 32-byte handle with all-zero HMAC in last 10 bytes -> signing disabled.
-        // This is the precondition for full filesystem handle forgery (F-6.2).
+        // This is the precondition for handle forgery on Windows NFS (F-2.3).
         let fh = windows_handle(false);
         assert_eq!(FileHandleAnalyzer::check_windows_signing(&fh), SigningStatus::Disabled);
     }

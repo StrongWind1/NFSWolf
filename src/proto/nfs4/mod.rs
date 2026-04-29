@@ -11,7 +11,7 @@
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 //! - EXCHANGE_ID + CREATE_SESSION  --  NFSv4.1 session setup
-//! - DESTROY_SESSION + DESTROY_CLIENTID  --  stealth cleanup (F-6.3)
+//! - DESTROY_SESSION + DESTROY_CLIENTID  --  stealth session cleanup
 //!
 //! Even when a server primarily serves NFSv3, the v4 endpoint is often active
 //! on the same port (2049) and exposes additional information:

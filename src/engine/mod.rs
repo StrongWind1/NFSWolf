@@ -1,7 +1,8 @@
 //! Core analysis and exploitation engine.
 //!
 //! Orchestrates protocol clients to perform security checks,
-//! file handle analysis, and automated attacks.
+//! file handle analysis, and automated exploitation primitives
+//! (escape construction, handle brute force, UID spray).
 
 pub mod analyzer;
 pub mod credential;
