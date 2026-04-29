@@ -131,8 +131,10 @@ opt-level = 3
 lto = true
 # Single codegen unit forces cross-crate inlining; required for full LTO.
 codegen-units = 1
-# Abort on panic  --  no unwinding machinery in the binary.
-panic = "abort"
+# Unwind on panic so the scanner can isolate per-host failures via
+# tokio::spawn / JoinError::is_panic. A single bad target must not abort
+# a multi-thousand-host sweep.
+panic = "unwind"
 # Catch overflows in release too; remove only if profiling proves the cost.
 overflow-checks = true
 # Strip debug symbols from the release binary.

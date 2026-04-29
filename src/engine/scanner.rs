@@ -123,8 +123,18 @@ impl Scanner {
 
         let mut results = Vec::with_capacity(handles.len());
         for handle in handles {
-            if let Ok(r) = handle.await {
-                results.push(r);
+            match handle.await {
+                Ok(r) => results.push(r),
+                Err(e) if e.is_panic() => {
+                    // One host's RPC peer misbehaved badly enough to panic a worker.
+                    // With panic = "unwind", tokio confines it to this task; we drop
+                    // the result and keep scanning so a single bad target doesn't
+                    // sink a multi-thousand-host sweep.
+                    tracing::warn!(error = %e, "scan worker panicked; host result discarded");
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "scan worker join failed");
+                },
             }
         }
         results
