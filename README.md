@@ -22,7 +22,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 | Async / concurrent scan | yes | no | no | yes | no | no |
 | AUTH_SYS UID spraying | yes | no | yes | yes | no | no |
 | Export escape (ext4/XFS/BTRFS) | yes | no | no | no | no | no |
-| Interactive NFS shell (35+ commands) | yes | no | no | no | no | yes |
+| Interactive NFS shell (40+ commands) | yes | no | no | no | no | yes |
 | FUSE mount (`nfswolf mount`) | yes | no | no | no | no | no |
 | Portmapper / mountd enumeration | yes | partial | no | no | no | no |
 | Self-contained HTML / JSON / CSV reports | yes | no | no | no | no | no |
