@@ -62,6 +62,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ipnet = "2"
 
+# POSIX detach for `nfswolf mount` (libc::daemon).  The mount subcommand
+# detaches itself so the FUSE handler survives the operator's shell exit;
+# this is the only place the binary uses libc directly, and the unsafe
+# call is gated by `#[allow(unsafe_code, reason = ...)]` at a single site.
+libc = "0.2"
+
 [dev-dependencies]
 proptest = "1"
 assert_cmd = "2"
@@ -138,7 +144,12 @@ overflow-checks = true
 
 # --- Lint policy ---
 [lints.rust]
-unsafe_code = "forbid"
+# Relaxed from "forbid" to "deny" so `nfswolf mount` can call
+# libc::daemon under a single `#[allow(unsafe_code, reason = ...)]`.
+# Every unsafe call site must carry a justification string; outside of
+# the one in src/main.rs there are none, and adding new ones requires
+# the same explicit allow-with-reason.
+unsafe_code = "deny"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 unreachable_pub = "allow"
