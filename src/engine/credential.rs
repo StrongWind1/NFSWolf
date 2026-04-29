@@ -19,8 +19,9 @@
 ///   3. (0, 0)                  -- root, works when export has no_root_squash
 ///   4. Common service UIDs (nobody, 1000, www-data, mysql, postgres)
 ///
-/// Used by the shell (ls, cd, cat) and attack modules (read, lookup) so
-/// every NFS operation gets the same automatic privilege escalation.
+/// Used by the shell (ls, cd, cat), the FUSE mount, and the offensive
+/// subcommands (escape, brute-handle, uid-spray) so every NFS operation
+/// gets the same automatic privilege escalation.
 pub fn escalation_list(caller: (u32, u32), owner: Option<(u32, u32)>) -> Vec<(u32, u32)> {
     let (caller_uid, caller_gid) = caller;
     let mut list = Vec::with_capacity(14);

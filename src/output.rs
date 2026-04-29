@@ -72,12 +72,15 @@ pub fn print_handle(label: &str, hex: &str) {
     println!("  {}: {}", label.bold(), hex.cyan());
 }
 
-/// Print a "next steps" suggestion after an escape, pointing to `shell` and `read`.
+/// Print a "next steps" suggestion after an escape, pointing the operator
+/// at the two surfaces that consume a raw handle (`shell --handle` and
+/// `mount --handle`). Both honour `--allow-write` and the auto-UID ladder,
+/// so any read/write/walk/grep workflow works through them.
 pub fn print_handle_next_steps(hex: &str, host: &str) {
     println!();
     println!("  {} Copy the handle above and use it with:", "Next steps:".bold().yellow());
     println!("    {} shell {} --handle {}", "nfswolf".dimmed(), host, hex.cyan());
-    println!("    {} attack read {} --handle {} --path /etc/shadow", "nfswolf".dimmed(), host, hex.cyan());
+    println!("    {} mount {} /mnt/escaped --handle {}", "nfswolf".dimmed(), host, hex.cyan());
 }
 
 // --- timing ------------------------------------------------------------------

@@ -67,7 +67,7 @@ pub struct ShellArgs {
     pub command: Option<String>,
 
     /// Use a raw file handle (hex) as the shell root  --  skips MOUNT entirely.
-    /// Obtain handles from `attack escape` or `attack brute-handle`.
+    /// Obtain handles from `nfswolf escape` or `nfswolf brute-handle`.
     #[arg(long, value_name = "HEX", help_heading = H_TARGET)]
     pub handle: Option<String>,
 

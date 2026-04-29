@@ -25,11 +25,12 @@ use clap::{Parser, Subcommand};
 /// `--export`, or `--handle`).
 pub const H_TARGET: &str = "Target / Source";
 
-/// AUTH_SYS credential fields (uid, gid, hostname, auto-uid).
+/// AUTH_SYS credential fields (uid, gid, hostname, aux GIDs).
 pub const H_IDENTITY: &str = "Identity";
 
-/// Per-operation safety belts (`--allow-write`, `--allow-root`, FUSE-mount
-/// permission flags).
+/// Per-operation safety belts (currently just `--allow-write`; the auto-UID
+/// ladder, owner-bit elevation, suid/dev passthrough, and shared-mount
+/// visibility are always-on across `shell` and `mount`).
 pub const H_PERMISSIONS: &str = "Permissions";
 
 /// Network-level toggles: alternate ports, transport, proxy, timeout.
@@ -97,7 +98,8 @@ pub struct Cli {
     pub timeout: u64,
 
     /// Override the NFS port (skip portmapper). Applies to every subcommand
-    /// that opens an NFS connection -- mount, shell, attack modules.
+    /// that opens an NFS connection -- shell, mount, escape, brute-handle,
+    /// uid-spray.
     #[arg(long, global = true, value_name = "PORT", help_heading = H_NETWORK)]
     pub nfs_port: Option<u16>,
 
