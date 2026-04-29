@@ -3,6 +3,8 @@
 Fast, native NFS security toolkit. One static binary — recon, analysis, escape, exploitation, and an interactive shell — for **authorized security research only**.
 
 [![CI](https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg)](https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/nfswolf.svg)](https://crates.io/crates/nfswolf)
+[![docs.rs](https://img.shields.io/docsrs/nfswolf)](https://docs.rs/nfswolf)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV 1.94](https://img.shields.io/badge/msrv-1.94-informational)](rust-toolchain.toml)
 
@@ -10,7 +12,7 @@ Fast, native NFS security toolkit. One static binary — recon, analysis, escape
 
 nfswolf is a penetration-testing and security-research tool. Operating it against systems without explicit written authorization is illegal in most jurisdictions. You alone are responsible for how you use it. By using nfswolf you accept full responsibility for compliance with applicable laws, contracts, and policies.
 
-If you believe you have found a security issue in nfswolf itself, please read [SECURITY.md](SECURITY.md) for the disclosure channel.
+If you believe you have found a security issue in nfswolf itself, please open a private security advisory on the [GitHub repository](https://github.com/StrongWind1/NFSWolf/security/advisories) rather than a public issue.
 
 ## Why nfswolf
 
