@@ -4,6 +4,34 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-29
+
+This release adds three login-history readers to the interactive shell -- `last`, `lastb`, and `lastlog` -- so an operator who has reached an NFS-exported filesystem root (typically via `escape-root`) can decode `/var/log/wtmp`, `/var/log/btmp`, and `/var/log/lastlog` directly over NFS without staging them locally first. Parsing follows the canonical glibc `struct utmpx` (384 bytes) and `struct lastlog` (292 bytes) layouts and was cross-checked against util-linux 2.42 `login-utils/last.c`.
+
+### Added
+
+- Shell: `last [N]` decodes `/var/log/wtmp` and prints paired login sessions with full timestamps and durations. The state machine mirrors util-linux 2.42 `login-utils/last.c::process_wtmp_file()` -- USER_PROCESS pairs with DEAD_PROCESS on `ut_line`, sysvinit pseudo-records (`~`/`reboot`, `~`/`shutdown`, `~`/`runlevel`) are reclassified, and unmatched sessions are closed as `Crash` (next boot) or `Down` (clean shutdown / runlevel 0/6) per the same rules. Always-on full-time format and numeric IPs.
+- Shell: `lastb [N]` decodes `/var/log/btmp` and prints failed-login attempts. Same `struct utmpx` parser as `last`.
+- Shell: `lastlog` decodes `/var/log/lastlog` (uid-indexed 292-byte slots), maps UIDs to usernames via `/etc/passwd` from the same export, and prints one row per user that has actually logged in. When the classic flat file is empty or absent the command also probes `/var/lib/lastlog/lastlog2.db` (util-linux 2.42 default) and prints a `get` hint -- the SQLite database is left to offline tooling because pure-Rust SQLite would violate the project's no-C-deps rule.
+- New module `src/util/utmp.rs`: pure-Rust binary parser for `struct utmpx`, `struct lastlog`, and `/etc/passwd`. Bounds-checked, panic-free, with seven unit tests covering record sizes, BOOT_TIME / USER_PROCESS layouts, partial-trailing-record handling, UID-indexed lastlog slots, and IPv4 address rendering. Spec-cited to util-linux 2.42, glibc `<bits/utmp.h>`, and `<bits/lastlog.h>`. Safe on every architecture supported by the project: the on-disk record sizes are fixed by the Linux ABI regardless of native `time_t` width.
+- New shell helper `read_all_escalated()`: returns the full contents of a file handle after running the standard auto-UID escalation ladder. Required by the binary log readers because wtmp/btmp are typically `gid=43` (`utmp`); the helper transparently switches credentials on `NFS3ERR_ACCES`.
+
+### Changed
+
+- Shell `escape-root` now also rebases the session's notion of `/` to the constructed filesystem root. Absolute path lookups (`cat /etc/shadow`, `last`, `cd /`) walk from the underlying filesystem root rather than the narrow export the session originally MOUNTed through. Without this fix the new log readers couldn't reach `/var/log/wtmp` after an escape because the path was still resolved against the original sub-export.
+- Crate metadata: expanded `description`, added `filesystem` to `categories`, added `[package.metadata.docs.rs]` with `all-features = true` and `--cfg docsrs` so docs.rs rebuilds are deterministic, and switched the `include` list to absolute (`/`-prefixed) paths to match the convention used by most well-curated Rust crates.
+- README: added crates.io and docs.rs badges, and pointed the security-disclosure paragraph at the GitHub private security advisory channel rather than a `SECURITY.md` file.
+
+### Verified against the lab
+
+- `10.252.0.30` (Ubuntu 24.04): 5 boot/shutdown sessions paired correctly; durations match wall-clock (a 4-day 17-hour 45-minute boot pairs with the matching `SHUTDOWN_TIME` record); 16 failed `lastb` entries showing both console (tty1) and `ssh:notty` attempts; `lastlog` correctly reports the file as empty.
+- `10.252.0.32` (Ubuntu 24.04): wtmp contains only `LOGIN_PROCESS` getty spawns, which util-linux's own `last` ignores per `last.c` lines 886-893; the new command produces the same "no completed sessions" outcome rather than synthesizing fake rows.
+
+### Deferred
+
+- Live state -- `ps`, `ss` / `netstat`, `who` / `w` -- is not reachable over NFS. The Linux kernel NFS server refuses to traverse onto procfs / sysfs / tmpfs even when `crossmnt` is set, so `/proc/<pid>/*`, `/proc/net/tcp`, and `/var/run/utmp` cannot be exported regardless of client behavior. This is enforced kernel-side and not in scope for any future release.
+- `lastlog2` SQLite parsing. Pure-Rust SQLite readers all carry C dependencies (`rusqlite`, `sqlx`) and the project enforces a hard no-C-deps rule for the static-musl build target. Operators reaching a host that has migrated to `lastlog2.db` should `get` the file and read it offline with `sqlite3`.
+
 ## [0.2.0] - 2026-04-28
 
 The headline change is a substantial CLI overhaul: the `attack` umbrella verb is gone, primitives that duplicated `shell` / `mount` were removed, and three offensive primitives (`escape`, `brute-handle`, `uid-spray`) have been promoted to top-level subcommands. The `export` subcommand was renamed to `convert`. Every subcommand now runs the full check matrix unconditionally — the per-check toggles are gone — and `--help` is grouped into seven sections on every subcommand. The scanner is faster and more resilient against half-open firewalls, and the FUSE driver is now feature-complete.

@@ -1,24 +1,30 @@
 [package]
 name = "nfswolf"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94"
-description = "Fast native NFS security scanner and analysis toolkit"
+description = "Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an interactive shell for authorized red-team and pentest work."
 license = "Apache-2.0"
 repository = "https://github.com/StrongWind1/NFSWolf"
-homepage = "https://github.com/StrongWind1/NFSWolf"
-documentation = "https://docs.rs/nfswolf"
-keywords = ["nfs", "security", "scanner", "pentest"]
-categories = ["command-line-utilities", "network-programming"]
+keywords = ["nfs", "security", "pentest", "scanner", "rpc"]
+categories = ["command-line-utilities", "network-programming", "filesystem"]
 readme = "README.md"
 include = [
-  "src/**/*",
-  "Cargo.toml",
-  "Cargo.lock",
-  "README.md",
-  "LICENSE",
-  "CHANGELOG.md",
+  "/src/**/*",
+  "/tests/**/*",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/LICENSE",
+  "/CHANGELOG.md",
 ]
+
+# Build the published documentation on docs.rs with all features enabled and a
+# stable cfg flag (`docsrs`), matching the convention used by most well-curated
+# Rust crates so doc rebuilds stay deterministic across nightly toolchains.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # Async runtime
