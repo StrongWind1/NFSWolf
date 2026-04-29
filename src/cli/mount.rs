@@ -21,10 +21,15 @@ use crate::cli::{H_PERMISSIONS, H_STEALTH, H_TARGET};
 /// FUSE mount; use `nfswolf shell --nfs-version 4` for interactive NFSv4
 /// browsing instead.
 ///
-/// Cleanup: the mount is unmounted automatically when the process exits
-/// cleanly. After a SIGKILL or hard panic the kernel may keep the mount
-/// in a "Transport endpoint is not connected" state; clean it up with
-/// `fusermount -u <mountpoint>` (Linux) or `umount <mountpoint>` (macOS).
+/// Cleanup: nfswolf detaches itself once the kernel mount is in place
+/// (just like mount(8)) and the FUSE handler runs in a daemon process,
+/// so the mount survives the operator's shell exiting.  Always unmount
+/// manually:
+///   `fusermount3 -u MOUNTPOINT`   # Linux
+///   `umount MOUNTPOINT`           # macOS
+/// After a SIGKILL or hard panic of the daemon, the kernel may keep the
+/// mount in a "Transport endpoint is not connected" state; the same
+/// command clears it.
 ///
 /// Examples:
 ///   nfswolf mount 10.0.0.5:/srv /mnt/x
@@ -58,11 +63,40 @@ pub struct MountArgs {
     pub hide: bool,
 }
 
+/// Synchronous pre-flight checks that must run BEFORE the binary detaches.
+///
+/// Validating these in the parent (rather than after `libc::daemon`) means
+/// argument errors land on the operator's terminal with a non-zero exit
+/// status, instead of disappearing into a daemon-child that nobody is
+/// watching. Network work happens later, in the daemon, so MOUNT/RPC
+/// failures still surface (stdio is kept attached) but they no longer
+/// block the parent from returning to the shell.
+#[cfg(feature = "fuse")]
+pub fn preflight(args: &MountArgs) -> anyhow::Result<()> {
+    if args.hide && args.handle.is_some() {
+        anyhow::bail!("--hide has no effect with --handle: there is no server-side mount to unmount");
+    }
+    match std::fs::metadata(&args.mountpoint) {
+        Ok(md) if md.is_dir() => Ok(()),
+        Ok(_) => anyhow::bail!("mountpoint {} is not a directory", args.mountpoint),
+        Err(e) => anyhow::bail!("mountpoint {} unusable: {e}", args.mountpoint),
+    }
+}
+
 /// Run the `mount` subcommand.
 ///
 /// The `#[cfg(feature = "fuse")]` variant does the real work; the stub
 /// variant prints a message and exits cleanly so the binary doesn't break
 /// when built without the `fuse` feature.
+///
+/// Pre-conditions:
+///   * `preflight(args)` has already succeeded (called from `main` before
+///     daemonization).
+///   * The current process is the daemon child  --  the user's shell has
+///     already returned. Status messages still reach the controlling
+///     terminal because `libc::daemon(1, 1)` was invoked with
+///     `noclose = 1`, but they appear "after the prompt" rather than
+///     blocking the prompt.
 #[cfg(feature = "fuse")]
 pub async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
     use std::net::{IpAddr, SocketAddr};
@@ -81,19 +115,6 @@ pub async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::R
     use crate::util::stealth::StealthConfig;
 
     tracing::info!(target = %args.target, mountpoint = %args.mountpoint, "mounting NFS export via FUSE");
-
-    // Reject incoherent flag combinations early so the operator gets a
-    // clear error before we do any network work.
-    if args.hide && args.handle.is_some() {
-        anyhow::bail!("--hide has no effect with --handle: there is no server-side mount to unmount");
-    }
-
-    // Pre-flight the mountpoint so fuser doesn't return an opaque errno.
-    match std::fs::metadata(&args.mountpoint) {
-        Ok(md) if md.is_dir() => {},
-        Ok(_) => anyhow::bail!("mountpoint {} is not a directory", args.mountpoint),
-        Err(e) => anyhow::bail!("mountpoint {} unusable: {e}", args.mountpoint),
-    }
 
     // Parse the unified `<TARGET>` -- accepts host, host:/export, or
     // bare host with --export / --handle. Mount requires a source.
@@ -200,12 +221,13 @@ pub async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::R
     // async NFS calls onto the runtime that owns the connection pool.
     let rt_handle = tokio::runtime::Handle::current();
     let fs = crate::fuse::NfsFuse::new(crate::fuse::NfsFuseConfig { nfs3, root_fh, allow_write: args.allow_write, default_cred: cred, rt: rt_handle });
-    eprintln!("{}", crate::output::status_info(&format!("Mounting at {} (Ctrl-C to unmount)", args.mountpoint)));
 
+    // The status banner and `# rerun:` line have already been emitted from
+    // `main` before daemonization, so the operator sees them BEFORE their
+    // shell prompt returns. From here on out we are the daemon child;
+    // `fuser::mount2` blocks for the lifetime of the kernel mount.
     let mountpoint = Path::new(&args.mountpoint).to_path_buf();
     tokio::task::spawn_blocking(move || fuser::mount2(fs, &mountpoint, &config)).await??;
-
-    crate::cli::emit_replay(globals);
     Ok(())
 }
 

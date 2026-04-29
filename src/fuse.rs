@@ -993,9 +993,15 @@ impl Filesystem for NfsFuse {
                 let entries: Vec<_> = ok.reply.entries.into_inner();
                 let dotdot_ino = self.state.lock().expect("inode map lock").parents.get(&ino.0).copied().unwrap_or(1);
 
+                // FUSE readdir cookies are exclusive: when the kernel calls
+                // back with `offset = N`, it expects entries with cookie > N
+                // (the entry AT offset N has already been consumed). Using
+                // `<=` here re-emits "." / ".." every time the kernel resumes
+                // at offset 2, which is an infinite loop on any non-empty
+                // directory.
                 let fixed: [(u64, u64, FuseFileType, &str); 2] = [(1, ino.0, FuseFileType::Directory, "."), (2, dotdot_ino, FuseFileType::Directory, "..")];
                 for (pos, entry_ino, kind, name) in fixed {
-                    if offset <= pos && reply.add(INodeNo(entry_ino), pos, kind, name) {
+                    if offset < pos && reply.add(INodeNo(entry_ino), pos, kind, name) {
                         reply.ok();
                         return;
                     }

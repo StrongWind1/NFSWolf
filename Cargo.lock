@@ -687,6 +687,7 @@ dependencies = [
  "fuser",
  "indicatif",
  "ipnet",
+ "libc",
  "nfs3_client",
  "nfs3_server",
  "nfs3_types",
