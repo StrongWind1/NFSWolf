@@ -182,8 +182,9 @@ async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, jo
     let addr = SocketAddr::new(ip, 111);
     let nfs_addr = SocketAddr::new(ip, 2049);
 
-    let portmap_open = is_port_open(addr, probe_timeout).await;
-    let nfs_port_open = is_port_open(nfs_addr, probe_timeout).await;
+    // Probe both ports in parallel: a half-open firewall on one port shouldn't
+    // serialize the other.
+    let (portmap_open, nfs_port_open) = tokio::join!(is_port_open(addr, probe_timeout), is_port_open(nfs_addr, probe_timeout));
 
     if !nfs_port_open && !portmap_open {
         return HostResult { addr, nfs_port_open, portmap_open, nfs_versions: vec![], exports: vec![], os_guess: None, connected_clients: vec![], nfs4_reachable: false };
@@ -193,7 +194,9 @@ async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, jo
         // UDP portmapper: bypass TCP/111 firewalls by querying PMAPPROC_DUMP over UDP.
         detect_nfs_versions_udp(addr, probe_timeout).await
     } else if portmap_open {
-        portmap.detect_nfs_versions(addr).await.unwrap_or_default()
+        // Cap the RPC at probe_timeout: a stateful firewall may complete the TCP
+        // handshake on 111 then drop RPC payload, stalling the underlying client default.
+        timeout(probe_timeout, portmap.detect_nfs_versions(addr)).await.ok().and_then(Result::ok).unwrap_or_default()
     } else if nfs_port_open {
         vec![3] // portmapper closed, NFS port open -- assume v3
     } else {
@@ -204,33 +207,33 @@ async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, jo
         return HostResult { addr, nfs_port_open, portmap_open, nfs_versions, exports: vec![], os_guess: None, connected_clients: vec![], nfs4_reachable: false };
     }
 
-    // Enumerate exports
-    let export_entries = mount.list_exports(addr).await.unwrap_or_default();
+    // Enumerate exports -- bounded so a stalled mountd can't sink the worker.
+    let export_entries = timeout(probe_timeout, mount.list_exports(addr)).await.ok().and_then(Result::ok).unwrap_or_default();
 
     let mut exports = Vec::new();
     let mut os_guess: Option<String> = None;
 
     for entry in export_entries {
-        let mount_result = mount.mount(addr, &entry.path).await;
+        let mount_result = timeout(probe_timeout, mount.mount(addr, &entry.path)).await;
         let (auth_flavors, file_handle) = match mount_result {
-            Ok(mr) => {
+            Ok(Ok(mr)) => {
                 if os_guess.is_none() {
                     let fh = FileHandle::from_bytes(&mr.handle.0);
                     os_guess = Some(format!("{:?}/{:?}", FileHandleAnalyzer::fingerprint_os(&fh), FileHandleAnalyzer::fingerprint_fs(&fh)));
                 }
                 (mr.auth_flavors, Some(mr.handle.0.clone()))
             },
-            Err(_) => (vec![], None),
+            _ => (vec![], None),
         };
         exports.push(ExportInfo { path: entry.path, allowed_hosts: entry.allowed_hosts, auth_flavors, file_handle });
     }
 
     // Connected clients from MNTPROC_DUMP -- always enumerated.
-    let connected_clients = mount.dump_clients(addr).await.unwrap_or_default().into_iter().map(|c| c.hostname).collect();
+    let connected_clients = timeout(probe_timeout, mount.dump_clients(addr)).await.ok().and_then(Result::ok).unwrap_or_default().into_iter().map(|c| c.hostname).collect();
 
     // NIS detection -- always probed when portmapper is reachable.
     if portmap_open
-        && let Ok(nis) = portmap.detect_nis(addr).await
+        && let Ok(Ok(nis)) = timeout(probe_timeout, portmap.detect_nis(addr)).await
         && nis.ypserv_present
     {
         tracing::info!(%ip, port = ?nis.ypserv_port, "NIS ypserv detected");
