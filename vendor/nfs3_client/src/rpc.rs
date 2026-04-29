@@ -110,19 +110,29 @@ where
     where
         T: Unpack,
     {
-        let mut buf = [0u8; 4];
-        io.async_read_exact(&mut buf).await?;
-        let fragment_header: fragment_header = buf.into();
-        assert!(
-            fragment_header.eof(),
-            "Fragment header does not have EOF flag"
-        );
+        // RFC 1057 §10: a record may be split into multiple fragments; only the
+        // last has the EOF bit set. Concatenate them before unpacking.
+        // Cap the running total so a hostile or buggy peer can't drive us OOM.
+        const MAX_RECORD_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
+        let mut payload: Vec<u8> = Vec::new();
+        loop {
+            let mut hdr = [0u8; 4];
+            io.async_read_exact(&mut hdr).await?;
+            let fh: fragment_header = hdr.into();
+            let frag_len = fh.fragment_length() as usize;
+            if payload.len().saturating_add(frag_len) > MAX_RECORD_BYTES {
+                return Err(RpcError::WrongLength.into());
+            }
+            let start = payload.len();
+            payload.resize(start + frag_len, 0);
+            io.async_read_exact(&mut payload[start..]).await?;
+            if fh.eof() {
+                break;
+            }
+        }
+        let total_len = payload.len();
 
-        let total_len = fragment_header.fragment_length();
-        let mut buf = vec![0u8; total_len as usize];
-        io.async_read_exact(&mut buf).await?;
-
-        let mut cursor = std::io::Cursor::new(buf);
+        let mut cursor = std::io::Cursor::new(payload);
         let (resp_msg, _) = rpc_msg::unpack(&mut cursor)?;
 
         if resp_msg.xid != xid {
@@ -142,7 +152,7 @@ where
         }
 
         let (final_value, _) = T::unpack(&mut cursor)?;
-        if cursor.position() != u64::from(total_len) {
+        if cursor.position() != total_len as u64 {
             let pos = cursor.position();
             return Err(RpcError::NotFullyParsed {
                 buf: cursor.into_inner(),
