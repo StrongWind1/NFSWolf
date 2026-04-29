@@ -4,6 +4,15 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-28
+
+### Scanner
+
+- Per-host TCP probes for ports 111 and 2049 now run concurrently via `tokio::join!`; a half-open firewall on one port no longer serializes the other.
+- Every portmap / mount RPC call inside `scan_host` (`detect_nfs_versions`, `list_exports`, `mount`, `dump_clients`, `detect_nis`) is wrapped in `tokio::time::timeout(probe_timeout, …)`. A stateful firewall that completes the TCP handshake on 111 but drops RPC payload can no longer stall a worker for the underlying client default.
+- Multi-fragment RPC replies are now reassembled correctly; a single misbehaving target can no longer panic and sink an entire multi-thousand-host sweep (per-host scan tasks are panic-isolated).
+- `mount(1)` now detaches into a daemon so the FUSE handler outlives the shell.
+
 ### CLI cleanup
 
 - `--help` is now grouped into seven sections (Target / Identity / Permissions / Network / Stealth / Output / Behavior) on every subcommand, replacing the flat alphabetical list.
@@ -91,5 +100,6 @@ First public release. Covers the full NFS attack path: recon → enumeration →
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/StrongWind1/NFSWolf/releases/tag/v0.1.0
