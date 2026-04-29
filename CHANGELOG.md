@@ -6,40 +6,72 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [0.2.0] - 2026-04-28
 
-### Scanner
+The headline change is a substantial CLI overhaul: the `attack` umbrella verb is gone, primitives that duplicated `shell` / `mount` were removed, and three offensive primitives (`escape`, `brute-handle`, `uid-spray`) have been promoted to top-level subcommands. The `export` subcommand was renamed to `convert`. Every subcommand now runs the full check matrix unconditionally — the per-check toggles are gone — and `--help` is grouped into seven sections on every subcommand. The scanner is faster and more resilient against half-open firewalls, and the FUSE driver is now feature-complete.
 
-- Per-host TCP probes for ports 111 and 2049 now run concurrently via `tokio::join!`; a half-open firewall on one port no longer serializes the other.
-- Every portmap / mount RPC call inside `scan_host` (`detect_nfs_versions`, `list_exports`, `mount`, `dump_clients`, `detect_nis`) is wrapped in `tokio::time::timeout(probe_timeout, …)`. A stateful firewall that completes the TCP handshake on 111 but drops RPC payload can no longer stall a worker for the underlying client default.
-- Multi-fragment RPC replies are now reassembled correctly; a single misbehaving target can no longer panic and sink an entire multi-thousand-host sweep (per-host scan tasks are panic-isolated).
-- `mount(1)` now detaches into a daemon so the FUSE handler outlives the shell.
+This is a breaking release. Scripts that called `nfswolf attack ...` or `nfswolf export ...` need updating; see the migration notes inline.
 
-### CLI cleanup
+### Added
 
-- `--help` is now grouped into seven sections (Target / Identity / Permissions / Network / Stealth / Output / Behavior) on every subcommand, replacing the flat alphabetical list.
-- Unified positional `<TARGET>` accepts `host`, `host:/export`, or bracketed IPv6 (`[2001:db8::1]:/srv`) on every subcommand that touches a single export. `--export` and `--handle` still work as flags; the parser rejects ambiguous combinations with a clear error.
-- `--export` now consistently has `-e` as its short form on every subcommand (`scan`, `mount`, `shell`, `attack read|write|upload|harvest|uid-spray|symlink-swap|lock-dos`).
-- `--nfs-port` and `--mount-port` are now global flags (apply to every subcommand). They were previously duplicated on `mount` and `shell`.
-- Successful subcommand runs print a `# rerun: nfswolf …` line on stderr that can be pasted back into the shell. Suppressed by `--quiet` or `--json`.
-- `scan`: dropped `--fast`, `--no-rpc-enum`, `--check-portmap-amplification`, `--check-v2-downgrade`, `--check-nis`, `--check-portmap-bypass`. Every scan now runs the full check matrix unconditionally. The only knobs are concurrency, ports, and timeout.
-- `analyze`: dropped `-A/--check-all`, `--skip-version-check`, `--no-exploit`, `--check-v4`, `--check-no-root-squash`, `--check-insecure-port`, `--check-nohide`, `--check-v2-downgrade`, `--check-portmap-amplification`, `--check-nis`, `--probe-squash`. Every analysis now runs the full check matrix unconditionally; the only per-run knobs are `--test-read PATH`, `--test-read-uids`, `--test-read-gids`, and `--v4-depth`. `--test-read` defaults to `/etc/shadow` when no paths are supplied.
-- `mount`: dropped `--auto-uid`, `--allow-root`, `--suid`, `--dev`, `--allow-other`, `--elevate-perms`. The credential ladder, owner-bit elevation, suid/dev passthrough, and shared-mount visibility are always on -- this is a security toolkit, the goal is unobstructed access. `-e` short for `--export` was added.
-- `shell`: dropped `--auto-uid`. The credential ladder is always on (it never had a real off-state, since the shell falls through to escalated credentials whenever the server returns NFS3ERR_ACCES).
-- `attack`: dropped `--escape` from every sub-module. To reach files outside the export boundary, run `attack escape` first to obtain a root handle, then pass the resulting hex string back via `--handle HEX`. The escape module is the single entry point for export-escape; it no longer gets duplicated as an inline flag.
-- FUSE: fixed `--elevate-perms` shift offset (now correctly copies owner bits to other; previously copied group bits, leaving 0700 unchanged) -- behavior is now always-on.
-- FUSE: fixed `--nfs-port` being silently ignored when `--export` was used (it was only honored with `--handle`).
-- FUSE: fixed `--proxy` not being passed to the connection pool, so `--handle` mounts now tunnel through SOCKS5.
-- FUSE: every `Nfs3Client` procedure is now wired through a `Filesystem` callback (lookup, getattr, setattr, access, readlink, mknod, mkdir, symlink, create, unlink, rmdir, rename, link, readdir, read, write, fsync, statfs); auto-UID escalation runs on every callback and caches the resolved credential per inode.
-- FUSE: server-side symlink resolution and the null-attr READDIRPLUS fix-up are always on.
-- Renamed `export` subcommand to `convert` and clarified the pipeline relationship: `analyze` produces the JSON, `convert` renders it. `analyze` lost its per-subcommand `--output FILE` and `--txt FILE` flags; instead, the global `--json` flag now causes `analyze` to emit a JSON array on stdout. Capture with shell redirection (`> results.json`) and feed to `nfswolf convert` to render HTML/Markdown/CSV/TXT/console. Re-running `analyze` to regenerate a different format would re-execute every check (including the squash/no-root-squash probes that touch the server); `convert` is the safe, offline path for re-rendering.
+- New top-level subcommands: `nfswolf escape`, `nfswolf brute-handle`, `nfswolf uid-spray`. Replaces `nfswolf attack escape | brute-handle | uid-spray`.
+- New top-level subcommand `nfswolf convert` that renders a JSON dump produced by `nfswolf analyze --json` into HTML / Markdown / CSV / TXT / console. The pipeline is now `analyze --json > results.json` then `convert -i results.json -f html -o report.html`. `convert` is safe to re-run because it does not touch the server.
+- Unified positional `<TARGET>` parser shared by every subcommand that touches a single export. Accepts `host`, `host:/export`, or bracketed IPv6 (`[2001:db8::1]:/srv`). `--export` and `--handle` still work as flags; the parser rejects ambiguous combinations with a clear error.
+- `--nfs-port` and `--mount-port` are now global flags (previously duplicated on `mount` and `shell`).
+- Successful subcommand runs print a `# rerun: nfswolf …` line on stderr that can be pasted back into the shell to reproduce the run. Suppressed by `--quiet` or `--json`.
+- `--help` for every subcommand is now grouped into seven sections: Target / Identity / Permissions / Network / Stealth / Output / Behavior.
+- Shell: `get -r` and `put -r` recursive directory transfer with `indicatif` per-directory spinners; `get --verify <sha256>` validates the downloaded file against an expected hash.
+- Shell: `hostname <name>` command sets `auth_unix.machinename` mid-session to bypass hostname-restricted export ACLs (F-1.4 / F-3.3 precondition probe).
+- Shell: SHA-256 of every downloaded file is printed for evidence chains.
+- Shell: `--proxy socks5://host:port` tunnels every NFS connection through a SOCKS5 pivot. Inline CONNECT, no external crate.
+- Global `--transport-udp` flag for single-shot UDP RPC probes (portmapper amplification measurement, NSM probes). Wiring into the scanner's portmapper queries is tracked as the next step in `tasklist.md`.
+- FUSE: every `Nfs3Client` procedure is now wired through a `Filesystem` callback (lookup, getattr, setattr, access, readlink, mknod, mkdir, symlink, create, unlink, rmdir, rename, link, readdir, read, write, fsync, statfs). Auto-UID escalation runs on every callback and caches the resolved credential per inode.
+- NFSv4 shell: `nfswolf shell --nfs-version 4` drops into a minimal NFSv4 shell (ls / cd / pwd / cat / get) using `Nfs4DirectClient` — works against NFSv4-only servers where MOUNT and the portmapper are filtered.
+- Scanner: `nfs4_reachable: bool` field in `HostResult`, set by a direct NFSv4 COMPOUND PUTROOTFH probe to confirm v4 even when portmapper is filtered (F-3.3).
 
-### Attack-module pruning
+### Changed
 
-- Removed `attack read`, `attack write`, `attack upload`, `attack harvest`, and `attack symlink-swap`. With `shell` and `mount` providing full read/write/recursive-walk coverage with the same credential ladder, the standalone primitives were duplicating functionality that the interactive surfaces handled better. Use `shell` (`get`, `put`, `get -r`, `put -r`, `cat`, `find`) or `mount` (regular filesystem tools) instead.
+- Scanner: per-host TCP probes for ports 111 and 2049 now run concurrently via `tokio::join!`. A half-open firewall on one port no longer serializes the other.
+- Scanner: every portmap / mount RPC call inside `scan_host` (`detect_nfs_versions`, `list_exports`, `mount`, `dump_clients`, `detect_nis`) is wrapped in `tokio::time::timeout(probe_timeout, …)`. A stateful firewall that completes the TCP handshake on 111 but drops RPC payload can no longer stall a worker for the underlying client default.
+- Scanner: per-host workers are panic-isolated. A single misbehaving target can no longer sink a multi-thousand-host sweep.
+- `nfswolf mount(1)` now detaches into a daemon so the FUSE handler outlives the shell.
+- `analyze`: every analysis now runs the full check matrix unconditionally. The only per-run knobs are `--test-read PATH`, `--test-read-uids`, `--test-read-gids`, and `--v4-depth`. `--test-read` defaults to `/etc/shadow` when no paths are supplied.
+- `analyze`: dropped per-check toggles (`-A/--check-all`, `--skip-version-check`, `--no-exploit`, `--check-v4`, `--check-no-root-squash`, `--check-insecure-port`, `--check-nohide`, `--check-v2-downgrade`, `--check-portmap-amplification`, `--check-nis`, `--probe-squash`).
+- `analyze`: dropped `--output FILE` / `--txt FILE`. The global `--json` flag now makes `analyze` emit a JSON array on stdout — capture with shell redirection and feed to `nfswolf convert`.
+- `scan`: dropped per-check toggles (`--fast`, `--no-rpc-enum`, `--check-portmap-amplification`, `--check-v2-downgrade`, `--check-nis`, `--check-portmap-bypass`). Every scan now runs the full check matrix unconditionally. The only knobs are concurrency, ports, and timeout.
+- `mount`: dropped `--auto-uid`, `--allow-root`, `--suid`, `--dev`, `--allow-other`, `--elevate-perms`. The credential ladder, owner-bit elevation, suid/dev passthrough, and shared-mount visibility are always on — this is a security toolkit, the goal is unobstructed access. `-e` short for `--export` was added.
+- `shell`: dropped `--auto-uid`. The credential ladder is always on; the shell falls through to escalated credentials on every `NFS3ERR_ACCES`.
+- `--export` consistently has `-e` as its short form on every subcommand that accepts it.
+
+### Removed
+
+- The `attack` parent verb is gone.
+- Removed `attack read`, `attack write`, `attack upload`, `attack harvest`, and `attack symlink-swap`. `shell` (`get`, `put`, `get -r`, `put -r`, `cat`, `find`) and `mount` (regular filesystem tools) cover the same primitives with the same credential ladder.
 - Removed `attack lock-dos` entirely. Lock-storm DoS was the only NLM-dependent feature; with it gone, the NLM and NSM clients (`src/proto/nlm/`, `src/proto/nsm/`), the F-6.1 NLM lock-attack analyzer check, and the portmapper helpers `detect_nlm` / `detect_nsm` are removed. F-6.2 / F-6.3 (grace-period DoS, SETCLIENTID state destruction) were never implemented and are documented as out of scope.
-- Removed `attack v4-grace` (was placeholder-only; never had a working implementation).
-- Promoted `attack escape`, `attack brute-handle`, and `attack uid-spray` to top-level subcommands: `nfswolf escape ...`, `nfswolf brute-handle ...`, `nfswolf uid-spray ...`. The `attack` parent verb is gone.
-- Reframed `uid-spray` in its help text as a last-resort fallback. The auto-UID escalation ladder built into `shell` and `mount` already tries owner, root, and common service UIDs on every `NFS3ERR_ACCES`, and `escape` bypasses export-level access checks entirely. `uid-spray` is included for the rare case where those don't pin down a working credential.
-- Removed `src/engine/fs_walker.rs` (recursive walker used only by `harvest`) and the `CredentialManager` struct from `src/engine/credential.rs` (used only by removed attack modules). The `escalation_list` helper survives — it's shared by `shell`, `mount`, and the three offensive subcommands.
+- Removed `attack v4-grace` (placeholder-only; no working implementation).
+- Removed `src/engine/fs_walker.rs` (recursive walker used only by `harvest`) and the `CredentialManager` struct from `src/engine/credential.rs` (used only by removed attack modules). The `escalation_list` helper survives — it is shared by `shell`, `mount`, and the three offensive subcommands.
+- Removed inline `--escape` flag from offensive subcommands. To cross the export boundary, run `nfswolf escape` first and feed the resulting handle into `shell --handle HEX` or `mount --handle HEX`. The escape module is now the single entry point for export breakout.
+
+### Fixed
+
+- FUSE: `--elevate-perms` shift offset (now correctly copies owner bits to other; previously copied group bits, leaving 0700 unchanged). Behavior is now always-on.
+- FUSE: `--nfs-port` being silently ignored when `--export` was used (was only honored with `--handle`).
+- FUSE: `--proxy` not being passed to the connection pool, so `--handle` mounts now tunnel through SOCKS5.
+- FUSE: server-side symlink resolution and the null-attr READDIRPLUS fix-up are always on (NetApp / nested-export workaround).
+- Multiple small CLI bugs surfaced by live-server testing.
+
+### Migration
+
+- `nfswolf attack escape ...`        → `nfswolf escape ...`
+- `nfswolf attack brute-handle ...`  → `nfswolf brute-handle ...`
+- `nfswolf attack uid-spray ...`     → `nfswolf uid-spray ...`
+- `nfswolf attack read ...`          → `nfswolf shell ... -c "cat <path>"` (or `get`)
+- `nfswolf attack write ...`         → `nfswolf shell ... -c "put <path>"` (with `--allow-write`)
+- `nfswolf attack upload ...`        → `nfswolf shell ... -c "put -r <dir>"`
+- `nfswolf attack harvest ...`       → `nfswolf shell ... -c "find /"` then `cat`
+- `nfswolf attack symlink-swap ...`  → `nfswolf shell ... -c "symlink ..."`
+- `nfswolf attack lock-dos ...`      → no replacement; out of scope
+- `nfswolf attack v4-grace ...`      → no replacement; out of scope
+- `nfswolf export -i results.json -f html` → `nfswolf convert -i results.json -f html`
+- `nfswolf analyze --output report.html`   → `nfswolf analyze --json > results.json && nfswolf convert -i results.json -f html -o report.html`
 
 ## [0.1.0] - 2026-04-17
 
