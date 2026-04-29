@@ -25,6 +25,7 @@ use crate::engine::file_handle::FileHandleAnalyzer;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
+use crate::util::utmp::{LastlogRecord, UTMP_RECORD_SIZE, UtType, UtmpRecord, parse_lastlog, parse_passwd, parse_utmp};
 
 /// Maximum bytes to read in a single `cat` command.
 const CAT_MAX_BYTES: u32 = 1_048_576; // 1 MiB
@@ -61,6 +62,9 @@ pub const SHELL_COMMANDS: &[&str] = &[
     "suid-scan",
     "world-writable",
     "secrets-scan",
+    "last",
+    "lastb",
+    "lastlog",
     "escape-root",
     "mount-handle",
     "handle",
@@ -294,6 +298,9 @@ impl NfsShell {
             "suid-scan" => self.cmd_suid_scan().await,
             "world-writable" => self.cmd_world_writable().await,
             "secrets-scan" => self.cmd_secrets_scan().await,
+            "last" => self.cmd_last(arg, false).await,
+            "lastb" => self.cmd_last(arg, true).await,
+            "lastlog" => self.cmd_lastlog(arg).await,
             // Escape
             "escape-root" => self.cmd_escape_root().await,
             "mount-handle" => self.cmd_mount_handle(arg).await,
@@ -1085,9 +1092,123 @@ impl NfsShell {
         secrets_recursive(Arc::clone(&self.nfs3), self.cwd.clone(), self.cwd_path.clone()).await;
     }
 
-    // -------------------------------------------------------------------------
-    // Escape / handle manipulation
-    // -------------------------------------------------------------------------
+    /// `last [N]` / `lastb [N]` -- decode `/var/log/wtmp` (or `/var/log/btmp`).
+    ///
+    /// Reads the binary log via NFS READ from the export root, parses it with
+    /// the canonical 384-byte glibc `struct utmpx` layout, and applies the
+    /// state machine from util-linux 2.42 `login-utils/last.c::process_wtmp_file`
+    /// to pair USER_PROCESS with DEAD_PROCESS by ut_line and reconstruct
+    /// boot/shutdown boundaries.
+    ///
+    /// Always-on knobs (per the project's "this is a security tool, allow
+    /// everything" stance): full ctime timestamps, numeric IPs, system events
+    /// shown, host column shown. Optional positional `N` caps the number of
+    /// rendered records.
+    async fn cmd_last(&self, arg: &str, lastb: bool) {
+        let max_recs: Option<usize> = arg.split_whitespace().next().and_then(|s| s.parse().ok());
+        let path = if lastb { "/var/log/btmp" } else { "/var/log/wtmp" };
+        let label = if lastb { "lastb" } else { "last" };
+
+        let (fh, attrs) = match self.lookup_path(path).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", format!("{label}: {path}: {e}").red());
+                eprintln!("{}", format!("       (escape-root first if you're inside a sub-export; {path} lives on the underlying filesystem)").yellow());
+                return;
+            },
+        };
+        if attrs.size == 0 {
+            println!("{}", format!("{path} is empty -- no records to show").yellow());
+            return;
+        }
+        let bytes = match read_all_escalated(&self.nfs3, &fh).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{}", format!("{label}: read {path}: {e}").red());
+                return;
+            },
+        };
+        let recs = parse_utmp(&bytes);
+        if recs.is_empty() {
+            println!("{}", format!("{path}: no parseable records ({} bytes / {UTMP_RECORD_SIZE} per record)", bytes.len()).yellow());
+            return;
+        }
+        if lastb {
+            render_lastb(&recs, max_recs);
+        } else {
+            render_last(&recs, max_recs);
+        }
+    }
+
+    /// `lastlog` -- decode `/var/log/lastlog` (uid-indexed 292-byte slots).
+    ///
+    /// Per util-linux 2.42 `liblastlog2/src/lastlog2.c::ll2_import_lastlog()`,
+    /// each slot at offset `uid * 292` holds the user's most recent successful
+    /// login (`ll_time` 0 == never). UIDs are mapped to usernames by reading
+    /// `/etc/passwd` from the same export. The newer SQLite-backed
+    /// `/var/lib/lastlog/lastlog2.db` (util-linux 2.42 default) is reported as
+    /// a `get` hint when `/var/log/lastlog` is missing or empty -- pure-Rust
+    /// SQLite parsing is out of scope for this command.
+    async fn cmd_lastlog(&self, _arg: &str) {
+        let lastlog_path = "/var/log/lastlog";
+        let (fh, attrs) = match self.lookup_path(lastlog_path).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", format!("lastlog: {lastlog_path}: {e}").red());
+                self.lastlog_hint_lastlog2().await;
+                return;
+            },
+        };
+        if attrs.size == 0 {
+            println!("{}", format!("{lastlog_path} is empty -- no users have logged in interactively").yellow());
+            self.lastlog_hint_lastlog2().await;
+            return;
+        }
+        let bytes = match read_all_escalated(&self.nfs3, &fh).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{}", format!("lastlog: read {lastlog_path}: {e}").red());
+                return;
+            },
+        };
+        let recs = parse_lastlog(&bytes);
+
+        // Map UIDs to usernames via /etc/passwd if reachable; missing entries
+        // render as "uid=N" rather than failing the whole command.
+        let uid_to_user: Vec<(u32, String)> = match self.lookup_path("/etc/passwd").await {
+            Ok((pfh, _)) => match read_all_escalated(&self.nfs3, &pfh).await {
+                Ok(b) => parse_passwd(&b),
+                Err(e) => {
+                    eprintln!("{}", format!("lastlog: /etc/passwd unreadable ({e}); rendering UIDs numerically").yellow());
+                    Vec::new()
+                },
+            },
+            Err(e) => {
+                eprintln!("{}", format!("lastlog: /etc/passwd lookup failed ({e}); rendering UIDs numerically").yellow());
+                Vec::new()
+            },
+        };
+        render_lastlog(&recs, &uid_to_user);
+    }
+
+    /// Hint that the new SQLite-backed lastlog2 database might exist when the
+    /// classic flat file is missing or empty. Util-linux 2.42 made lastlog2 the
+    /// default, but the format requires a SQLite reader so we just point the
+    /// operator at `get` for offline analysis.
+    async fn lastlog_hint_lastlog2(&self) {
+        let candidate = "/var/lib/lastlog/lastlog2.db";
+        if let Ok((_fh, attrs)) = self.lookup_path(candidate).await {
+            eprintln!(
+                "{}",
+                format!(
+                    "[*] note: {candidate} is present ({} bytes); util-linux 2.42 uses an SQLite database here. \
+                     Run 'get {candidate} ./lastlog2.db' and read it with `sqlite3 lastlog2.db 'select * from Lastlog2'`.",
+                    attrs.size
+                )
+                .cyan()
+            );
+        }
+    }
 
     /// Construct a filesystem-root escape handle from the current export handle.
     ///
@@ -1106,6 +1227,11 @@ impl NfsShell {
                         eprintln!("{}", format!("[+] escaped to filesystem root ({:?})", result.fs_type).green().bold());
                         eprintln!("{}", format!("    handle: {}", escaped_fh.to_hex()).cyan());
                         eprintln!("{}", format!("    inode: {}  type: {:?}  mode: {:04o}", a.fileid, a.file_type, a.mode & 0o7777).cyan());
+                        // Also rebase the session's notion of "/" so absolute path
+                        // lookups (e.g. `cat /etc/shadow`, `last`, `cd /`) walk
+                        // from the underlying filesystem root rather than the
+                        // narrow export we MOUNTed through.
+                        self.export_root = escaped_fh.clone();
                         self.cwd = escaped_fh;
                         self.cwd_path = String::from("/ [escaped]");
                         self.refresh_tab_cache().await;
@@ -2093,6 +2219,302 @@ fn is_nfs_acces(e: &anyhow::Error) -> bool {
     msg.contains("NFS3ERR_ACCES") || msg.contains("NFS3ERR_PERM")
 }
 
+/// Read the full contents of `fh` with auto-UID escalation on `NFS3ERR_ACCES`.
+///
+/// `read_all` only returns the bytes for the current credential; this wrapper
+/// mirrors the escalation strategy of `read_escalated` (used by `cat`) but
+/// returns the buffer instead of streaming to stdout. Required for the binary
+/// log readers (wtmp/btmp/lastlog) that need the whole file in memory before
+/// the parser can process it. wtmp/btmp are typically gid=43 (`utmp`), so the
+/// escalation list quickly hits a working credential when a wide-open caller
+/// is initially refused.
+async fn read_all_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
+    match read_all(nfs3, fh).await {
+        Ok(buf) => return Ok(buf),
+        Err(e) if !is_nfs_acces(&e) => return Err(e),
+        Err(_) => {},
+    }
+    let owner = getattr_owner(nfs3, fh).await;
+    let caller = (nfs3.uid(), nfs3.gid());
+    for (uid, gid) in escalation_list(caller, owner) {
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf")), uid, gid);
+        match read_all(&esc, fh).await {
+            Ok(buf) => {
+                tracing::debug!(uid, gid, "read_all escalated");
+                return Ok(buf);
+            },
+            Err(e) if !is_nfs_acces(&e) => return Err(e),
+            Err(_) => {},
+        }
+    }
+    anyhow::bail!("NFS3ERR_ACCES: permission denied reading file (no credential in escalation ladder worked)")
+}
+
+// =============================================================================
+// last / lastb / lastlog rendering
+// =============================================================================
+
+/// Format a wtmp `tv_sec` for the `last` / `lastb` / `lastlog` columns.
+///
+/// Util-linux 2.42 last.c uses `ctime(3)` ("Mon Apr 28 22:15:00 2026") -- we
+/// render the same instant as `YYYY-MM-DD HH:MM:SS` (the project's existing
+/// `fmt_unix_time`) to keep this command zero-dep and consistent with the
+/// `stat` and `ls` views. Negative timestamps are clamped to zero (1970-01-01)
+/// rather than crashing -- they only appear in corrupt records.
+fn fmt_ctime(tv_sec: i32) -> String {
+    let secs = u32::try_from(tv_sec).unwrap_or(0);
+    fmt_unix_time(secs)
+}
+
+/// Decide what string goes in the host column. Numeric IPs are preferred when
+/// the binary `ut_addr_v6` field is populated -- mirrors util-linux last.c
+/// `--ip` semantics. Falls back to the textual `ut_host` field otherwise.
+fn pick_host(rec: &UtmpRecord) -> String {
+    let ip = rec.addr_string();
+    if !ip.is_empty() {
+        return ip;
+    }
+    rec.host.clone()
+}
+
+/// Internal representation of one paired login record awaiting render.
+/// Mirrors the union of `case R_*` outcomes in util-linux last.c::list().
+struct LastEntry {
+    user: String,
+    line: String,
+    host: String,
+    login: i32,
+    /// Logout outcome (controls what appears in the duration column).
+    outcome: LastOutcome,
+}
+
+enum LastOutcome {
+    /// Paired with a DEAD_PROCESS at this time.
+    Logout(i32),
+    /// Process is still alive (no logout, no shutdown observed).
+    StillLoggedIn,
+    /// System came down via SHUTDOWN_TIME / RUN_LVL 0|6 at this time.
+    Down(i32),
+    /// System rebooted without a clean shutdown -- session was crashed at this time.
+    Crash(i32),
+}
+
+fn render_last(recs: &[UtmpRecord], max_recs: Option<usize>) {
+    let entries = pair_wtmp(recs);
+    let mut count = 0usize;
+    for entry in &entries {
+        if max_recs.is_some_and(|n| count >= n) {
+            break;
+        }
+        let login = fmt_ctime(entry.login);
+        let (logout, length) = match entry.outcome {
+            LastOutcome::Logout(t) => {
+                let dur = t.saturating_sub(entry.login);
+                (fmt_ctime(t), fmt_duration(dur))
+            },
+            LastOutcome::StillLoggedIn => ("still running".to_owned(), String::new()),
+            LastOutcome::Down(t) => {
+                let dur = t.saturating_sub(entry.login);
+                (format!("down  {}", fmt_ctime(t)), fmt_duration(dur))
+            },
+            LastOutcome::Crash(t) => {
+                let dur = t.saturating_sub(entry.login);
+                (format!("crash {}", fmt_ctime(t)), fmt_duration(dur))
+            },
+        };
+        // Column layout follows util-linux last.c `list()` printf with full-time format.
+        println!("{:<8.8} {:<12.12} {:<16.16} {:<19} - {:<25} {}", entry.user, entry.line, entry.host, login, logout, length);
+        count += 1;
+    }
+    if count == 0 {
+        println!("{}", "no completed sessions in wtmp".yellow());
+    }
+}
+
+fn render_lastb(recs: &[UtmpRecord], max_recs: Option<usize>) {
+    // btmp is just a sequence of failed login attempts; no pairing logic
+    // applies. Render newest first.
+    let mut count = 0usize;
+    for r in recs.iter().rev() {
+        if max_recs.is_some_and(|n| count >= n) {
+            break;
+        }
+        // The login program writes ut_type=USER_PROCESS for failed attempts in
+        // older util-linux but LOGIN_PROCESS in some sshd configs; we render
+        // both. EMPTY records mean "no real attempt" -- skip.
+        if matches!(r.ut_type, UtType::Empty) {
+            continue;
+        }
+        let host = pick_host(r);
+        let user = if r.user.is_empty() { "(unknown)" } else { r.user.as_str() };
+        println!("{:<8.8} {:<12.12} {:<16.16} {:<24} (failed login)", user, r.line, host, fmt_ctime(r.tv_sec));
+        count += 1;
+    }
+    if count == 0 {
+        println!("{}", "no failed-login records in btmp".green());
+    }
+}
+
+fn render_lastlog(recs: &[LastlogRecord], uid_to_user: &[(u32, String)]) {
+    println!("{:<16} {:<8} {:<24} Latest", "Username", "Port", "From");
+    let mut shown = 0usize;
+    for r in recs {
+        if r.ll_time == 0 {
+            continue;
+        }
+        let user = uid_to_user.iter().find(|(u, _)| *u == r.uid).map_or_else(|| format!("uid={}", r.uid), |(_, n)| n.clone());
+        let when = fmt_ctime(r.ll_time);
+        println!("{:<16} {:<8.8} {:<24.24} {}", user, r.ll_line, r.ll_host, when);
+        shown += 1;
+    }
+    if shown == 0 {
+        println!("{}", "no recorded interactive logins (every slot has ll_time=0)".yellow());
+    }
+}
+
+/// Translate util-linux 2.42 last.c `process_wtmp_file()` into a sequence of
+/// renderable entries. Records are walked forwards (oldest -> newest) and the
+/// resulting list is reversed before return so the caller sees newest-first
+/// like the system `last(1)`.
+///
+/// The state machine mirrors last.c's logic but expressed in terms of "open
+/// sessions" rather than last.c's reverse-scan pending list:
+///
+/// - USER_PROCESS opens a session keyed by ut_line.
+/// - DEAD_PROCESS closes the session on the same ut_line as a clean Logout.
+/// - SHUTDOWN_TIME (sysvinit "shutdown" pseudo-record or RUN_LVL 0|6) closes
+///   any still-open sessions as Down(t).
+/// - BOOT_TIME closes any still-open sessions as Crash(t) unless a clean
+///   shutdown was seen since the last boot, in which case the existing Down
+///   close still stands.
+///
+/// At end-of-file: any still-open session is StillLoggedIn; the most recent
+/// boot is StillLoggedIn (the system is up).
+struct OpenSession {
+    user: String,
+    host: String,
+    login: i32,
+}
+
+struct PendingBoot {
+    host: String,
+    login: i32,
+}
+
+const fn clone_outcome(o: &LastOutcome) -> LastOutcome {
+    match o {
+        LastOutcome::Logout(t) => LastOutcome::Logout(*t),
+        LastOutcome::StillLoggedIn => LastOutcome::StillLoggedIn,
+        LastOutcome::Down(t) => LastOutcome::Down(*t),
+        LastOutcome::Crash(t) => LastOutcome::Crash(*t),
+    }
+}
+
+fn close_all(open: &mut std::collections::HashMap<String, OpenSession>, entries: &mut Vec<LastEntry>, outcome: &LastOutcome) {
+    let drained: Vec<(String, OpenSession)> = open.drain().collect();
+    for (line, sess) in drained {
+        entries.push(LastEntry { user: sess.user, line, host: sess.host, login: sess.login, outcome: clone_outcome(outcome) });
+    }
+}
+
+fn pair_wtmp(recs: &[UtmpRecord]) -> Vec<LastEntry> {
+    use std::collections::HashMap;
+
+    let mut open: HashMap<String, OpenSession> = HashMap::new();
+    let mut entries: Vec<LastEntry> = Vec::new();
+    let mut pending_boot: Option<PendingBoot> = None;
+    // Most recent clean shutdown observed since the last open boot. None means
+    // the previous boot ended via crash (next BOOT) or hasn't ended yet.
+    let mut clean_shutdown_since_boot: Option<i32> = None;
+
+    for r in recs {
+        // Reclassify per util-linux 2.42 last.c lines 750-786 (sysvinit
+        // compatibility for boot / shutdown / runlevel pseudo-records).
+        let mut rec = r.clone();
+        if rec.line == "~" {
+            if rec.user == "shutdown" {
+                rec.ut_type = UtType::Other(254); // last.c's SHUTDOWN_TIME constant
+            } else if rec.user == "reboot" {
+                rec.ut_type = UtType::BootTime;
+            } else if rec.user == "runlevel" {
+                rec.ut_type = UtType::RunLvl;
+            }
+        } else if !rec.user.is_empty() && !rec.line.is_empty() && rec.user != "LOGIN" && !matches!(rec.ut_type, UtType::DeadProcess) {
+            rec.ut_type = UtType::UserProcess;
+        }
+        if rec.user.is_empty() {
+            rec.ut_type = UtType::DeadProcess;
+        }
+
+        match rec.ut_type {
+            UtType::Other(254) => {
+                // SHUTDOWN_TIME -- close all open sessions as clean Down.
+                close_all(&mut open, &mut entries, &LastOutcome::Down(rec.tv_sec));
+                clean_shutdown_since_boot = Some(rec.tv_sec);
+            },
+            UtType::RunLvl => {
+                // Per last.c lines 815-826, runlevel 0 or 6 is treated as a clean shutdown.
+                let lvl = rec.pid & 0xff;
+                if lvl == i32::from(b'0') || lvl == i32::from(b'6') {
+                    close_all(&mut open, &mut entries, &LastOutcome::Down(rec.tv_sec));
+                    clean_shutdown_since_boot = Some(rec.tv_sec);
+                }
+            },
+            UtType::BootTime => {
+                // Resolve the previously pending boot first.
+                if let Some(pb) = pending_boot.take() {
+                    let outcome = clean_shutdown_since_boot.map_or(LastOutcome::Crash(rec.tv_sec), LastOutcome::Down);
+                    entries.push(LastEntry { user: "reboot".to_owned(), line: "system boot".to_owned(), host: pb.host, login: pb.login, outcome });
+                }
+                // Any sessions still open at this boot crashed: a clean shutdown
+                // would have closed them already (Down) in the branch above.
+                close_all(&mut open, &mut entries, &LastOutcome::Crash(rec.tv_sec));
+                pending_boot = Some(PendingBoot { host: rec.host.clone(), login: rec.tv_sec });
+                clean_shutdown_since_boot = None;
+            },
+            UtType::UserProcess => {
+                // Replacing a record with the same ut_line means the previous
+                // entry was orphaned (no DEAD_PROCESS). The most recent USER on
+                // this line is what we keep.
+                open.insert(rec.line.clone(), OpenSession { user: rec.user.clone(), host: pick_host(&rec), login: rec.tv_sec });
+            },
+            UtType::DeadProcess => {
+                if let Some(sess) = open.remove(&rec.line) {
+                    entries.push(LastEntry { user: sess.user, line: rec.line.clone(), host: sess.host, login: sess.login, outcome: LastOutcome::Logout(rec.tv_sec) });
+                }
+            },
+            // EMPTY, INIT_PROCESS, LOGIN_PROCESS, NEW_TIME, OLD_TIME, ACCOUNTING,
+            // and any unknown future ut_type get ignored (matches last.c default cases).
+            _ => {},
+        }
+    }
+
+    // End of file: any pending boot has no follow-up -- system is still up.
+    if let Some(pb) = pending_boot {
+        entries.push(LastEntry { user: "reboot".to_owned(), line: "system boot".to_owned(), host: pb.host, login: pb.login, outcome: LastOutcome::StillLoggedIn });
+    }
+    // Sessions that never closed are still logged in.
+    let mut still_open: Vec<(String, OpenSession)> = open.into_iter().collect();
+    still_open.sort_by_key(|(_, s)| s.login);
+    for (line, sess) in still_open {
+        entries.push(LastEntry { user: sess.user, line, host: sess.host, login: sess.login, outcome: LastOutcome::StillLoggedIn });
+    }
+
+    // util-linux's `last` prints newest first; we built oldest first.
+    entries.reverse();
+    entries
+}
+
+fn fmt_duration(secs: i32) -> String {
+    if secs <= 0 {
+        return String::new();
+    }
+    let days = secs / 86_400;
+    let hours = (secs / 3600) % 24;
+    let mins = (secs / 60) % 60;
+    if days > 0 { format!("({days}+{hours:02}:{mins:02})") } else { format!("({hours:02}:{mins:02})") }
+}
+
 /// Print the command reference.
 fn print_help() {
     println!("{}", "NFS shell commands:".bold());
@@ -2134,6 +2556,9 @@ fn print_help() {
     println!("  suid-scan                  find SUID/SGID binaries");
     println!("  world-writable             find world-writable files");
     println!("  secrets-scan               find credential/secret files");
+    println!("  last [N]                   decode /var/log/wtmp (login history; per util-linux 2.42 last.c)");
+    println!("  lastb [N]                  decode /var/log/btmp (failed-login history)");
+    println!("  lastlog                    decode /var/log/lastlog (last login per UID)");
     println!();
     println!("{}", "Escape (F-2.1 -- construct filesystem root handle):".bold().underline());
     println!("  escape-root                build and switch to FS root handle");
