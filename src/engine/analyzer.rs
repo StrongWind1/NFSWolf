@@ -278,6 +278,8 @@ pub struct Analyzer {
     pub mount: NfsMountClient,
     /// Portmapper client for service enumeration and amplification checks.
     pub portmap: PortmapClient,
+    /// Optional SOCKS5 proxy for NFSv4 probes.
+    pub proxy: Option<String>,
 }
 
 impl std::fmt::Debug for Analyzer {
@@ -289,8 +291,15 @@ impl std::fmt::Debug for Analyzer {
 impl Analyzer {
     /// Construct an Analyzer from pre-built clients.
     #[must_use]
-    pub const fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient) -> Self {
-        Self { nfs3, mount, portmap }
+    pub fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient) -> Self {
+        Self { nfs3, mount, portmap, proxy: None }
+    }
+
+    /// Attach a SOCKS5 proxy for NFSv4 SECINFO probes.
+    #[must_use]
+    pub fn with_proxy(mut self, proxy: String) -> Self {
+        self.proxy = Some(proxy);
+        self
     }
 
     /// Run all enabled security checks and return a consolidated result.
@@ -370,7 +379,7 @@ impl Analyzer {
         check_auth_methods(&entry.path, &mount_res.auth_flavors, findings);
         // NFSv4 SECINFO check: verify auth methods from the NFSv4 perspective (F-3.4).
         // Complements check_auth_methods (which uses MOUNT auth flavors) with a live NFSv4 probe.
-        check_nfs4_secinfo(addr, &entry.path, findings).await;
+        check_nfs4_secinfo(addr, &entry.path, findings, self.proxy.as_deref()).await;
         check_windows_signing(&fh, &entry.path, findings);
         check_handle_entropy(&fh, &entry.path, findings);
 
@@ -1064,14 +1073,14 @@ async fn handle_exists(nfs3: &Nfs3Client, fh: &FileHandle) -> bool {
 /// (F-3.4: TLS downgrade not enforced  --  RPCSEC_GSS not required).
 ///
 /// Best-effort: silently returns on timeout or PROG_MISMATCH (NFSv3-only server).
-async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>) {
+async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{ArgOp, ResOpData};
 
     let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
     let timeout = std::time::Duration::from_secs(5);
 
-    let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect(nfs4_addr)).await;
+    let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
     let Ok(Ok(mut client)) = connect else { return };
 
     // Parse export path into LOOKUP chain components and SECINFO target.

@@ -91,20 +91,23 @@ pub struct Scanner {
     mount_client: NfsMountClient,
     config: ScanConfig,
     _stealth: StealthConfig,
+    proxy: Option<String>,
 }
 
 impl Scanner {
     /// Create a new scanner with the given configuration.
     #[must_use]
     pub const fn new(config: ScanConfig, stealth: StealthConfig) -> Self {
-        Self { portmap: PortmapClient::default_port(), mount_client: NfsMountClient::new(), config, _stealth: stealth }
+        Self { portmap: PortmapClient::default_port(), mount_client: NfsMountClient::new(), config, _stealth: stealth, proxy: None }
     }
 
-    /// Attach a SOCKS5 proxy so all portmapper and mount connections are tunnelled.
+    /// Attach a SOCKS5 proxy so ALL connections (port probes, portmapper,
+    /// mount, NFSv4 probes) are tunnelled.
     #[must_use]
     pub fn with_proxy(mut self, proxy: String) -> Self {
         self.portmap = self.portmap.with_proxy(proxy.clone());
-        self.mount_client = self.mount_client.with_proxy(proxy);
+        self.mount_client = self.mount_client.with_proxy(proxy.clone());
+        self.proxy = Some(proxy);
         self
     }
 
@@ -120,7 +123,7 @@ impl Scanner {
             let permit = Arc::clone(&sem);
             let portmap = self.portmap.clone();
             let mount = self.mount_client.clone();
-            let job = ScanJob { timeout: self.config.timeout, transport_udp: self.config.transport_udp };
+            let job = ScanJob { timeout: self.config.timeout, transport_udp: self.config.transport_udp, proxy: self.proxy.clone() };
 
             let handle = tokio::spawn(async move {
                 let _permit = permit.acquire_owned().await;
@@ -182,6 +185,7 @@ impl Scanner {
 struct ScanJob {
     timeout: Duration,
     transport_udp: bool,
+    proxy: Option<String>,
 }
 
 /// Probe a single host and return its `HostResult`.
@@ -192,7 +196,7 @@ async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, jo
 
     // Probe both ports in parallel: a half-open firewall on one port shouldn't
     // serialize the other.
-    let (portmap_open, nfs_port_open) = tokio::join!(is_port_open(addr, probe_timeout), is_port_open(nfs_addr, probe_timeout));
+    let (portmap_open, nfs_port_open) = tokio::join!(is_port_open(addr, probe_timeout, job.proxy.as_deref()), is_port_open(nfs_addr, probe_timeout, job.proxy.as_deref()));
 
     if !nfs_port_open && !portmap_open {
         return HostResult { addr, nfs_port_open, portmap_open, nfs_versions: vec![], exports: vec![], os_guess: None, connected_clients: vec![], nfs4_reachable: false };
@@ -249,14 +253,22 @@ async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, jo
 
     // NFSv4 direct probe: confirm the server actually responds to NFSv4 COMPOUND.
     // This catches NFSv4-only servers where portmapper is filtered but port 2049 is open.
-    let nfs4_reachable = if nfs_port_open { probe_nfs4(ip, probe_timeout).await } else { false };
+    let nfs4_reachable = if nfs_port_open { probe_nfs4(ip, probe_timeout, job.proxy.as_deref()).await } else { false };
 
     HostResult { addr, nfs_port_open, portmap_open, nfs_versions, exports, os_guess, connected_clients, nfs4_reachable }
 }
 
 /// Non-blocking TCP probe: returns true if the port accepts connections within timeout.
-async fn is_port_open(addr: SocketAddr, probe_timeout: Duration) -> bool {
-    timeout(probe_timeout, TcpStream::connect(addr)).await.is_ok_and(|r| r.is_ok())
+///
+/// When `proxy` is set, the probe is tunnelled through the SOCKS5 proxy so the
+/// reachability test reflects the proxy's perspective and no direct traffic leaks.
+async fn is_port_open(addr: SocketAddr, probe_timeout: Duration, proxy: Option<&str>) -> bool {
+    if let Some(p) = proxy {
+        let Ok(proxy_addr) = crate::proto::conn::parse_proxy_addr(p) else { return false };
+        timeout(probe_timeout, crate::proto::conn::socks5_connect(proxy_addr, addr)).await.is_ok_and(|r| r.is_ok())
+    } else {
+        timeout(probe_timeout, TcpStream::connect(addr)).await.is_ok_and(|r| r.is_ok())
+    }
 }
 
 /// Detect registered NFS versions via the portmapper DUMP procedure over UDP.

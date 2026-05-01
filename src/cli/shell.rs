@@ -219,7 +219,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let mut hostname = globals.hostname.clone();
 
     eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
-    let mut client = Nfs4DirectClient::connect_with_auth(addr, uid, gid, &hostname).await.map_err(|e| anyhow::anyhow!("NFSv4 connect to {addr} failed: {e}"))?;
+    let mut client = Nfs4DirectClient::connect_with_auth_proxy(addr, uid, gid, &hostname, globals.proxy.as_deref()).await.map_err(|e| anyhow::anyhow!("NFSv4 connect to {addr} failed: {e}"))?;
 
     // Fetch the root FH from PUTROOTFH + GETFH.
     let root_fh = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?;
