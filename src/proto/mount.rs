@@ -181,7 +181,13 @@ impl NfsMountClient {
         };
         let port = match self.mount_port {
             Some(p) => p,
-            None => portmap.query_port(addr, 100_005, 3).await.context("failed to query portmapper for mountd port -- use --mount-port to specify manually")?,
+            None => match portmap.query_port(addr, 100_005, 3).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(%addr, error = %e, "portmapper unavailable, trying mountd on well-known fallback ports");
+                    self.probe_mountd_fallback(addr).await.with_context(|| format!("portmapper unavailable and mountd not found on fallback ports (2049, 20048) -- use --mount-port to specify manually\n  portmapper error: {e}"))?
+                },
+            },
         };
         let mount_addr = SocketAddr::new(addr.ip(), port);
         let io = if let Some(ref p) = self.proxy {
@@ -194,6 +200,33 @@ impl NfsMountClient {
             connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))?
         };
         Ok(MountClient::new(io))
+    }
+
+    /// Try well-known mountd ports when portmapper is unavailable.
+    ///
+    /// Linux mountd typically uses random high ports (requires portmapper), but
+    /// Windows NFS multiplexes mountd on port 2049 and some Linux installations
+    /// use the fixed port 20048 (common in RHEL/Fedora nfs-utils configs).
+    /// We attempt a MNT NULL call on each candidate to confirm it speaks MOUNT.
+    async fn probe_mountd_fallback(&self, addr: SocketAddr) -> anyhow::Result<u16> {
+        const FALLBACK_PORTS: &[u16] = &[2049, 20048];
+        for &port in FALLBACK_PORTS {
+            let mount_addr = SocketAddr::new(addr.ip(), port);
+            let io_result = if let Some(ref p) = self.proxy {
+                let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+                crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.map(nfs3_client::tokio::TokioIo::new)
+            } else {
+                use nfs3_client::net::Connector as _;
+                nfs3_client::tokio::TokioConnector.connect(mount_addr).await
+            };
+            let Ok(io) = io_result else { continue };
+            let mut mc = MountClient::new(io);
+            if mc.export().await.is_ok() {
+                tracing::info!(%addr, port, "mountd found on fallback port");
+                return Ok(port);
+            }
+        }
+        anyhow::bail!("mountd not reachable on fallback ports {FALLBACK_PORTS:?}")
     }
 }
 

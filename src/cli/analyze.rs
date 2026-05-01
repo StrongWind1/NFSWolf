@@ -21,7 +21,6 @@ use crate::engine::analyzer::{AnalysisResult, AnalyzeConfig, Analyzer};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
-use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::proto::portmap::PortmapClient;
@@ -168,10 +167,7 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let nfs3 = Arc::new(Nfs3Client::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent));
 
-    let mount_client = match &globals.proxy {
-        Some(p) => NfsMountClient::new().with_proxy(p.clone()),
-        None => NfsMountClient::new(),
-    };
+    let mount_client = crate::cli::probe::make_mount_client(globals);
     let portmap_client = match &globals.proxy {
         Some(p) => PortmapClient::default_port().with_proxy(p.clone()),
         None => PortmapClient::default_port(),
