@@ -1,18 +1,26 @@
-# nfswolf
+<h1 align="center">NFSWolf</h1>
 
-Fast, native NFS security toolkit. One static binary — recon, analysis, escape, exploitation, and an interactive shell — for **authorized security research only**.
+<p align="center">
+  <strong>Fast, native NFS security toolkit. One static binary — recon, analysis, escape, exploitation, and an interactive shell.</strong>
+</p>
 
-[![CI](https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg)](https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/nfswolf.svg)](https://crates.io/crates/nfswolf)
-[![docs.rs](https://img.shields.io/docsrs/nfswolf)](https://docs.rs/nfswolf)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV 1.94](https://img.shields.io/badge/msrv-1.94-informational)](rust-toolchain.toml)
+<p align="center">
+  <a href="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/nfswolf"><img src="https://img.shields.io/crates/v/nfswolf.svg" alt="Crates.io"></a>
+  <a href="https://docs.rs/nfswolf"><img src="https://img.shields.io/docsrs/nfswolf" alt="docs.rs"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/msrv-1.94-informational" alt="MSRV 1.94"></a>
+</p>
 
-## Authorized use only
+<p align="center">
+  <a href="#quick-start">Quick start</a> &bull;
+  <a href="#cli-reference">CLI reference</a> &bull;
+  <a href="#installation">Installation</a> &bull;
+  <a href="docs/FINDINGS.md">Findings catalog</a> &bull;
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-nfswolf is a penetration-testing and security-research tool. Operating it against systems without explicit written authorization is illegal in most jurisdictions. You alone are responsible for how you use it. By using nfswolf you accept full responsibility for compliance with applicable laws, contracts, and policies.
-
-If you believe you have found a security issue in nfswolf itself, please open a private security advisory on the [GitHub repository](https://github.com/StrongWind1/NFSWolf/security/advisories) rather than a public issue.
+---
 
 ## Why nfswolf
 
@@ -177,6 +185,12 @@ make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
 make check-all    # full gate: fmt, lint, audit, check, test-matrix, doc, hygiene, machete
 ```
+
+## Authorized use only
+
+`nfswolf` is a penetration-testing and security-research tool. Operating it against systems without explicit written authorization is illegal in most jurisdictions. You alone are responsible for how you use it. By using `nfswolf` you accept full responsibility for compliance with applicable laws, contracts, and policies.
+
+If you believe you have found a security issue in `nfswolf` itself, please open a private security advisory on the [GitHub repository](https://github.com/StrongWind1/NFSWolf/security/advisories) rather than a public issue.
 
 ## License
 
