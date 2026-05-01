@@ -100,6 +100,14 @@ impl Scanner {
         Self { portmap: PortmapClient::default_port(), mount_client: NfsMountClient::new(), config, _stealth: stealth }
     }
 
+    /// Attach a SOCKS5 proxy so all portmapper and mount connections are tunnelled.
+    #[must_use]
+    pub fn with_proxy(mut self, proxy: String) -> Self {
+        self.portmap = self.portmap.with_proxy(proxy.clone());
+        self.mount_client = self.mount_client.with_proxy(proxy);
+        self
+    }
+
     /// Scan a list of IP addresses and return one `HostResult` per host.
     ///
     /// Hosts that don't respond to either port 111 or 2049 are still

@@ -158,14 +158,25 @@ fn strip_export(s: &str) -> String {
 async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<AnalysisResult> {
     let addr: SocketAddr = format!("{host}:111").parse().map_err(|_| anyhow::anyhow!("invalid host: {host}"))?;
 
-    let pool = Arc::new(ConnectionPool::default_config());
+    let pool = Arc::new(match &globals.proxy {
+        Some(p) => ConnectionPool::with_proxy(p.clone()),
+        None => ConnectionPool::default_config(),
+    });
     let circuit = Arc::new(CircuitBreaker::default_config());
     let cred = Credential::Sys(AuthSys::new(globals.uid, globals.gid, &globals.hostname));
     let pool_key = PoolKey { host: addr, export: "/".to_owned(), uid: globals.uid, gid: globals.gid };
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let nfs3 = Arc::new(Nfs3Client::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent));
 
-    let analyzer = Analyzer::new(nfs3, NfsMountClient::new(), PortmapClient::default_port());
+    let mount_client = match &globals.proxy {
+        Some(p) => NfsMountClient::new().with_proxy(p.clone()),
+        None => NfsMountClient::new(),
+    };
+    let portmap_client = match &globals.proxy {
+        Some(p) => PortmapClient::default_port().with_proxy(p.clone()),
+        None => PortmapClient::default_port(),
+    };
+    let analyzer = Analyzer::new(nfs3, mount_client, portmap_client);
     let config = AnalyzeConfig { host: host.to_owned(), port: 2049, test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
     analyzer.analyze(&config).await
 }

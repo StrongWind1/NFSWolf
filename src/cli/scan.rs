@@ -90,7 +90,10 @@ pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     let config = ScanConfig { concurrency: args.concurrency, timeout: Duration::from_millis(globals.timeout), transport_udp: globals.transport_udp };
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
-    let scanner = Scanner::new(config, stealth);
+    let mut scanner = Scanner::new(config, stealth);
+    if let Some(ref p) = globals.proxy {
+        scanner = scanner.with_proxy(p.clone());
+    }
     let results = scanner.scan_range(targets).await;
 
     let results: Vec<HostResult> = if args.accessible_only { results.into_iter().filter(|r| !r.exports.is_empty()).collect() } else { results };

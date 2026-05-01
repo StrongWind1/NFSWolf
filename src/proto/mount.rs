@@ -60,19 +60,21 @@ pub struct NfsMountClient {
     /// `--privileged-port` is in effect or when retrying after the server
     /// returned MNT3ERR_ACCES from an ephemeral source port.
     privileged_required: bool,
+    /// Optional SOCKS5 proxy for all TCP connections.
+    proxy: Option<String>,
 }
 
 impl NfsMountClient {
     /// Create a mount client that resolves the mount port via portmapper.
     #[must_use]
     pub const fn new() -> Self {
-        Self { mount_port: None, privileged_required: false }
+        Self { mount_port: None, privileged_required: false, proxy: None }
     }
 
     /// Create a mount client with a fixed mount port (bypasses portmapper).
     #[must_use]
     pub const fn with_port(port: u16) -> Self {
-        Self { mount_port: Some(port), privileged_required: false }
+        Self { mount_port: Some(port), privileged_required: false, proxy: None }
     }
 
     /// Force this client to bind a privileged source port (<1024) only.
@@ -80,6 +82,13 @@ impl NfsMountClient {
     #[must_use]
     pub const fn require_privileged(mut self) -> Self {
         self.privileged_required = true;
+        self
+    }
+
+    /// Attach a SOCKS5 proxy to this client.
+    #[must_use]
+    pub fn with_proxy(mut self, proxy: String) -> Self {
+        self.proxy = Some(proxy);
         self
     }
 
@@ -104,7 +113,7 @@ impl NfsMountClient {
             Err(e) => {
                 if downcast_mnt_acces(&e) {
                     tracing::warn!(%addr, %export, "MNT returned ACCES from ephemeral source port; retrying with privileged-only");
-                    let priv_client = Self { mount_port: self.mount_port, privileged_required: true };
+                    let priv_client = Self { mount_port: self.mount_port, privileged_required: true, proxy: self.proxy.clone() };
                     priv_client.mount_once(addr, export).await.with_context(|| format!("MNT {export} (privileged retry)"))
                 } else {
                     Err(e)
@@ -156,20 +165,34 @@ impl NfsMountClient {
 
     /// Open a TCP connection to the mount daemon.
     ///
-    /// Tries privileged source ports (300-1023) first since most NFS servers
-    /// require `secure` (source port < 1024). Falls back to an ephemeral
-    /// port if privileged binding fails AND `privileged_required` is unset
-    /// (e.g., not running as root). With `privileged_required` set, the
-    /// fallback is suppressed and the call returns an error -- this is the
-    /// semantic of `--privileged-port` and of the auto-retry on
-    /// `MNT3ERR_ACCES`.
+    /// When a SOCKS5 proxy is configured, the portmapper query and mount
+    /// connection are both tunnelled through it. Privileged source port
+    /// binding is impossible via proxy (the proxy controls outbound ports),
+    /// so the privileged port logic is bypassed in that case.
+    ///
+    /// Without a proxy, tries privileged source ports (300-1023) first since
+    /// most NFS servers require `secure` (source port < 1024). Falls back to
+    /// an ephemeral port if privileged binding fails AND `privileged_required`
+    /// is unset (e.g., not running as root).
     async fn connect(&self, addr: SocketAddr) -> anyhow::Result<MountClient<crate::proto::conn::NfsIo>> {
+        let portmap = match &self.proxy {
+            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
+            None => crate::proto::portmap::PortmapClient::default_port(),
+        };
         let port = match self.mount_port {
             Some(p) => p,
-            None => crate::proto::portmap::PortmapClient::default_port().query_port(addr, 100_005, 3).await.context("failed to query portmapper for mountd port -- use --mount-port to specify manually")?,
+            None => portmap.query_port(addr, 100_005, 3).await.context("failed to query portmapper for mountd port -- use --mount-port to specify manually")?,
         };
         let mount_addr = SocketAddr::new(addr.ip(), port);
-        let io = if self.privileged_required { connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} (privileged-only)"))? } else { connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))? };
+        let io = if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd at {mount_addr} via {p}"))?;
+            nfs3_client::tokio::TokioIo::new(stream)
+        } else if self.privileged_required {
+            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} (privileged-only)"))?
+        } else {
+            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))?
+        };
         Ok(MountClient::new(io))
     }
 }

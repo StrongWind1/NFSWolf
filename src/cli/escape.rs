@@ -92,7 +92,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
     // Use uid=0 for probes so permission errors (squashed root) are distinguishable
     // from format errors (STALE/BADHANDLE). The handle is a bearer token; once we
     // have it the caller can use any credential (RFC 1094 S2.3.3).
-    let (_, _, probe_client) = make_client(addr, export, 0, 0, &[], StealthConfig::new(0, 0));
+    let (_, _, probe_client) = make_client(addr, export, 0, 0, &[], StealthConfig::new(0, 0), globals.proxy.as_deref());
 
     // --- Phase 1: known root inodes for the detected filesystem type ---
 

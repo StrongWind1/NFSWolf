@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use anyhow::Context as _;
 use nfs3_client::PortmapperClient;
 use nfs3_client::net::Connector as _;
-use nfs3_client::tokio::TokioConnector;
+use nfs3_client::tokio::{TokioConnector, TokioIo};
 use nfs3_types::portmap::{IPPROTO_TCP, IPPROTO_UDP};
 
 /// RPC program numbers relevant to NFS infrastructure.
@@ -65,13 +65,15 @@ pub struct PortmapAmplificationResult {
 pub struct PortmapClient {
     /// Default portmapper port (111).
     port: u16,
+    /// Optional SOCKS5 proxy for all TCP connections.
+    proxy: Option<String>,
 }
 
 impl PortmapClient {
     /// Create a portmapper client targeting the given port.
     #[must_use]
     pub const fn new(port: u16) -> Self {
-        Self { port }
+        Self { port, proxy: None }
     }
 
     /// Create with the standard portmapper port (111).
@@ -80,10 +82,28 @@ impl PortmapClient {
         Self::new(nfs3_types::portmap::PMAP_PORT)
     }
 
+    /// Attach a SOCKS5 proxy to this client.
+    #[must_use]
+    pub fn with_proxy(mut self, proxy: String) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    /// Open a TCP connection to `addr`, tunnelling through the proxy if configured.
+    async fn connect_tcp(&self, addr: SocketAddr) -> anyhow::Result<crate::proto::conn::NfsIo> {
+        if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, addr).await.with_context(|| format!("SOCKS5 connect to {addr} via {p}"))?;
+            Ok(TokioIo::new(stream))
+        } else {
+            TokioConnector.connect(addr).await.with_context(|| format!("connect to {addr}"))
+        }
+    }
+
     /// Resolve the port for `program`/`version` via PMAPPROC_GETPORT (TCP).
     pub async fn query_port(&self, addr: SocketAddr, program: u32, version: u32) -> anyhow::Result<u16> {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
-        let io = TokioConnector.connect(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
+        let io = self.connect_tcp(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
         let mut client = PortmapperClient::new(io);
         client.getport(program, version).await.with_context(|| format!("GETPORT {program}/{version}"))
     }
@@ -91,7 +111,7 @@ impl PortmapClient {
     /// Enumerate all registered RPC services via PMAPPROC_DUMP.
     pub async fn dump(&self, addr: SocketAddr) -> anyhow::Result<Vec<PortmapEntry>> {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
-        let io = TokioConnector.connect(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
+        let io = self.connect_tcp(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
         let mut client = PortmapperClient::new(io);
         let mappings = client.dump().await.context("PMAPPROC_DUMP")?;
         Ok(mappings.into_iter().filter_map(|m| u16::try_from(m.port).ok().map(|port| PortmapEntry { program: m.prog, version: m.vers, protocol: m.prot, port })).collect())
