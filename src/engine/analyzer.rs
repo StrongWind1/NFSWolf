@@ -291,6 +291,7 @@ impl std::fmt::Debug for Analyzer {
 impl Analyzer {
     /// Construct an Analyzer from pre-built clients.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn, reason = "Arc<T> cannot be used in const context")]
     pub fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient) -> Self {
         Self { nfs3, mount, portmap, proxy: None }
     }

@@ -33,7 +33,7 @@ pub struct MountResult {
 }
 
 /// One export with its access control list.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct ExportEntry {
     /// Exported filesystem path on the server.
     pub path: String,
@@ -44,7 +44,7 @@ pub struct ExportEntry {
 }
 
 /// A client that currently has an export mounted (from MNTPROC_DUMP).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MountedClient {
     /// Client hostname (as reported by the server).
     pub hostname: String,
@@ -145,13 +145,52 @@ impl NfsMountClient {
         client.umntall().await.context("UMNTALL")
     }
 
-    /// List all exports with their ACLs (MNTPROC_EXPORT).
+    /// List all exports with their ACLs via MOUNT v3 EXPORT (MNTPROC_EXPORT).
     ///
     /// A wildcard or empty `allowed_hosts` list means the export is world-accessible (F-7.1).
+    /// This queries MOUNT version 3 -- for NFSv2 exports, use `list_exports_v1()`.
     pub async fn list_exports(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
         let mut client = self.connect(addr).await?;
-        let exports = client.export().await.context("MNTPROC_EXPORT")?;
+        let exports = client.export().await.context("MNTPROC_EXPORT v3")?;
         Ok(exports.into_inner().into_iter().map(export_entry_from).collect())
+    }
+
+    /// List NFSv2 exports via MOUNT v1 EXPORT (program 100005, version 1, proc 5).
+    ///
+    /// The nfs3_client `MountClient` hardcodes version 3.  This method issues a
+    /// raw RPC call with version 1 and deserializes using the same `exports` XDR
+    /// type (the wire format is identical between v1 and v3 EXPORT -- only the
+    /// version number in the RPC header differs).
+    ///
+    /// Per the scanning plan: "MOUNT v1 EXPORT returns the NFSv2 export list.
+    /// MOUNT v3 EXPORT returns the NFSv3 export list.  These are usually
+    /// identical but CAN differ."
+    pub async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
+        use nfs3_client::net::Connector as _;
+        use nfs3_client::rpc::RpcClient;
+        use nfs3_types::mount::exports;
+        use nfs3_types::xdr_codec::Void;
+
+        let portmap = match &self.proxy {
+            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
+            None => crate::proto::portmap::PortmapClient::default_port(),
+        };
+        let port = match self.mount_port {
+            Some(p) => p,
+            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1")?,
+        };
+        let mount_addr = SocketAddr::new(addr.ip(), port);
+        let io = if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
+            nfs3_client::tokio::TokioIo::new(stream)
+        } else {
+            nfs3_client::tokio::TokioConnector.connect(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
+        };
+        // RPC call: program=100005, version=1, proc=5 (EXPORT), args=Void
+        let mut rpc = RpcClient::new(io);
+        let result: exports<'_, '_> = rpc.call(100_005, 1, 5, &Void).await.context("MOUNT v1 EXPORT")?;
+        Ok(result.into_inner().into_iter().map(export_entry_from).collect())
     }
 
     /// List connected clients via MNTPROC_DUMP.

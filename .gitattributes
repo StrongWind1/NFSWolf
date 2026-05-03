@@ -13,7 +13,7 @@
 Makefile    text eol=lf
 *.md        text eol=lf
 
-# Binary files — do not diff or convert line endings.
+# Binary files -- do not diff or convert line endings.
 *.png       binary
 *.jpg       binary
 *.gif       binary

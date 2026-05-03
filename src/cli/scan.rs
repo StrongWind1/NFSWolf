@@ -1,10 +1,13 @@
 //! Network scanner for NFS service discovery.
 //!
-//! Detects NFS servers, enumerates exports, checks version support,
-//! and flags amplification/downgrade issues. Every scan runs the full
-//! check set -- there are no opt-in flags for individual checks.
+//! Probes port 111 (portmapper) and port 2049 (NFS) to discover NFS services,
+//! confirms versions via direct NULL/COMPOUND probes, enumerates exports via
+//! the MOUNT protocol and NFSv4 READDIR, and reports connected clients.
+//!
+//! No file-level NFS operations (no MNT, no GETATTR, no READ) -- that is
+//! `analyze` and `shell` territory.
 
-use std::net::IpAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
@@ -13,57 +16,69 @@ use tabled::builder::Builder;
 use tabled::settings::Style;
 
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
-use crate::engine::scanner::{HostResult, ScanConfig, Scanner};
+use crate::engine::scan_types::{HostResult, NfsPortInfo};
+use crate::engine::scanner::{ScanConfig, ScanOutput, Scanner};
 use crate::util::stealth::StealthConfig;
+
+// Re-export for convenience.
+#[allow(unused_imports, reason = "used in type signatures below")]
+use crate::engine::scan_types;
 
 /// Discover NFS servers on a network.
 ///
 /// Accepts IPs, CIDR ranges, hostnames, or files containing one target per line.
 /// Every scan runs the full check matrix: portmapper, version detection, export
-/// enumeration, amplification, NFSv2 downgrade, NIS, and portmap-bypass.
+/// enumeration, and NFSv4 pseudo-FS discovery.
 ///
 /// Examples:
 ///   nfswolf scan 192.168.1.0/24
 ///   nfswolf scan 10.0.0.1 10.0.0.2 10.0.0.3
 ///   nfswolf scan -f hosts.txt
+///   nfswolf scan --scan-udp 10.0.0.0/16
 #[derive(Parser)]
 pub struct ScanArgs {
     /// Targets: IPs, CIDRs, hostnames. Omit if using -f.
     #[arg(required_unless_present = "targets_file", help_heading = H_TARGET)]
     pub targets: Vec<String>,
 
-    /// REQUIRED (when no positional targets): file of targets, one per line
+    /// REQUIRED (when no positional targets): file of targets, one per line.
+    /// Lines starting with # and blank lines are skipped.
     #[arg(short = 'f', long = "file", value_name = "FILE", help_heading = H_TARGET)]
     pub targets_file: Option<String>,
 
-    /// Maximum concurrent probe connections
+    /// Maximum concurrent host scans
     #[arg(short = 'c', long, default_value = "256", value_name = "N", help_heading = H_BEHAVIOR)]
     pub concurrency: usize,
 
-    /// Additional ports to probe (default: 111, 2049)
-    #[arg(long, value_delimiter = ',', value_name = "PORT,...", help_heading = H_BEHAVIOR)]
-    pub ports: Vec<u16>,
-
-    /// Save results to file (.json or .csv extension determines format)
-    #[arg(short = 'o', long, value_name = "FILE", help_heading = H_OUTPUT)]
-    pub output: Option<String>,
-
-    /// Only display hosts that have at least one accessible export
+    /// Probe all ports over UDP in addition to TCP.
+    /// Discovers UDP-accessible NFS and mountd services.
+    /// Mutually exclusive with --proxy (UDP cannot be tunneled through SOCKS5).
     #[arg(long, help_heading = H_BEHAVIOR)]
-    pub accessible_only: bool,
+    pub scan_udp: bool,
+
+    /// Additional NFS port(s) to probe (comma-delimited).
+    /// Added to the set of portmapper-discovered NFS ports (does not replace
+    /// portmapper discovery or the 2049 fallback).
+    #[arg(long, value_delimiter = ',', value_name = "PORT,...", help_heading = H_BEHAVIOR)]
+    pub nfs_port: Vec<u16>,
+
+    /// Write JSON results to FILE (machine-readable, UTF-8).
+    /// Can be used simultaneously with --csv.
+    #[arg(long, value_name = "FILE", help_heading = H_OUTPUT)]
+    pub json: Option<PathBuf>,
+
+    /// Write CSV results to FILE (one row per host, UTF-8).
+    /// Can be used simultaneously with --json.
+    #[arg(long, value_name = "FILE", help_heading = H_OUTPUT)]
+    pub csv: Option<PathBuf>,
 }
 
 impl ScanArgs {
-    /// Effective ports to scan. Falls back to 111 + 2049 if none specified.
-    pub fn effective_ports(&self) -> Vec<u16> {
-        if self.ports.is_empty() { vec![111, 2049] } else { self.ports.clone() }
-    }
-
     /// Merge positional targets and file-based targets into one list.
     pub fn all_target_specs(&self) -> Vec<String> {
         let mut specs = self.targets.clone();
         if let Some(ref f) = self.targets_file {
-            specs.push(f.clone()); // Scanner::parse_targets handles file paths
+            specs.push(f.clone());
         }
         specs
     }
@@ -71,6 +86,11 @@ impl ScanArgs {
 
 /// Run the scan command.
 pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+    // Validate mutual exclusion: --scan-udp and --proxy cannot coexist.
+    if args.scan_udp && globals.proxy.is_some() {
+        anyhow::bail!("UDP probes cannot be tunneled through SOCKS5");
+    }
+
     let start = std::time::Instant::now();
     let specs = args.all_target_specs();
     tracing::info!(count = specs.len(), "starting NFS scan");
@@ -83,140 +103,447 @@ pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if !globals.quiet {
+    let show_progress = !globals.quiet;
+    if show_progress {
         eprintln!("{}", crate::output::status_info(&format!("Scanning {} host(s)...", targets.len())));
     }
 
-    let config = ScanConfig { concurrency: args.concurrency, timeout: Duration::from_millis(globals.timeout), transport_udp: globals.transport_udp };
+    let config = ScanConfig { concurrency: args.concurrency, timeout: Duration::from_millis(globals.timeout), scan_udp: args.scan_udp, nfs_ports: args.nfs_port.clone(), mount_port: globals.mount_port };
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let mut scanner = Scanner::new(config, stealth);
     if let Some(ref p) = globals.proxy {
         scanner = scanner.with_proxy(p.clone());
     }
-    let results = scanner.scan_range(targets).await;
+    let output = scanner.scan_range(targets).await;
+    let ScanOutput { results, total, interrupted } = output;
 
-    let results: Vec<HostResult> = if args.accessible_only { results.into_iter().filter(|r| !r.exports.is_empty()).collect() } else { results };
+    // Table + per-host detail always goes to stdout (even on interrupt -- partial data).
+    print_table(&results, args.scan_udp);
+    print_host_details(&results);
 
-    print_results(&results);
-    print_findings(&results);
-
-    if !globals.quiet {
-        let accessible = results.iter().filter(|r| !r.exports.is_empty()).count();
-        eprintln!("{}", crate::output::status_info(&format!("Done in {}  --  {} host(s) up, {} with accessible exports", crate::output::elapsed(start), results.iter().filter(|r| r.nfs_port_open || r.portmap_open).count(), accessible,)));
+    if let Some(ref json_path) = args.json {
+        write_json(json_path, &results, interrupted)?;
+        if show_progress {
+            eprintln!("{}", crate::output::status_ok(&format!("JSON written -> {}", json_path.display())));
+        }
     }
 
-    if let Some(output) = &args.output {
-        write_output(output, &results)?;
-        if !globals.quiet {
-            eprintln!("{}", crate::output::status_ok(&format!("Results saved -> {output}")));
+    if let Some(ref csv_path) = args.csv {
+        write_csv(csv_path, &results, interrupted)?;
+        if show_progress {
+            eprintln!("{}", crate::output::status_ok(&format!("CSV written -> {}", csv_path.display())));
         }
+    }
+
+    if interrupted {
+        let nfs_count = results.len();
+        eprintln!("{}", crate::output::status_warn(&format!("Interrupted  --  {} of {} host(s) completed, {} with NFS", results.len(), total, nfs_count)));
+        std::process::exit(130);
+    }
+
+    if show_progress {
+        let nfs_count = results.len();
+        eprintln!("{}", crate::output::status_info(&format!("Done in {}  --  {} host(s) scanned, {} with NFS", crate::output::elapsed(start), total, nfs_count)));
     }
 
     crate::cli::emit_replay(globals);
     Ok(())
 }
 
-/// Print a table of scan results to stdout.
-fn print_results(results: &[HostResult]) {
-    let visible: Vec<&HostResult> = results.iter().filter(|r| r.nfs_port_open || r.portmap_open).collect();
-    if visible.is_empty() {
+// --- Table output ------------------------------------------------------------
+
+/// Render the summary table to stdout, hiding columns that are blank across all rows.
+fn print_table(results: &[HostResult], scan_udp: bool) {
+    if results.is_empty() {
         println!("{}", "  No NFS servers found.".dimmed());
         return;
     }
 
-    let mut builder = Builder::default();
-    builder.push_record(["Host", "NFS", "Versions", "Exports", "OS"]);
+    // Build all rows first so we can detect blank columns.
+    let headers = ["Hostname", "IP", "RPC Port 111", "NFS Port", "NFSv2", "v2 Exports", "NFSv3", "v3 Exports", "NFSv4", "v4 Exports", "Hint", "Mount Port", "Clients"];
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(results.len());
 
-    for r in &visible {
-        let nfs_status = if r.nfs_port_open { "open".green().to_string() } else { "closed".dimmed().to_string() };
-        // Build version string: portmapper-reported versions + "v4+" if NFSv4 confirmed
-        // but not in portmapper (indicates portmapper is filtered).
-        let versions = {
-            let mut vs: Vec<String> = r.nfs_versions.iter().map(|v| format!("v{v}")).collect();
-            if r.nfs4_reachable && !r.nfs_versions.contains(&4) {
-                vs.push("v4+".to_owned()); // v4+ = confirmed via direct probe, not portmapper
-            }
-            if vs.is_empty() { "?".dimmed().to_string() } else { vs.join(",") }
-        };
-        let export_count = if r.exports.is_empty() { "0".dimmed().to_string() } else { r.exports.len().to_string().green().to_string() };
-        let os = r.os_guess.as_deref().unwrap_or("?").to_owned();
-        builder.push_record([r.addr.ip().to_string(), nfs_status, versions, export_count, os]);
+    for r in results {
+        rows.push(vec![
+            r.hostname.as_deref().unwrap_or("").to_owned(),
+            r.ip.to_string(),
+            render_portmap(&r.portmap_reachability, scan_udp),
+            render_nfs_ports(&r.nfs_ports),
+            if r.has_v2() { "yes".to_owned() } else { "--".to_owned() },
+            render_export_count(r.exports_v2.as_deref()),
+            if r.has_v3() { "yes".to_owned() } else { "--".to_owned() },
+            render_export_count(r.exports_v3.as_deref()),
+            if r.has_v4() { "yes".to_owned() } else { "--".to_owned() },
+            render_v4_export_count(r),
+            render_hint(r),
+            render_mount_ports(&r.mount_ports),
+            render_mounts_count(r),
+        ]);
+    }
+
+    // Determine which columns have at least one non-blank value.
+    let col_count = headers.len();
+    let visible: Vec<bool> = (0..col_count).map(|col| rows.iter().any(|row| !is_blank_cell(row.get(col).map_or("", String::as_str)))).collect();
+
+    // Build the table with only visible columns.
+    let mut builder = Builder::default();
+    let filtered_headers: Vec<&str> = headers.iter().zip(visible.iter()).filter_map(|(h, &v)| if v { Some(*h) } else { None }).collect();
+    builder.push_record(filtered_headers);
+
+    for row in &rows {
+        let filtered_row: Vec<&str> = row.iter().zip(visible.iter()).filter_map(|(cell, &v)| if v { Some(cell.as_str()) } else { None }).collect();
+        builder.push_record(filtered_row);
     }
 
     let table = builder.build().with(Style::rounded()).to_string();
     println!("{table}");
 }
 
-/// Print per-export security warnings to stdout (below the table).
-fn print_findings(results: &[HostResult]) {
-    for r in results {
-        let ip = r.addr.ip();
+/// A cell is "blank" if it's empty or just "--".
+fn is_blank_cell(s: &str) -> bool {
+    s.is_empty() || s == "--"
+}
 
-        if r.nfs_versions.contains(&2) && r.nfs_versions.len() > 1 {
-            println!("{}", crate::output::status_warn(&format!("{ip}  NFSv2 exposed alongside v3/v4  --  downgrade risk")));
-        }
-
-        // NFSv4 confirmed but not in portmapper = portmapper is filtered while NFS is open.
-        // This is a portmapper bypass (F-3.3): firewall blocks port 111 but allows 2049.
-        if r.nfs4_reachable && !r.nfs_versions.contains(&4) {
-            println!("{}", crate::output::status_warn(&format!("{ip}  NFSv4 reachable but not in portmapper  --  portmapper may be filtered (F-3.3)")));
-        }
-
-        for export in &r.exports {
-            let has_wildcard = export.allowed_hosts.iter().any(|h| h == "*" || h.starts_with("*."));
-            if has_wildcard || export.allowed_hosts.is_empty() {
-                println!("{}", crate::output::status_err(&format!("{ip}:{}  world-accessible (wildcard ACL)", export.path)));
-            }
-            let has_gss = export.auth_flavors.contains(&6);
-            let auth_sys_only = !export.auth_flavors.is_empty() && !has_gss;
-            if auth_sys_only {
-                println!("{}", crate::output::status_warn(&format!("{ip}:{}  AUTH_SYS only  --  no Kerberos", export.path)));
-            }
+/// Render the :111 column.
+fn render_portmap(reach: &crate::engine::scan_types::PortReachability, scan_udp: bool) -> String {
+    use crate::engine::scan_types::PortReachability;
+    if scan_udp {
+        reach.to_string()
+    } else {
+        match reach {
+            PortReachability::Tcp | PortReachability::TcpUdp => "open".to_owned(),
+            _ => "--".to_owned(),
         }
     }
 }
 
-/// Write results to a file (JSON or CSV based on extension).
-fn write_output(path: &str, results: &[HostResult]) -> anyhow::Result<()> {
-    use std::fmt::Write as _;
-    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    if ext == "json" {
-        let json = serde_json::to_string_pretty(&results.iter().map(host_to_json).collect::<Vec<_>>())?;
-        std::fs::write(path, json)?;
-    } else if ext == "csv" {
-        let mut csv = String::from("host,nfs_port,portmap,versions,exports\n");
-        for r in results {
-            let versions = r.nfs_versions.iter().map(ToString::to_string).collect::<Vec<_>>().join(";");
-            let _ = writeln!(csv, "{},{},{},{},{}", r.addr.ip(), r.nfs_port_open, r.portmap_open, versions, r.exports.len());
-        }
-        std::fs::write(path, csv)?;
-    } else {
-        anyhow::bail!("unsupported output format  --  use .json or .csv extension");
+/// Render the NFS Port column.
+fn render_nfs_ports(ports: &[NfsPortInfo]) -> String {
+    if ports.is_empty() {
+        return "--".to_owned();
     }
-    tracing::info!(%path, "results written");
+    // If all versions on the same port, show once.
+    if let [p] = ports {
+        let proto = port_proto_str(p.tcp, p.udp);
+        return format!("{}/{proto}", p.port);
+    }
+    // Multiple ports -- show per version.
+    let mut parts = Vec::new();
+    for p in ports {
+        if !p.any_version() {
+            continue;
+        }
+        let proto = port_proto_str(p.tcp, p.udp);
+        let mut vers = Vec::new();
+        if p.v2 {
+            vers.push("v2");
+        }
+        if p.v3 {
+            vers.push("v3");
+        }
+        if p.v4 {
+            vers.push("v4");
+        }
+        parts.push(format!("{}/{proto} ({})", p.port, vers.join(",")));
+    }
+    if parts.is_empty() { "--".to_owned() } else { parts.join(", ") }
+}
+
+const fn port_proto_str(tcp: bool, udp: bool) -> &'static str {
+    match (tcp, udp) {
+        (true, true) => "tcp+udp",
+        (true, false) => "tcp",
+        (false, true) => "udp",
+        (false, false) => "?",
+    }
+}
+
+/// Render the Hint column (PROG_MISMATCH version range).
+///
+/// Hidden (returns "--") when all versions in the hinted range are already
+/// confirmed by direct probes -- the hint adds no new information in that case.
+fn render_hint(r: &HostResult) -> String {
+    let Some(ref hint) = r.hint else { return "--".to_owned() };
+    // Check if every version in [low..=high] is already confirmed.
+    let all_confirmed = (hint.low..=hint.high).all(|v| match v {
+        2 => r.has_v2(),
+        3 => r.has_v3(),
+        4 => r.has_v4(),
+        _ => false,
+    });
+    if all_confirmed { "--".to_owned() } else { hint.to_string() }
+}
+
+/// Render export count for v2x/v3x columns.
+fn render_export_count(exports: Option<&[crate::proto::mount::ExportEntry]>) -> String {
+    match exports {
+        None => "--".to_owned(),
+        Some(e) => e.len().to_string(),
+    }
+}
+
+/// Render v4x column.
+fn render_v4_export_count(r: &HostResult) -> String {
+    if !r.has_v4() {
+        return "--".to_owned();
+    }
+    match &r.exports_v4 {
+        Some(entries) => format!("{}+", entries.len()),
+        None => "?".to_owned(),
+    }
+}
+
+/// Render mount port column.
+fn render_mount_ports(ports: &[crate::engine::scan_types::MountPortInfo]) -> String {
+    if ports.is_empty() {
+        return "--".to_owned();
+    }
+    let parts: Vec<String> = ports
+        .iter()
+        .map(|p| {
+            let proto = port_proto_str(p.tcp, p.udp);
+            let vers: Vec<String> = p.versions.iter().map(|v| format!("v{v}")).collect();
+            format!("{}/{proto} ({})", p.port, vers.join(","))
+        })
+        .collect();
+    parts.join(", ")
+}
+
+/// Render mounts count.
+fn render_mounts_count(r: &HostResult) -> String {
+    match &r.mounts {
+        None => "--".to_owned(),
+        Some(m) => m.len().to_string(),
+    }
+}
+
+// --- Per-host detail ---------------------------------------------------------
+
+/// Print per-host detail below the table.
+fn print_host_details(results: &[HostResult]) {
+    for r in results {
+        println!();
+        // Header: IP (hostname) or just IP
+        if let Some(ref h) = r.hostname {
+            println!("{} ({h})", r.ip);
+        } else {
+            println!("{}", r.ip);
+        }
+
+        // Export list deduplication and display.
+        print_exports(r);
+
+        // Connected clients from MOUNT DUMP
+        if let Some(ref mounts) = r.mounts
+            && !mounts.is_empty()
+        {
+            let entries: Vec<String> = mounts.iter().map(|m| format!("{}:{}", m.hostname, m.directory)).collect();
+            println!("  Clients: {}", entries.join(", "));
+        }
+    }
+}
+
+/// Print export lists with version-label deduplication.
+fn print_exports(r: &HostResult) {
+    // Collect available export lists with their version labels.
+    let mut lists: Vec<(&str, ExportListKind<'_>)> = Vec::new();
+    if let Some(ref v2) = r.exports_v2 {
+        lists.push(("v2", ExportListKind::Mount(v2)));
+    }
+    if let Some(ref v3) = r.exports_v3 {
+        lists.push(("v3", ExportListKind::Mount(v3)));
+    }
+    if let Some(ref v4) = r.exports_v4 {
+        lists.push(("v4", ExportListKind::V4(v4)));
+    }
+
+    if lists.is_empty() {
+        return;
+    }
+
+    // Group lists that are identical.
+    let groups = group_identical_exports(&lists);
+    for (labels, kind) in &groups {
+        let label = labels.join(", ");
+        println!("  Exports ({label}):");
+        match kind {
+            ExportListKind::Mount(entries) => {
+                for e in *entries {
+                    let acl = if e.allowed_hosts.is_empty() { "*".to_owned() } else { e.allowed_hosts.join(",") };
+                    println!("    {:<40}{acl}", e.path);
+                }
+            },
+            ExportListKind::V4(entries) => {
+                for e in *entries {
+                    println!("    {}", e.path);
+                }
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ExportListKind<'a> {
+    Mount(&'a [crate::proto::mount::ExportEntry]),
+    V4(&'a [crate::engine::scan_types::V4ExportEntry]),
+}
+
+/// Group export lists with identical content under combined labels.
+fn group_identical_exports<'a>(lists: &[(&str, ExportListKind<'a>)]) -> Vec<(Vec<String>, ExportListKind<'a>)> {
+    let mut groups: Vec<(Vec<String>, ExportListKind<'a>)> = Vec::new();
+
+    for (label, kind) in lists {
+        let mut merged = false;
+        for (existing_labels, existing_kind) in &mut groups {
+            if exports_equal(existing_kind, kind) {
+                existing_labels.push((*label).to_owned());
+                merged = true;
+                break;
+            }
+        }
+        if !merged {
+            groups.push((vec![(*label).to_owned()], kind.clone()));
+        }
+    }
+    groups
+}
+
+/// Compare two export lists for equality.
+fn exports_equal(a: &ExportListKind<'_>, b: &ExportListKind<'_>) -> bool {
+    match (a, b) {
+        (ExportListKind::Mount(a), ExportListKind::Mount(b)) => a == b,
+        (ExportListKind::V4(a), ExportListKind::V4(b)) => a == b,
+        // v4 exports (path-only) can match mount exports if paths match
+        (ExportListKind::Mount(m), ExportListKind::V4(v)) | (ExportListKind::V4(v), ExportListKind::Mount(m)) => m.len() == v.len() && m.iter().zip(v.iter()).all(|(me, ve)| me.path == ve.path),
+    }
+}
+
+// --- JSON output -------------------------------------------------------------
+
+/// Write JSON array of host results to a file (UTF-8).
+fn write_json(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyhow::Result<()> {
+    let mut wrapper = serde_json::Map::new();
+    if interrupted {
+        wrapper.insert("interrupted".to_owned(), serde_json::Value::Bool(true));
+    }
+    let json_results: Vec<serde_json::Value> = results.iter().map(host_to_json).collect();
+    wrapper.insert("hosts".to_owned(), serde_json::Value::Array(json_results));
+    #[allow(clippy::unwrap_used, reason = "serializing known-good structures")]
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(wrapper)).unwrap();
+    std::fs::write(path, json)?;
+    tracing::info!(path = %path.display(), "JSON written");
     Ok(())
 }
 
-/// Convert a `HostResult` to a `serde_json::Value` for JSON output.
+/// Convert a `HostResult` to the plan's JSON schema.
 fn host_to_json(r: &HostResult) -> serde_json::Value {
     serde_json::json!({
-        "host": r.addr.ip().to_string(),
-        "nfs_port_open": r.nfs_port_open,
-        "portmap_open": r.portmap_open,
-        "nfs_versions": r.nfs_versions,
-        "nfs4_reachable": r.nfs4_reachable,
-        "exports": r.exports.iter().map(|e| serde_json::json!({
-            "path": e.path,
-            "allowed_hosts": e.allowed_hosts,
-            "auth_flavors": e.auth_flavors,
+        "ip": r.ip.to_string(),
+        "hostname": r.hostname,
+        "portmap": {
+            "tcp": r.portmap_reachability.has_tcp(),
+            "udp": matches!(r.portmap_reachability, crate::engine::scan_types::PortReachability::Udp | crate::engine::scan_types::PortReachability::TcpUdp),
+        },
+        "nfs_ports": r.nfs_ports.iter().map(|p| serde_json::json!({
+            "port": p.port,
+            "tcp": p.tcp,
+            "udp": p.udp,
+            "versions": {
+                "v2": p.v2,
+                "v3": p.v3,
+                "v4": p.v4,
+            }
         })).collect::<Vec<_>>(),
-        "os_guess": r.os_guess,
-        "connected_clients": r.connected_clients,
+        "mount_ports": r.mount_ports.iter().map(|p| serde_json::json!({
+            "port": p.port,
+            "tcp": p.tcp,
+            "udp": p.udp,
+            "versions": p.versions,
+        })).collect::<Vec<_>>(),
+        "exports": {
+            "v2": r.exports_v2.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
+                "path": e.path,
+                "allowed": if e.allowed_hosts.is_empty() { vec!["*".to_owned()] } else { e.allowed_hosts.clone() },
+            })).collect::<Vec<_>>()),
+            "v3": r.exports_v3.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
+                "path": e.path,
+                "allowed": if e.allowed_hosts.is_empty() { vec!["*".to_owned()] } else { e.allowed_hosts.clone() },
+            })).collect::<Vec<_>>()),
+            "v4": r.exports_v4.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
+                "path": e.path,
+            })).collect::<Vec<_>>()),
+        },
+        "mounts": r.mounts.as_ref().map(|m| m.iter().map(|c| serde_json::json!({
+            "hostname": c.hostname,
+            "directory": c.directory,
+        })).collect::<Vec<_>>()),
+        "mounts_available": r.mounts.is_some(),
+        "hint": r.hint.as_ref().map(ToString::to_string),
+        "scan_duration_ms": u64::try_from(r.scan_duration.as_millis()).unwrap_or(u64::MAX),
     })
 }
 
-/// Unused  --  targets are parsed via Scanner::parse_targets.
-fn _resolve_targets(specs: &[String]) -> anyhow::Result<Vec<IpAddr>> {
-    Scanner::parse_targets(specs)
+// --- CSV output --------------------------------------------------------------
+
+/// Write CSV results to a file.
+fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyhow::Result<()> {
+    use std::fmt::Write as _;
+
+    let mut csv = String::from("Hostname,IP,:111,NFS Port,v2,v2x,v3,v3x,v4,v4x,Hint,Mount Port,Clients,HostInfo\n");
+
+    for r in results {
+        let hostname = r.hostname.as_deref().unwrap_or("");
+        let ip = r.ip.to_string();
+        let portmap = if r.portmap_reachability.is_reachable() { "open" } else { "--" };
+        let nfs_port = render_nfs_ports(&r.nfs_ports);
+        let v2 = if r.has_v2() { "true" } else { "--" };
+        let v2x = render_export_count(r.exports_v2.as_deref());
+        let v3 = if r.has_v3() { "true" } else { "--" };
+        let v3x = render_export_count(r.exports_v3.as_deref());
+        let v4 = if r.has_v4() { "true" } else { "--" };
+        let v4x = render_v4_export_count(r);
+        let hint = r.hint.as_ref().map_or_else(|| "--".to_owned(), ToString::to_string);
+        let mount_port = render_mount_ports(&r.mount_ports);
+        let mounts = render_mounts_count(r);
+        let host_info = build_host_info(r);
+        let _ = writeln!(csv, "{hostname},{ip},{portmap},\"{nfs_port}\",{v2},{v2x},{v3},{v3x},{v4},{v4x},{hint},\"{mount_port}\",{mounts},\"{host_info}\"");
+    }
+
+    if interrupted {
+        csv.push_str("# INTERRUPTED -- partial results\n");
+    }
+    std::fs::write(path, csv)?;
+    tracing::info!(path = %path.display(), "CSV written");
+    Ok(())
+}
+
+/// Build the HostInfo CSV column.
+fn build_host_info(r: &HostResult) -> String {
+    let mut parts = Vec::new();
+
+    // Exports (use v3 if available, else v2, formatted as path(ACL))
+    let export_list = r.exports_v3.as_ref().or(r.exports_v2.as_ref());
+    if let Some(exports) = export_list
+        && !exports.is_empty()
+    {
+        let export_strs: Vec<String> = exports
+            .iter()
+            .map(|e| {
+                let acl = if e.allowed_hosts.is_empty() { "*".to_owned() } else { e.allowed_hosts.join(",") };
+                format!("{}({acl})", e.path)
+            })
+            .collect();
+        parts.push(format!("exports:{}", export_strs.join(";")));
+    }
+
+    // Mounts
+    if let Some(ref mounts) = r.mounts
+        && !mounts.is_empty()
+    {
+        let mount_strs: Vec<String> = mounts.iter().map(|m| format!("{}:{}", m.hostname, m.directory)).collect();
+        parts.push(format!("mounts:{}", mount_strs.join(";")));
+    }
+
+    parts.join(";")
 }

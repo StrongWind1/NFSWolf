@@ -2,12 +2,22 @@
 //!
 //! Discovers NFS services across network ranges using async I/O.
 //! Architecture: tokio::spawn fan-out with Semaphore-based concurrency limit.
-//! Per-host: TCP probe -> portmapper DUMP -> mount export list -> mount each export.
+//! Per-host probe sequence:
+//!   1. TCP (+ UDP) probe port 111
+//!   2. Portmapper DUMP (+ GETPORT fallback)
+//!   3. NFS + mountd port set assembly and dedup
+//!   4. TCP (+ UDP) reachability probes on all discovered ports
+//!   5. Version probes (NULL v2/v3, COMPOUND v4) with TCP connection reuse
+//!   6. Host skip logic (no version = omit)
+//!   7. MOUNT v1/v3 EXPORT + DUMP queries
+//!   8. NFSv4 READDIR on pseudo-root
+//!   9. Assemble HostResult + stealth delay
 
-// Toolkit API  --  not all items are used in currently-implemented phases.
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use ipnet::IpNet;
@@ -15,82 +25,52 @@ use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
-use crate::engine::file_handle::FileHandleAnalyzer;
+use crate::engine::scan_types::{HostResult, MountPortInfo, NfsPortInfo, PortReachability, TargetSpec, V4ExportEntry, VersionRange};
 use crate::proto::mount::NfsMountClient;
-use crate::proto::nfs3::types::FileHandle;
-use crate::proto::nfs4::compound::probe_nfs4;
+use crate::proto::nfs4::compound::Nfs4DirectClient;
 use crate::proto::portmap::PortmapClient;
-use crate::proto::udp::call_rpc_udp;
+use crate::proto::rpc_probe::probe_nfs_versions_tcp;
 use crate::util::stealth::StealthConfig;
 
-/// Scan result for a single host.
-#[derive(Debug, Clone)]
-pub struct HostResult {
-    /// Remote address (IP + portmapper port).
-    pub addr: SocketAddr,
-    /// True if TCP connect to port 2049 succeeded.
-    pub nfs_port_open: bool,
-    /// True if TCP connect to port 111 (portmapper) succeeded.
-    pub portmap_open: bool,
-    /// NFS versions registered in the portmapper (e.g., `[2, 3, 4]`).
-    pub nfs_versions: Vec<u32>,
-    /// Discovered exports.
-    pub exports: Vec<ExportInfo>,
-    /// OS/filesystem fingerprint from the first mountable export handle.
-    pub os_guess: Option<String>,
-    /// Connected clients from MNTPROC_DUMP.
-    pub connected_clients: Vec<String>,
-    /// True if the server responded to an NFSv4 COMPOUND (PUTROOTFH) probe.
-    ///
-    /// This is a live confirmation distinct from `nfs_versions.contains(&4)`:
-    /// it catches NFSv4-only servers where portmapper is filtered but port 2049 is open.
-    pub nfs4_reachable: bool,
-}
-
-/// Information about a single NFS export.
-#[derive(Debug, Clone)]
-pub struct ExportInfo {
-    /// Export path on the server.
-    pub path: String,
-    /// Access control entries (hostnames, subnets, wildcards).
-    pub allowed_hosts: Vec<String>,
-    /// Auth flavors advertised by MNTPROC_MNT (0=none, 1=sys, 6=gss/krb5).
-    pub auth_flavors: Vec<u32>,
-    /// Root file handle bytes, if successfully mounted.
-    pub file_handle: Option<Vec<u8>>,
+/// Output from `scan_range` -- results plus metadata about the scan.
+#[derive(Debug)]
+pub struct ScanOutput {
+    /// Hosts with confirmed NFS (passed skip logic).
+    pub results: Vec<HostResult>,
+    /// Total number of targets submitted.
+    pub total: usize,
+    /// True if the scan was interrupted by Ctrl+C (SIGINT).
+    pub interrupted: bool,
 }
 
 /// Scanner configuration.
-///
-/// Every check the scanner knows about runs unconditionally; the only knobs
-/// here are concurrency, timeout, and transport.
 #[derive(Debug)]
 pub struct ScanConfig {
     /// Maximum number of hosts to scan simultaneously.
     pub concurrency: usize,
-    /// Timeout for each TCP connection probe.
+    /// Timeout for each TCP connection probe / RPC call.
     pub timeout: Duration,
-    /// Use UDP instead of TCP for portmapper DUMP/GETPORT queries.
-    /// Needed when TCP/111 is firewalled but UDP/111 is open.
-    pub transport_udp: bool,
+    /// Probe all ports over UDP in addition to TCP (`--scan-udp`).
+    pub scan_udp: bool,
+    /// Additional NFS ports to probe (`--nfs-port`).
+    pub nfs_ports: Vec<u16>,
+    /// Override mountd port (`--mount-port`).
+    pub mount_port: Option<u16>,
 }
 
 impl Default for ScanConfig {
     fn default() -> Self {
-        Self { concurrency: 256, timeout: Duration::from_secs(5), transport_udp: false }
+        Self { concurrency: 256, timeout: Duration::from_secs(3), scan_udp: false, nfs_ports: vec![], mount_port: None }
     }
 }
 
 /// Parallel NFS scanner.
 ///
 /// Spawns one tokio task per host, bounded by a `Semaphore`.
-/// Each task probes ports, enumerates RPC services, and mounts exports.
 #[derive(Debug)]
 pub struct Scanner {
-    portmap: PortmapClient,
-    mount_client: NfsMountClient,
     config: ScanConfig,
-    _stealth: StealthConfig,
+    stealth: StealthConfig,
     proxy: Option<String>,
 }
 
@@ -98,170 +78,381 @@ impl Scanner {
     /// Create a new scanner with the given configuration.
     #[must_use]
     pub const fn new(config: ScanConfig, stealth: StealthConfig) -> Self {
-        Self { portmap: PortmapClient::default_port(), mount_client: NfsMountClient::new(), config, _stealth: stealth, proxy: None }
+        Self { config, stealth, proxy: None }
     }
 
-    /// Attach a SOCKS5 proxy so ALL connections (port probes, portmapper,
-    /// mount, NFSv4 probes) are tunnelled.
+    /// Attach a SOCKS5 proxy so ALL connections are tunnelled.
     #[must_use]
     pub fn with_proxy(mut self, proxy: String) -> Self {
-        self.portmap = self.portmap.with_proxy(proxy.clone());
-        self.mount_client = self.mount_client.with_proxy(proxy.clone());
         self.proxy = Some(proxy);
         self
     }
 
-    /// Scan a list of IP addresses and return one `HostResult` per host.
+    /// Scan a list of targets and return results for hosts with confirmed NFS.
     ///
-    /// Hosts that don't respond to either port 111 or 2049 are still
-    /// included with `nfs_port_open = false` so the caller can count them.
-    pub async fn scan_range(&self, targets: Vec<IpAddr>) -> Vec<HostResult> {
+    /// Hosts where no NFS version probe succeeds are omitted.
+    /// On SIGINT (Ctrl+C): cancels in-flight workers, returns partial results
+    /// collected so far with `interrupted = true`.
+    pub async fn scan_range(&self, targets: Vec<TargetSpec>) -> ScanOutput {
+        let total = targets.len();
         let sem = Arc::new(Semaphore::new(self.config.concurrency));
-        let mut handles = Vec::with_capacity(targets.len());
+        let nfs_found = Arc::new(AtomicU32::new(0));
 
-        for ip in targets {
+        let pb = indicatif::ProgressBar::new(u64::try_from(total).unwrap_or(u64::MAX));
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Scanning  {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("0 with NFS");
+
+        // Shared result collector -- workers push as they complete.
+        let results = Arc::new(tokio::sync::Mutex::new(Vec::<HostResult>::new()));
+
+        let mut handles = Vec::with_capacity(total);
+        for target in targets {
             let permit = Arc::clone(&sem);
-            let portmap = self.portmap.clone();
-            let mount = self.mount_client.clone();
-            let job = ScanJob { timeout: self.config.timeout, transport_udp: self.config.transport_udp, proxy: self.proxy.clone() };
+            let nfs_found = Arc::clone(&nfs_found);
+            let results = Arc::clone(&results);
+            let pb = pb.clone();
+            let job = ScanJob { timeout: self.config.timeout, scan_udp: self.config.scan_udp, nfs_ports: self.config.nfs_ports.clone(), mount_port: self.config.mount_port, proxy: self.proxy.clone(), stealth: self.stealth.clone() };
 
             let handle = tokio::spawn(async move {
                 let _permit = permit.acquire_owned().await;
-                scan_host(ip, portmap, mount, job).await
+                let result = scan_host(target, job).await;
+                if let Some(ref r) = result
+                    && r.has_nfs()
+                {
+                    nfs_found.fetch_add(1, Ordering::Relaxed);
+                    results.lock().await.push(r.clone());
+                }
+                pb.set_message(format!("{} with NFS", nfs_found.load(Ordering::Relaxed)));
+                pb.inc(1);
             });
             handles.push(handle);
         }
 
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(r) => results.push(r),
-                Err(e) if e.is_panic() => {
-                    // One host's RPC peer misbehaved badly enough to panic a worker.
-                    // With panic = "unwind", tokio confines it to this task; we drop
-                    // the result and keep scanning so a single bad target doesn't
-                    // sink a multi-thousand-host sweep.
-                    tracing::warn!(error = %e, "scan worker panicked; host result discarded");
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "scan worker join failed");
-                },
+        // Wait for all workers OR Ctrl+C -- whichever comes first.
+        let wait_all = async {
+            for handle in &mut handles {
+                let _ = handle.await;
             }
-        }
-        results
+        };
+        let interrupted = tokio::select! {
+            () = wait_all => false,
+            _ = tokio::signal::ctrl_c() => {
+                for handle in &handles {
+                    handle.abort();
+                }
+                true
+            },
+        };
+
+        pb.finish_and_clear();
+        // All tasks are either complete or aborted -- safe to lock.
+        let collected = results.lock().await.clone();
+
+        ScanOutput { results: collected, total, interrupted }
     }
 
-    /// Parse target specifications into a flat list of IP addresses.
+    /// Parse target specifications into a flat list of `TargetSpec`.
     ///
-    /// Accepted formats:
-    /// - Bare IP: `192.168.1.1`
-    /// - CIDR range: `192.168.0.0/24`
-    /// - Hostname: `nfsserver.example.com` (DNS-resolved)
-    /// - File path: `/path/to/targets.txt` (one spec per line)
-    pub fn parse_targets(specs: &[String]) -> anyhow::Result<Vec<IpAddr>> {
-        let mut ips = Vec::new();
+    /// Preserves hostnames and deduplicates by IP (first-seen hostname wins).
+    pub fn parse_targets(specs: &[String]) -> anyhow::Result<Vec<TargetSpec>> {
+        let mut targets = Vec::new();
+
         for spec in specs {
-            if std::path::Path::new(spec.as_str()).exists() {
+            // Check if it's a file path.
+            let path = std::path::Path::new(spec.as_str());
+            if path.is_file() && (path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) || !spec.contains('/')) {
                 let content = std::fs::read_to_string(spec).with_context(|| format!("read targets file {spec}"))?;
-                let file_specs: Vec<String> = content.lines().map(str::to_owned).collect();
-                ips.extend(Self::parse_targets(&file_specs)?);
-            } else if let Ok(net) = spec.parse::<IpNet>() {
-                ips.extend(net.hosts());
+                let file_specs: Vec<String> = content.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).map(str::to_owned).collect();
+                targets.extend(Self::parse_targets(&file_specs)?);
+                continue;
+            }
+
+            if let Ok(net) = spec.parse::<IpNet>() {
+                for ip in net.hosts() {
+                    targets.push(TargetSpec { ip, hostname: None });
+                }
             } else if let Ok(ip) = spec.parse::<IpAddr>() {
-                ips.push(ip);
+                targets.push(TargetSpec { ip, hostname: None });
             } else {
-                // Assume hostname -- resolve via stdlib getaddrinfo (no crate needed).
+                // Assume hostname.
                 match format!("{spec}:0").to_socket_addrs() {
-                    Ok(addrs) => ips.extend(addrs.map(|a| a.ip())),
+                    Ok(addrs) => {
+                        for a in addrs {
+                            targets.push(TargetSpec { ip: a.ip(), hostname: Some(spec.clone()) });
+                        }
+                    },
                     Err(e) => tracing::warn!("DNS lookup failed for {spec}: {e}"),
                 }
             }
         }
-        Ok(ips)
+
+        // IP deduplication: first-seen hostname wins.
+        let mut seen = HashSet::new();
+        targets.retain(|t| seen.insert(t.ip));
+        Ok(targets)
     }
 }
 
-/// Per-host scan parameters extracted from `ScanConfig` for task spawn.
+/// Per-host scan parameters.
 struct ScanJob {
     timeout: Duration,
-    transport_udp: bool,
+    scan_udp: bool,
+    nfs_ports: Vec<u16>,
+    mount_port: Option<u16>,
     proxy: Option<String>,
+    stealth: StealthConfig,
 }
 
-/// Probe a single host and return its `HostResult`.
-async fn scan_host(ip: IpAddr, portmap: PortmapClient, mount: NfsMountClient, job: ScanJob) -> HostResult {
+/// Probe a single host. Returns `None` if no NFS version is confirmed.
+async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
+    let start = Instant::now();
+    let ip = target.ip;
     let probe_timeout = job.timeout;
-    let addr = SocketAddr::new(ip, 111);
-    let nfs_addr = SocketAddr::new(ip, 2049);
 
-    // Probe both ports in parallel: a half-open firewall on one port shouldn't
-    // serialize the other.
-    let (portmap_open, nfs_port_open) = tokio::join!(is_port_open(addr, probe_timeout, job.proxy.as_deref()), is_port_open(nfs_addr, probe_timeout, job.proxy.as_deref()));
+    // --- Stage 1: TCP/UDP probe port 111 ---
+    let portmap_addr = SocketAddr::new(ip, 111);
+    let portmap_tcp = is_port_open(portmap_addr, probe_timeout, job.proxy.as_deref()).await;
+    let portmap_udp = if job.scan_udp { crate::proto::udp::probe_udp_rpc(portmap_addr, 100_000, 2, probe_timeout).await } else { false };
+    let portmap_reachability = PortReachability::from_probes(portmap_tcp, portmap_udp);
 
-    if !nfs_port_open && !portmap_open {
-        return HostResult { addr, nfs_port_open, portmap_open, nfs_versions: vec![], exports: vec![], os_guess: None, connected_clients: vec![], nfs4_reachable: false };
-    }
+    // --- Stage 2: Portmapper DUMP + GETPORT fallback ---
+    let portmap = PortmapClient::default_port();
+    let portmap = if let Some(ref p) = job.proxy { portmap.with_proxy(p.clone()) } else { portmap };
 
-    let nfs_versions = if job.transport_udp {
-        // UDP portmapper: bypass TCP/111 firewalls by querying PMAPPROC_DUMP over UDP.
-        detect_nfs_versions_udp(addr, probe_timeout).await
-    } else if portmap_open {
-        // Cap the RPC at probe_timeout: a stateful firewall may complete the TCP
-        // handshake on 111 then drop RPC payload, stalling the underlying client default.
-        timeout(probe_timeout, portmap.detect_nfs_versions(addr)).await.ok().and_then(Result::ok).unwrap_or_default()
-    } else if nfs_port_open {
-        vec![3] // portmapper closed, NFS port open -- assume v3
+    let dump_entries = if portmap_reachability.has_tcp() { timeout(probe_timeout, portmap.dump(portmap_addr)).await.ok().and_then(Result::ok).unwrap_or_default() } else { vec![] };
+
+    // Extract NFS and MOUNT entries from dump.
+    let nfs_from_dump: Vec<(u32, u32, u16)> = dump_entries.iter().filter(|e| e.program == 100_003 && e.port > 0).map(|e| (e.version, e.protocol, e.port)).collect();
+    let mount_from_dump: Vec<(u32, u32, u16)> = dump_entries.iter().filter(|e| e.program == 100_005 && e.port > 0).map(|e| (e.version, e.protocol, e.port)).collect();
+
+    // If dump returned nothing and portmapper is reachable, try individual GETPORT queries.
+    let (nfs_from_getport, mount_from_getport) = if nfs_from_dump.is_empty() && portmap_reachability.has_tcp() {
+        let mut nfs_gp = Vec::new();
+        let mut mount_gp = Vec::new();
+        for v in [2u32, 3, 4] {
+            if let Ok(Ok(port)) = timeout(probe_timeout, portmap.query_port(portmap_addr, 100_003, v)).await
+                && port > 0
+            {
+                nfs_gp.push((v, 6u32, port)); // 6 = TCP
+            }
+        }
+        for v in [1u32, 3] {
+            if let Ok(Ok(port)) = timeout(probe_timeout, portmap.query_port(portmap_addr, 100_005, v)).await
+                && port > 0
+            {
+                mount_gp.push((v, 6u32, port));
+            }
+        }
+        (nfs_gp, mount_gp)
     } else {
-        vec![]
+        (vec![], vec![])
     };
 
-    if nfs_versions.is_empty() && !nfs_port_open {
-        return HostResult { addr, nfs_port_open, portmap_open, nfs_versions, exports: vec![], os_guess: None, connected_clients: vec![], nfs4_reachable: false };
+    // --- Stage 3: NFS + mountd port set assembly + dedup ---
+    let mut nfs_port_set: HashSet<u16> = HashSet::new();
+    for &(_, _, port) in nfs_from_dump.iter().chain(nfs_from_getport.iter()) {
+        nfs_port_set.insert(port);
+    }
+    for &port in &job.nfs_ports {
+        nfs_port_set.insert(port);
+    }
+    // If no NFS port from portmapper, add 2049 as fallback.
+    if nfs_from_dump.is_empty() && nfs_from_getport.is_empty() {
+        nfs_port_set.insert(2049);
     }
 
-    // Enumerate exports -- bounded so a stalled mountd can't sink the worker.
-    let export_entries = timeout(probe_timeout, mount.list_exports(addr)).await.ok().and_then(Result::ok).unwrap_or_default();
+    // Mountd port discovery.
+    let mount_client = if let Some(ref p) = job.proxy { NfsMountClient::new().with_proxy(p.clone()) } else { NfsMountClient::new() };
+    let mount_client = if let Some(port) = job.mount_port { NfsMountClient::with_port(port) } else { mount_client };
 
-    let mut exports = Vec::new();
-    let mut os_guess: Option<String> = None;
+    let mut mountd_ports: HashSet<u16> = HashSet::new();
+    for &(_, _, port) in mount_from_dump.iter().chain(mount_from_getport.iter()) {
+        mountd_ports.insert(port);
+    }
 
-    for entry in export_entries {
-        let mount_result = timeout(probe_timeout, mount.mount(addr, &entry.path)).await;
-        let (auth_flavors, file_handle) = match mount_result {
-            Ok(Ok(mr)) => {
-                if os_guess.is_none() {
-                    let fh = FileHandle::from_bytes(&mr.handle.0);
-                    os_guess = Some(format!("{:?}/{:?}", FileHandleAnalyzer::fingerprint_os(&fh), FileHandleAnalyzer::fingerprint_fs(&fh)));
+    if mountd_ports.is_empty() {
+        if let Some(mp) = job.mount_port {
+            mountd_ports.insert(mp);
+        } else {
+            // Probe fallback ports 2049, 20048 with MOUNT NULL.
+            for &port in &[2049u16, 20048] {
+                let probe_addr = SocketAddr::new(ip, port);
+                if is_port_open(probe_addr, probe_timeout, job.proxy.as_deref()).await {
+                    let mc = if let Some(ref p) = job.proxy { NfsMountClient::with_port(port).with_proxy(p.clone()) } else { NfsMountClient::with_port(port) };
+                    if timeout(probe_timeout, mc.list_exports(SocketAddr::new(ip, 111))).await.is_ok_and(|r| r.is_ok()) {
+                        mountd_ports.insert(port);
+                        break;
+                    }
                 }
-                (mr.auth_flavors, Some(mr.handle.0.clone()))
-            },
-            _ => (vec![], None),
-        };
-        exports.push(ExportInfo { path: entry.path, allowed_hosts: entry.allowed_hosts, auth_flavors, file_handle });
+            }
+        }
     }
 
-    // Connected clients from MNTPROC_DUMP -- always enumerated.
-    let connected_clients = timeout(probe_timeout, mount.dump_clients(addr)).await.ok().and_then(Result::ok).unwrap_or_default().into_iter().map(|c| c.hostname).collect();
-
-    // NIS detection -- always probed when portmapper is reachable.
-    if portmap_open
-        && let Ok(Ok(nis)) = timeout(probe_timeout, portmap.detect_nis(addr)).await
-        && nis.ypserv_present
-    {
-        tracing::info!(%ip, port = ?nis.ypserv_port, "NIS ypserv detected");
+    // --- Stage 4: Reachability probes on NFS ports ---
+    let mut nfs_ports_info: Vec<NfsPortInfo> = Vec::new();
+    for &port in &nfs_port_set {
+        let addr = SocketAddr::new(ip, port);
+        let tcp = is_port_open(addr, probe_timeout, job.proxy.as_deref()).await;
+        let udp = if job.scan_udp { crate::proto::udp::probe_udp_rpc(addr, 100_003, 3, probe_timeout).await } else { false };
+        if tcp || udp {
+            nfs_ports_info.push(NfsPortInfo { port, tcp, udp, v2: false, v3: false, v4: false });
+        }
     }
 
-    // NFSv4 direct probe: confirm the server actually responds to NFSv4 COMPOUND.
-    // This catches NFSv4-only servers where portmapper is filtered but port 2049 is open.
-    let nfs4_reachable = if nfs_port_open { probe_nfs4(ip, probe_timeout, job.proxy.as_deref()).await } else { false };
+    // --- Stage 5: Version probes ---
+    let mut hint: Option<VersionRange> = None;
 
-    HostResult { addr, nfs_port_open, portmap_open, nfs_versions, exports, os_guess, connected_clients, nfs4_reachable }
+    for port_info in &mut nfs_ports_info {
+        if !port_info.tcp {
+            continue;
+        }
+        let addr = SocketAddr::new(ip, port_info.port);
+        let (v2_res, v3_res, v4_res) = probe_nfs_versions_tcp(addr, probe_timeout, job.proxy.as_deref()).await;
+
+        port_info.v2 = v2_res.is_accepted();
+        port_info.v3 = v3_res.is_accepted();
+        // For v4: any valid COMPOUND response (even non-zero NFS4 status) confirms v4.
+        port_info.v4 = v4_res.is_accepted();
+
+        // Capture first PROG_MISMATCH range for the Hint column.
+        if hint.is_none() {
+            if let Some(r) = v2_res.mismatch_range() {
+                hint = Some(r.clone());
+            } else if let Some(r) = v3_res.mismatch_range() {
+                hint = Some(r.clone());
+            } else if let Some(r) = v4_res.mismatch_range() {
+                hint = Some(r.clone());
+            }
+        }
+    }
+
+    // UDP version probes.
+    if job.scan_udp {
+        for port_info in &mut nfs_ports_info {
+            if !port_info.udp {
+                continue;
+            }
+            let addr = SocketAddr::new(ip, port_info.port);
+            if !port_info.v2 {
+                let r = crate::proto::rpc_probe::probe_nfs_null_udp(addr, 2, probe_timeout).await;
+                if r.is_accepted() {
+                    port_info.v2 = true;
+                }
+                if hint.is_none()
+                    && let Some(range) = r.mismatch_range()
+                {
+                    hint = Some(range.clone());
+                }
+            }
+            if !port_info.v3 {
+                let r = crate::proto::rpc_probe::probe_nfs_null_udp(addr, 3, probe_timeout).await;
+                if r.is_accepted() {
+                    port_info.v3 = true;
+                }
+                if hint.is_none()
+                    && let Some(range) = r.mismatch_range()
+                {
+                    hint = Some(range.clone());
+                }
+            }
+        }
+    }
+
+    // --- Stage 6: Host skip logic ---
+    if !nfs_ports_info.iter().any(NfsPortInfo::any_version) {
+        return None;
+    }
+
+    // --- Stage 7: MOUNT queries ---
+    // Build MountPortInfo for output -- only include versions relevant to
+    // confirmed NFS versions (v1=NFSv2, v3=NFSv3). Filter out mountd v2
+    // (legacy Linux artifact, not tied to any NFS version).
+    let confirmed_v2 = nfs_ports_info.iter().any(|p| p.v2);
+    let confirmed_v3 = nfs_ports_info.iter().any(|p| p.v3);
+    let mount_ports: Vec<MountPortInfo> = {
+        let mut infos: Vec<MountPortInfo> = Vec::new();
+        let all_mount = mount_from_dump.iter().chain(mount_from_getport.iter());
+        for &(version, protocol, port) in all_mount {
+            // Only include mount versions tied to confirmed NFS versions.
+            // mountd v1 -> NFSv2, mountd v3 -> NFSv3. Skip mountd v2 (unused artifact).
+            if version == 1 && !confirmed_v2 {
+                continue;
+            }
+            if version == 2 {
+                continue;
+            }
+            if version == 3 && !confirmed_v3 {
+                continue;
+            }
+            // Only show TCP mount ports (UDP mountd isn't useful for the scanner).
+            if protocol != 6 {
+                continue;
+            }
+            if let Some(info) = infos.iter_mut().find(|i| i.port == port) {
+                if !info.versions.contains(&version) {
+                    info.versions.push(version);
+                }
+            } else {
+                infos.push(MountPortInfo { port, tcp: true, udp: false, versions: vec![version] });
+            }
+        }
+        infos
+    };
+
+    // v3 exports -- only query if NFSv3 version probe succeeded
+    let has_v3 = nfs_ports_info.iter().any(|p| p.v3);
+    let exports_v3 = if has_v3 && (mount_ports.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
+        match timeout(probe_timeout, mount_client.list_exports(SocketAddr::new(ip, 111))).await {
+            Ok(Ok(e)) => Some(e),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // v2 exports (via MOUNT v1) -- only query if NFSv2 version probe succeeded
+    let has_v2 = nfs_ports_info.iter().any(|p| p.v2);
+    let exports_v2 = if has_v2 && mount_ports.iter().any(|m| m.versions.contains(&1)) {
+        match timeout(probe_timeout, mount_client.list_exports_v1(SocketAddr::new(ip, 111))).await {
+            Ok(Ok(e)) => Some(e),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // MOUNT DUMP
+    let mounts = if !mountd_ports.is_empty() || mount_ports.iter().any(|m| m.tcp) {
+        match timeout(probe_timeout, mount_client.dump_clients(SocketAddr::new(ip, 111))).await {
+            Ok(Ok(m)) => Some(m),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // --- Stage 8: NFSv4 READDIR ---
+    let has_v4 = nfs_ports_info.iter().any(|p| p.v4);
+    let exports_v4 = if has_v4 {
+        let v4_port = nfs_ports_info.iter().find(|p| p.v4).map_or(2049, |p| p.port);
+        let v4_addr = SocketAddr::new(ip, v4_port);
+        match timeout(probe_timeout, readdir_v4_pseudo_root(v4_addr, job.proxy.as_deref())).await {
+            Ok(Ok(entries)) => Some(entries),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // --- Stage 9: Assembly + stealth delay ---
+    if !job.stealth.delay.is_zero() || !job.stealth.jitter.is_zero() {
+        job.stealth.wait().await;
+    }
+
+    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports, exports_v2, exports_v3, exports_v4, mounts, hint, scan_duration: start.elapsed() })
 }
 
 /// Non-blocking TCP probe: returns true if the port accepts connections within timeout.
-///
-/// When `proxy` is set, the probe is tunnelled through the SOCKS5 proxy so the
-/// reachability test reflects the proxy's perspective and no direct traffic leaks.
 async fn is_port_open(addr: SocketAddr, probe_timeout: Duration, proxy: Option<&str>) -> bool {
     if let Some(p) = proxy {
         let Ok(proxy_addr) = crate::proto::conn::parse_proxy_addr(p) else { return false };
@@ -271,27 +462,18 @@ async fn is_port_open(addr: SocketAddr, probe_timeout: Duration, proxy: Option<&
     }
 }
 
-/// Detect registered NFS versions via the portmapper DUMP procedure over UDP.
+/// Enumerate top-level NFSv4 pseudo-FS entries via COMPOUND([PUTROOTFH, READDIR]).
 ///
-/// Used when `--transport-udp` is set and TCP/111 may be firewalled.
-/// Sends PMAPPROC_DUMP (proc 4) over UDP, parses the mapping list, and
-/// returns all NFS (program 100003) TCP-registered versions.
-async fn detect_nfs_versions_udp(addr: SocketAddr, probe_timeout: Duration) -> Vec<u32> {
-    use nfs3_types::portmap::{IPPROTO_TCP, pmaplist};
-    use nfs3_types::xdr_codec::Void;
-
-    // portmapper: program 100000, version 2, PMAPPROC_DUMP = proc 4.
-    const PMAP_PROGRAM: u32 = 100_000;
-    const PMAP_VERSION: u32 = 2;
-    const PMAPPROC_DUMP: u32 = 4;
-    const NFS_PROGRAM: u32 = 100_003;
-
-    let Ok(list) = call_rpc_udp::<Void, pmaplist>(addr, PMAP_PROGRAM, PMAP_VERSION, PMAPPROC_DUMP, &Void, probe_timeout).await else {
-        return vec![];
+/// Tries AUTH_SYS (uid=0) first since most servers require it for the pseudo-root.
+/// Falls back to AUTH_NONE if AUTH_SYS fails.
+async fn readdir_v4_pseudo_root(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Vec<V4ExportEntry>> {
+    // AUTH_SYS with uid=0 (most servers require at least AUTH_SYS for READDIR)
+    let result = Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await;
+    let mut client = match result {
+        Ok(c) => c,
+        Err(_) => Nfs4DirectClient::connect_proxy(addr, proxy).await?,
     };
-
-    let mut versions: Vec<u32> = list.into_inner().into_iter().filter(|m| m.prog == NFS_PROGRAM && m.prot == IPPROTO_TCP).map(|m| m.vers).collect();
-    versions.sort_unstable();
-    versions.dedup();
-    versions
+    let root_fh = client.get_root_fh().await?;
+    let entries = client.list_dir(&root_fh).await?;
+    Ok(entries.into_iter().map(|name| V4ExportEntry { path: name }).collect())
 }

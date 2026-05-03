@@ -16,7 +16,7 @@ use std::sync::Arc;
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
 use crate::engine::analyzer::{AnalysisResult, AnalyzeConfig, Analyzer};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
@@ -75,6 +75,11 @@ pub struct AnalyzeArgs {
     /// NFSv4 directory tree depth for overview
     #[arg(long, default_value = "2", help_heading = H_BEHAVIOR)]
     pub v4_depth: u32,
+
+    /// Emit machine-readable JSON to stdout instead of human-readable output.
+    /// Capture with shell redirection: `nfswolf analyze --json target > results.json`
+    #[arg(long, help_heading = H_OUTPUT)]
+    pub json: bool,
 }
 
 impl AnalyzeArgs {
@@ -107,12 +112,12 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
 
     for host in &targets {
         tracing::info!(%host, "analyzing NFS server");
-        if !globals.quiet && !globals.json {
+        if !globals.quiet && !args.json {
             eprintln!("{}", crate::output::status_info(&format!("Analyzing {host}...")));
         }
         let start = std::time::Instant::now();
         let result = run_single(host, &args, globals).await?;
-        if globals.json {
+        if args.json {
             // Defer printing until every host has been analysed so the JSON
             // output is a single array.
         } else {
@@ -124,7 +129,7 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
         all_results.push(result);
     }
 
-    if globals.json {
+    if args.json {
         let json = serde_json::to_string_pretty(&all_results)?;
         println!("{json}");
     }

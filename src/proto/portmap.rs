@@ -149,7 +149,7 @@ impl PortmapClient {
     ///
     /// This is a TCP-based approximation. True UDP measurement would require
     /// a raw UDP socket, which lives in `proto::udp` and is wired through
-    /// the global `--transport-udp` flag.
+    /// the `--scan-udp` flag.
     pub async fn measure_amplification(&self, addr: SocketAddr) -> anyhow::Result<PortmapAmplificationResult> {
         // Estimate request size: RPC header + DUMP args = ~64 bytes
         let request_bytes: usize = 64;

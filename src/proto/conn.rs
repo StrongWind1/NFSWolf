@@ -295,7 +295,7 @@ impl NfsConnection {
 /// 4. Reply: [VER, REP=0(success), RSV, ATYP, BNDADDR, BNDPORT]
 ///
 /// IPv6 targets are not supported (NFS servers are typically IPv4).
-pub(crate) async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::io::Result<TcpStream> {
+pub async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy_addr).await?;
 
     // Step 1: greeting  --  offer NO_AUTH (method 0x00).
@@ -327,7 +327,7 @@ pub(crate) async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -
 }
 
 /// Parse a proxy string of the form `host:port` or `socks5://host:port`.
-pub(crate) fn parse_proxy_addr(proxy: &str) -> anyhow::Result<SocketAddr> {
+pub fn parse_proxy_addr(proxy: &str) -> anyhow::Result<SocketAddr> {
     let stripped = proxy.strip_prefix("socks5://").unwrap_or(proxy);
     stripped.parse::<SocketAddr>().with_context(|| format!("invalid proxy address '{proxy}' (expected host:port or socks5://host:port)"))
 }
