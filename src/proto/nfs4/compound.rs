@@ -129,6 +129,7 @@ impl Nfs4Client {
 pub struct Nfs4DirectClient {
     rpc: RpcClient<TokioIo<TcpStream>>,
     addr: SocketAddr,
+    proxy: Option<String>,
 }
 
 impl std::fmt::Debug for Nfs4DirectClient {
@@ -138,15 +139,31 @@ impl std::fmt::Debug for Nfs4DirectClient {
 }
 
 impl Nfs4DirectClient {
+    /// Open a TCP connection, tunnelling through a SOCKS5 proxy when configured.
+    async fn connect_tcp(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<TokioIo<TcpStream>> {
+        if let Some(p) = proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, addr).await.with_context(|| format!("SOCKS5 connect to {addr} via {p}"))?;
+            Ok(TokioIo::new(stream))
+        } else {
+            TokioConnector.connect(addr).await.with_context(|| format!("NFSv4 TCP connect to {addr}"))
+        }
+    }
+
     /// Connect directly to the NFS port on `addr` without MOUNT, using AUTH_NONE.
     ///
     /// Suitable for anonymous probes (scanner, analyzer).  For interactive shell
     /// use `connect_with_auth` so UID/GID/hostname are sent in every COMPOUND.
     pub async fn connect(addr: SocketAddr) -> anyhow::Result<Self> {
+        Self::connect_proxy(addr, None).await
+    }
+
+    /// Connect via an optional SOCKS5 proxy, using AUTH_NONE.
+    pub async fn connect_proxy(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Self> {
         let null_auth = nfs3_types::rpc::opaque_auth::default();
-        let io = TokioConnector.connect(addr).await.with_context(|| format!("NFSv4 TCP connect to {addr}"))?;
+        let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, null_auth.clone(), null_auth);
-        Ok(Self { rpc, addr })
+        Ok(Self { rpc, addr, proxy: proxy.map(String::from) })
     }
 
     /// Connect with an AUTH_SYS credential (`uid`, `gid`, `hostname`).
@@ -155,11 +172,16 @@ impl Nfs4DirectClient {
     /// AUTH_SYS opaque_auth structure (RFC 5531 S14 / RFC 2623 S2.1).
     /// The server cannot verify these claims, so any values can be spoofed.
     pub async fn connect_with_auth(addr: SocketAddr, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<Self> {
+        Self::connect_with_auth_proxy(addr, uid, gid, hostname, None).await
+    }
+
+    /// Connect with AUTH_SYS via an optional SOCKS5 proxy.
+    pub async fn connect_with_auth_proxy(addr: SocketAddr, uid: u32, gid: u32, hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
         let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth();
-        let io = TokioConnector.connect(addr).await.with_context(|| format!("NFSv4 TCP connect to {addr}"))?;
+        let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, opaque, nfs3_types::rpc::opaque_auth::default());
-        Ok(Self { rpc, addr })
+        Ok(Self { rpc, addr, proxy: proxy.map(String::from) })
     }
 
     /// Rebuild the RPC credential and reconnect the underlying TCP socket.
@@ -170,7 +192,7 @@ impl Nfs4DirectClient {
     pub async fn reconnect_with_auth(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         use crate::proto::auth::AuthSys;
         let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth();
-        let io = TokioConnector.connect(self.addr).await.with_context(|| format!("NFSv4 TCP reconnect to {}", self.addr))?;
+        let io = Self::connect_tcp(self.addr, self.proxy.as_deref()).await?;
         self.rpc = RpcClient::new_with_auth(io, opaque, nfs3_types::rpc::opaque_auth::default());
         Ok(())
     }
@@ -260,9 +282,10 @@ impl Nfs4DirectClient {
 ///
 /// Sends `PUTROOTFH` and returns `true` if the server responds with `NFS4_OK`.
 /// Used by the scanner to confirm NFSv4 reachability independent of portmapper.
-pub async fn probe_nfs4(ip: IpAddr, probe_timeout: Duration) -> bool {
+/// When `proxy` is `Some`, the TCP connection is tunnelled through SOCKS5.
+pub async fn probe_nfs4(ip: IpAddr, probe_timeout: Duration, proxy: Option<&str>) -> bool {
     let addr = SocketAddr::new(ip, 2049);
-    let connect = tokio::time::timeout(probe_timeout, Nfs4DirectClient::connect(addr)).await;
+    let connect = tokio::time::timeout(probe_timeout, Nfs4DirectClient::connect_proxy(addr, proxy)).await;
     let Ok(Ok(mut client)) = connect else { return false };
     let result = tokio::time::timeout(probe_timeout, client.compound(vec![ArgOp::Putrootfh])).await;
     matches!(result, Ok(Ok(res)) if res.status == 0)

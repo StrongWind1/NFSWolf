@@ -33,4 +33,4 @@ What did you expect instead?
 
 ## Additional context
 
-Anything else useful — stack traces with `RUST_BACKTRACE=1`, packet captures, server configuration.
+Anything else useful -- stack traces with `RUST_BACKTRACE=1`, packet captures, server configuration.

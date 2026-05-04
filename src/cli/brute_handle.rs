@@ -86,7 +86,7 @@ async fn run_inner(host: &str, fs_type: &str, seed_handle: &str, max_attempts: u
     let mount = make_mount_client(globals);
     let exports = mount.list_exports(addr).await.unwrap_or_default();
     let export_path = exports.first().map_or("/", |e| e.path.as_str()).to_owned();
-    let (_, _, client) = make_client(addr, &export_path, 0, 0, &[], stealth.clone());
+    let (_, _, client) = make_client(addr, &export_path, 0, 0, &[], stealth.clone(), globals.proxy.as_deref());
 
     let mut hits = 0u64;
     let mut stale = 0u64;

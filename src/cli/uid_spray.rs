@@ -74,7 +74,7 @@ pub async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Result<()>
     eprintln!("{}", format!("[*] Spraying UIDs {}-{} on {host}:{export}", args.uid_start, args.uid_end).yellow());
 
     let addr = parse_addr(&host)?;
-    let (_, circuit, client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone());
+    let (_, circuit, client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref());
 
     // Mount to get the root handle, then walk to the target path.
     let mount = make_mount_client(globals);
@@ -82,7 +82,7 @@ pub async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Result<()>
     let target_fh = if args.path == "/" {
         mnt.handle
     } else {
-        let (_, _, lookup_client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone());
+        let (_, _, lookup_client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref());
         lookup_path(&lookup_client, &mnt.handle, &args.path).await?
     };
 

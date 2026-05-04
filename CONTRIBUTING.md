@@ -6,7 +6,7 @@ Thanks for your interest in improving nfswolf. This document is the short-form e
 
 - nfswolf is an **authorized-use** security tool.
 - Every protocol constant, flag, and wire value must be traceable to an RFC section or documented as a deliberate deviation.
-- Pure Rust only — no new C dependencies. The primary distribution is a static musl binary.
+- Pure Rust only -- no new C dependencies. The primary distribution is a static musl binary.
 - Keep the project's role in mind: nfswolf is the *attacker* against misconfigured NFS servers in authorized engagements. The server is the target, not the threat. Code does not need to defend against malicious server replies.
 
 ## Prerequisites
@@ -36,13 +36,13 @@ make check-all
 That target runs, in order:
 
 1. `cargo fmt -- --check`
-2. `cargo clippy --all-targets --all-features` — zero warnings.
-3. `cargo deny check` — licenses, advisories, sources. Requires network access on first run to fetch the advisory DB.
+2. `cargo clippy --all-targets --all-features` -- zero warnings.
+3. `cargo deny check` -- licenses, advisories, sources. Requires network access on first run to fetch the advisory DB.
 4. `cargo check --all-targets --all-features`
-5. `test-matrix` — three feature combinations (`--all-features`, `--no-default-features`, `--features fuse`).
+5. `test-matrix` -- three feature combinations (`--all-features`, `--no-default-features`, `--features fuse`).
 6. `cargo doc --all-features --no-deps` with `-D warnings`.
 7. ASCII / LF hygiene over tracked `.rs` files.
-8. `cargo machete` — unused dependency check.
+8. `cargo machete` -- unused dependency check.
 
 If you need an offline gate that skips `cargo deny`, run the targets individually:
 
@@ -68,7 +68,7 @@ Run `cargo fmt` and `cargo clippy --fix` liberally; the repo uses `rustfmt.toml`
 
 ## Commit and PR
 
-- Commit messages use imperative mood, first line ≤72 chars. Conventional-commit prefixes (`feat:`, `fix:`, `refactor:`, `ci:`, `docs:`, `chore:`) are welcome but not enforced.
+- Commit messages use imperative mood, first line <=72 chars. Conventional-commit prefixes (`feat:`, `fix:`, `refactor:`, `ci:`, `docs:`, `chore:`) are welcome but not enforced.
 - One logical change per PR. Keep refactors separate from behavior changes when practical.
 
 ## Releasing

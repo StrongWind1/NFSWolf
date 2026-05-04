@@ -16,12 +16,11 @@ use std::sync::Arc;
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
 use crate::engine::analyzer::{AnalysisResult, AnalyzeConfig, Analyzer};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
-use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::proto::portmap::PortmapClient;
@@ -76,6 +75,11 @@ pub struct AnalyzeArgs {
     /// NFSv4 directory tree depth for overview
     #[arg(long, default_value = "2", help_heading = H_BEHAVIOR)]
     pub v4_depth: u32,
+
+    /// Emit machine-readable JSON to stdout instead of human-readable output.
+    /// Capture with shell redirection: `nfswolf analyze --json target > results.json`
+    #[arg(long, help_heading = H_OUTPUT)]
+    pub json: bool,
 }
 
 impl AnalyzeArgs {
@@ -108,12 +112,12 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
 
     for host in &targets {
         tracing::info!(%host, "analyzing NFS server");
-        if !globals.quiet && !globals.json {
+        if !globals.quiet && !args.json {
             eprintln!("{}", crate::output::status_info(&format!("Analyzing {host}...")));
         }
         let start = std::time::Instant::now();
         let result = run_single(host, &args, globals).await?;
-        if globals.json {
+        if args.json {
             // Defer printing until every host has been analysed so the JSON
             // output is a single array.
         } else {
@@ -125,7 +129,7 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
         all_results.push(result);
     }
 
-    if globals.json {
+    if args.json {
         let json = serde_json::to_string_pretty(&all_results)?;
         println!("{json}");
     }
@@ -158,14 +162,25 @@ fn strip_export(s: &str) -> String {
 async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<AnalysisResult> {
     let addr: SocketAddr = format!("{host}:111").parse().map_err(|_| anyhow::anyhow!("invalid host: {host}"))?;
 
-    let pool = Arc::new(ConnectionPool::default_config());
+    let pool = Arc::new(match &globals.proxy {
+        Some(p) => ConnectionPool::with_proxy(p.clone()),
+        None => ConnectionPool::default_config(),
+    });
     let circuit = Arc::new(CircuitBreaker::default_config());
     let cred = Credential::Sys(AuthSys::new(globals.uid, globals.gid, &globals.hostname));
     let pool_key = PoolKey { host: addr, export: "/".to_owned(), uid: globals.uid, gid: globals.gid };
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let nfs3 = Arc::new(Nfs3Client::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent));
 
-    let analyzer = Analyzer::new(nfs3, NfsMountClient::new(), PortmapClient::default_port());
+    let mount_client = crate::cli::probe::make_mount_client(globals);
+    let portmap_client = match &globals.proxy {
+        Some(p) => PortmapClient::default_port().with_proxy(p.clone()),
+        None => PortmapClient::default_port(),
+    };
+    let mut analyzer = Analyzer::new(nfs3, mount_client, portmap_client);
+    if let Some(ref p) = globals.proxy {
+        analyzer = analyzer.with_proxy(p.clone());
+    }
     let config = AnalyzeConfig { host: host.to_owned(), port: 2049, test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
     analyzer.analyze(&config).await
 }
