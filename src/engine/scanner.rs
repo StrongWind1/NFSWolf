@@ -238,11 +238,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         let mut nfs_gp = Vec::new();
         let mut mount_gp = Vec::new();
         for v in [2u32, 3, 4] {
-            let result = if portmap_reachability.has_tcp() {
-                timeout(probe_timeout, portmap.query_port(portmap_addr, 100_003, v)).await.ok().and_then(Result::ok)
-            } else {
-                portmap.query_port_udp(portmap_addr, 100_003, v, probe_timeout).await.ok()
-            };
+            let result = if portmap_reachability.has_tcp() { timeout(probe_timeout, portmap.query_port(portmap_addr, 100_003, v)).await.ok().and_then(Result::ok) } else { portmap.query_port_udp(portmap_addr, 100_003, v, probe_timeout).await.ok() };
             if let Some(port) = result
                 && port > 0
             {
@@ -250,11 +246,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             }
         }
         for v in [1u32, 3] {
-            let result = if portmap_reachability.has_tcp() {
-                timeout(probe_timeout, portmap.query_port(portmap_addr, 100_005, v)).await.ok().and_then(Result::ok)
-            } else {
-                portmap.query_port_udp(portmap_addr, 100_005, v, probe_timeout).await.ok()
-            };
+            let result = if portmap_reachability.has_tcp() { timeout(probe_timeout, portmap.query_port(portmap_addr, 100_005, v)).await.ok().and_then(Result::ok) } else { portmap.query_port_udp(portmap_addr, 100_005, v, probe_timeout).await.ok() };
             if let Some(port) = result
                 && port > 0
             {
