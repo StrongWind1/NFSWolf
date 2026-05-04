@@ -6,12 +6,13 @@
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use nfs3_client::PortmapperClient;
 use nfs3_client::net::Connector as _;
 use nfs3_client::tokio::{TokioConnector, TokioIo};
-use nfs3_types::portmap::{IPPROTO_TCP, IPPROTO_UDP};
+use nfs3_types::portmap::{self, IPPROTO_TCP, IPPROTO_UDP};
 
 /// RPC program numbers relevant to NFS infrastructure.
 /// NFSv2/v3/v4 server (program 100003, RFC 1057 S9).
@@ -79,7 +80,7 @@ impl PortmapClient {
     /// Create with the standard portmapper port (111).
     #[must_use]
     pub const fn default_port() -> Self {
-        Self::new(nfs3_types::portmap::PMAP_PORT)
+        Self::new(portmap::PMAP_PORT)
     }
 
     /// Attach a SOCKS5 proxy to this client.
@@ -173,5 +174,25 @@ impl PortmapClient {
     #[must_use]
     pub fn has_nfs_udp(entries: &[PortmapEntry]) -> bool {
         entries.iter().any(|e| e.program == PROG_NFS && e.protocol == IPPROTO_UDP)
+    }
+
+    /// Enumerate all registered RPC services via PMAPPROC_DUMP over UDP.
+    ///
+    /// Fallback for environments where TCP/111 is firewalled but UDP/111 is open
+    /// (RFC 1057 S10: portmapper MUST be available on both transports).
+    pub async fn dump_udp(&self, addr: SocketAddr, probe_timeout: Duration) -> anyhow::Result<Vec<PortmapEntry>> {
+        use nfs3_types::xdr_codec::Void;
+
+        let pmap_addr = SocketAddr::new(addr.ip(), self.port);
+        let list: portmap::pmaplist = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 4, &Void, probe_timeout).await.context("PMAPPROC_DUMP over UDP")?;
+        Ok(list.0.into_iter().filter_map(|m| u16::try_from(m.port).ok().map(|port| PortmapEntry { program: m.prog, version: m.vers, protocol: m.prot, port })).collect())
+    }
+
+    /// Resolve the port for `program`/`version` via PMAPPROC_GETPORT over UDP.
+    pub async fn query_port_udp(&self, addr: SocketAddr, program: u32, version: u32, probe_timeout: Duration) -> anyhow::Result<u16> {
+        let pmap_addr = SocketAddr::new(addr.ip(), self.port);
+        let query = portmap::mapping { prog: program, vers: version, prot: IPPROTO_TCP, port: 0 };
+        let port: u32 = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 3, &query, probe_timeout).await.context("PMAPPROC_GETPORT over UDP")?;
+        u16::try_from(port).with_context(|| format!("port {port} out of u16 range"))
     }
 }

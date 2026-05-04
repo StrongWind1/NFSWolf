@@ -219,25 +219,43 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let portmap = PortmapClient::default_port();
     let portmap = if let Some(ref p) = job.proxy { portmap.with_proxy(p.clone()) } else { portmap };
 
-    let dump_entries = if portmap_reachability.has_tcp() { timeout(probe_timeout, portmap.dump(portmap_addr)).await.ok().and_then(Result::ok).unwrap_or_default() } else { vec![] };
+    // Try TCP DUMP first; fall back to UDP DUMP if TCP is unreachable but UDP is.
+    let dump_entries = if portmap_reachability.has_tcp() {
+        timeout(probe_timeout, portmap.dump(portmap_addr)).await.ok().and_then(Result::ok).unwrap_or_default()
+    } else if portmap_udp {
+        portmap.dump_udp(portmap_addr, probe_timeout).await.unwrap_or_default()
+    } else {
+        vec![]
+    };
 
     // Extract NFS and MOUNT entries from dump.
     let nfs_from_dump: Vec<(u32, u32, u16)> = dump_entries.iter().filter(|e| e.program == 100_003 && e.port > 0).map(|e| (e.version, e.protocol, e.port)).collect();
     let mount_from_dump: Vec<(u32, u32, u16)> = dump_entries.iter().filter(|e| e.program == 100_005 && e.port > 0).map(|e| (e.version, e.protocol, e.port)).collect();
 
     // If dump returned nothing and portmapper is reachable, try individual GETPORT queries.
-    let (nfs_from_getport, mount_from_getport) = if nfs_from_dump.is_empty() && portmap_reachability.has_tcp() {
+    let portmap_reachable = portmap_reachability.has_tcp() || portmap_udp;
+    let (nfs_from_getport, mount_from_getport) = if nfs_from_dump.is_empty() && portmap_reachable {
         let mut nfs_gp = Vec::new();
         let mut mount_gp = Vec::new();
         for v in [2u32, 3, 4] {
-            if let Ok(Ok(port)) = timeout(probe_timeout, portmap.query_port(portmap_addr, 100_003, v)).await
+            let result = if portmap_reachability.has_tcp() {
+                timeout(probe_timeout, portmap.query_port(portmap_addr, 100_003, v)).await.ok().and_then(Result::ok)
+            } else {
+                portmap.query_port_udp(portmap_addr, 100_003, v, probe_timeout).await.ok()
+            };
+            if let Some(port) = result
                 && port > 0
             {
-                nfs_gp.push((v, 6u32, port)); // 6 = TCP
+                nfs_gp.push((v, 6u32, port));
             }
         }
         for v in [1u32, 3] {
-            if let Ok(Ok(port)) = timeout(probe_timeout, portmap.query_port(portmap_addr, 100_005, v)).await
+            let result = if portmap_reachability.has_tcp() {
+                timeout(probe_timeout, portmap.query_port(portmap_addr, 100_005, v)).await.ok().and_then(Result::ok)
+            } else {
+                portmap.query_port_udp(portmap_addr, 100_005, v, probe_timeout).await.ok()
+            };
+            if let Some(port) = result
                 && port > 0
             {
                 mount_gp.push((v, 6u32, port));
