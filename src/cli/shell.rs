@@ -117,25 +117,21 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         let fh = FileHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?;
         eprintln!("{}", crate::output::status_info(&format!("Using raw handle: {hex}")));
 
+        // --handle always connects directly to the NFS port (no MOUNT needed).
+        // File handles are bearer tokens (RFC 2623 S2.6) -- MOUNT is bypassed entirely.
         let nfs_port = globals.nfs_port.unwrap_or(2049);
         let mc = make_mount_client(globals);
 
-        match mc.list_exports(addr).await {
+        let session_label = match mc.list_exports(addr).await {
             Ok(exports) if !exports.is_empty() => {
-                // Use the first available export to establish the NFS TCP session.
-                // The raw handle overrides the root fh for all file operations.
-                let session_export = exports.into_iter().next().map(|e| e.path).unwrap_or_default();
-                eprintln!("{}", crate::output::status_info(&format!("Session via {host}:{session_export}")));
-                let key = PoolKey { host: addr, export: session_export, uid, gid };
-                (fh, key, None)
+                let first = exports.into_iter().next().map(|e| e.path).unwrap_or_default();
+                format!("{host}:{first}")
             },
-            _ => {
-                // Portmapper unreachable -- connect directly to NFS port without MOUNT.
-                eprintln!("{}", crate::output::status_warn(&format!("Portmapper unavailable  --  connecting direct to port {nfs_port}")));
-                let key = PoolKey { host: addr, export: format!("__direct__{nfs_port}"), uid, gid };
-                (fh, key, Some(nfs_port))
-            },
-        }
+            _ => format!("{host}:{nfs_port}"),
+        };
+        eprintln!("{}", crate::output::status_info(&format!("Session via {session_label}")));
+        let key = PoolKey { host: SocketAddr::new(host, nfs_port), export: format!("__handle__{nfs_port}"), uid, gid };
+        (fh, key, Some(nfs_port))
     } else {
         let mount_client = make_mount_client(globals);
         eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
