@@ -15,4 +15,5 @@ pub mod nfs3;
 pub mod nfs4;
 pub mod pool;
 pub mod portmap;
+pub mod rpc_probe;
 pub mod udp;

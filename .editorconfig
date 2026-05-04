@@ -1,4 +1,4 @@
-# EditorConfig — https://editorconfig.org
+# EditorConfig -- https://editorconfig.org
 root = true
 
 # Defaults for all files: LF, UTF-8, trim trailing whitespace, final newline.
@@ -22,7 +22,7 @@ indent_size = 4
 [*.{yml,yaml}]
 indent_size = 2
 
-# Makefile — tabs required
+# Makefile -- tabs required
 [Makefile]
 indent_style = tab
 
@@ -30,6 +30,6 @@ indent_style = tab
 [*.sh]
 indent_size = 2
 
-# Markdown — trailing whitespace can be intentional (line breaks)
+# Markdown -- trailing whitespace can be intentional (line breaks)
 [*.md]
 trim_trailing_whitespace = false

@@ -10,6 +10,7 @@
         fix hooks clean check-all all
 
 # Default target -- running bare `make` builds dist artifacts for the current platform.
+.PHONY: all
 all: dist
 
 CARGO := cargo
@@ -90,6 +91,7 @@ check:
 # -- Tests ---------------------------------------------------------------------
 
 # Full test suite (all features). Use for quick local runs.
+.PHONY: test
 test:
 	$(CARGO) test --all-targets --all-features
 
@@ -112,24 +114,47 @@ machete:
 
 # -- File hygiene --------------------------------------------------------------
 
+# Repository paths excluded from all hygiene checks.
+#   vendor/**  - third-party code, not our policy to enforce
+#   ref/**     - reference material / external docs
+HYGIENE_EXCLUDES := ':!vendor/**' ':!ref/**' ':!docs/**' ':!Makefile'
+
+# Files held to strict ASCII: TAB, LF, printable ASCII only. Nothing else.
+HYGIENE_STRICT_GLOBS := \
+    '*.toml' '*.yml' '*.yaml' '*.json' '*.sh' '*.lock' \
+     'LICENSE' '.editorconfig' '.gitignore' '.gitattributes'
+
+# Files allowed the project allowlist (§) on top of strict ASCII.
+#   .rs  - § in RFC-section comments
+#   .md  - § for protocol references
+HYGIENE_ALLOWLIST_GLOBS := '*.rs' '*.md'
+
+HYGIENE_ALL_GLOBS := $(HYGIENE_STRICT_GLOBS) $(HYGIENE_ALLOWLIST_GLOBS)
+
+# PCRE codepoint classes (codepoint-aware under LC_ALL=C.UTF-8).
+#    \x{0A} LF, \x{20}-\x{7E} printable ASCII (excludes DEL).
+# CR (\x{0D}) intentionally not allowed; the project is LF-only and lf-check
+# enforces that separately.
+HYGIENE_STRICT_CLASS    := [^\x{0A}\x{20}-\x{7E}]
+
+# Allowlist adds:
+#   §  U+00A7 SECTION SIGN
+HYGIENE_ALLOWLIST_CLASS := [^\x{0A}\x{20}-\x{7E}\x{A7}]
+
 ascii-check:
-	@echo "Checking for non-ASCII bytes in tracked source files..."
-	@# Config files are strictly ASCII. Rust source is allowed a small allowlist
-	@# of UTF-8 characters that appear in RFC-section references in comments
-	@# (e.g. "RFC 1813 section 4.4"). Historically this list is just "section-sign"
-	@# and non-breaking hyphen; extend cautiously.
+	@echo "Checking for non-ASCII code points in tracked source files..."
 	@fail=0; \
-	for f in $$(git ls-files -- '*.toml' '*.yml' '*.yaml' '*.json' '*.sh' 'Makefile'); do \
-		if LC_ALL=C grep -Pn '[^\x00-\x7F]' "$$f" > /dev/null 2>&1; then \
+	for f in $$(git ls-files -- $(HYGIENE_STRICT_GLOBS) $(HYGIENE_EXCLUDES)); do \
+		if LC_ALL=C.UTF-8 grep -aPn '$(HYGIENE_STRICT_CLASS)' "$$f" > /dev/null 2>&1; then \
 			echo "  NON-ASCII: $$f"; \
-			LC_ALL=C grep -Pn '[^\x00-\x7F]' "$$f"; \
+			LC_ALL=C.UTF-8 grep -aPn '$(HYGIENE_STRICT_CLASS)' "$$f"; \
 			fail=1; \
 		fi; \
 	done; \
-	for f in $$(git ls-files -- '*.rs'); do \
-		if LC_ALL=C grep -Pn '[^\x00-\x7F\xC2\xA7]' "$$f" > /dev/null 2>&1; then \
+	for f in $$(git ls-files -- $(HYGIENE_ALLOWLIST_GLOBS) $(HYGIENE_EXCLUDES)); do \
+		if LC_ALL=C.UTF-8 grep -aPn '$(HYGIENE_ALLOWLIST_CLASS)' "$$f" > /dev/null 2>&1; then \
 			echo "  NON-ASCII (outside allowlist): $$f"; \
-			LC_ALL=C grep -Pn '[^\x00-\x7F\xC2\xA7]' "$$f"; \
+			LC_ALL=C.UTF-8 grep -aPn '$(HYGIENE_ALLOWLIST_CLASS)' "$$f"; \
 			fail=1; \
 		fi; \
 	done; \
@@ -139,7 +164,7 @@ ascii-check:
 lf-check:
 	@echo "Checking for CRLF line endings in tracked files..."
 	@fail=0; \
-	for f in $$(git ls-files -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.json' '*.sh' 'Makefile'); do \
+	for f in $$(git ls-files -- $(HYGIENE_ALL_GLOBS) $(HYGIENE_EXCLUDES)); do \
 		if grep -Pq '\r$$' "$$f" 2>/dev/null; then \
 			echo "  CRLF: $$f"; \
 			fail=1; \
@@ -148,6 +173,7 @@ lf-check:
 	if [ "$$fail" -eq 1 ]; then echo "FAIL: CRLF line endings found"; exit 1; fi
 	@echo "OK: all source files use LF."
 
+.PHONY: hygiene
 hygiene: ascii-check lf-check
 
 # -- Platform-specific build targets -------------------------------------------
@@ -266,7 +292,17 @@ build-windows:
 #   -> triggers .github/workflows/release.yml on native runners for all targets
 
 ifeq ($(PLATFORM)-$(ARCH),linux-x86_64)
-dist: build-linux-musl build-linux-x86-full
+  DIST_DEPS := build-linux-musl build-linux-x86-full
+else ifeq ($(PLATFORM)-$(ARCH),linux-arm64)
+  DIST_DEPS := build-linux-arm-musl build-linux-arm-full
+else ifeq ($(PLATFORM),macos)
+  DIST_DEPS := build-macos-arm build-macos-x86 build-macos-universal
+else
+  DIST_DEPS := build-windows
+endif
+
+.PHONY: dist
+dist: $(DIST_DEPS)
 	@mkdir -p $(DIST)
 	@built=0; \
 	if [ -f target/$(TARGET_LINUX_X86_MUSL)/release/$(BIN) ]; then \
@@ -279,12 +315,6 @@ dist: build-linux-musl build-linux-x86-full
 		echo "  $(DIST)/$(BIN)-linux-x86_64-full  (glibc+FUSE)"; \
 		built=$$((built+1)); \
 	fi; \
-	echo "$$built artifact(s) in $(DIST)/  |  ARM64/Windows/macOS: git tag vX.Y.Z && git push --tags"
-
-else ifeq ($(PLATFORM)-$(ARCH),linux-arm64)
-dist: build-linux-arm-musl build-linux-arm-full
-	@mkdir -p $(DIST)
-	@built=0; \
 	if [ -f target/$(TARGET_LINUX_ARM_MUSL)/release/$(BIN) ]; then \
 		cp target/$(TARGET_LINUX_ARM_MUSL)/release/$(BIN) $(DIST)/$(BIN)-linux-arm64; \
 		echo "  $(DIST)/$(BIN)-linux-arm64  (musl static)"; \
@@ -295,12 +325,6 @@ dist: build-linux-arm-musl build-linux-arm-full
 		echo "  $(DIST)/$(BIN)-linux-arm64-full  (glibc+FUSE)"; \
 		built=$$((built+1)); \
 	fi; \
-	echo "$$built artifact(s) in $(DIST)/  |  x86_64/Windows/macOS: git tag vX.Y.Z && git push --tags"
-
-else ifeq ($(PLATFORM),macos)
-dist: build-macos-arm build-macos-x86 build-macos-universal
-	@mkdir -p $(DIST)
-	@built=0; \
 	if [ -f target/$(TARGET_MACOS_ARM)/release/$(BIN) ]; then \
 		cp target/$(TARGET_MACOS_ARM)/release/$(BIN) $(DIST)/$(BIN)-macos-arm64; \
 		echo "  $(DIST)/$(BIN)-macos-arm64"; \
@@ -315,12 +339,7 @@ dist: build-macos-arm build-macos-x86 build-macos-universal
 		echo "  $(DIST)/$(BIN)-macos-universal  (lipo)"; \
 		built=$$((built+1)); \
 	fi; \
-	echo "$$built artifact(s) in $(DIST)/  |  Linux/Windows: git tag vX.Y.Z && git push --tags"
-
-else
-# Windows  --  native runners required for MSVC; GNU cross-compiled from Ubuntu in CI.
-dist: build-windows
-endif
+	echo "$$built artifact(s) in $(DIST)/  |  Other platforms: git tag vX.Y.Z && git push --tags"
 
 # -- Size reporting -------------------------------------------------------------
 
@@ -350,12 +369,14 @@ size: build
 
 # -- Convenience ---------------------------------------------------------------
 
+.PHONY: fix
 fix: fmt-fix lint-fix
 
 hooks:
 	git config core.hooksPath .githooks
 	@echo "Git hooks installed (.githooks/pre-commit)"
 
+.PHONY: clean
 clean:
 	$(CARGO) clean
 	rm -rf $(DIST)
@@ -366,4 +387,5 @@ clean:
 # -- Gates ---------------------------------------------------------------------
 
 # Full verification gate  --  run before every push.
+.PHONY: check-all
 check-all: fmt lint audit check test-matrix doc hygiene machete

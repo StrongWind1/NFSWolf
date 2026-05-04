@@ -7,5 +7,6 @@
 pub mod analyzer;
 pub mod credential;
 pub mod file_handle;
+pub mod scan_types;
 pub mod scanner;
 pub mod uid_sprayer;

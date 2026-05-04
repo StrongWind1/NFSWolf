@@ -1,7 +1,7 @@
 <h1 align="center">NFSWolf</h1>
 
 <p align="center">
-  <strong>Fast, native NFS security toolkit. One static binary — recon, analysis, escape, exploitation, and an interactive shell.</strong>
+  <strong>Fast, native NFS security toolkit. One static binary -- recon, analysis, escape, exploitation, and an interactive shell.</strong>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## Why nfswolf
 
-The NFS security ecosystem is scattered across a dozen small tools written in the 1990s and 2000s, most of which only work on Linux and depend on `libnfs`. nfswolf consolidates the full NFS attack path — reconnaissance, analysis, export escape, shell access, and targeted exploitation — into a single pure-Rust binary that links statically under `musl`.
+The NFS security ecosystem is scattered across a dozen small tools written in the 1990s and 2000s, most of which only work on Linux and depend on `libnfs`. nfswolf consolidates the full NFS attack path -- reconnaissance, analysis, export escape, shell access, and targeted exploitation -- into a single pure-Rust binary that links statically under `musl`.
 
 | Capability | nfswolf | showmount | nfsspy | msf NFS | nfs-ls | nfsshell |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -42,7 +42,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 
 ## Features at a glance
 
-- **Documented security findings** across export, transport, file-handle, and credential attack categories — full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
+- **Documented security findings** across export, transport, file-handle, and credential attack categories -- full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
 - **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2.
 - **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
 - **Offensive subcommands**: `escape` (export breakout), `brute-handle` (handle oracle), `uid-spray` (last-resort credential discovery).
@@ -56,7 +56,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 
 Download from the [Releases page](https://github.com/StrongWind1/NFSWolf/releases). Each release ships with a `SHA256SUMS` checksum file, a `SHA256SUMS.sig` cosign signature, and per-artifact SLSA build-provenance attestations.
 
-### Pick your artifact carefully — the `mount` subcommand is NOT in the musl static build
+### Pick your artifact carefully -- the `mount` subcommand is NOT in the musl static build
 
 | File | Link | FUSE / `nfswolf mount` | When to use it |
 |---|---|:---:|---|
@@ -66,7 +66,7 @@ Download from the [Releases page](https://github.com/StrongWind1/NFSWolf/release
 | `nfswolf-macos-universal`, `nfswolf-macos-arm64`, `nfswolf-macos-x86_64` | macOS | macFUSE required | macOS has no bundled FUSE; install [macFUSE](https://osxfuse.github.io/) separately if you want `mount`. |
 | `nfswolf-windows-x86_64-msvc.exe`, `-gnu.exe`, `-arm64-msvc.exe` | Windows | **no** | FUSE is Linux / macOS only; `nfswolf mount` is not available on Windows regardless of build. |
 
-If you download the static-musl Linux binary and then try `nfswolf mount ...`, the command will not exist in the binary and `nfswolf --help` will not list it. This is by design — `libfuse3` cannot be statically linked against `musl`.
+If you download the static-musl Linux binary and then try `nfswolf mount ...`, the command will not exist in the binary and `nfswolf --help` will not list it. This is by design -- `libfuse3` cannot be statically linked against `musl`.
 
 ### Verify your download
 
@@ -150,7 +150,6 @@ Global flags common to every subcommand:
 --hostname <NAME>        AUTH_SYS machinename field
 --privileged-port        Bind source port <1024 (may require CAP_NET_BIND_SERVICE / root)
 --proxy <HOST:PORT>      Route all RPC through SOCKS5 (no-auth) proxy
---transport-udp          Use UDP for portmapper probes where supported
 --stealth-delay <MS>     Baseline inter-RPC delay
 --stealth-jitter <MS>    Random jitter added to each delay
 --no-color               Strip ANSI colors
@@ -194,10 +193,10 @@ If you believe you have found a security issue in `nfswolf` itself, please open 
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0 -- see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz — the NFSv3 / MOUNT / portmapper / XDR foundation.
+- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz -- the NFSv3 / MOUNT / portmapper / XDR foundation.
 - Authors of RFC 1057, RFC 1094, RFC 1813, RFC 5531, RFC 7530, RFC 2623, RFC 9289.
 - Prior-art tools that inspired this consolidation: `nfsspy`, `nfsshell`, `showmount`, Metasploit NFS modules.

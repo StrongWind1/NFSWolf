@@ -162,7 +162,33 @@ File handles are bearer tokens — possession is authorization.
 | Precondition | Bind mount used as NFS export, subtree_check disabled |
 | Detection | Construct filesystem root handle from bind mount's fsid |
 
-**Why this exists**: Bind mounts are an alternative view of the same underlying filesystem — they share the same filesystem ID. When `subtree_check` is disabled, the NFS server only validates that a handle's fsid matches the export's filesystem. A handle for any inode on that filesystem is accepted, regardless of the bind mount boundary.
+**Why this exists**: Bind mounts are an alternative view of the same underlying filesystem -- they share the same filesystem ID. When `subtree_check` is disabled, the NFS server only validates that a handle's fsid matches the export's filesystem. A handle for any inode on that filesystem is accepted, regardless of the bind mount boundary.
+
+### F-2.7: NFS Daemon Export ACL Blindness (Bearer Token Property)
+
+| Field | Value |
+|-------|-------|
+| Severity | Critical |
+| RFC Basis | RFC 2623 S2.6, RFC 1094 S2.3.3 |
+| Precondition | Possession of a valid file handle (obtained by any means) |
+| Detection | Use handle from export A against port 2049 from an IP not authorized for that export |
+
+**Why this is the root cause**: The NFS daemon (port 2049) never calls back to mountd to verify that the requesting client was authorized to receive the handle it presents. The kernel checks `(client_auth_domain, fsid)` in the export cache -- if any wildcard export exists on the same filesystem, the handle resolves. MOUNT is the only gate, and it issues permanent bearer tokens with no binding, no MAC, no expiry, and no revocation.
+
+**What nfswolf tests**: The `shell --handle <hex>` path demonstrates this directly -- connects to port 2049 without MOUNT, and the handle works from any IP.
+
+### F-2.8: Sibling Export Lateral Access (Cross-Export Handle Reuse)
+
+| Field | Value |
+|-------|-------|
+| Severity | Critical |
+| RFC Basis | RFC 1813 S3.3.3, RFC 2623 S2.6 |
+| Precondition | Access to any export on the same filesystem; no_subtree_check (default) |
+| Detection | Mount wildcard export, escape-root, cd to restricted export directory |
+
+**Why this works**: When two exports share a physical filesystem (same fsid) and `subtree_check` is disabled, the kernel does not verify that a handle's inode is within the export's directory tree. After escaping to the filesystem root (F-2.1), standard LOOKUP operations reach any directory on the filesystem -- including IP-restricted peer exports. No handle construction is needed for the lateral movement step.
+
+**What nfswolf tests**: `escape-root` + `cd /path/to/restricted` + `ls`/`cat` demonstrates the full chain.
 
 ---
 
@@ -202,6 +228,19 @@ File handles are bearer tokens — possession is authorization.
 **Why the RFC allows this**: "NFS has historically used a model where, from an authentication perspective, the client was the entire machine, or at least the source IP address of the machine." (RFC 7530 §19). With UDP transport, IP addresses are trivially spoofable. Even TCP requires only SYN prediction.
 
 **What nfswolf does for this finding**: detection only. `nfswolf analyze` reports whether an export is restricted by IP/hostname and whether Kerberos is in use. Active spoofing is out of scope because it requires privileged network positioning and is not reproducible across lab environments; the `--hostname` flag manipulates `auth_unix.machinename` (F-1.4), which is NOT the same as source-IP spoofing.
+
+### F-3.6: UDP MOUNT Handle Theft via Source IP Spoofing
+
+| Field | Value |
+|-------|-------|
+| Severity | Critical |
+| RFC Basis | RFC 2623 S2.1, RFC 2623 S2.6, RFC 1057 S10 |
+| Precondition | mountd UDP listener; attacker on same L2 segment; knowledge of allowed IP |
+| Detection | Check if mountd serves over UDP (rpcinfo/scanner --scan-udp) |
+
+**Why this works**: `rpc.mountd` trusts the source address from `recvfrom()` on its UDP socket. UDP is connectionless -- no handshake, no sequence numbers. An attacker on the same broadcast domain adds the allowed IP to their NIC, sends a single UDP MNT datagram with that source, and receives the file handle in the reply. The handle is then usable indefinitely over TCP from any IP (F-2.7).
+
+**What nfswolf tests**: Scanner reports mountd UDP availability. The attack itself is a one-packet operation documented in the finding write-up.
 
 ### F-3.4: STRIPTLS Downgrade (RFC 9289)
 

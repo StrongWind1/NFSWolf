@@ -6,12 +6,13 @@
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use nfs3_client::PortmapperClient;
 use nfs3_client::net::Connector as _;
-use nfs3_client::tokio::TokioConnector;
-use nfs3_types::portmap::{IPPROTO_TCP, IPPROTO_UDP};
+use nfs3_client::tokio::{TokioConnector, TokioIo};
+use nfs3_types::portmap::{self, IPPROTO_TCP, IPPROTO_UDP};
 
 /// RPC program numbers relevant to NFS infrastructure.
 /// NFSv2/v3/v4 server (program 100003, RFC 1057 S9).
@@ -65,25 +66,45 @@ pub struct PortmapAmplificationResult {
 pub struct PortmapClient {
     /// Default portmapper port (111).
     port: u16,
+    /// Optional SOCKS5 proxy for all TCP connections.
+    proxy: Option<String>,
 }
 
 impl PortmapClient {
     /// Create a portmapper client targeting the given port.
     #[must_use]
     pub const fn new(port: u16) -> Self {
-        Self { port }
+        Self { port, proxy: None }
     }
 
     /// Create with the standard portmapper port (111).
     #[must_use]
     pub const fn default_port() -> Self {
-        Self::new(nfs3_types::portmap::PMAP_PORT)
+        Self::new(portmap::PMAP_PORT)
+    }
+
+    /// Attach a SOCKS5 proxy to this client.
+    #[must_use]
+    pub fn with_proxy(mut self, proxy: String) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    /// Open a TCP connection to `addr`, tunnelling through the proxy if configured.
+    async fn connect_tcp(&self, addr: SocketAddr) -> anyhow::Result<crate::proto::conn::NfsIo> {
+        if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, addr).await.with_context(|| format!("SOCKS5 connect to {addr} via {p}"))?;
+            Ok(TokioIo::new(stream))
+        } else {
+            TokioConnector.connect(addr).await.with_context(|| format!("connect to {addr}"))
+        }
     }
 
     /// Resolve the port for `program`/`version` via PMAPPROC_GETPORT (TCP).
     pub async fn query_port(&self, addr: SocketAddr, program: u32, version: u32) -> anyhow::Result<u16> {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
-        let io = TokioConnector.connect(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
+        let io = self.connect_tcp(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
         let mut client = PortmapperClient::new(io);
         client.getport(program, version).await.with_context(|| format!("GETPORT {program}/{version}"))
     }
@@ -91,7 +112,7 @@ impl PortmapClient {
     /// Enumerate all registered RPC services via PMAPPROC_DUMP.
     pub async fn dump(&self, addr: SocketAddr) -> anyhow::Result<Vec<PortmapEntry>> {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
-        let io = TokioConnector.connect(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
+        let io = self.connect_tcp(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
         let mut client = PortmapperClient::new(io);
         let mappings = client.dump().await.context("PMAPPROC_DUMP")?;
         Ok(mappings.into_iter().filter_map(|m| u16::try_from(m.port).ok().map(|port| PortmapEntry { program: m.prog, version: m.vers, protocol: m.prot, port })).collect())
@@ -129,7 +150,7 @@ impl PortmapClient {
     ///
     /// This is a TCP-based approximation. True UDP measurement would require
     /// a raw UDP socket, which lives in `proto::udp` and is wired through
-    /// the global `--transport-udp` flag.
+    /// the `--scan-udp` flag.
     pub async fn measure_amplification(&self, addr: SocketAddr) -> anyhow::Result<PortmapAmplificationResult> {
         // Estimate request size: RPC header + DUMP args = ~64 bytes
         let request_bytes: usize = 64;
@@ -153,5 +174,25 @@ impl PortmapClient {
     #[must_use]
     pub fn has_nfs_udp(entries: &[PortmapEntry]) -> bool {
         entries.iter().any(|e| e.program == PROG_NFS && e.protocol == IPPROTO_UDP)
+    }
+
+    /// Enumerate all registered RPC services via PMAPPROC_DUMP over UDP.
+    ///
+    /// Fallback for environments where TCP/111 is firewalled but UDP/111 is open
+    /// (RFC 1057 S10: portmapper MUST be available on both transports).
+    pub async fn dump_udp(&self, addr: SocketAddr, probe_timeout: Duration) -> anyhow::Result<Vec<PortmapEntry>> {
+        use nfs3_types::xdr_codec::Void;
+
+        let pmap_addr = SocketAddr::new(addr.ip(), self.port);
+        let list: portmap::pmaplist = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 4, &Void, probe_timeout).await.context("PMAPPROC_DUMP over UDP")?;
+        Ok(list.0.into_iter().filter_map(|m| u16::try_from(m.port).ok().map(|port| PortmapEntry { program: m.prog, version: m.vers, protocol: m.prot, port })).collect())
+    }
+
+    /// Resolve the port for `program`/`version` via PMAPPROC_GETPORT over UDP.
+    pub async fn query_port_udp(&self, addr: SocketAddr, program: u32, version: u32, probe_timeout: Duration) -> anyhow::Result<u16> {
+        let pmap_addr = SocketAddr::new(addr.ip(), self.port);
+        let query = portmap::mapping { prog: program, vers: version, prot: IPPROTO_TCP, port: 0 };
+        let port: u32 = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 3, &query, probe_timeout).await.context("PMAPPROC_GETPORT over UDP")?;
+        u16::try_from(port).with_context(|| format!("port {port} out of u16 range"))
     }
 }

@@ -87,12 +87,6 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "HOST:PORT", help_heading = H_NETWORK)]
     pub proxy: Option<String>,
 
-    /// Use UDP instead of TCP for portmapper and NFS probes.
-    /// Required for servers that block TCP/111 or only serve NFS over UDP
-    /// (legacy embedded devices, older HP-UX and NetApp configurations).
-    #[arg(long = "transport-udp", global = true, help_heading = H_NETWORK)]
-    pub transport_udp: bool,
-
     /// Connection timeout in milliseconds
     #[arg(short = 't', long, global = true, default_value = "3000", value_name = "MS", help_heading = H_NETWORK)]
     pub timeout: u64,
@@ -119,10 +113,6 @@ pub struct Cli {
     /// Disable ANSI colour output (also set by NO_COLOR env var)
     #[arg(long, global = true, help_heading = H_OUTPUT)]
     pub no_color: bool,
-
-    /// Emit machine-readable JSON instead of human-readable output
-    #[arg(long, global = true, help_heading = H_OUTPUT)]
-    pub json: bool,
 
     /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, global = true, action = clap::ArgAction::Count, help_heading = H_OUTPUT)]
@@ -189,8 +179,6 @@ pub struct GlobalOpts {
     pub privileged_port: bool,
     /// Optional SOCKS5 proxy address.
     pub proxy: Option<String>,
-    /// Use UDP transport for portmapper and NFS probes.
-    pub transport_udp: bool,
     /// Connection timeout in milliseconds.
     pub timeout: u64,
     /// Override NFS port (skip portmapper) when set.
@@ -203,8 +191,6 @@ pub struct GlobalOpts {
     pub jitter: u64,
     /// Disable colored output.
     pub no_color: bool,
-    /// Output JSON instead of human-readable format.
-    pub json: bool,
     /// Verbose logging level.
     pub verbose: u8,
     /// Suppress non-essential output.
@@ -225,14 +211,12 @@ impl Cli {
             aux_gids: self.aux_gids.clone(),
             privileged_port: self.privileged_port,
             proxy: self.proxy.clone(),
-            transport_udp: self.transport_udp,
             timeout: self.timeout,
             nfs_port: self.nfs_port,
             mount_port: self.mount_port,
             delay: self.delay,
             jitter: self.jitter,
             no_color: self.no_color,
-            json: self.json,
             verbose: self.verbose,
             quiet: self.quiet,
         }
@@ -248,10 +232,9 @@ pub fn completions(args: &CompletionsArgs) {
 ///
 /// The line echoes back the literal argv the user typed (minus the
 /// program name), which is the most useful thing to copy into shell
-/// history. Skipped when `--quiet` or `--json` is set so machine-readable
-/// output stays clean.
+/// history. Skipped when `--quiet` is set.
 pub fn emit_replay(globals: &GlobalOpts) {
-    if globals.quiet || globals.json {
+    if globals.quiet {
         return;
     }
     let argv: Vec<String> = std::env::args().skip(1).collect();

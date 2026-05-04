@@ -22,13 +22,16 @@ use crate::proto::nfs3::types::FileHandle;
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::util::stealth::StealthConfig;
 
-/// Build a MOUNT client honouring the global `--mount-port` and
-/// `--privileged-port` flags.
+/// Build a MOUNT client honouring the global `--mount-port`,
+/// `--privileged-port`, and `--proxy` flags.
 ///
 /// Used by every subcommand that calls `MNT` (escape, shell, mount,
 /// uid-spray, brute-handle) so the same flags propagate everywhere.
 pub fn make_mount_client(globals: &GlobalOpts) -> NfsMountClient {
-    let base = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
+    let mut base = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
+    if let Some(ref p) = globals.proxy {
+        base = base.with_proxy(p.clone());
+    }
     if globals.privileged_port { base.require_privileged() } else { base }
 }
 
@@ -49,8 +52,14 @@ pub fn parse_addr(host: &str) -> anyhow::Result<SocketAddr> {
 }
 
 /// Build an `Nfs3Client` for the given host, export, and AUTH_SYS credential.
-pub fn make_client(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
-    let pool = Arc::new(ConnectionPool::default_config());
+///
+/// When `proxy` is `Some`, the connection pool tunnels all TCP through the
+/// SOCKS5 proxy.
+pub fn make_client(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
+    let pool = Arc::new(match proxy {
+        Some(p) => ConnectionPool::with_proxy(p.to_owned()),
+        None => ConnectionPool::default_config(),
+    });
     let circuit = Arc::new(CircuitBreaker::default_config());
     let gids = build_gid_list(gid, aux_gids);
     let auth = AuthSys::with_groups(uid, gid, &gids, "nfswolf");
