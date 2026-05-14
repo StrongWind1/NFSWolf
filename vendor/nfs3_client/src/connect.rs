@@ -183,7 +183,7 @@ where
             port
         } else {
             portmapper
-                .getport(nfs3_types::mount::PROGRAM, nfs3_types::mount::VERSION)
+                .getport(nfs3_types::mount::PROGRAM, nfs3_types::mount::VERSION, nfs3_types::portmap::IPPROTO_TCP)
                 .await?
         };
 
@@ -191,7 +191,7 @@ where
             port
         } else {
             portmapper
-                .getport(nfs3_types::nfs3::PROGRAM, nfs3_types::nfs3::VERSION)
+                .getport(nfs3_types::nfs3::PROGRAM, nfs3_types::nfs3::VERSION, nfs3_types::portmap::IPPROTO_TCP)
                 .await?
         };
 

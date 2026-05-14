@@ -153,6 +153,6 @@ async fn memfs_portmapper_responds_to_nfs_getport() {
 
     let mut pm = portmap_client(port).await;
     // PMAPPROC_GETPORT for NFS v3 -- MemFs serves NFS on the same port it was bound to.
-    let nfs_port = pm.getport(100_003, 3).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
+    let nfs_port = pm.getport(100_003, 3, nfs3_types::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
     assert_eq!(nfs_port, port, "portmapper must report NFS v3 port matching server bind port");
 }

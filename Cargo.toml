@@ -107,20 +107,22 @@ path = "tests/integration/analyzer_test.rs"
 # ---------------------------------------------------------------------------
 # [patch.crates-io]
 #
-# nfs3_client 0.8.0 as published on crates.io does not expose a way to swap
+# nfs3_client upstream HEAD (Vaiz/nfs3@82e07b1) does not expose a way to swap
 # the AUTH_SYS credential on an already-established connection; the
 # `RpcClient::credential` field is private and no setter exists. nfswolf
 # needs that capability to reuse a single mount session while spraying
 # different UID/GID pairs (see `src/proto/conn.rs::access_as`).
 #
 # Until upstream (Vaiz/nfs3) ships a release with a public setter, we patch
-# 0.8.0 locally via `vendor/nfs3_client/`, which contains the pristine
-# crates.io source plus two minimal additions:
+# HEAD locally via `vendor/nfs3_client/`, which contains the upstream source
+# at commit 82e07b1 plus two minimal additions:
 #
 #   * vendor/nfs3_client/src/nfs.rs   -- adds `pub fn set_credential`
-#   * vendor/nfs3_client/src/rpc.rs   -- exposes `credential`/`verifier` as pub
+#   * vendor/nfs3_client/src/rpc.rs   -- exposes `credential`/`verifier` as pub,
+#                                        replaces FragmentedReply error with full
+#                                        multi-fragment reassembly (32 MiB cap)
 #
-# Run `diff -u /path/to/crates.io-tarball/ vendor/nfs3_client/` to audit the
+# Run `diff -u ref/nfs3/crates/nfs3_client/ vendor/nfs3_client/` to audit the
 # deviation. When upstream merges equivalent API, remove this patch and
 # bump the `nfs3_client` version in `[dependencies]` above.
 # ---------------------------------------------------------------------------
