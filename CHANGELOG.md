@@ -4,6 +4,8 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-13
+
 ### Changed
 
 - Scanner rewrite: new probe infrastructure using raw RPC record-marking to detect PROG_MISMATCH version ranges (RFC 1831 S13). Probes NFS NULL v2, NULL v3, and COMPOUND v4 over a single TCP connection per host. Reports confirmed protocol versions alongside a portmapper-derived "Hint" column showing the server-advertised version range.
@@ -26,6 +28,10 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 - Global `--transport-udp` flag (replaced by per-subcommand `--scan-udp`).
 - Global `--json` flag (replaced by per-subcommand `--json <FILE>` on `scan` and bool `--json` on `analyze`).
+
+### Dependencies
+
+- `nfs3_client` vendor updated to upstream HEAD `82e07b1` (Vaiz/nfs3 PRs #159/#161/#162). The only API-breaking change affecting nfswolf is `PortmapperClient::getport` now requiring an explicit transport protocol argument (`IPPROTO_TCP`/`IPPROTO_UDP` per RFC 1057 Appendix A). All four call sites updated. Multi-fragment RPC reassembly and `set_credential` vendor patches unchanged.
 
 ## [0.3.0] - 2026-04-29
 
