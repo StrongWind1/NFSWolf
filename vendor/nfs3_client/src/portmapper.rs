@@ -27,11 +27,11 @@ where
         Ok(())
     }
 
-    pub async fn getport(&mut self, prog: u32, vers: u32) -> Result<u16, crate::error::Error> {
+    pub async fn getport(&mut self, prog: u32, vers: u32, prot: u32) -> Result<u16, crate::error::Error> {
         let args = mapping {
             prog,
             vers,
-            prot: nfs3_types::portmap::IPPROTO_TCP,
+            prot,
             port: 0,
         };
 

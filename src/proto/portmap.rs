@@ -106,7 +106,7 @@ impl PortmapClient {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let io = self.connect_tcp(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
         let mut client = PortmapperClient::new(io);
-        client.getport(program, version).await.with_context(|| format!("GETPORT {program}/{version}"))
+        client.getport(program, version, IPPROTO_TCP).await.with_context(|| format!("GETPORT {program}/{version}"))
     }
 
     /// Enumerate all registered RPC services via PMAPPROC_DUMP.
