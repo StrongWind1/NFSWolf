@@ -281,9 +281,9 @@ impl Default for NfsMountClient {
 /// We walk the anyhow source chain because `mount_once` wraps the raw
 /// `nfs3_client::Error::MountError` with a `with_context`.
 fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
-    use nfs3_client::error::Error as ClientError;
+    use nfs3_client::MountError;
     use nfs3_types::mount::mountstat3;
-    err.chain().any(|cause| matches!(cause.downcast_ref::<ClientError>(), Some(ClientError::MountError(mountstat3::MNT3ERR_ACCES))))
+    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError>(), Some(MountError::Denied(mountstat3::MNT3ERR_ACCES))))
 }
 
 /// Connect to `addr` from a privileged source port (300-1023), falling back to ephemeral.

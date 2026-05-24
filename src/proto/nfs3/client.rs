@@ -2,8 +2,8 @@
 //!
 //! Each method checks the circuit breaker, checks out a pooled connection,
 //! applies the stealth delay, executes the NFS call, then records the result
-//! in the circuit breaker. Transient errors poison the connection and increment
-//! the circuit breaker; permission errors (expected during UID spraying) do not.
+//! in the circuit breaker. Transport-fatal errors (IO, fragmented reply)
+//! poison the connection; all errors increment the circuit breaker.
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::net::SocketAddr;
@@ -18,7 +18,6 @@ use nfs3_types::nfs3::{
 use crate::proto::auth::Credential;
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
-use crate::proto::nfs3::errors::Nfs3Error;
 use crate::proto::pool::{ConnectionPool, PoolKey, PooledConnection};
 use crate::util::stealth::StealthConfig;
 
@@ -355,26 +354,20 @@ impl Nfs3Client {
     }
 }
 
-/// Update the circuit breaker and poison the connection on transient failure.
+/// Update the circuit breaker and poison the connection on transport failure.
 ///
-/// Permission errors (expected during UID spraying) do not trip the circuit.
-/// IO and protocol errors do, since they indicate the server is degraded.
-fn update_circuit<T>(circuit: &CircuitBreaker, conn: &mut PooledConnection, res: &Result<T, &nfs3_client::error::Error>, addr: SocketAddr) {
+/// Uses upstream `is_connection_reusable()` to decide whether the TCP session
+/// is still in a clean state. Only `Io` and `FragmentedReply` errors poison
+/// the connection; protocol-level errors (auth, program mismatch, etc.) leave
+/// the transport intact. All errors record a circuit breaker failure.
+fn update_circuit<T>(circuit: &CircuitBreaker, conn: &mut PooledConnection, res: &Result<T, &nfs3_client::RpcError>, addr: SocketAddr) {
     match res {
         Ok(_) => circuit.record_success(addr),
         Err(e) => {
-            let nfs_err = extract_nfs_error(e);
-            let is_perm = nfs_err.is_some_and(Nfs3Error::is_permission_denied);
-            let is_transient = nfs_err.is_some_and(Nfs3Error::is_transient) || nfs_err.is_none();
-            if is_transient && !is_perm {
+            if !e.is_connection_reusable() {
                 conn.poison();
-                circuit.record_failure(addr);
             }
+            circuit.record_failure(addr);
         },
     }
-}
-
-/// Extract the `Nfs3Error` if the error is an NFS status code, None otherwise.
-const fn extract_nfs_error(e: &nfs3_client::error::Error) -> Option<Nfs3Error> {
-    if let nfs3_client::error::Error::NfsError(stat) = e { Nfs3Error::from_nfsstat3(*stat) } else { None }
 }

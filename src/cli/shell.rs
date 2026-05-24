@@ -148,7 +148,7 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     };
 
     let mut shell = NfsShell::new(Arc::clone(&nfs3), root_fh, args.allow_write, globals.hostname.clone());
-    eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid}{}   --   type 'help' for commands", if args.allow_write { "  [write enabled]" } else { "" },)));
+    eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid}{}   --   type 'help' for commands", if args.allow_write { "  [write enabled]" } else { "" })));
 
     if let Some(cmd) = args.command {
         // Non-interactive: run one command and return.

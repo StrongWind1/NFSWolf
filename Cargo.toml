@@ -39,7 +39,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # NFS protocol (NFSv3 + MOUNT + portmapper  --  pure Rust, no C deps)
-nfs3_client = { version = "0.8", features = ["tokio"] }
+nfs3_client = { version = "0.9", features = ["tokio"] }
 nfs3_types = "0.5"
 
 # Networking
@@ -107,24 +107,18 @@ path = "tests/integration/analyzer_test.rs"
 # ---------------------------------------------------------------------------
 # [patch.crates-io]
 #
-# nfs3_client upstream HEAD (Vaiz/nfs3@82e07b1) does not expose a way to swap
-# the AUTH_SYS credential on an already-established connection; the
-# `RpcClient::credential` field is private and no setter exists. nfswolf
-# needs that capability to reuse a single mount session while spraying
-# different UID/GID pairs (see `src/proto/conn.rs::access_as`).
+# nfs3_client v0.9.0 does not expose a way to swap AUTH_SYS credentials on
+# an established Nfs3Client connection. NFSWolf needs this for UID/GID
+# spraying (F-3.1) and auto-uid escalation -- reuse one TCP session while
+# changing the AUTH_SYS stamp per call (see src/proto/conn.rs::access_as).
 #
-# Until upstream (Vaiz/nfs3) ships a release with a public setter, we patch
-# HEAD locally via `vendor/nfs3_client/`, which contains the upstream source
-# at commit 82e07b1 plus two minimal additions:
+# Until upstream (Vaiz/nfs3 #150) ships a release with a public setter,
+# we patch locally via vendor/nfs3_client/:
+#   * src/nfs.rs   -- adds pub fn set_credential()
+#   * src/rpc.rs   -- makes credential/verifier fields pub
 #
-#   * vendor/nfs3_client/src/nfs.rs   -- adds `pub fn set_credential`
-#   * vendor/nfs3_client/src/rpc.rs   -- exposes `credential`/`verifier` as pub,
-#                                        replaces FragmentedReply error with full
-#                                        multi-fragment reassembly (32 MiB cap)
-#
-# Run `diff -u ref/nfs3/crates/nfs3_client/ vendor/nfs3_client/` to audit the
-# deviation. When upstream merges equivalent API, remove this patch and
-# bump the `nfs3_client` version in `[dependencies]` above.
+# When #150 ships, delete vendor/nfs3_client/ and remove this patch block,
+# then bump nfs3_client version in [dependencies] above.
 # ---------------------------------------------------------------------------
 [patch.crates-io]
 nfs3_client = { path = "vendor/nfs3_client" }

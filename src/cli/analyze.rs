@@ -123,7 +123,7 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
         } else {
             print_result(&result);
             if !globals.quiet {
-                eprintln!("{}", crate::output::status_info(&format!("Completed in {}  --  {} finding(s)", crate::output::elapsed(start), result.findings.len(),)));
+                eprintln!("{}", crate::output::status_info(&format!("Completed in {}  --  {} finding(s)", crate::output::elapsed(start), result.findings.len())));
             }
         }
         all_results.push(result);

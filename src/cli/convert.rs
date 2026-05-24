@@ -87,7 +87,7 @@ pub fn run(args: &ConvertArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     report::generate(&results, args.format, &args.title, &mut out)?;
 
     if !globals.quiet {
-        eprintln!("{}", crate::output::status_ok(&format!("Report written -> {}  ({} host(s), {} finding(s), {:?} format)", args.output, results.len(), finding_count, args.format,)));
+        eprintln!("{}", crate::output::status_ok(&format!("Report written -> {}  ({} host(s), {} finding(s), {:?} format)", args.output, results.len(), finding_count, args.format)));
     }
     crate::cli::emit_replay(globals);
     Ok(())
