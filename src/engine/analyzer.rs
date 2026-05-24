@@ -526,7 +526,7 @@ async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &s
                     title: "Export escape possible  --  filesystem root accessible via crafted handle",
                     desc: "subtree_check is disabled (Linux default). An attacker can craft a file \
                            handle targeting any inode on the filesystem, bypassing export boundaries.",
-                    evidence: &format!("export_entries={}, root_entries={}, inode={}, fs_type={:?}, confidence={:.0}%", export_count.unwrap_or(0), root_count.unwrap_or(0), candidate.inode_number, candidate.fs_type, candidate.confidence * 100.0,),
+                    evidence: &format!("export_entries={}, root_entries={}, inode={}, fs_type={:?}, confidence={:.0}%", export_count.unwrap_or(0), root_count.unwrap_or(0), candidate.inode_number, candidate.fs_type, candidate.confidence * 100.0),
                     remediation: "Enable subtree_check in /etc/exports (caution  --  impacts rename correctness).",
                     export: Some(export_path),
                 },
@@ -1157,7 +1157,7 @@ fn make_finding(spec: &FindingSpec<'_>, sev: Severity) -> Finding {
 /// Uses `std::time::SystemTime` to avoid adding a chrono dependency.
 fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     // Format as YYYY-MM-DDTHH:MM:SSZ (manual, no chrono dep).
     let (y, mo, d, h, mi, s) = secs_to_datetime(secs);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")

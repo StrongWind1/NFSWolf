@@ -17,7 +17,7 @@ pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result
     for result in results {
         for finding in &result.findings {
             let export = finding.export.as_deref().unwrap_or("");
-            writeln!(out, "{},{},{},{},{},{},{},{}", csv_field(&result.host), csv_field(export), csv_field(&finding.id), csv_field(&finding.title), csv_field(&format!("{:?}", finding.severity)), csv_field(&finding.description), csv_field(&finding.evidence), csv_field(&finding.remediation),)?;
+            writeln!(out, "{},{},{},{},{},{},{},{}", csv_field(&result.host), csv_field(export), csv_field(&finding.id), csv_field(&finding.title), csv_field(&format!("{:?}", finding.severity)), csv_field(&finding.description), csv_field(&finding.evidence), csv_field(&finding.remediation))?;
         }
     }
     Ok(())

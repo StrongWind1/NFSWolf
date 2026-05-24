@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88"
 name = "nfs3_client"
-version = "0.8.0"
+version = "0.9.0"
 authors = ["Vaiz"]
 build = false
 publish = true
@@ -79,7 +79,7 @@ path = "tests/reexport_test.rs"
 version = "2.3"
 
 [dependencies.nfs3_types]
-version = "0.5.0"
+version = "0.5.2"
 
 [dependencies.smol]
 version = "2.0"

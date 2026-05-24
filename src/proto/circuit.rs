@@ -84,7 +84,7 @@ impl CircuitBreaker {
     /// Create with default parameters suitable for NFS scanning.
     #[must_use]
     pub fn default_config() -> Self {
-        Self::new(Duration::from_secs(60), 0.80, 10, Duration::from_secs(5), Duration::from_secs(300))
+        Self::new(Duration::from_mins(1), 0.80, 10, Duration::from_secs(5), Duration::from_mins(5))
     }
 
     /// Record a successful transient-eligible call to `addr`.
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn circuit_breaker_trips_on_many_failures() {
         // Configure a tight breaker: 80 % errors, min 10 samples, short cooldown.
-        let cb = CircuitBreaker::new(Duration::from_secs(60), 0.80, 10, Duration::from_millis(500), Duration::from_secs(60));
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_millis(500), Duration::from_mins(1));
         let addr = loopback(2049);
         // 12 failures with no successes -> 100 % error rate > 80 % threshold.
         for _ in 0..12 {
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn circuit_breaker_does_not_trip_below_threshold() {
         // 60 % failure rate vs 80 % threshold  --  should stay closed.
-        let cb = CircuitBreaker::new(Duration::from_secs(60), 0.80, 10, Duration::from_millis(100), Duration::from_secs(60));
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_millis(100), Duration::from_mins(1));
         let addr = loopback(3049);
         // 6 failures + 4 successes = 60 % error rate.
         for _ in 0..6 {
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn circuit_breaker_separate_hosts_are_independent() {
-        let cb = CircuitBreaker::new(Duration::from_secs(60), 0.80, 10, Duration::from_millis(100), Duration::from_secs(60));
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_millis(100), Duration::from_mins(1));
         let addr_a = loopback(2049);
         let addr_b = loopback(2050);
         for _ in 0..12 {
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn record_failure_below_min_samples_does_not_trip() {
         // min_samples=10, only 5 failures  --  breaker must stay closed even at 100% error rate.
-        let cb = CircuitBreaker::new(Duration::from_secs(60), 0.80, 10, Duration::from_millis(100), Duration::from_secs(60));
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_millis(100), Duration::from_mins(1));
         let addr = loopback(4001);
         for _ in 0..5 {
             cb.record_failure(addr);
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn recovery_resets_trip_count_after_sustained_success() {
-        let cb = CircuitBreaker::new(Duration::from_secs(60), 0.80, 10, Duration::from_millis(5), Duration::from_secs(60));
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_millis(5), Duration::from_mins(1));
         let addr = loopback(4002);
         // Trip the breaker exactly once: 10 failures at min_samples=10
         for _ in 0..10 {
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn compute_cooldown_increases_exponentially() {
-        let cb = CircuitBreaker::new(Duration::from_secs(60), 0.80, 10, Duration::from_secs(1), Duration::from_secs(3600));
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_secs(1), Duration::from_hours(1));
         // Cooldown for trip_count=1 should be less than for trip_count=3
         // Due to jitter, sample many times and compare averages
         let mut sum_1: u64 = 0;
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn multiple_hosts_fully_independent() {
-        let cb = CircuitBreaker::new(Duration::from_secs(60), 0.80, 10, Duration::from_millis(500), Duration::from_secs(60));
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_millis(500), Duration::from_mins(1));
         let addr_a = loopback(5001);
         let addr_b = loopback(5002);
         // Trip host A
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn check_or_wait_returns_err_when_tripped() {
-        let cb = CircuitBreaker::new(Duration::from_secs(60), 0.80, 10, Duration::from_secs(60), Duration::from_secs(300));
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_mins(1), Duration::from_mins(5));
         let addr = loopback(6002);
         for _ in 0..15 {
             cb.record_failure(addr);
