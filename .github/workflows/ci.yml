@@ -23,7 +23,7 @@
 #   cargo test  -- compiles and runs unit + integration tests.
 #   cargo doc   -- builds HTML API documentation from doc-comments in source.
 #   clippy      -- the Rust linter. Part of the standard toolchain.
-#   MSRV        -- Minimum Supported Rust Version. This project requires 1.94.
+#   MSRV        -- Minimum Supported Rust Version. This project requires 1.95.
 #   feature     -- a compile-time flag that turns optional code on/off.
 #                  nfswolf exposes one: `fuse` (Linux FUSE support).
 # =============================================================================
@@ -78,7 +78,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
@@ -104,7 +104,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
@@ -171,7 +171,7 @@ jobs:
             flags: --no-default-features --features fuse
     steps:
       - name: Checkout source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
@@ -221,7 +221,7 @@ jobs:
         os: [macos-latest, windows-latest]
     steps:
       - name: Checkout source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
@@ -246,28 +246,28 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # msrv -- Minimum Supported Rust Version. Cargo.toml declares
-  # `rust-version = "1.94"`. This job proves we haven't accidentally used a
+  # `rust-version = "1.95"`. This job proves we haven't accidentally used a
   # language feature newer than that (for example `let-else` in edition 2021
   # code, or a freshly stabilised API).
   # ---------------------------------------------------------------------------
   msrv:
-    name: msrv (1.94)
+    name: msrv (1.95)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.94 toolchain
+      - name: Install Rust 1.95 toolchain
         # --profile minimal skips extras like miri we don't need. rust-toolchain.toml
-        # pins a different version for the primary jobs; here we install a second
+        # uses stable (latest) for the primary jobs; here we install a second
         # toolchain side-by-side and make it the default for this job only.
         run: |
           set -euo pipefail
-          rustup toolchain install 1.94.0 --profile minimal --component clippy
-          rustup default 1.94.0
+          rustup toolchain install 1.95.0 --profile minimal --component clippy
+          rustup default 1.95.0
 
       - name: Install FUSE headers
         run: |
@@ -303,7 +303,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
@@ -346,7 +346,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
@@ -366,7 +366,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 

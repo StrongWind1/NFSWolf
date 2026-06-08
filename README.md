@@ -1,15 +1,14 @@
 <h1 align="center">NFSWolf</h1>
 
 <p align="center">
-  <strong>Fast, native NFS security toolkit. One static binary -- recon, analysis, escape, exploitation, and an interactive shell.</strong>
+  <strong>Fast, native NFS security toolkit. One static binary - recon, analysis, escape, exploitation, and an interactive shell.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://crates.io/crates/nfswolf"><img src="https://img.shields.io/crates/v/nfswolf.svg" alt="Crates.io"></a>
-  <a href="https://docs.rs/nfswolf"><img src="https://img.shields.io/docsrs/nfswolf" alt="docs.rs"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
-  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/msrv-1.94-informational" alt="MSRV 1.94"></a>
+  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/edition-2024-informational" alt="Edition 2024"></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.95-informational" alt="MSRV 1.95"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
 </p>
 
 <p align="center">
@@ -22,9 +21,9 @@
 
 ---
 
-## Why nfswolf
+## Why NFSWolf
 
-The NFS security ecosystem is scattered across a dozen small tools written in the 1990s and 2000s, most of which only work on Linux and depend on `libnfs`. nfswolf consolidates the full NFS attack path -- reconnaissance, analysis, export escape, shell access, and targeted exploitation -- into a single pure-Rust binary that links statically under `musl`.
+The NFS security ecosystem is scattered across a dozen small tools written in the 1990s and 2000s, most of which only work on Linux and depend on `libnfs`. NFSWolf consolidates the full NFS attack path - reconnaissance, analysis, export escape, shell access, and targeted exploitation - into a single pure-Rust binary that links statically under `musl`.
 
 | Capability | nfswolf | showmount | nfsspy | msf NFS | nfs-ls | nfsshell |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -42,7 +41,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 
 ## Features at a glance
 
-- **Documented security findings** across export, transport, file-handle, and credential attack categories -- full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
+- **Documented security findings** across export, transport, file-handle, and credential attack categories - full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
 - **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2.
 - **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
 - **Offensive subcommands**: `escape` (export breakout), `brute-handle` (handle oracle), `uid-spray` (last-resort credential discovery).
@@ -50,13 +49,27 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 - **FUSE**: mount any NFS export locally with spoofed credentials via `nfswolf mount`.
 - **Six report formats**: HTML, JSON, CSV, Markdown, plain-text, ANSI console.
 
+## Example
+
+Discover NFS hosts on a subnet, then audit one export:
+
+```console
+$ nfswolf scan 192.168.1.0/24
+192.168.1.10   v3 v4   exports: /srv/nfs (rw), /home (ro)
+[*] 1 host, 2 exports
+
+$ nfswolf analyze 192.168.1.10:/srv/nfs
+[HIGH] no_root_squash - AUTH_SYS UID 0 is honored (root access to the export)
+[*] 1 finding (1 high)
+```
+
 ## Installation
 
 ### Prebuilt binaries
 
 Download from the [Releases page](https://github.com/StrongWind1/NFSWolf/releases). Each release ships with a `SHA256SUMS` checksum file, a `SHA256SUMS.sig` cosign signature, and per-artifact SLSA build-provenance attestations.
 
-### Pick your artifact carefully -- the `mount` subcommand is NOT in the musl static build
+### Pick your artifact carefully - the `mount` subcommand is NOT in the musl static build
 
 | File | Link | FUSE / `nfswolf mount` | When to use it |
 |---|---|:---:|---|
@@ -66,7 +79,7 @@ Download from the [Releases page](https://github.com/StrongWind1/NFSWolf/release
 | `nfswolf-macos-universal`, `nfswolf-macos-arm64`, `nfswolf-macos-x86_64` | macOS | macFUSE required | macOS has no bundled FUSE; install [macFUSE](https://osxfuse.github.io/) separately if you want `mount`. |
 | `nfswolf-windows-x86_64-msvc.exe`, `-gnu.exe`, `-arm64-msvc.exe` | Windows | **no** | FUSE is Linux / macOS only; `nfswolf mount` is not available on Windows regardless of build. |
 
-If you download the static-musl Linux binary and then try `nfswolf mount ...`, the command will not exist in the binary and `nfswolf --help` will not list it. This is by design -- `libfuse3` cannot be statically linked against `musl`.
+If you download the static-musl Linux binary and then try `nfswolf mount ...`, the command will not exist in the binary and `nfswolf --help` will not list it. This is by design - `libfuse3` cannot be statically linked against `musl`.
 
 ### Verify your download
 
@@ -86,16 +99,11 @@ cosign verify-blob \
 
 ```sh
 git clone https://github.com/StrongWind1/NFSWolf
-cd nfswolf
-make build            # release build for the native target
-sudo install -Dm755 target/release/nfswolf /usr/local/bin/nfswolf
+cd NFSWolf
+make release          # optimised native build -> target/release/nfswolf
 ```
 
-### From crates.io
-
-```sh
-cargo install nfswolf --locked
-```
+Requires a stable Rust toolchain (see `rust-toolchain.toml`).
 
 ## Quick start
 
@@ -158,7 +166,7 @@ Global flags common to every subcommand:
 
 See `nfswolf <subcommand> --help` for per-subcommand flags.
 
-## What nfswolf does NOT do
+## What NFSWolf does not do
 
 - Does not exploit RPCSEC_GSS / Kerberized mounts (detection only).
 - Does not attack NFS-over-TLS channels (detects `NONE`/`TLS_V1` negotiation only).
@@ -185,18 +193,27 @@ make dev          # debug build, fast iteration
 make check-all    # full gate: fmt, lint, audit, check, test-matrix, doc, hygiene, machete
 ```
 
-## Authorized use only
+## Credits
 
-`nfswolf` is a penetration-testing and security-research tool. Operating it against systems without explicit written authorization is illegal in most jurisdictions. You alone are responsible for how you use it. By using `nfswolf` you accept full responsibility for compliance with applicable laws, contracts, and policies.
+- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz - the NFSv3 / MOUNT / portmapper / XDR foundation.
+- Authors of RFC 1057, RFC 1094, RFC 1813, RFC 5531, RFC 7530, RFC 2623, RFC 9289.
+- Prior-art tools that inspired this consolidation: `nfsspy`, `nfsshell`, `showmount`, Metasploit NFS modules.
 
-If you believe you have found a security issue in `nfswolf` itself, please open a private security advisory on the [GitHub repository](https://github.com/StrongWind1/NFSWolf/security/advisories) rather than a public issue.
+## Related tools
+
+Other projects in this collection:
+
+- [CredWolf](https://github.com/StrongWind1/CredWolf) - Active Directory credential validation
+- [KerbWolf](https://github.com/StrongWind1/KerbWolf) - Kerberos roasting and hash extraction toolkit
+- [NTDSWolf](https://github.com/StrongWind1/NTDSWolf) - offline NTDS.dit parser and credential extractor
+- [WPAWolf](https://github.com/StrongWind1/WPAWolf) - WPA/WPA2/WPA3-FT-PSK handshake extraction from captures
+
+## Disclaimer
+
+NFSWolf is a penetration-testing and security-research tool. Operating it against systems without explicit written authorization is illegal in most jurisdictions. You alone are responsible for how you use it. By using NFSWolf you accept full responsibility for compliance with applicable laws, contracts, and policies.
+
+If you believe you have found a security issue in NFSWolf itself, please open a private security advisory on the [GitHub repository](https://github.com/StrongWind1/NFSWolf/security/advisories) rather than a public issue.
 
 ## License
 
-Apache-2.0 -- see [LICENSE](LICENSE).
-
-## Acknowledgments
-
-- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz -- the NFSv3 / MOUNT / portmapper / XDR foundation.
-- Authors of RFC 1057, RFC 1094, RFC 1813, RFC 5531, RFC 7530, RFC 2623, RFC 9289.
-- Prior-art tools that inspired this consolidation: `nfsspy`, `nfsshell`, `showmount`, Metasploit NFS modules.
+[Apache License 2.0](LICENSE)
