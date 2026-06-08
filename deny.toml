@@ -8,7 +8,15 @@ feature-depth = 3
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = [ "https://github.com/rustsec/advisory-db" ]
-ignore = [ ]
+# RUSTSEC-2026-0173: proc-macro-error2 is unmaintained. It is a compile-time
+# only proc-macro helper pulled transitively by tabled_derive 0.11.0 (the
+# latest published version; tabled 0.21 still pins it), so it never links into
+# the shipped binary. The advisory is "unmaintained", not a vulnerability or
+# unsoundness, and has no safe upgrade. Drop this ignore when tabled upstream
+# releases a tabled_derive that no longer depends on proc-macro-error2.
+ignore = [
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; compile-time-only transitive dep via tabled_derive 0.11 (latest), no upgrade path, not linked into the binary" },
+]
 maximum-db-staleness = "P1D"
 git-fetch-with-cli = true
 unmaintained = "all"
