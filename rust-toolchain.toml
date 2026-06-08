@@ -1,8 +1,8 @@
 [toolchain]
-# Pinned to a concrete stable release for reproducible builds.
-# Update this value in tandem with `rust-version` in Cargo.toml and the MSRV job
-# in .github/workflows/ci.yml when raising the supported baseline.
-channel = "1.95.0"
+# Track the latest stable Rust. The supported floor (MSRV) is declared by
+# `rust-version` in Cargo.toml and verified by the `msrv` job in
+# .github/workflows/ci.yml.
+channel = "stable"
 # Use the `default` profile so we don't pull miri / rustc-codegen-cranelift
 # which are not always published alongside every stable point release and
 # which we don't need for this project.
