@@ -38,11 +38,9 @@ highlight = "all"
 # incompatible major versions of the same crate.
 #   hashbrown: dashmap 6.x -> 0.14, indexmap 2.x (via fuser) -> 0.17
 #   nix:       fuser -> 0.30, rustyline -> 0.31
-#   wit-bindgen: getrandom 0.3 (via proptest) -> 0.51, getrandom 0.4 -> 0.57
 skip = [
     { crate = "hashbrown@0.14", reason = "dashmap 6.x has not upgraded to hashbrown 0.17" },
     { crate = "nix@0.30", reason = "fuser has not upgraded to nix 0.31" },
-    { crate = "wit-bindgen@0.51", reason = "getrandom 0.3 (via proptest) pulls older wit-bindgen" },
 ]
 
 [[bans.deny]]
