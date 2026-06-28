@@ -163,7 +163,10 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     rl.set_helper(Some(completer));
 
     loop {
-        let prompt = format!("nfswolf@{host}:{} uid={}> ", shell.cwd_path(), uid);
+        // Read uid/gid from the shell so the prompt tracks mid-session
+        // `uid` / `gid` / `impersonate` changes (the credential lives on the
+        // client, not the captured `uid` local).
+        let prompt = format!("nfswolf@{host}:{} uid={} gid={}> ", shell.cwd_path(), shell.current_uid(), shell.current_gid());
         match rl.readline(&prompt) {
             Ok(line) => {
                 let _ = rl.add_history_entry(&line);

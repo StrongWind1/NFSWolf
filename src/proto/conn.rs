@@ -2,7 +2,7 @@
 //!
 //! Adds AUTH_SYS stamp injection, reconnection strategy, and health tracking.
 //! Each connection wraps a single nfs3_client TCP connection to one (host, export).
-//! A second TCP connection to the NFS port is kept for raw RPC calls (NFSv2, NLM, NSM).
+//! A second TCP connection to the NFS port is kept for raw RPC calls (NFSv2).
 //! When a SOCKS5 proxy is configured, both connections are tunneled through it.
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
@@ -56,11 +56,11 @@ impl ConnectionHealth {
 /// Wraps nfs3_client::Nfs3Connection with nfswolf-specific management.
 ///
 /// Holds two TCP connections: one for NFSv3 procedures (via nfs3_client) and
-/// one for raw RPC calls (NFSv2, NLM, NSM via `RpcClient::call`).
+/// one for raw RPC calls (NFSv2 via `RpcClient::call`).
 pub struct NfsConnection {
     /// NFSv3 connection including mount and NFS clients.
     inner: Nfs3Connection<NfsIo>,
-    /// Separate raw RPC connection to the NFS port for NFSv2/NLM/NSM calls.
+    /// Separate raw RPC connection to the NFS port for NFSv2 calls.
     raw_rpc: RpcClient<NfsIo>,
     /// Remote server address (host + portmapper port).
     pub addr: SocketAddr,
@@ -124,7 +124,7 @@ impl NfsConnection {
 
     /// Execute a raw RPC call on the NFS port connection.
     ///
-    /// Used for NFSv2 (program 100003, version 2), NLM (100021), NSM (100024).
+    /// Used for NFSv2 (program 100003, version 2).
     /// The caller is responsible for correct `program`, `version`, and `proc` values.
     pub async fn call_raw<C, R>(&mut self, program: u32, version: u32, proc: u32, args: &C) -> anyhow::Result<R>
     where
@@ -189,7 +189,7 @@ impl NfsConnection {
 
         let inner = Nfs3Connection { host: addr.ip().to_string(), mount_port: nfs_port, mount_path: dirpath(Opaque::owned(b"/__direct__".to_vec())), mount_client, mount_resok, nfs3_port: nfs_port, nfs3_client };
 
-        // Raw RPC connection for NFSv2/NLM/NSM calls.
+        // Raw RPC connection for NFSv2 calls.
         let raw_io = tcp_connect(nfs_addr).await.with_context(|| format!("raw RPC direct connect to {nfs_addr}"))?;
         let raw_rpc = RpcClient::new_with_auth(raw_io, opaque, nfs3_types::rpc::opaque_auth::default());
 

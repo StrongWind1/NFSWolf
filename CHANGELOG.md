@@ -4,11 +4,32 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-28
+
+### Added
+
+- `shell`: `tree [depth]` command -- recursively map a directory (default depth 3), always traversing hidden dot-directories (`.ssh`, `.aws`, `.bash_history` are exactly what you want on a security tool).
+- `shell`: the prompt now shows `uid=<n> gid=<n>` and tracks mid-session `uid` / `gid` / `impersonate` changes.
+- `brute-handle` reports a non-destructive writability hint per hit from advisory ACCESS bits (probed as uid=0 and the object's owner). It never writes to the server -- a handle is not itself read-only/read-write; the export's ro/rw flag and the credential decide.
+- `access::WRITE_BITS` / `access::grants_write()` helpers in `proto::nfs3::types`.
+
+### Changed
+
+- `--help` groups the nine subcommands into Recon / Connect / Advanced / Utilities sections; commands are still invoked flat (`nfswolf scan ...`).
+- `shell`: `get` now honours the auto-UID escalation ladder like `cat`, so `get /etc/shadow` succeeds where it previously failed with `NFS3ERR_ACCES`; `tree` escalates credentials to descend into root-only hidden directories.
+- `brute-handle`: `--seed-handle` is now optional -- a bare `host:/export` target derives the seed handle by mounting the export (MNTPROC_MNT), matching `escape`. `--seed-handle HEX` remains an explicit override and a new `-e/--export` flag mirrors `escape`.
+- `brute-handle`: candidate generation now fingerprints the seed (`--fs-type auto`, the default) and tries the same known-root candidates as `escape` (ext4 inode 2 / compound-UUID, XFS 128/64/32, BTRFS subvolumes) before the generic inode sweep. A hit is accepted on `NFS3_OK` *or* `NFS3ERR_ACCES`/`NFS3ERR_PERM`, so brute-handle now finds the same roots `escape` does (a root_squash'd root is a valid handle, no longer discarded).
+- Docs: reconciled the finding count (39 findings, F-1.1 through F-7.6), RFC citation format (`§`), write-up severities, and CLI/command references across FINDINGS / ARCHITECTURE / README / CLAUDE; CONTRIBUTING MSRV is now 1.95.
+
+### Removed
+
+- `docs/scanning-module-plan.md` (the completed scan-rewrite plan); the `conn.rs` raw-RPC comments no longer reference the removed NLM/NSM clients.
+
 ## [0.3.1] - 2026-05-13
 
 ### Changed
 
-- Scanner rewrite: new probe infrastructure using raw RPC record-marking to detect PROG_MISMATCH version ranges (RFC 1831 S13). Probes NFS NULL v2, NULL v3, and COMPOUND v4 over a single TCP connection per host. Reports confirmed protocol versions alongside a portmapper-derived "Hint" column showing the server-advertised version range.
+- Scanner rewrite: new probe infrastructure using raw RPC record-marking to detect PROG_MISMATCH version ranges (RFC 1831 §13). Probes NFS NULL v2, NULL v3, and COMPOUND v4 over a single TCP connection per host. Reports confirmed protocol versions alongside a portmapper-derived "Hint" column showing the server-advertised version range.
 - Scanner: MOUNT EXPORT and DUMP now run against the highest registered mountd version rather than attempting all three separately (mountd v1/v2/v3 serve the same data).
 - Scanner: NFSv4 pseudo-root READDIR uses AUTH_SYS uid=0 instead of AUTH_NONE (servers reject anonymous access).
 - Scanner: blank table columns are hidden dynamically -- a /24 scan against hosts with no NFSv2 will never show the "v2x" column.
@@ -189,6 +210,9 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/StrongWind1/NFSWolf/releases/tag/v0.1.0
