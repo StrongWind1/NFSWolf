@@ -162,9 +162,8 @@ impl NfsMountClient {
     /// type (the wire format is identical between v1 and v3 EXPORT -- only the
     /// version number in the RPC header differs).
     ///
-    /// Per the scanning plan: "MOUNT v1 EXPORT returns the NFSv2 export list.
-    /// MOUNT v3 EXPORT returns the NFSv3 export list.  These are usually
-    /// identical but CAN differ."
+    /// MOUNT v1 EXPORT returns the NFSv2 export list; MOUNT v3 EXPORT returns
+    /// the NFSv3 export list.  These are usually identical but CAN differ.
     pub async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
         use nfs3_client::net::Connector as _;
         use nfs3_client::rpc::RpcClient;

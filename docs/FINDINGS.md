@@ -169,7 +169,7 @@ File handles are bearer tokens — possession is authorization.
 | Field | Value |
 |-------|-------|
 | Severity | Critical |
-| RFC Basis | RFC 2623 S2.6, RFC 1094 S2.3.3 |
+| RFC Basis | RFC 2623 §2.6, RFC 1094 §2.3.3 |
 | Precondition | Possession of a valid file handle (obtained by any means) |
 | Detection | Use handle from export A against port 2049 from an IP not authorized for that export |
 
@@ -182,7 +182,7 @@ File handles are bearer tokens — possession is authorization.
 | Field | Value |
 |-------|-------|
 | Severity | Critical |
-| RFC Basis | RFC 1813 S3.3.3, RFC 2623 S2.6 |
+| RFC Basis | RFC 1813 §3.3.3, RFC 2623 §2.6 |
 | Precondition | Access to any export on the same filesystem; no_subtree_check (default) |
 | Detection | Mount wildcard export, escape-root, cd to restricted export directory |
 
@@ -234,7 +234,7 @@ File handles are bearer tokens — possession is authorization.
 | Field | Value |
 |-------|-------|
 | Severity | Critical |
-| RFC Basis | RFC 2623 S2.1, RFC 2623 S2.6, RFC 1057 S10 |
+| RFC Basis | RFC 2623 §2.1, RFC 2623 §2.6, RFC 1057 §10 |
 | Precondition | mountd UDP listener; attacker on same L2 segment; knowledge of allowed IP |
 | Detection | Check if mountd serves over UDP (rpcinfo/scanner --scan-udp) |
 
@@ -484,16 +484,19 @@ subcommand exercises these findings.
 | F-2.4 | [BTRFS Subvolume Escape](findings/F-2.4-btrfs-subvolume-escape.md) | High | `escape` (subvol 5 + 256+), `shell escape-root` |
 | F-2.5 | [Stale Handle Persistence](findings/F-2.5-stale-handle-persistence.md) | Medium | `shell --handle <hex>`, `mount --handle <hex>`, `shell mount-handle` |
 | F-2.6 | [Bind Mount Escape](findings/F-2.6-bind-mount-escape.md) | High | `escape` (fsid-based handle), `analyze` |
+| F-2.7 | [NFS Daemon ACL Blindness](findings/F-2.7-nfsd-acl-blindness.md) | Critical | `shell --handle <hex>` / `mount --handle <hex>` (port 2049, no MOUNT — handle resolves from any IP) |
+| F-2.8 | [Sibling Export Lateral Access](findings/F-2.8-sibling-export-lateral-access.md) | Critical | `escape` + `shell` (`escape-root`, then `cd` to a peer export, `ls`/`cat`) |
 | F-3.1 | [Plaintext Wire Protocol](findings/F-3.1-plaintext-wire-protocol.md) | High | `analyze` (TLS probe; precondition check) |
 | F-3.2 | [Portmapper Amplification](findings/F-3.2-portmapper-amplification.md) | Medium | `scan` (UDP DUMP amplification factor), `analyze` |
 | F-3.3 | [IP Spoofing](findings/F-3.3-ip-spoofing-host-trust.md) | High | `analyze` (host-based ACL detection; no active exploit) |
 | F-3.4 | [STRIPTLS Downgrade](findings/F-3.4-striptls-downgrade.md) | High | `analyze` (AUTH_TLS probe); NFSv4 SECINFO |
 | F-3.5 | [Portmapper Tunnel Bypass](findings/F-3.5-portmapper-tunnel-bypass.md) | Medium | `scan` (direct port 2049 probe when 111 filtered) |
+| F-3.6 | [UDP MOUNT Handle Theft](findings/F-3.6-udp-mount-handle-theft.md) | Critical | `scan --scan-udp` (mountd UDP availability) |
 | F-4.1 | [no_root_squash](findings/F-4.1-no-root-squash.md) | Critical | `analyze`, `mount --uid 0 --allow-write`, `shell uid 0` |
 | F-4.2 | [SUID/SGID Escalation](findings/F-4.2-suid-sgid-escalation.md) | High | `shell suid-scan`, `mount` + `chmod u+s` via regular tools |
 | F-4.3 | [Device Node Creation](findings/F-4.3-device-node-creation.md) | High | `shell mknod` |
 | F-4.4 | [Symlink Escape](findings/F-4.4-symlink-escape.md) | High | `analyze` (writable parent detection), `shell ln -s` |
-| F-4.5 | [SELinux Label Bypass](findings/F-4.5-selinux-label-bypass.md) | Medium | `analyze` (MAC label check on created file) |
+| F-4.5 | [SELinux Label Bypass](findings/F-4.5-selinux-label-bypass.md) | Medium | Not implemented -- documented for awareness (no SELinux/MAC check in `analyze`) |
 | F-5.1 | [Export List Enumeration](findings/F-5.1-export-list-enumeration.md) | Medium | `scan` (MNTPROC_EXPORT), `analyze` |
 | F-5.2 | [READDIRPLUS Harvesting](findings/F-5.2-readdirplus-handle-harvesting.md) | High | `shell ls`, `shell find`, `mount` (transparent via FUSE) |
 | F-5.3 | [NIS Credential Extraction](findings/F-5.3-nis-credential-extraction.md) | High | `scan` / `analyze` (portmapper 100004/100007 detect) |

@@ -216,6 +216,17 @@ pub mod access {
     pub const EXECUTE: u32 = 0x0020;
     /// All six bits OR'd  --  request the full access mask in one call.
     pub const ALL: u32 = READ | LOOKUP | MODIFY | EXTEND | DELETE | EXECUTE;
+
+    /// The write-capability bits: modify data/attrs, extend/create, or delete.
+    /// A handle granting any of these is writable. ACCESS is advisory only
+    /// (RFC 1813 S3.3.4)  --  confirm with an actual CREATE/WRITE.
+    pub const WRITE_BITS: u32 = MODIFY | EXTEND | DELETE;
+
+    /// Whether an ACCESS result mask grants any write capability.
+    #[must_use]
+    pub const fn grants_write(mask: u32) -> bool {
+        mask & WRITE_BITS != 0
+    }
 }
 
 /// Write stability levels.

@@ -27,6 +27,8 @@ For the summary catalog with RFC rationale, see [FINDINGS.md](../FINDINGS.md).
 | F-2.4 | [BTRFS Subvolume Handle Construction](F-2.4-btrfs-subvolume-escape.md) | High |
 | F-2.5 | [Stale Handle After Permission Revocation](F-2.5-stale-handle-persistence.md) | Medium |
 | F-2.6 | [Bind Mount Export Escape](F-2.6-bind-mount-escape.md) | High |
+| F-2.7 | [NFS Daemon Export ACL Blindness](F-2.7-nfsd-acl-blindness.md) | Critical |
+| F-2.8 | [Sibling Export Lateral Access](F-2.8-sibling-export-lateral-access.md) | Critical |
 
 ### Category 3: Network-Level Attacks
 
@@ -37,6 +39,7 @@ For the summary catalog with RFC rationale, see [FINDINGS.md](../FINDINGS.md).
 | F-3.3 | [IP Spoofing Against Host-Based ACLs](F-3.3-ip-spoofing-host-trust.md) | High |
 | F-3.4 | [STRIPTLS Downgrade (RFC 9289)](F-3.4-striptls-downgrade.md) | High |
 | F-3.5 | [Filtered Portmapper Bypass](F-3.5-portmapper-tunnel-bypass.md) | Medium |
+| F-3.6 | [UDP MOUNT Handle Theft via Source IP Spoofing](F-3.6-udp-mount-handle-theft.md) | Critical |
 
 ### Category 4: Privilege Escalation
 
@@ -95,10 +98,10 @@ Reconnaissance          Identity / Access           Post-Exploitation
 [F-1.4] Name Spoof──┤  [F-1.5] Cred Replay    │    [F-4.4] Symlink Attack
 [F-3.2] Portmap Amp──┤  [F-1.6] v2 Downgrade──┤    [F-4.5] SELinux Bypass
 [F-5.3] NIS Extract──┤  [F-2.1] Export Escape  │    [F-7.6] No Detection
-[F-3.5] Portmap Tun──┤  [F-2.2] Handle Guess  │    [F-6.1] Lock DoS
+[F-3.5] Portmap Tun──┤  [F-2.2] Handle Guess  │    [F-2.7] NFSd Blind
 [F-5.5] Pseudo-FS ──┘  [F-2.3] Win Signing   ┘    [F-2.6] Bind Mount
-                        [F-1.2] Squash Bypass        [F-6.2] Grace Period
-                        [F-1.3] Group Inject         [F-6.3] State Destroy
+                        [F-1.2] Squash Bypass        [F-2.8] Sibling Pivot
+                        [F-1.3] Group Inject         [F-3.6] UDP FH Theft
                         [F-2.4] BTRFS Subvol
                         [F-3.4] STRIPTLS
 ```

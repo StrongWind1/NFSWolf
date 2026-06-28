@@ -57,7 +57,16 @@ pub const H_BEHAVIOR: &str = "Behavior";
 ///   nfswolf escape 192.168.1.10:/srv       # subtree-check bypass -> root handle
 ///   nfswolf shell 192.168.1.10 --handle HEX  # HEX = output from escape
 #[derive(Parser)]
-#[command(name = "nfswolf", version, about, long_about = None)]
+#[command(
+    name = "nfswolf",
+    version,
+    about,
+    long_about = None,
+    // Suppress clap's flat `{subcommands}` block; the categorised listing is
+    // rendered by `after_help` (COMMANDS_HELP) since clap can't group subcommands.
+    help_template = "{about-with-newline}\n{usage-heading} {usage}\n\n{options}\n{after-help}",
+    after_help = COMMANDS_HELP,
+)]
 pub struct Cli {
     /// AUTH_SYS UID to present to the NFS server (spoofed  --  server trusts this)
     #[arg(short = 'u', long, global = true, default_value = "1000", value_name = "UID", help_heading = H_IDENTITY)]
@@ -128,34 +137,85 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    // --- Recon: discover, audit, and break out of exports ---
     /// Discover NFS servers on a network
     Scan(scan::ScanArgs),
 
     /// Deep security audit of an NFS server
     Analyze(analyze::AnalyzeArgs),
 
+    /// Escape an export to the filesystem root via subtree_check bypass
+    Escape(escape::EscapeArgs),
+
+    // --- Connect: interactive / filesystem access ---
+    /// Interactive NFS exploration shell
+    Shell(shell::ShellArgs),
+
     /// FUSE-mount an NFS export with UID spoofing
     #[cfg(feature = "fuse")]
     Mount(mount::MountArgs),
 
-    /// Interactive NFS exploration shell
-    Shell(shell::ShellArgs),
-
-    /// Escape an export to the filesystem root via subtree_check bypass
-    Escape(escape::EscapeArgs),
-
+    // --- Advanced: last-resort handle / credential brute force ---
     /// Brute-force NFS file handles using the STALE/BADHANDLE oracle
     BruteHandle(brute_handle::BruteHandleArgs),
 
     /// UID/GID spray (last-resort credential discovery)
     UidSpray(uid_spray::UidSprayArgs),
 
+    // --- Utilities: reporting and shell integration ---
     /// Convert an `analyze --json` dump into HTML/Markdown/CSV/TXT/console
     Convert(convert::ConvertArgs),
 
     /// Generate shell completions
     Completions(CompletionsArgs),
 }
+
+/// Categorised command listing shown in `--help` via `after_help`.
+///
+/// clap 4.x cannot group subcommands under headings the way it groups args
+/// (`help_heading` is args-only), so the help template suppresses the auto
+/// `{subcommands}` block and the grouped listing is rendered here instead. The
+/// `mount` line is gated on the `fuse` feature so the musl-static build (which
+/// drops FUSE) stays accurate.
+#[cfg(feature = "fuse")]
+const COMMANDS_HELP: &str = concat!(
+    "Commands:\n",
+    "  Recon:\n",
+    "    scan          Discover NFS servers on a network\n",
+    "    analyze       Deep security audit of an NFS server\n",
+    "    escape        Break out of an export to the filesystem root (subtree_check bypass)\n",
+    "  Connect:\n",
+    "    shell         Interactive NFS exploration shell\n",
+    "    mount         FUSE-mount an NFS export with UID spoofing\n",
+    "  Advanced:\n",
+    "    brute-handle  Brute-force file handles via the STALE/BADHANDLE oracle\n",
+    "    uid-spray     UID/GID spray (last-resort credential discovery)\n",
+    "  Utilities:\n",
+    "    convert       Render an `analyze --json` dump to HTML/MD/CSV/TXT/console\n",
+    "    completions   Generate shell completions\n",
+    "\n",
+    "Run `nfswolf <COMMAND> --help` for per-command options.",
+);
+
+/// Same listing for the `--no-default-features` build, which omits `mount`.
+#[cfg(not(feature = "fuse"))]
+const COMMANDS_HELP: &str = concat!(
+    "Commands:\n",
+    "  Recon:\n",
+    "    scan          Discover NFS servers on a network\n",
+    "    analyze       Deep security audit of an NFS server\n",
+    "    escape        Break out of an export to the filesystem root (subtree_check bypass)\n",
+    "  Connect:\n",
+    "    shell         Interactive NFS exploration shell\n",
+    "  Advanced:\n",
+    "    brute-handle  Brute-force file handles via the STALE/BADHANDLE oracle\n",
+    "    uid-spray     UID/GID spray (last-resort credential discovery)\n",
+    "  Utilities:\n",
+    "    convert       Render an `analyze --json` dump to HTML/MD/CSV/TXT/console\n",
+    "    completions   Generate shell completions\n",
+    "\n",
+    "Run `nfswolf <COMMAND> --help` for per-command options.",
+);
 
 #[derive(Parser)]
 pub struct CompletionsArgs {

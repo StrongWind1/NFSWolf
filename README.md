@@ -137,17 +137,17 @@ nfswolf uid-spray 192.168.1.10:/srv/nfs --uid-start 0 --uid-end 5000 --path /etc
 
 ## CLI reference
 
-| Subcommand | Purpose |
-|---|---|
-| `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
-| `analyze` | Per-host security audit against the documented finding catalog |
-| `shell` | Interactive REPL over NFSv3 or NFSv4, with `get -r` / `put -r` / `--verify` |
-| `mount` | FUSE mount with spoofed AUTH_SYS credentials (`--features fuse`) |
-| `escape` | Construct ext4 / XFS / BTRFS escape handles to break out of an export |
-| `brute-handle` | Brute-force file handles using the STALE / BADHANDLE oracle |
-| `uid-spray` | Last-resort UID/GID brute force when auto-UID escalation fails |
-| `convert` | Render a saved analysis result to HTML / JSON / CSV / Markdown / text |
-| `completions <shell>` | Generate shell completions for bash, zsh, fish, PowerShell |
+| Group | Subcommand | Purpose |
+|---|---|---|
+| Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
+| Recon | `analyze` | Per-host security audit against the documented finding catalog |
+| Recon | `escape` | Construct ext4 / XFS / BTRFS escape handles to break out of an export |
+| Connect | `shell` | Interactive REPL over NFSv3 or NFSv4, with `get -r` / `put -r` / `--verify` |
+| Connect | `mount` | FUSE mount with spoofed AUTH_SYS credentials (`--features fuse`) |
+| Advanced | `brute-handle` | Brute-force file handles using the STALE / BADHANDLE oracle |
+| Advanced | `uid-spray` | Last-resort UID/GID brute force when auto-UID escalation fails |
+| Utilities | `convert` | Render a saved analysis result to HTML / JSON / CSV / Markdown / text |
+| Utilities | `completions <shell>` | Generate shell completions for bash, zsh, fish, PowerShell |
 
 Global flags common to every subcommand:
 

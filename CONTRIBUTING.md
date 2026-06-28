@@ -11,7 +11,7 @@ Thanks for your interest in improving nfswolf. This document is the short-form e
 
 ## Prerequisites
 
-- Rust 1.94 or newer (the repo pins the channel via `rust-toolchain.toml`).
+- Rust 1.95 or newer (the repo pins the channel via `rust-toolchain.toml`).
 - `libfuse3-dev` + `pkg-config` (Linux, for the `fuse` feature).
 - `musl-tools` (Linux, for `make dist`).
 - GNU `make` and `grep` (the hygiene targets currently use `grep -P`).
@@ -41,7 +41,7 @@ That target runs, in order:
 4. `cargo check --all-targets --all-features`
 5. `test-matrix` -- three feature combinations (`--all-features`, `--no-default-features`, `--features fuse`).
 6. `cargo doc --all-features --no-deps` with `-D warnings`.
-7. ASCII / LF hygiene over tracked `.rs` files.
+7. ASCII / LF hygiene over tracked `.rs` and `.md` files (`.md` may use `§` for RFC section references).
 8. `cargo machete` -- unused dependency check.
 
 If you need an offline gate that skips `cargo deny`, run the targets individually:
