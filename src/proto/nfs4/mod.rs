@@ -23,13 +23,6 @@
 pub mod compound;
 pub mod types;
 
-/// Linux NFSv4 pseudo-root namespace UUID.
-///
-/// nfs_analyze uses this UUID to detect the pseudo-root boundary when
-/// recursively mapping the NFSv4 pseudo-filesystem. A fsid matching
-/// this UUID indicates the pseudo-root, not a real export.
-pub const LINUX_PSEUDO_ROOT_UUID: &str = "39c6b5c1-3f24-4f4e-977c-7fe6546b8a25";
-
 /// NFSv4 compound operation codes relevant to security analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -85,7 +78,8 @@ pub struct PseudoFsEntry {
     pub path: String,
     /// Filesystem ID  --  changes at export boundaries.
     pub fsid: (u64, u64),
-    /// Whether this is the pseudo-root (matches LINUX_PSEUDO_ROOT_UUID).
+    /// Whether this is the pseudo-root, detected from an all-zero root fsid
+    /// (Linux knfsd `fsid=0` export); see `map_pseudo_fs` (RFC 7530 S7.3).
     pub is_pseudo_root: bool,
     /// Auth methods from SECINFO (e.g., `["krb5", "sys"]`).
     pub auth_methods: Vec<String>,

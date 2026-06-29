@@ -483,10 +483,10 @@ subcommand exercises these findings.
 | F-2.3 | [Windows Handle Signing](findings/F-2.3-windows-handle-signing.md) | Critical | `analyze` (`FileHandleAnalyzer::check_windows_signing`) |
 | F-2.4 | [BTRFS Subvolume Escape](findings/F-2.4-btrfs-subvolume-escape.md) | High | `escape` (subvol 5 + 256+), `shell escape-root` |
 | F-2.5 | [Stale Handle Persistence](findings/F-2.5-stale-handle-persistence.md) | Medium | `shell --handle <hex>`, `mount --handle <hex>`, `shell mount-handle` |
-| F-2.6 | [Bind Mount Escape](findings/F-2.6-bind-mount-escape.md) | High | `escape` (fsid-based handle), `analyze` |
+| F-2.6 | [Bind Mount Escape](findings/F-2.6-bind-mount-escape.md) | High | `escape` (fsid-based handle). `analyze` detection removed: the old handle-fsid vs fattr3-fsid equality test compared two differently-encoded values and false-positived on normal exports; no sound oracle is available from a single GETATTR |
 | F-2.7 | [NFS Daemon ACL Blindness](findings/F-2.7-nfsd-acl-blindness.md) | Critical | `shell --handle <hex>` / `mount --handle <hex>` (port 2049, no MOUNT — handle resolves from any IP) |
 | F-2.8 | [Sibling Export Lateral Access](findings/F-2.8-sibling-export-lateral-access.md) | Critical | `escape` + `shell` (`escape-root`, then `cd` to a peer export, `ls`/`cat`) |
-| F-3.1 | [Plaintext Wire Protocol](findings/F-3.1-plaintext-wire-protocol.md) | High | `analyze` (TLS probe; precondition check) |
+| F-3.1 | [Plaintext Wire Protocol](findings/F-3.1-plaintext-wire-protocol.md) | High | `analyze` (Info: flags exports that advertise no RPCSEC_GSS; RFC 9289 TLS itself is not actively probed) |
 | F-3.2 | [Portmapper Amplification](findings/F-3.2-portmapper-amplification.md) | Medium | `scan` (UDP DUMP amplification factor), `analyze` |
 | F-3.3 | [IP Spoofing](findings/F-3.3-ip-spoofing-host-trust.md) | High | `analyze` (host-based ACL detection; no active exploit) |
 | F-3.4 | [STRIPTLS Downgrade](findings/F-3.4-striptls-downgrade.md) | High | `analyze` (AUTH_TLS probe); NFSv4 SECINFO |
@@ -506,8 +506,8 @@ subcommand exercises these findings.
 | F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | Out of scope -- never implemented |
 | F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | Out of scope -- never implemented |
 | F-7.1 | [Wildcard Exports](findings/F-7.1-wildcard-export-policy.md) | High | `scan` + `analyze` (ACL pattern match on EXPORT output) |
-| F-7.2 | [Privileged Port Bypass](findings/F-7.2-privileged-port-bypass.md) | Medium | `analyze` (insecure port probe) |
+| F-7.2 | [Privileged Port Bypass](findings/F-7.2-privileged-port-bypass.md) | Medium | `analyze` probe removed (was tautological -- MNTPROC_EXPORT is not source-port gated, so it reported `insecure` on secure servers); a sound test needs an MNT from an unprivileged source port |
 | F-7.3 | [nohide/crossmnt Exposure](findings/F-7.3-nohide-crossmnt-exposure.md) | Medium | `analyze` (crossmnt LOOKUP traversal), `shell` |
-| F-7.4 | [Missing nosuid/nodev](findings/F-7.4-missing-nosuid-nodev.md) | High | `analyze` (server-side export flag check) |
+| F-7.4 | [Missing nosuid/nodev](findings/F-7.4-missing-nosuid-nodev.md) | High | Not server-observable -- `nosuid`/`nodev` are client-side mount options, absent from MNTPROC_EXPORT, so `analyze` cannot detect them remotely (documented gap, no detection) |
 | F-7.5 | [Squash Misconfiguration](findings/F-7.5-squash-misconfiguration.md) | Critical | `analyze` (all_squash + anonuid=0 detection) |
 | F-7.6 | [No Audit Logging](findings/F-7.6-no-audit-logging.md) | Medium | Not remotely detectable -- documented for awareness |

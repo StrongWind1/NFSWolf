@@ -66,6 +66,12 @@ fn scan_help_succeeds() {
 }
 
 #[test]
+fn scan_auto_escape_flag_in_help() {
+    // The auto-escape opt-in must be discoverable in `scan --help`.
+    Command::cargo_bin("nfswolf").expect("binary must be built").args(["scan", "--help"]).assert().success().stdout(contains("--auto-escape"));
+}
+
+#[test]
 fn analyze_help_succeeds() {
     Command::cargo_bin("nfswolf").expect("binary must be built").args(["analyze", "--help"]).assert().success();
 }

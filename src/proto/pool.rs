@@ -3,19 +3,19 @@
 //! Keys connections by (host, export, uid, gid) so each unique credential/export
 //! pair has its own idle queue. Stale connections receive a GETATTR health check
 //! before reuse. A poisoned connection is discarded instead of re-queued.
-//! When the total outstanding count reaches `max_total`, callers wait on a
-//! `tokio::sync::Notify` until a connection is returned.
+//! Admission is gated by a `tokio::sync::Semaphore` with `max_total` permits, so
+//! the outstanding count can never exceed `max_total` and a returned connection
+//! reliably wakes the next waiter (the permit is released on drop).
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::proto::auth::Credential;
 use crate::proto::conn::{NfsConnection, ReconnectStrategy};
@@ -47,9 +47,12 @@ struct PoolInner {
     pools: DashMap<PoolKey, Mutex<VecDeque<NfsConnection>>>,
     max_per_key: usize,
     max_total: usize,
-    outstanding: AtomicUsize,
+    /// Global admission gate  --  one permit per outstanding checkout. Acquiring a
+    /// permit before handing out a connection enforces `max_total` atomically (it
+    /// can never overshoot) and reliably wakes the next waiter when a
+    /// `PooledConnection` is dropped, since the permit is released on drop.
+    admission: Arc<Semaphore>,
     stale_threshold: Duration,
-    backpressure: Notify,
     /// Optional SOCKS5 proxy for all new connections created by this pool.
     proxy: Option<String>,
 }
@@ -65,7 +68,7 @@ pub struct ConnectionPool {
 
 impl std::fmt::Debug for PoolInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PoolInner").field("max_per_key", &self.max_per_key).field("max_total", &self.max_total).field("outstanding", &self.outstanding.load(Ordering::Relaxed)).finish_non_exhaustive()
+        f.debug_struct("PoolInner").field("max_per_key", &self.max_per_key).field("max_total", &self.max_total).field("outstanding", &self.max_total.saturating_sub(self.admission.available_permits())).finish_non_exhaustive()
     }
 }
 
@@ -73,7 +76,7 @@ impl ConnectionPool {
     /// Create a new pool with the given limits.
     #[must_use]
     pub fn new(max_per_key: usize, max_total: usize, stale_threshold: Duration) -> Self {
-        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key, max_total, outstanding: AtomicUsize::new(0), stale_threshold, backpressure: Notify::new(), proxy: None }) }
+        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key, max_total, admission: Arc::new(Semaphore::new(max_total)), stale_threshold, proxy: None }) }
     }
 
     /// Create with sensible defaults for interactive scanning.
@@ -87,39 +90,41 @@ impl ConnectionPool {
     /// `proxy` should be `"host:port"` or `"socks5://host:port"`.
     #[must_use]
     pub fn with_proxy(proxy: String) -> Self {
-        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key: 4, max_total: 256, outstanding: AtomicUsize::new(0), stale_threshold: Duration::from_secs(5), backpressure: Notify::new(), proxy: Some(proxy) }) }
+        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key: 4, max_total: 256, admission: Arc::new(Semaphore::new(256)), stale_threshold: Duration::from_secs(5), proxy: Some(proxy) }) }
     }
 
     /// Check out a connection for `key`, creating one if necessary.
     ///
     /// Blocks until a slot is available when `max_total` is reached.
     pub async fn checkout(&self, key: PoolKey, credential: Credential, reconnect: ReconnectStrategy) -> anyhow::Result<PooledConnection> {
-        loop {
-            // Wait if at global limit.
-            if self.inner.outstanding.load(Ordering::Relaxed) >= self.inner.max_total {
-                self.inner.backpressure.notified().await;
-                continue;
-            }
+        // Reserve a global slot atomically before touching the pool. The permit
+        // bounds outstanding connections to `max_total` (it can never overshoot)
+        // and is released on `PooledConnection` drop, which wakes the next waiter.
+        let permit = Arc::clone(&self.inner.admission).acquire_owned().await.map_err(|e| anyhow::anyhow!("connection pool closed: {e}"))?;
 
-            if let Some(conn) = self.try_pop(&key).await {
-                self.inner.outstanding.fetch_add(1, Ordering::Relaxed);
-                return Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key });
-            }
-
-            // No idle connection  --  create a new one (via proxy if configured).
-            let conn = NfsConnection::connect(key.host, &key.export, credential, reconnect, self.inner.proxy.as_deref()).await?;
-            self.inner.outstanding.fetch_add(1, Ordering::Relaxed);
-            return Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key });
+        if let Some(mut conn) = self.try_pop(&key).await {
+            // Re-stamp the reused connection with the REQUESTED credential before
+            // returning it: see `restamp_credential` for why uid/gid keying alone
+            // is not enough (aux-gids + machinename are not part of PoolKey).
+            restamp_credential(&mut conn, credential);
+            return Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit });
         }
+
+        // No idle connection  --  create a new one (via proxy if configured). A
+        // fresh connection is stamped with `credential` at construction, so it
+        // needs no re-stamp here.
+        let conn = NfsConnection::connect(key.host, &key.export, credential, reconnect, self.inner.proxy.as_deref()).await?;
+        Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit })
     }
 
     /// Return a connection to the idle queue (LIFO).
     ///
     /// Poisoned connections are discarded rather than re-queued.
     pub fn checkin(&self, key: PoolKey, conn: NfsConnection) {
-        self.inner.outstanding.fetch_sub(1, Ordering::Relaxed);
-        self.inner.backpressure.notify_one();
-
+        // The admission permit is released by `PooledConnection`'s drop, which runs
+        // after this call (explicit Drop body first, then fields), so the slot is
+        // freed and the next waiter woken only once the connection is back in the
+        // idle queue. No manual counter/notify is needed here.
         if conn.health.poisoned {
             return; // discard
         }
@@ -138,21 +143,17 @@ impl ConnectionPool {
     /// `nfs_port` is the NFS port to connect to without portmapper or MOUNT.
     /// Used when `--handle` is given and portmapper is filtered but the NFS port is open.
     pub async fn checkout_direct(&self, key: PoolKey, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy) -> anyhow::Result<PooledConnection> {
-        loop {
-            if self.inner.outstanding.load(Ordering::Relaxed) >= self.inner.max_total {
-                self.inner.backpressure.notified().await;
-                continue;
-            }
+        let permit = Arc::clone(&self.inner.admission).acquire_owned().await.map_err(|e| anyhow::anyhow!("connection pool closed: {e}"))?;
 
-            if let Some(conn) = self.try_pop(&key).await {
-                self.inner.outstanding.fetch_add(1, Ordering::Relaxed);
-                return Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key });
-            }
-
-            let conn = NfsConnection::connect_direct(key.host, nfs_port, credential, reconnect, self.inner.proxy.as_deref()).await?;
-            self.inner.outstanding.fetch_add(1, Ordering::Relaxed);
-            return Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key });
+        if let Some(mut conn) = self.try_pop(&key).await {
+            // Same re-stamp as checkout(): honour the requested aux-gids/hostname
+            // on a reused connection (PoolKey keys only on uid/gid).
+            restamp_credential(&mut conn, credential);
+            return Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit });
         }
+
+        let conn = NfsConnection::connect_direct(key.host, nfs_port, credential, reconnect, self.inner.proxy.as_deref()).await?;
+        Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit })
     }
 
     /// Drain all idle connections for a key (used after a host goes down).
@@ -165,7 +166,8 @@ impl ConnectionPool {
     /// Snapshot current pool statistics.
     #[must_use]
     pub fn stats(&self) -> PoolStats {
-        let outstanding = self.inner.outstanding.load(Ordering::Relaxed);
+        // Outstanding = permits handed out = max_total minus those still available.
+        let outstanding = self.inner.max_total.saturating_sub(self.inner.admission.available_permits());
         let idle = self.inner.pools.iter().filter_map(|e| e.value().try_lock().ok().map(|q| q.len())).sum();
         PoolStats { idle, outstanding }
     }
@@ -191,11 +193,34 @@ impl ConnectionPool {
     }
 }
 
+/// Re-stamp `conn` with `credential` so the AUTH_SYS identity actually used on
+/// the wire matches the caller's request, not whatever the pooled connection was
+/// last stamped with.
+///
+/// `PoolKey` keys only on (host, export, uid, gid); the auxiliary-GID list and
+/// the machinename (RFC 1057 S9.2) are not part of the key. Without this, a
+/// connection created for uid=0/gid=0 with `gids=[100]` (or a specific hostname)
+/// could be reused for a later uid=0/gid=0 request carrying different aux-gids /
+/// hostname, silently running under the wrong supplementary groups. This mirrors
+/// the per-call credential swap `NfsConnection::access_as` already performs.
+fn restamp_credential(conn: &mut NfsConnection, credential: Credential) {
+    let opaque = match &credential {
+        Credential::None => nfs3_types::rpc::opaque_auth::default(),
+        Credential::Sys(auth) => auth.to_opaque_auth(),
+    };
+    conn.inner_mut().nfs3_client.set_credential(opaque);
+    conn.update_credential(credential);
+}
+
 /// RAII wrapper  --  returns the connection to the pool on drop.
 pub struct PooledConnection {
     conn: Option<NfsConnection>,
     pool: ConnectionPool,
     key: PoolKey,
+    /// Global admission permit  --  released when this guard drops (after the
+    /// `Drop` body runs `checkin`), freeing the `max_total` slot and waking the
+    /// next waiter. Held purely for its drop side effect.
+    _permit: OwnedSemaphorePermit,
 }
 
 impl std::fmt::Debug for PooledConnection {

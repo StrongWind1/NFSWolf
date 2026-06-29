@@ -280,6 +280,8 @@ pub struct Analyzer {
     pub portmap: PortmapClient,
     /// Optional SOCKS5 proxy for NFSv4 probes.
     pub proxy: Option<String>,
+    /// Stealth pacing applied to per-export probe RPCs (Critical Design Rule 10).
+    pub stealth: StealthConfig,
 }
 
 impl std::fmt::Debug for Analyzer {
@@ -293,13 +295,25 @@ impl Analyzer {
     #[must_use]
     #[allow(clippy::missing_const_for_fn, reason = "Arc<T> cannot be used in const context")]
     pub fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient) -> Self {
-        Self { nfs3, mount, portmap, proxy: None }
+        Self { nfs3, mount, portmap, proxy: None, stealth: StealthConfig::none() }
     }
 
     /// Attach a SOCKS5 proxy for NFSv4 SECINFO probes.
     #[must_use]
     pub fn with_proxy(mut self, proxy: String) -> Self {
         self.proxy = Some(proxy);
+        self
+    }
+
+    /// Apply the configured stealth delay/jitter to per-export probe RPCs.
+    ///
+    /// Without this the per-export client is built with `StealthConfig::none()`,
+    /// so a `--delay`/`--jitter` run would still emit a full-rate burst of mount,
+    /// READDIRPLUS, and write probes (Critical Design Rule 10).
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn, reason = "moves a Drop-bearing Analyzer (Arc/String fields) through the builder")]
+    pub fn with_stealth(mut self, stealth: StealthConfig) -> Self {
+        self.stealth = stealth;
         self
     }
 
@@ -331,6 +345,10 @@ impl Analyzer {
             export_analyses.push(ea);
         }
 
+        // F-3.1 (Plaintext Traffic Interception): host-level transport-confidentiality
+        // check, backed by the auth flavors collected per export above.
+        check_plaintext_transport(&export_analyses, &mut findings);
+
         // OS guess from first valid handle.
         let os_guess = export_analyses.iter().find_map(|ea| if ea.file_handle.is_empty() { None } else { FileHandle::from_hex(&ea.file_handle).ok() });
         let os_string = os_guess.map(|fh| check_os_fingerprint(&fh));
@@ -342,6 +360,9 @@ impl Analyzer {
     async fn analyze_export(&self, config: &AnalyzeConfig, addr: SocketAddr, entry: &ExportEntry, findings: &mut Vec<Finding>) -> ExportAnalysis {
         let mut ea = ExportAnalysis { path: entry.path.clone(), allowed_hosts: entry.allowed_hosts.clone(), auth_methods: Vec::new(), writable: false, no_root_squash: None, escape_possible: false, file_handle: String::new(), file_access_tests: Vec::new(), nfs4_acls: Vec::new() };
 
+        // Pace the per-export MOUNT burst (Critical Design Rule 10). NfsMountClient
+        // does not embed StealthConfig, so honour the delay/jitter here.
+        self.stealth.wait().await;
         let mount_res = match self.mount.mount(addr, &entry.path).await {
             Ok(r) => r,
             Err(e) => {
@@ -359,7 +380,10 @@ impl Analyzer {
             let circuit = Arc::new(CircuitBreaker::default_config());
             let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf"));
             let key = PoolKey { host: addr, export: entry.path.clone(), uid, gid };
-            Arc::new(Nfs3Client::new(pool, key, circuit, StealthConfig::none(), cred, ReconnectStrategy::Persistent))
+            // Inherit the configured stealth pacing so every per-export probe RPC
+            // (escape, btrfs, nohide, symlink, squash writes, file-access reads)
+            // honours --delay/--jitter (Critical Design Rule 10).
+            Arc::new(Nfs3Client::new(pool, key, circuit, self.stealth.clone(), cred, ReconnectStrategy::Persistent))
         };
 
         let fh = mount_res.handle;
@@ -380,7 +404,7 @@ impl Analyzer {
         check_auth_methods(&entry.path, &mount_res.auth_flavors, findings);
         // NFSv4 SECINFO check: verify auth methods from the NFSv4 perspective (F-3.4).
         // Complements check_auth_methods (which uses MOUNT auth flavors) with a live NFSv4 probe.
-        check_nfs4_secinfo(addr, &entry.path, findings, self.proxy.as_deref()).await;
+        check_nfs4_secinfo(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
         check_windows_signing(&fh, &entry.path, findings);
         check_handle_entropy(&fh, &entry.path, findings);
 
@@ -390,8 +414,18 @@ impl Analyzer {
         // BTRFS subvolume escape (F-2.4)  --  if handle fingerprints as BTRFS.
         check_btrfs_escape(&export_nfs3, &fh, &entry.path, findings).await;
 
-        // Bind mount escape (F-2.6)  --  if fsid from FSSTAT differs from handle-derived fsid.
-        check_bind_mount_escape(&export_nfs3, &fh, &entry.path, findings).await;
+        // Bind mount escape (F-2.6): intentionally NOT emitted. The prior heuristic
+        // compared a fixed 8-byte slice (handle bytes 4..12) against the fattr3.fsid
+        // from FSSTAT and flagged a bind mount on any mismatch. That signal is
+        // unsound on two counts: the in-handle fsid is variable-length keyed on
+        // fsid_type (4/8/12/16 bytes -- see file_handle.rs fingerprint_fs), so the
+        // fixed slice is garbage for most handles; and the raw fsid embedded in the
+        // file handle uses a DIFFERENT encoding than the kernel-computed fattr3.fsid,
+        // so the two are essentially never equal on a normal export -- firing a
+        // constant false-positive HIGH finding. A sound F-2.6 oracle needs a
+        // different signal (e.g. building a filesystem-root handle from the handle's
+        // own fsid and confirming it resolves), so the broken check is disabled
+        // rather than emitting from an unsound equality.
 
         // nohide/crossmnt detection (F-7.3).
         check_nohide(&export_nfs3, &fh, &entry.path, findings).await;
@@ -399,10 +433,30 @@ impl Analyzer {
         // Symlink attack preconditions (F-4.4)  --  writable dirs owned by non-root.
         check_symlink_preconditions(&export_nfs3, &fh, &entry.path, findings).await;
 
-        // Squash probes write a small payload, then clean up.
-        check_no_root_squash(&export_nfs3, &fh, &entry.path, findings).await;
-        check_squash_config(&export_nfs3, &fh, &entry.path, findings).await;
-        check_insecure_port(addr, &entry.path, findings).await;
+        // Squash probes write a small payload, then clean up. Run the non-root
+        // (uid=99999) probe first: its observed UID is the discriminator that tells
+        // genuine no_root_squash (F-4.1) apart from all_squash+anonuid=0 (F-7.5),
+        // both of which land a uid=0 write as root.
+        let squash_anon_uid = check_squash_config(&export_nfs3, &fh, &entry.path, findings).await;
+        check_no_root_squash(&export_nfs3, &fh, &entry.path, squash_anon_uid, findings).await;
+
+        // `insecure` export option (F-7.2): intentionally NOT emitted. A sound test
+        // must issue the port-gated MNT operation from a deliberately UNPRIVILEGED
+        // source port (>=1024) and flag only when the server accepts it. The prior
+        // check called MNTPROC_EXPORT (which Linux rpc.mountd does not gate on source
+        // port) and -- when running as root -- the mount client binds a PRIVILEGED
+        // source port anyway, so it tested neither the right operation nor the right
+        // port and fired on essentially every reachable server. Forcing an
+        // unprivileged source port for a control MNT needs connection plumbing not
+        // exposed by NfsMountClient here, so the unsound emission is disabled.
+
+        // Missing nosuid/nodev (F-7.4): intentionally NOT emitted. nosuid/nodev are
+        // CLIENT-side mount options enforced by the mounting kernel, not server
+        // export flags -- the MNTPROC_EXPORT response carries only the export path
+        // and its host group list (see ExportEntry), so the server never exposes
+        // whether a client mounts with nosuid/nodev. No collected data backs an
+        // F-7.4 detection here, so analyze does not claim one. (FINDINGS.md still
+        // attributes F-7.4 to `analyze`; that cross-reference over-claims.)
 
         // File access tests from --test-read paths (F-1.3: auxiliary group injection).
         for path in &config.test_paths {
@@ -440,13 +494,42 @@ impl Analyzer {
 
 // --- Per-export checks ---
 
+/// Decide whether a single allowed-host ACL entry effectively exposes the export
+/// to the whole network (F-7.1, RFC 2623 S2.6 host-based access control).
+///
+/// Catches three classes the old exact-string match missed:
+///   - glob wildcards (`*`, `?`): `*`, `*.example.com`, `192.168.*` -- the ACL no
+///     longer pins a specific host;
+///   - the explicit world wildcards `0.0.0.0/0` and `::/0`;
+///   - broad CIDRs: an IPv4 prefix shorter than /16 or an IPv6 prefix shorter
+///     than /48 covers a large slice of the address space (e.g. `10.0.0.0/8`,
+///     `0.0.0.0/1`, `::/1`).
+fn is_world_accessible_host(host: &str) -> bool {
+    // Glob metacharacters match arbitrary hostnames.
+    if host.contains('*') || host.contains('?') {
+        return true;
+    }
+    // CIDR with a short prefix length.
+    if let Some((addr, prefix)) = host.split_once('/')
+        && let Ok(bits) = prefix.parse::<u8>()
+    {
+        if addr.parse::<std::net::Ipv4Addr>().is_ok() {
+            return bits < 16;
+        }
+        if addr.parse::<std::net::Ipv6Addr>().is_ok() {
+            return bits < 48;
+        }
+    }
+    false
+}
+
 /// Check export ACLs for world-accessible exports (wildcard or empty host list).
 ///
 /// An empty allowed_hosts list means the server uses `*` implicitly.
-/// Wildcards like `*` or `0.0.0.0/0` also flag as open.
+/// Glob wildcards and broad CIDRs also flag as open -- see `is_world_accessible_host`.
 fn check_export_acls(exports: &[ExportEntry], findings: &mut Vec<Finding>) {
     for export in exports {
-        let is_open = export.allowed_hosts.is_empty() || export.allowed_hosts.iter().any(|h| h == "*" || h == "0.0.0.0/0" || h == "::/0");
+        let is_open = export.allowed_hosts.is_empty() || export.allowed_hosts.iter().any(|h| is_world_accessible_host(h));
         if is_open {
             findings.push(make_finding(
                 &FindingSpec {
@@ -461,6 +544,43 @@ fn check_export_acls(exports: &[ExportEntry], findings: &mut Vec<Finding>) {
             ));
         }
     }
+}
+
+/// Flag plaintext NFS transport when no RPCSEC_GSS privacy is advertised (F-3.1).
+///
+/// NFS defers confidentiality to the transport and specifies none (RFC 1813 S8).
+/// RPCSEC_GSS (flavor 6) is the only auth flavor here that can carry krb5p wire
+/// privacy; if no analyzed export advertises it, and absent NFS-over-TLS
+/// (RFC 9289, opt-in and not probed), every payload and AUTH_SYS credential
+/// crosses the wire in cleartext and is open to passive interception.
+///
+/// Backed solely by the MOUNT/SECINFO auth flavors already collected, so this is
+/// emitted once per host at Info severity rather than asserting TLS is absent.
+fn check_plaintext_transport(exports: &[ExportAnalysis], findings: &mut Vec<Finding>) {
+    // Only meaningful once we have learned at least one export's auth set;
+    // otherwise enumeration failed and we have no transport evidence.
+    let any_auth = exports.iter().any(|ea| !ea.auth_methods.is_empty());
+    let any_gss = exports.iter().any(|ea| ea.auth_methods.iter().any(|m| m.contains("GSS")));
+    if !any_auth || any_gss {
+        return;
+    }
+    let flavors: Vec<String> = exports.iter().flat_map(|ea| ea.auth_methods.iter().cloned()).collect();
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-3.1",
+            title: "NFS traffic is unencrypted  --  no RPCSEC_GSS privacy advertised",
+            desc: "No analyzed export advertises RPCSEC_GSS (flavor 6), so krb5p wire \
+                   privacy is unavailable. NFS defers confidentiality to the transport \
+                   and specifies none (RFC 1813 S8); absent NFS-over-TLS (RFC 9289, \
+                   opt-in) all file contents and AUTH_SYS credentials are sent in \
+                   cleartext and can be passively intercepted.",
+            evidence: &format!("auth_methods={flavors:?}"),
+            remediation: "Require sec=krb5p (RPCSEC_GSS privacy) or wrap NFS in TLS \
+                          (RFC 9289) / a VPN to protect data in transit.",
+            export: None,
+        },
+        Severity::Info,
+    ));
 }
 
 /// Flag exports that support only AUTH_SYS (flavor 1) with no Kerberos.
@@ -759,50 +879,6 @@ async fn check_btrfs_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_pa
     }
 }
 
-/// Check for bind mount export escape (F-2.6).
-///
-/// If FSSTAT returns an fsid that differs from what the export handle implies,
-/// the export is a bind mount over a different filesystem  --  the underlying
-/// filesystem root may be reachable via a crafted handle.
-async fn check_bind_mount_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
-    let args = FSSTAT3args { fsroot: export_fh.to_nfs_fh3() };
-    let Ok(res) = nfs3.fsstat(&args).await else { return };
-    let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res else { return };
-
-    // Extract fsid from the post-op attributes on the root object.
-    // post_op_attr is Nfs3Option<fattr3>  --  use match, not .map().
-    let server_fsid = match ok.obj_attributes {
-        nfs3_types::nfs3::Nfs3Option::Some(ref a) => a.fsid,
-        nfs3_types::nfs3::Nfs3Option::None => 0,
-    };
-    if server_fsid == 0 {
-        return; // server didn't include attributes
-    }
-
-    // Compare with the fsid embedded in the file handle (bytes 4..12 on Linux ext4/xfs).
-    // If they differ, this export is a bind mount.
-    let handle_bytes = export_fh.as_bytes();
-    if handle_bytes.len() >= 12 {
-        let handle_fsid = handle_bytes.get(4..12).and_then(|s| <[u8; 8]>::try_from(s).ok()).map_or(0, u64::from_le_bytes);
-        if handle_fsid != 0 && handle_fsid != server_fsid {
-            findings.push(make_finding(
-                &FindingSpec {
-                    id: "F-2.6",
-                    title: "Bind mount detected  --  underlying filesystem may be accessible",
-                    desc: "The FSSTAT fsid does not match the fsid in the export file handle. \
-                           This indicates the export is a bind mount. The underlying filesystem \
-                           root may be reachable by constructing a handle with the real fsid.",
-                    evidence: &format!("handle_fsid=0x{handle_fsid:016x}, server_fsid=0x{server_fsid:016x}"),
-                    remediation: "Avoid bind-mounting sensitive filesystems into exports. \
-                                  Enable subtree_check.",
-                    export: Some(export_path),
-                },
-                Severity::High,
-            ));
-        }
-    }
-}
-
 /// Detect nohide/crossmnt sub-mount exposure (F-7.3, opt-in).
 ///
 /// Performs READDIRPLUS on the export root and then FSSTAT on any directory
@@ -908,9 +984,16 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
 /// Probe for no_root_squash by creating a test file as uid=0 (F-4.1, opt-in).
 ///
 /// Creates a temporary file with AUTH_SYS uid=0 credentials. If the resulting
-/// file is owned by root (GETATTR uid=0), root_squash is disabled.
-/// Per RFC 1813 S4.4 and RFC 2623 S2.5, uid=0 should be remapped by default.
-async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
+/// file is owned by root (GETATTR uid=0), uid=0 was NOT remapped. Per RFC 1813
+/// S4.4 and RFC 2623 S2.5, uid=0 should be squashed by default.
+///
+/// `squash_anon_uid` is the UID observed by the uid=99999 squash probe (run
+/// first). It discriminates genuine no_root_squash from all_squash+anonuid=0:
+/// under all_squash+anonuid=0 a non-root write ALSO lands as uid 0, so reporting
+/// F-4.1 there would point the operator at the wrong export option (that case is
+/// F-7.5). F-4.1 is therefore emitted only when uid=0 lands as root AND the
+/// non-root probe did NOT also land as root.
+async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path: &str, squash_anon_uid: Option<u32>, findings: &mut Vec<Finding>) {
     let probe_name = b".nfswolf_root_probe";
     let root_client = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(0, 0, &[], "nfswolf")), 0, 0);
 
@@ -930,7 +1013,13 @@ async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_pat
     // Always attempt cleanup regardless of getattr result.
     let _ = root_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await;
 
-    if file_uid == Some(0) {
+    // If the uid=99999 probe ALSO landed as uid 0, every client UID is squashed
+    // to root (all_squash + anonuid=0) -- that is F-7.5, not no_root_squash, so
+    // suppress F-4.1 to avoid the wrong remediation. Only uid 0 specifically
+    // being honoured (non-root retaining a non-zero identity, or the non-root
+    // probe being denied entirely / unknown) is genuine no_root_squash.
+    let all_uids_squashed_to_root = squash_anon_uid == Some(0);
+    if file_uid == Some(0) && !all_uids_squashed_to_root {
         findings.push(make_finding(
             &FindingSpec {
                 id: "F-4.1",
@@ -947,19 +1036,28 @@ async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_pat
     }
 }
 
-/// Probe squash configuration by creating a test file as uid=99999 (F-7.5, opt-in).
+/// Probe squash configuration by creating a test file as uid=99999 (F-1.2 / F-7.5).
 ///
 /// Creates a temporary file with a non-root arbitrary UID and inspects the
-/// resulting ownership to detect all_squash, anonuid=0 (critical), and
-/// other squash misconfiguration (RFC 1813 S4.4, RFC 2623 S2.5).
-async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
+/// resulting ownership to detect all_squash, anonuid=0 (critical), and other
+/// squash misconfiguration (RFC 1813 S4.4, RFC 2623 S2.5). Returns the observed
+/// UID (the discriminator `check_no_root_squash` uses to avoid mislabeling
+/// all_squash+anonuid=0 as no_root_squash); `None` if the probe could not run.
+///
+/// Emits two findings:
+///   - F-7.5 (Critical) when the forced UID lands as root (all_squash+anonuid=0);
+///   - F-1.2 (High) when the server HONOURED the forged non-root UID, i.e. the
+///     file is owned by uid=99999 -- root_squash only remaps uid 0, so any client
+///     can impersonate the UID owning a file. This is the common positive result
+///     the previous code computed but never reported.
+async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) -> Option<u32> {
     const PROBE_UID: u32 = 99_999;
     let probe_name = b".nfswolf_squash_probe";
     let probe_client = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(PROBE_UID, PROBE_UID, &[], "nfswolf")), PROBE_UID, PROBE_UID);
 
     let create_args = CREATE3args { where_: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) }, how: createhow3::UNCHECKED(sattr3::default()) };
-    let Ok(create_res) = probe_client.create(&create_args).await else { return };
-    let nfs3_types::nfs3::Nfs3Result::Ok(created) = create_res else { return };
+    let Ok(create_res) = probe_client.create(&create_args).await else { return None };
+    let nfs3_types::nfs3::Nfs3Result::Ok(created) = create_res else { return None };
 
     let observed_uid = if let nfs3_types::nfs3::Nfs3Option::Some(ref fh) = created.obj {
         let fh = FileHandle::from_nfs_fh3(fh);
@@ -972,7 +1070,7 @@ async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path
     // Cleanup probe file before reporting.
     let _ = probe_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await;
 
-    let Some(uid) = observed_uid else { return };
+    let uid = observed_uid?;
     let result = infer_squash_mode(uid, PROBE_UID);
 
     if result.root_squash_bypassed || uid == ANON_UID_ROOT {
@@ -990,41 +1088,29 @@ async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path
             },
             Severity::Critical,
         ));
+    } else if uid == PROBE_UID {
+        // The forged non-root UID survived: the server trusted a credential it
+        // cannot verify (RFC 2623 S2.1). root_squash only remaps uid 0
+        // (RFC 1813 S4.4), so an attacker claiming the UID owning a file reads or
+        // writes it with no Kerberos and no privileged port.
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-1.2",
+                title: "Root squash bypass  --  forged non-root UID honoured by server",
+                desc: "A file created with AUTH_SYS uid=99999 is owned by uid=99999 on the \
+                       server: the forged non-root credential was trusted. root_squash only \
+                       remaps uid 0 (RFC 1813 S4.4, RFC 2623 S2.5), so any client can \
+                       impersonate the UID that owns a target file and read or write it.",
+                evidence: &format!("probe_uid={PROBE_UID}, observed_uid={uid}, squash_mode={}", result.squash_mode),
+                remediation: "Use sec=krb5p to authenticate credentials, or all_squash to \
+                              collapse every client UID to an unprivileged anonymous account.",
+                export: Some(export_path),
+            },
+            Severity::High,
+        ));
     }
-}
 
-/// Detect the `insecure` export option by connecting from an unprivileged port (F-7.2).
-///
-/// If the server accepts MOUNT from a source port >= 1024, the `insecure` export
-/// option is active. Per RFC 2623 S2.1, the traditional minimal protection of
-/// requiring privileged source ports is removed.
-async fn check_insecure_port(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>) {
-    // Try listing exports from an unprivileged port. NfsMountClient uses
-    // TokioConnector which binds to an OS-assigned ephemeral port (>= 1024).
-    // If the server rejects the unprivileged-port connection (drops TCP or
-    // returns an RPC error), `secure` is in effect and we return early.
-    let mount = NfsMountClient::new();
-    let Ok(_exports) = mount.list_exports(addr).await else {
-        // Server rejected the unprivileged-port connection  --  secure is active.
-        return;
-    };
-
-    // The server accepted an RPC call from an unprivileged port  --  `insecure`
-    // export option is active.
-    findings.push(make_finding(
-        &FindingSpec {
-            id: "F-7.2",
-            title: "`insecure` export option active  --  unprivileged port accepted",
-            desc: "The server accepted a MOUNT RPC call from a source port >= 1024. \
-                   The `insecure` export option is set, removing the minimal protection \
-                   that requires clients to hold root privilege to connect (RFC 2623 S2.1).",
-            evidence: "MOUNT EXPORT RPC succeeded from unprivileged port",
-            remediation: "Remove the 'insecure' option from /etc/exports. \
-                          Use sec=krb5 for real authentication.",
-            export: Some(export_path),
-        },
-        Severity::Medium,
-    ));
+    Some(uid)
 }
 
 /// Infer the server's squash mode from the observed UID of a test file.
@@ -1074,7 +1160,7 @@ async fn handle_exists(nfs3: &Nfs3Client, fh: &FileHandle) -> bool {
 /// (F-3.4: TLS downgrade not enforced  --  RPCSEC_GSS not required).
 ///
 /// Best-effort: silently returns on timeout or PROG_MISMATCH (NFSv3-only server).
-async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>) {
+async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{ArgOp, ResOpData};
 
@@ -1082,7 +1168,8 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
     let timeout = std::time::Duration::from_secs(5);
 
     let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
-    let Ok(Ok(mut client)) = connect else { return };
+    let Ok(Ok(client)) = connect else { return };
+    let mut client = client.with_stealth(stealth.clone());
 
     // Parse export path into LOOKUP chain components and SECINFO target.
     // "/srv/nfs" -> parent_components=["srv"], secinfo_name="nfs"

@@ -189,6 +189,9 @@ impl UidSprayer {
             }
         }
 
+        // Release the single spray connection (and its pool-admission permit)
+        // before returning, rather than at end-of-scope.
+        drop(conn);
         results
     }
 

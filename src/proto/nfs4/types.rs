@@ -18,30 +18,60 @@ pub const NFS4_PROGRAM: u32 = 100_003;
 /// NFSv4.0 version number for the COMPOUND procedure.
 pub const NFS4_VERSION: u32 = 4;
 
-/// COMPOUND is the sole non-NULL procedure in NFSv4 (RFC 7530 S17.2).
+/// COMPOUND is the sole non-NULL procedure in NFSv4 (RFC 7530 S15.2).
 /// All operations are batched inside a single COMPOUND call.
 pub const NFS4_PROC_COMPOUND: u32 = 1;
 
-// --- NFSv4 operation codes (RFC 7530 S13) ---
+// --- NFSv4 operation codes (RFC 7530 S16) ---
+// NFSv4.0 defines operations in section 16 (not 18, which is RFC 5661/NFSv4.1).
 
-/// PUTROOTFH  --  make the server's root FH current (op 24, RFC 7530 S18.24).
+/// PUTROOTFH  --  make the server's root FH current (op 24, RFC 7530 S16.22).
 const OP_PUTROOTFH: u32 = 24;
-/// PUTFH  --  make an existing FH current (op 22, RFC 7530 S18.22).
+/// PUTFH  --  make an existing FH current (op 22, RFC 7530 S16.20).
 const OP_PUTFH: u32 = 22;
-/// LOOKUP  --  look up a component in the current FH (op 15, RFC 7530 S18.15).
+/// LOOKUP  --  look up a component in the current FH (op 15, RFC 7530 S16.13).
 const OP_LOOKUP: u32 = 15;
-/// GETATTR  --  retrieve file attributes (op 9, RFC 7530 S18.9).
+/// GETATTR  --  retrieve file attributes (op 9, RFC 7530 S16.7).
 const OP_GETATTR: u32 = 9;
-/// GETFH  --  retrieve the current file handle (op 10, RFC 7530 S18.10).
+/// GETFH  --  retrieve the current file handle (op 10, RFC 7530 S16.8).
 const OP_GETFH: u32 = 10;
-/// SECINFO  --  query auth flavors for a name (op 33, RFC 7530 S18.29).
+/// SECINFO  --  query auth flavors for a name (op 33, RFC 7530 S16.31).
 const OP_SECINFO: u32 = 33;
-/// READDIR  --  read directory entries with inline attributes (op 26, RFC 7530 S18.23).
+/// READDIR  --  read directory entries with inline attributes (op 26, RFC 7530 S16.24).
 const OP_READDIR: u32 = 26;
-/// READ  --  read file data (op 25, RFC 7530 S18.22).
+/// READ  --  read file data (op 25, RFC 7530 S16.23).
 const OP_READ: u32 = 25;
 
 // --- XDR helpers ---
+
+/// Upper bound on bytes/elements pre-reserved from a single wire-supplied
+/// length or count before any payload is read.
+///
+/// The NFS server is untrusted (CLAUDE.md threat model): a tiny malicious
+/// COMPOUND reply can declare a multi-gigabyte opaque length or array count
+/// and drive `Vec::with_capacity` into an OOM-abort (CWE-789 / CWE-770). We
+/// never reserve more than this regardless of the declared size and grow the
+/// buffer only as real bytes arrive, so a forged length cannot amplify a small
+/// reply into a huge allocation. The parsed result for honest inputs is
+/// unchanged; this only bounds the speculative reservation.
+const XDR_PREALLOC_CAP: usize = 1 << 20; // 1 MiB / ~1M elements
+
+/// Read exactly `len` bytes of XDR opaque payload without trusting `len` for
+/// pre-allocation (untrusted-server hardening; see `XDR_PREALLOC_CAP`).
+///
+/// The buffer is reserved only up to `XDR_PREALLOC_CAP` and grown as bytes
+/// actually arrive, bounded by the remaining bytes in the RPC record, so a
+/// forged length cannot force a gigabyte allocation. Returns an `UnexpectedEof`
+/// error when fewer than `len` bytes are available, matching the previous
+/// `read_exact` contract for honest inputs.
+fn read_xdr_bytes(input: &mut impl Read, len: usize) -> nfs3_types::xdr_codec::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(len.min(XDR_PREALLOC_CAP));
+    let read = input.take(len as u64).read_to_end(&mut buf).map_err(nfs3_types::xdr_codec::Error::Io)?;
+    if read != len {
+        return Err(nfs3_types::xdr_codec::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
+    }
+    Ok(buf)
+}
 
 /// Write 1, 2, or 3 zero-padding bytes to reach a 4-byte XDR boundary.
 fn write_xdr_pad(out: &mut impl Write, pad: usize) -> nfs3_types::xdr_codec::Result<()> {
@@ -89,8 +119,8 @@ pub fn pack_xdr_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::
 pub fn unpack_xdr_string(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(String, usize)> {
     let (len, mut n) = u32::unpack(input)?;
     let len = len as usize;
-    let mut buf = vec![0u8; len];
-    input.read_exact(&mut buf).map_err(nfs3_types::xdr_codec::Error::Io)?;
+    // Do not pre-size from the untrusted length; read bounded by real bytes.
+    let buf = read_xdr_bytes(input, len)?;
     n += len;
     let pad = (4 - (len % 4)) % 4;
     skip_xdr_pad(input, pad)?;
@@ -167,7 +197,8 @@ impl Pack for AttrRequest {
 impl Unpack for AttrRequest {
     fn unpack(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(Self, usize)> {
         let (count, mut n) = u32::unpack(input)?;
-        let mut words = Vec::with_capacity(count as usize);
+        // Clamp the speculative reservation: `count` is attacker-controlled.
+        let mut words = Vec::with_capacity((count as usize).min(XDR_PREALLOC_CAP));
         for _ in 0..count {
             let (w, wn) = u32::unpack(input)?;
             words.push(w);
@@ -185,19 +216,19 @@ impl Unpack for AttrRequest {
 /// GETATTR, GETFH, SECINFO, READDIR, READ.  Wire format is: 4-byte op code + op data.
 #[derive(Debug, Clone)]
 pub enum ArgOp {
-    /// Set the current FH to the server's pseudo-root (RFC 7530 S18.24).
+    /// Set the current FH to the server's pseudo-root (RFC 7530 S16.22).
     Putrootfh,
-    /// Set the current FH to a known handle (RFC 7530 S18.22).
+    /// Set the current FH to a known handle (RFC 7530 S16.20).
     Putfh(Vec<u8>),
-    /// Look up a single path component in the current directory (RFC 7530 S18.15).
+    /// Look up a single path component in the current directory (RFC 7530 S16.13).
     Lookup(String),
-    /// Return attributes for the current FH (RFC 7530 S18.9).
+    /// Return attributes for the current FH (RFC 7530 S16.7).
     Getattr(AttrRequest),
-    /// Return the current file handle as opaque bytes (RFC 7530 S18.10).
+    /// Return the current file handle as opaque bytes (RFC 7530 S16.8).
     Getfh,
-    /// Query supported auth flavors for a named child (RFC 7530 S18.29).
+    /// Query supported auth flavors for a named child (RFC 7530 S16.31).
     Secinfo(String),
-    /// Read directory entries with inline attribute bitmaps (RFC 7530 S18.23).
+    /// Read directory entries with inline attribute bitmaps (RFC 7530 S16.24).
     Readdir {
         /// Opaque resume cookie (0 for first call).
         cookie: u64,
@@ -210,7 +241,7 @@ pub enum ArgOp {
         /// Attributes to inline per entry.
         attr_request: AttrRequest,
     },
-    /// Read file data starting at `offset` (RFC 7530 S18.22).
+    /// Read file data starting at `offset` (RFC 7530 S16.23).
     ///
     /// The anonymous stateid (all zeros) allows non-locked reads without OPEN.
     /// Per RFC 7530 S9.1.4.3, seqid=0 and other=\[0;12\] identify the anonymous stateid.
@@ -318,7 +349,7 @@ impl Pack for CompoundArgs {
 
 // --- CompoundRes ---
 
-/// A single directory entry returned by NFSv4 READDIR (RFC 7530 S18.23).
+/// A single directory entry returned by NFSv4 READDIR (RFC 7530 S16.24).
 #[derive(Debug, Clone)]
 pub struct DirEntry4 {
     /// Resume cookie for pagination (opaque to the client).
@@ -333,23 +364,32 @@ pub struct DirEntry4 {
 /// GETFH, READDIR, READ, and SECINFO carry operation-specific results.
 #[derive(Debug, Clone, Default)]
 pub enum ResOpData {
-    /// File handle bytes from GETFH (RFC 7530 S18.10).
+    /// File handle bytes from GETFH (RFC 7530 S16.8).
     Fh(Vec<u8>),
-    /// Directory entries from READDIR (RFC 7530 S18.23), plus EOF flag.
+    /// fsid from a GETATTR fsid request (RFC 7530 S16.7; attribute 8, S5.8.1.9).
+    ///
+    /// `Some((major, minor))` when FATTR4_FSID was present and decodable;
+    /// `None` otherwise. Used to tell the NFSv4 pseudo-root apart from a real
+    /// export boundary (RFC 7530 S7.3).
+    Getattr {
+        /// Decoded fsid4 major/minor, when FATTR4_FSID was returned.
+        fsid: Option<(u64, u64)>,
+    },
+    /// Directory entries from READDIR (RFC 7530 S16.24), plus EOF flag.
     Readdir {
         /// Entries decoded from the READDIR linked list.
         entries: Vec<DirEntry4>,
         /// True if this is the last page of directory entries.
         eof: bool,
     },
-    /// File data from READ (RFC 7530 S18.22), plus EOF flag.
+    /// File data from READ (RFC 7530 S16.23), plus EOF flag.
     Read {
         /// True if this read reached the end of the file.
         eof: bool,
         /// File data bytes.
         data: Vec<u8>,
     },
-    /// Auth flavor codes from SECINFO (RFC 7530 S18.29).
+    /// Auth flavor codes from SECINFO (RFC 7530 S16.31).
     ///
     /// 1 = AUTH_SYS, 6 = RPCSEC_GSS (Kerberos). No flavor 6 means
     /// the export accepts credential spoofing via AUTH_SYS (F-3.4).
@@ -389,7 +429,8 @@ impl Unpack for CompoundRes {
         let (tag, n1) = unpack_xdr_string(input)?;
         let (count, n2) = u32::unpack(input)?;
         let mut n = n0 + n1 + n2;
-        let mut results = Vec::with_capacity(count as usize);
+        // Clamp the speculative reservation: `count` is attacker-controlled.
+        let mut results = Vec::with_capacity((count as usize).min(XDR_PREALLOC_CAP));
         for _ in 0..count {
             let (op_code, on) = u32::unpack(input)?;
             let (op_status, sn) = u32::unpack(input)?;
@@ -420,12 +461,12 @@ impl Unpack for CompoundRes {
 /// at that point; all results collected before the error are valid.
 ///
 /// Wire formats per RFC 7530:
-/// - PUTROOTFH / PUTFH / LOOKUP: no data (S18.24, S18.22, S18.15)
-/// - GETFH: opaque<> file handle (S18.10)
-/// - GETATTR: bitmap + opaque<> attrvals (S18.9)
-/// - SECINFO: u32 array count + per-entry flavor/gss-info (S18.29)
-/// - READDIR: verifier + linked-list entries + eof (S18.23)
-/// - READ: bool eof + opaque<> data (S18.22)
+/// - PUTROOTFH / PUTFH / LOOKUP: no data (S16.22, S16.20, S16.13)
+/// - GETFH: opaque<> file handle (S16.8)
+/// - GETATTR: bitmap + opaque<> attrvals (S16.7)
+/// - SECINFO: u32 array count + per-entry flavor/gss-info (S16.31)
+/// - READDIR: verifier + linked-list entries + eof (S16.24)
+/// - READ: bool eof + opaque<> data (S16.23)
 fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(ResOpData, usize)> {
     match op_code {
         // No result data beyond status.
@@ -435,8 +476,8 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> nfs3_types::xdr
         OP_GETFH => {
             let (len, mut n) = u32::unpack(input)?;
             let len = len as usize;
-            let mut fh = vec![0u8; len];
-            input.read_exact(&mut fh).map_err(nfs3_types::xdr_codec::Error::Io)?;
+            // Do not pre-size from the untrusted length; read bounded by real bytes.
+            let fh = read_xdr_bytes(input, len)?;
             n += len;
             let pad = (4 - (len % 4)) % 4;
             skip_xdr_pad(input, pad)?;
@@ -445,22 +486,50 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> nfs3_types::xdr
         },
 
         // GETATTR result: bitmap (u32 count + N words) + opaque<> attrvals.
-        // We don't decode fattr4 attribute values  --  skip and return None.
+        // We decode only FATTR4_FSID (attribute 8, RFC 7530 S5.8.1.9) when it is
+        // the sole word-0 attribute requested, so the 16-byte fsid4 sits at the
+        // start of attrvals (the fsid_only request used by map_pseudo_fs). Any
+        // other attribute combination is not decoded and yields fsid = None.
         OP_GETATTR => {
             let (bitmap_count, mut n) = u32::unpack(input)?;
-            for _ in 0..bitmap_count {
-                let (_, wn) = u32::unpack(input)?;
+            let mut bitmap_w0 = 0u32;
+            for i in 0..bitmap_count {
+                let (w, wn) = u32::unpack(input)?;
+                if i == 0 {
+                    bitmap_w0 = w;
+                }
                 n += wn;
             }
-            n += skip_opaque(input)?;
-            Ok((ResOpData::None, n))
+            // attrvals opaque<>: requested attributes XDR-encoded in bit order.
+            let (attrval_len, ln) = u32::unpack(input)?;
+            n += ln;
+            let attrval_len = attrval_len as usize;
+            let attrvals = read_xdr_bytes(input, attrval_len)?;
+            n += attrval_len;
+            let pad = (4 - (attrval_len % 4)) % 4;
+            skip_xdr_pad(input, pad)?;
+            n += pad;
+            // FATTR4_FSID is bit 8 of word 0; fsid4 = { major u64, minor u64 }.
+            // Only safe to read at offset 0 when no lower-numbered word-0
+            // attribute (bits 0..7) precedes it in the attrvals stream.
+            let fsid_bit: u32 = 1 << 8; // FATTR4_FSID = attribute 8, word 0
+            let lower_bits: u32 = fsid_bit - 1; // attributes 0..7 in word 0
+            let fsid = if (bitmap_w0 & fsid_bit) != 0 && (bitmap_w0 & lower_bits) == 0 {
+                let major = attrvals.get(..8).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes);
+                let minor = attrvals.get(8..16).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes);
+                major.zip(minor)
+            } else {
+                None
+            };
+            Ok((ResOpData::Getattr { fsid }, n))
         },
 
         // SECINFO result: variable-length array of secinfo4 entries.
         // Each entry: u32 flavor.  If flavor == 6 (RPCSEC_GSS): oid(opaque<>) + qop(u32) + service(u32).
         OP_SECINFO => {
             let (arr_count, mut n) = u32::unpack(input)?;
-            let mut flavors = Vec::with_capacity(arr_count as usize);
+            // Clamp the speculative reservation: `arr_count` is attacker-controlled.
+            let mut flavors = Vec::with_capacity((arr_count as usize).min(XDR_PREALLOC_CAP));
             for _ in 0..arr_count {
                 let (flavor, fn_) = u32::unpack(input)?;
                 n += fn_;
@@ -483,8 +552,8 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> nfs3_types::xdr
             let (data_len, dn) = u32::unpack(input)?;
             n += dn;
             let data_len = data_len as usize;
-            let mut data = vec![0u8; data_len];
-            input.read_exact(&mut data).map_err(nfs3_types::xdr_codec::Error::Io)?;
+            // Do not pre-size from the untrusted length; read bounded by real bytes.
+            let data = read_xdr_bytes(input, data_len)?;
             n += data_len;
             let pad = (4 - (data_len % 4)) % 4;
             skip_xdr_pad(input, pad)?;
@@ -537,9 +606,8 @@ fn skip_opaque(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<usize> {
     let (len, mut n) = u32::unpack(input)?;
     let len = len as usize;
     if len > 0 {
-        // Read and discard the data bytes.
-        let mut buf = vec![0u8; len];
-        input.read_exact(&mut buf).map_err(nfs3_types::xdr_codec::Error::Io)?;
+        // Read and discard the data bytes, bounded by real bytes (untrusted len).
+        read_xdr_bytes(input, len)?;
         n += len;
         let pad = (4 - (len % 4)) % 4;
         skip_xdr_pad(input, pad)?;
@@ -732,7 +800,7 @@ mod tests {
         let mut buf = Vec::new();
         op.pack(&mut buf).unwrap();
         let opcode = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        assert_eq!(opcode, 25, "READ op code must be 25 per RFC 7530 S18.22");
+        assert_eq!(opcode, 25, "READ op code must be 25 per RFC 7530 S16.23");
     }
 
     #[test]

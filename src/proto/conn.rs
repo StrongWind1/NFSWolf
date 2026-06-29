@@ -110,12 +110,15 @@ impl NfsConnection {
         // Build a second TCP connection to the NFS port for raw RPC calls.
         let nfs_port = conn.nfs3_port;
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
+        // Use a privileged source port (<1024) so servers enforcing the `secure`
+        // export option accept the NFSv2 calls this connection carries. The proxy
+        // controls its own outbound port, so privileged binding is skipped there.
         let raw_io: TokioIo<TcpStream> = if let Some(p) = proxy {
             let proxy_addr = parse_proxy_addr(p)?;
             let stream = socks5_connect(proxy_addr, nfs_addr).await.with_context(|| format!("raw RPC proxy connect to {nfs_addr}"))?;
             TokioIo::new(stream)
         } else {
-            TokioConnector.connect(nfs_addr).await.with_context(|| format!("raw RPC connect to {nfs_addr}"))?
+            connect_privileged_nfs(nfs_addr).await.with_context(|| format!("raw RPC connect to {nfs_addr}"))?
         };
         let raw_rpc = RpcClient::new_with_auth(raw_io, opaque, nfs3_types::rpc::opaque_auth::default());
 
@@ -189,8 +192,9 @@ impl NfsConnection {
 
         let inner = Nfs3Connection { host: addr.ip().to_string(), mount_port: nfs_port, mount_path: dirpath(Opaque::owned(b"/__direct__".to_vec())), mount_client, mount_resok, nfs3_port: nfs_port, nfs3_client };
 
-        // Raw RPC connection for NFSv2 calls.
-        let raw_io = tcp_connect(nfs_addr).await.with_context(|| format!("raw RPC direct connect to {nfs_addr}"))?;
+        // Raw RPC connection for NFSv2 calls -- use a privileged source port (<1024)
+        // when not proxied so servers enforcing the `secure` option accept v2 calls.
+        let raw_io = if proxy.is_some() { tcp_connect(nfs_addr).await.with_context(|| format!("raw RPC direct connect (proxy) to {nfs_addr}"))? } else { connect_privileged_nfs(nfs_addr).await.with_context(|| format!("raw RPC direct connect to {nfs_addr}"))? };
         let raw_rpc = RpcClient::new_with_auth(raw_io, opaque, nfs3_types::rpc::opaque_auth::default());
 
         Ok(Self { inner, raw_rpc, addr, export: format!("__direct__{nfs_port}"), credential, reconnect, health: ConnectionHealth::new(), is_direct: true })
@@ -292,8 +296,10 @@ impl NfsConnection {
 /// 1. Greeting: [VER=5, NMETHODS=1, METHOD=NO_AUTH(0)]
 /// 2. Method selection: server replies [VER=5, METHOD=0]
 /// 3. CONNECT request: [VER, CMD=CONNECT, RSV, ATYP=IPv4, addr(4), port(2)]
-/// 4. Reply: [VER, REP=0(success), RSV, ATYP, BNDADDR, BNDPORT]
+/// 4. Reply: [VER, REP=0(success), RSV, ATYP, BND.ADDR(var), BND.PORT(2)]
 ///
+/// The reply's bound address is variable-length keyed on its ATYP byte
+/// (IPv4/IPv6/domain, RFC 1928 S5), so it is parsed rather than assumed IPv4.
 /// IPv6 targets are not supported (NFS servers are typically IPv4).
 pub async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy_addr).await?;
@@ -316,12 +322,29 @@ pub async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::
     let port = target.port().to_be_bytes();
     stream.write_all(&[0x05, 0x01, 0x00, 0x01, ip[0], ip[1], ip[2], ip[3], port[0], port[1]]).await?;
 
-    // Step 4: CONNECT reply  --  10 bytes for IPv4 bind address.
-    let mut reply = [0u8; 10];
-    stream.read_exact(&mut reply).await?;
-    if reply[1] != 0x00 {
-        return Err(std::io::Error::other(format!("SOCKS5 CONNECT failed (REP=0x{:02x})", reply[1])));
+    // Step 4: CONNECT reply  --  [VER, REP, RSV, ATYP, BND.ADDR(var), BND.PORT(2)]
+    // (RFC 1928 S6). The bound-address length depends on ATYP, so read the fixed
+    // 4-byte head first, then consume exactly the address+port the type implies.
+    let mut head = [0u8; 4];
+    stream.read_exact(&mut head).await?;
+    if head[1] != 0x00 {
+        return Err(std::io::Error::other(format!("SOCKS5 CONNECT failed (REP=0x{:02x})", head[1])));
     }
+    // RFC 1928 S5: ATYP 0x01=IPv4 (4), 0x04=IPv6 (16), 0x03=domain (1+len); all
+    // followed by a 2-byte port. read_exact returns an error (not a panic) on a
+    // short or hostile reply.
+    let bnd_len = match head[3] {
+        0x01 => 4 + 2,
+        0x04 => 16 + 2,
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            usize::from(len[0]) + 2
+        },
+        atyp => return Err(std::io::Error::other(format!("SOCKS5 CONNECT reply has unsupported ATYP=0x{atyp:02x}"))),
+    };
+    let mut bnd = vec![0u8; bnd_len];
+    stream.read_exact(&mut bnd).await?;
 
     Ok(stream)
 }

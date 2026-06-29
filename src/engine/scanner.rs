@@ -1,7 +1,10 @@
 //! Parallel NFS network scanner.
 //!
 //! Discovers NFS services across network ranges using async I/O.
-//! Architecture: tokio::spawn fan-out with Semaphore-based concurrency limit.
+//! Architecture: JoinSet fan-out gated by a Semaphore. The permit is acquired
+//! before each task spawns, so live task count (and memory) is bounded by the
+//! concurrency cap rather than the target-list size. StealthConfig is honored
+//! before every outbound probe (critical rule 10), not once per host.
 //! Per-host probe sequence:
 //!   1. TCP (+ UDP) probe port 111
 //!   2. Portmapper DUMP (+ GETPORT fallback)
@@ -11,7 +14,7 @@
 //!   6. Host skip logic (no version = omit)
 //!   7. MOUNT v1/v3 EXPORT + DUMP queries
 //!   8. NFSv4 READDIR on pseudo-root
-//!   9. Assemble HostResult + stealth delay
+//!   9. Assemble HostResult
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
@@ -23,6 +26,7 @@ use anyhow::Context as _;
 use ipnet::IpNet;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::engine::scan_types::{HostResult, MountPortInfo, NfsPortInfo, PortReachability, TargetSpec, V4ExportEntry, VersionRange};
@@ -105,43 +109,50 @@ impl Scanner {
         // Shared result collector -- workers push as they complete.
         let results = Arc::new(tokio::sync::Mutex::new(Vec::<HostResult>::new()));
 
-        let mut handles = Vec::with_capacity(total);
-        for target in targets {
-            let permit = Arc::clone(&sem);
-            let nfs_found = Arc::clone(&nfs_found);
-            let results = Arc::clone(&results);
-            let pb = pb.clone();
-            let job = ScanJob { timeout: self.config.timeout, scan_udp: self.config.scan_udp, nfs_ports: self.config.nfs_ports.clone(), mount_port: self.config.mount_port, proxy: self.proxy.clone(), stealth: self.stealth.clone() };
+        // Drive the targets through a JoinSet whose live size is bounded by the
+        // semaphore: the permit is acquired BEFORE each task is spawned, so at
+        // most `concurrency` tasks (and their ScanJob clones) exist at once and
+        // the spawn loop backpressures. Memory therefore scales with the
+        // concurrency cap, not the target-list size -- a /8 sweep no longer
+        // allocates millions of pending tasks and JoinHandles up front.
+        let drive = async {
+            let mut join_set: JoinSet<()> = JoinSet::new();
+            for target in targets {
+                // Block here until a slot frees up -- this is the backpressure.
+                let Ok(permit) = Arc::clone(&sem).acquire_owned().await else { break };
+                // Reap already-finished tasks so the set stays ~concurrency-sized.
+                while join_set.try_join_next().is_some() {}
 
-            let handle = tokio::spawn(async move {
-                let _permit = permit.acquire_owned().await;
-                let result = scan_host(target, job).await;
-                if let Some(ref r) = result
-                    && r.has_nfs()
-                {
-                    nfs_found.fetch_add(1, Ordering::Relaxed);
-                    results.lock().await.push(r.clone());
-                }
-                pb.set_message(format!("{} with NFS", nfs_found.load(Ordering::Relaxed)));
-                pb.inc(1);
-            });
-            handles.push(handle);
-        }
+                let nfs_found = Arc::clone(&nfs_found);
+                let results = Arc::clone(&results);
+                let pb = pb.clone();
+                let job = ScanJob { timeout: self.config.timeout, scan_udp: self.config.scan_udp, nfs_ports: self.config.nfs_ports.clone(), mount_port: self.config.mount_port, proxy: self.proxy.clone(), stealth: self.stealth.clone() };
 
-        // Wait for all workers OR Ctrl+C -- whichever comes first.
-        let wait_all = async {
-            for handle in &mut handles {
-                let _ = handle.await;
+                join_set.spawn(async move {
+                    let _permit = permit;
+                    let result = scan_host(target, job).await;
+                    if let Some(ref r) = result
+                        && r.has_nfs()
+                    {
+                        nfs_found.fetch_add(1, Ordering::Relaxed);
+                        results.lock().await.push(r.clone());
+                    }
+                    pb.set_message(format!("{} with NFS", nfs_found.load(Ordering::Relaxed)));
+                    pb.inc(1);
+                });
             }
+            // Drain the remainder; a panicked host yields JoinError, which is
+            // isolated and ignored here (per-host panic isolation preserved).
+            while join_set.join_next().await.is_some() {}
         };
+
+        // Run the driver OR bail on Ctrl+C (SIGINT) -- whichever comes first.
+        // On interrupt the `drive` future is dropped, which drops the JoinSet it
+        // owns and aborts every still-running probe; results gathered so far are
+        // already in the shared collector below.
         let interrupted = tokio::select! {
-            () = wait_all => false,
-            _ = tokio::signal::ctrl_c() => {
-                for handle in &handles {
-                    handle.abort();
-                }
-                true
-            },
+            () = drive => false,
+            _ = tokio::signal::ctrl_c() => true,
         };
 
         pb.finish_and_clear();
@@ -210,9 +221,19 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let probe_timeout = job.timeout;
 
     // --- Stage 1: TCP/UDP probe port 111 ---
+    // Honor StealthConfig before every outbound probe (critical rule 10),
+    // mirroring Nfs3Client which waits before each of its 22 procedures so the
+    // scan emits paced traffic rather than one burst per host. `wait()` is a
+    // no-op when no delay/jitter is configured, so the non-stealth path is free.
     let portmap_addr = SocketAddr::new(ip, 111);
+    job.stealth.wait().await;
     let portmap_tcp = is_port_open(portmap_addr, probe_timeout, job.proxy.as_deref()).await;
-    let portmap_udp = if job.scan_udp { crate::proto::udp::probe_udp_rpc(portmap_addr, 100_000, 2, probe_timeout).await } else { false };
+    let portmap_udp = if job.scan_udp {
+        job.stealth.wait().await;
+        crate::proto::udp::probe_udp_rpc(portmap_addr, 100_000, 2, probe_timeout).await
+    } else {
+        false
+    };
     let portmap_reachability = PortReachability::from_probes(portmap_tcp, portmap_udp);
 
     // --- Stage 2: Portmapper DUMP + GETPORT fallback ---
@@ -221,8 +242,10 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
 
     // Try TCP DUMP first; fall back to UDP DUMP if TCP is unreachable but UDP is.
     let dump_entries = if portmap_reachability.has_tcp() {
+        job.stealth.wait().await;
         timeout(probe_timeout, portmap.dump(portmap_addr)).await.ok().and_then(Result::ok).unwrap_or_default()
     } else if portmap_udp {
+        job.stealth.wait().await;
         portmap.dump_udp(portmap_addr, probe_timeout).await.unwrap_or_default()
     } else {
         vec![]
@@ -238,6 +261,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         let mut nfs_gp = Vec::new();
         let mut mount_gp = Vec::new();
         for v in [2u32, 3, 4] {
+            job.stealth.wait().await;
             let result = if portmap_reachability.has_tcp() { timeout(probe_timeout, portmap.query_port(portmap_addr, 100_003, v)).await.ok().and_then(Result::ok) } else { portmap.query_port_udp(portmap_addr, 100_003, v, probe_timeout).await.ok() };
             if let Some(port) = result
                 && port > 0
@@ -246,6 +270,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             }
         }
         for v in [1u32, 3] {
+            job.stealth.wait().await;
             let result = if portmap_reachability.has_tcp() { timeout(probe_timeout, portmap.query_port(portmap_addr, 100_005, v)).await.ok().and_then(Result::ok) } else { portmap.query_port_udp(portmap_addr, 100_005, v, probe_timeout).await.ok() };
             if let Some(port) = result
                 && port > 0
@@ -287,8 +312,10 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             // Probe fallback ports 2049, 20048 with MOUNT NULL.
             for &port in &[2049u16, 20048] {
                 let probe_addr = SocketAddr::new(ip, port);
+                job.stealth.wait().await;
                 if is_port_open(probe_addr, probe_timeout, job.proxy.as_deref()).await {
                     let mc = if let Some(ref p) = job.proxy { NfsMountClient::with_port(port).with_proxy(p.clone()) } else { NfsMountClient::with_port(port) };
+                    job.stealth.wait().await;
                     if timeout(probe_timeout, mc.list_exports(SocketAddr::new(ip, 111))).await.is_ok_and(|r| r.is_ok()) {
                         mountd_ports.insert(port);
                         break;
@@ -302,8 +329,14 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let mut nfs_ports_info: Vec<NfsPortInfo> = Vec::new();
     for &port in &nfs_port_set {
         let addr = SocketAddr::new(ip, port);
+        job.stealth.wait().await;
         let tcp = is_port_open(addr, probe_timeout, job.proxy.as_deref()).await;
-        let udp = if job.scan_udp { crate::proto::udp::probe_udp_rpc(addr, 100_003, 3, probe_timeout).await } else { false };
+        let udp = if job.scan_udp {
+            job.stealth.wait().await;
+            crate::proto::udp::probe_udp_rpc(addr, 100_003, 3, probe_timeout).await
+        } else {
+            false
+        };
         if tcp || udp {
             nfs_ports_info.push(NfsPortInfo { port, tcp, udp, v2: false, v3: false, v4: false });
         }
@@ -317,6 +350,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             continue;
         }
         let addr = SocketAddr::new(ip, port_info.port);
+        job.stealth.wait().await;
         let (v2_res, v3_res, v4_res) = probe_nfs_versions_tcp(addr, probe_timeout, job.proxy.as_deref()).await;
 
         port_info.v2 = v2_res.is_accepted();
@@ -344,6 +378,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             }
             let addr = SocketAddr::new(ip, port_info.port);
             if !port_info.v2 {
+                job.stealth.wait().await;
                 let r = crate::proto::rpc_probe::probe_nfs_null_udp(addr, 2, probe_timeout).await;
                 if r.is_accepted() {
                     port_info.v2 = true;
@@ -355,6 +390,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                 }
             }
             if !port_info.v3 {
+                job.stealth.wait().await;
                 let r = crate::proto::rpc_probe::probe_nfs_null_udp(addr, 3, probe_timeout).await;
                 if r.is_accepted() {
                     port_info.v3 = true;
@@ -412,6 +448,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // v3 exports -- only query if NFSv3 version probe succeeded
     let has_v3 = nfs_ports_info.iter().any(|p| p.v3);
     let exports_v3 = if has_v3 && (mount_ports.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
+        job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports(SocketAddr::new(ip, 111))).await {
             Ok(Ok(e)) => Some(e),
             _ => None,
@@ -423,6 +460,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // v2 exports (via MOUNT v1) -- only query if NFSv2 version probe succeeded
     let has_v2 = nfs_ports_info.iter().any(|p| p.v2);
     let exports_v2 = if has_v2 && mount_ports.iter().any(|m| m.versions.contains(&1)) {
+        job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports_v1(SocketAddr::new(ip, 111))).await {
             Ok(Ok(e)) => Some(e),
             _ => None,
@@ -433,6 +471,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
 
     // MOUNT DUMP
     let mounts = if !mountd_ports.is_empty() || mount_ports.iter().any(|m| m.tcp) {
+        job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.dump_clients(SocketAddr::new(ip, 111))).await {
             Ok(Ok(m)) => Some(m),
             _ => None,
@@ -446,6 +485,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let exports_v4 = if has_v4 {
         let v4_port = nfs_ports_info.iter().find(|p| p.v4).map_or(2049, |p| p.port);
         let v4_addr = SocketAddr::new(ip, v4_port);
+        job.stealth.wait().await;
         match timeout(probe_timeout, readdir_v4_pseudo_root(v4_addr, job.proxy.as_deref())).await {
             Ok(Ok(entries)) => Some(entries),
             _ => None,
@@ -454,11 +494,9 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         None
     };
 
-    // --- Stage 9: Assembly + stealth delay ---
-    if !job.stealth.delay.is_zero() || !job.stealth.jitter.is_zero() {
-        job.stealth.wait().await;
-    }
-
+    // --- Stage 9: Assembly ---
+    // No trailing stealth delay here: pacing is applied before each outbound
+    // probe above, so the per-host burst is already spread across the scan.
     Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports, exports_v2, exports_v3, exports_v4, mounts, hint, scan_duration: start.elapsed() })
 }
 

@@ -102,14 +102,22 @@ impl CircuitBreaker {
     ///
     /// Permission denials must NOT be passed here  --  use only for IO/timeout errors.
     pub fn record_failure(&self, addr: SocketAddr) {
+        let now = Instant::now();
         let mut h = self.hosts.entry(addr).or_insert_with(HostHealth::new);
         h.evict_stale(self.window);
-        h.events.push_back((Instant::now(), false));
+        h.events.push_back((now, false));
 
-        if h.events.len() >= self.min_samples && h.error_rate() >= self.error_threshold {
+        // Only escalate on a fresh closed->open transition. While the breaker
+        // is already open (tripped_until still in the future), a burst of
+        // concurrent in-flight failures must NOT each bump trip_count  --
+        // otherwise one outage incident jumps straight to max_cooldown. Per
+        // DESIGN.md S11, distinct outages (after the cooldown expires) still
+        // escalate; a single burst counts as one trip.
+        let breaker_closed = h.tripped_until.is_none_or(|until| until <= now);
+        if breaker_closed && h.events.len() >= self.min_samples && h.error_rate() >= self.error_threshold {
             h.trip_count = h.trip_count.saturating_add(1);
             let cooldown = self.compute_cooldown(h.trip_count);
-            h.tripped_until = Some(Instant::now() + cooldown);
+            h.tripped_until = Some(now + cooldown);
             tracing::warn!(%addr, trip_count = h.trip_count, ?cooldown, "circuit breaker tripped");
         }
     }
@@ -256,6 +264,23 @@ mod tests {
         }
         // Verify state by checking check_or_wait passes
         assert!(cb.check_or_wait(addr).is_ok());
+    }
+
+    #[test]
+    fn burst_of_failures_increments_trip_count_once() {
+        // A single outage burst (many concurrent in-flight calls all failing at
+        // once) must trip the breaker exactly once -- not escalate trip_count to
+        // its cap in one incident -- per DESIGN.md S11 graduated backoff.
+        let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_secs(30), Duration::from_mins(5));
+        let addr = loopback(7001);
+        // 40 failures in one burst, far past min_samples=10 at 100% error rate;
+        // the long base cooldown keeps the breaker open for the whole burst.
+        for _ in 0..40 {
+            cb.record_failure(addr);
+        }
+        assert!(cb.is_tripped(addr), "burst must open the breaker");
+        let trip_count = cb.hosts.get(&addr).expect("host must be tracked").trip_count;
+        assert_eq!(trip_count, 1, "a single burst must increment trip_count once, got {trip_count}");
     }
 
     #[test]
