@@ -35,31 +35,32 @@ pub struct UidSprayArgs {
     pub target: String,
 
     /// Export path (alternative to host:/export in the positional target)
-    #[arg(short = 'e', long, help_heading = H_TARGET)]
+    #[arg(short = 'e', long, value_name = "PATH", help_heading = H_TARGET)]
     pub export: Option<String>,
 
-    /// UID range start
-    #[arg(long, default_value = "0", help_heading = H_IDENTITY)]
+    /// UID range start. (uid-spray sweeps this range; the global -u/--uid is not
+    /// used here -- use --uid-start/--uid-end to choose the identities tried.)
+    #[arg(long, default_value = "0", value_name = "UID", help_heading = H_IDENTITY)]
     pub uid_start: u32,
 
     /// UID range end
-    #[arg(long, default_value = "65535", help_heading = H_IDENTITY)]
+    #[arg(long, default_value = "65535", value_name = "UID", help_heading = H_IDENTITY)]
     pub uid_end: u32,
 
-    /// GID range start
-    #[arg(long, default_value = "0", help_heading = H_IDENTITY)]
+    /// GID range start (the global -g/--gid is not used here)
+    #[arg(long, default_value = "0", value_name = "GID", help_heading = H_IDENTITY)]
     pub gid_start: u32,
 
     /// GID range end
-    #[arg(long, default_value = "65535", help_heading = H_IDENTITY)]
+    #[arg(long, default_value = "65535", value_name = "GID", help_heading = H_IDENTITY)]
     pub gid_end: u32,
 
     /// Path to check access against
-    #[arg(long, default_value = "/", help_heading = H_BEHAVIOR)]
+    #[arg(long, default_value = "/", value_name = "PATH", help_heading = H_BEHAVIOR)]
     pub path: String,
 
     /// Delay between attempts in ms (independent of global --delay)
-    #[arg(long, default_value = "0", help_heading = H_STEALTH)]
+    #[arg(long, default_value = "0", value_name = "MS", help_heading = H_STEALTH)]
     pub attempt_delay: u64,
 }
 

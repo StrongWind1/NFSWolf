@@ -21,7 +21,7 @@ use crate::report;
 ///
 /// Pipeline:
 ///   1. nfswolf analyze --json target > results.json     # capture findings
-///   2. nfswolf convert  -i results.json -f html -o report.html
+///   2. nfswolf convert  -i results.json --format html -o report.html
 ///
 /// Re-running `analyze` to regenerate a different format would re-execute
 /// every check (including the squash/no-root-squash probes that write to
@@ -29,17 +29,18 @@ use crate::report;
 /// captured JSON and is safe to run repeatedly.
 ///
 /// Examples:
-///   nfswolf convert -i results.json -f html     -o report.html
-///   nfswolf convert -i results.json -f markdown -o report.md --title "Client NFS Audit"
-///   nfswolf convert -i results.json -f csv      -o findings.csv
+///   nfswolf convert -i results.json --format html -o report.html
+///   nfswolf convert -i results.json --format markdown -o report.md --title "Client NFS Audit"
+///   nfswolf convert -i results.json --format csv -o findings.csv
 #[derive(Parser)]
 pub struct ConvertArgs {
     /// JSON input file produced by `analyze --json > FILE`
     #[arg(short = 'i', long, value_name = "FILE", help_heading = H_OUTPUT)]
     pub input: String,
 
-    /// Output format (see below for descriptions)
-    #[arg(short = 'f', long, value_enum, default_value = "html", help_heading = H_OUTPUT)]
+    /// Output format (see below for descriptions). Long-only: `-f` is the
+    /// targets-file flag in `scan`/`analyze`, so it is not reused here.
+    #[arg(long, value_enum, default_value = "html", value_name = "FORMAT", help_heading = H_OUTPUT)]
     pub format: ReportFormat,
 
     /// Output file path

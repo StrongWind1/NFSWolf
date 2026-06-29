@@ -5,12 +5,13 @@
 //! probes write a test file, no_root_squash detection creates a directory);
 //! all of them clean up after themselves.
 //!
-//! Output split: human-readable to stdout by default; pass the global
-//! `--json` flag to emit machine-readable JSON instead. Capture that JSON
-//! with shell redirection (`> results.json`) and feed it to `nfswolf
-//! convert` to render HTML/Markdown/CSV/etc.
+//! Output split: human-readable to stdout by default; pass `--json` to emit
+//! machine-readable JSON instead (to stdout, or to a file with `--json FILE`).
+//! Capture that JSON and feed it to `nfswolf convert` to render
+//! HTML/Markdown/CSV/etc.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -43,7 +44,7 @@ use crate::util::stealth::StealthConfig;
 ///   nfswolf analyze -f hosts.txt
 ///   nfswolf analyze 10.0.0.1 --test-read /etc/shadow --test-read-gids 0,42
 ///   nfswolf analyze --json target > results.json && \
-///     nfswolf convert -i results.json -f html -o report.html
+///     nfswolf convert -i results.json --format html -o report.html
 #[derive(Parser)]
 pub struct AnalyzeArgs {
     /// Target NFS server: IP or hostname. Omit if using -f.
@@ -73,13 +74,15 @@ pub struct AnalyzeArgs {
     pub test_read_uids: Vec<u32>,
 
     /// NFSv4 directory tree depth for overview
-    #[arg(long, default_value = "2", help_heading = H_BEHAVIOR)]
+    #[arg(long, default_value = "2", value_name = "N", help_heading = H_BEHAVIOR)]
     pub v4_depth: u32,
 
-    /// Emit machine-readable JSON to stdout instead of human-readable output.
-    /// Capture with shell redirection: `nfswolf analyze --json target > results.json`
-    #[arg(long, help_heading = H_OUTPUT)]
-    pub json: bool,
+    /// Emit machine-readable JSON instead of human-readable output. With no value
+    /// it goes to stdout (`nfswolf analyze --json target > results.json`); with a
+    /// path it is written to that file, matching `scan --json <FILE>`.
+    #[arg(long, value_name = "FILE", num_args = 0..=1, help_heading = H_OUTPUT)]
+    #[allow(clippy::option_option, reason = "clap optional-value flag: None = absent, Some(None) = --json (stdout), Some(Some(path)) = --json FILE")]
+    pub json: Option<Option<PathBuf>>,
 }
 
 impl AnalyzeArgs {
@@ -112,7 +115,7 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
 
     for host in &targets {
         tracing::info!(%host, "analyzing NFS server");
-        if !globals.quiet && !args.json {
+        if !globals.quiet && args.json.is_none() {
             eprintln!("{}", crate::output::status_info(&format!("Analyzing {host}...")));
         }
         let start = std::time::Instant::now();
@@ -128,7 +131,7 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
                 continue;
             },
         };
-        if args.json {
+        if args.json.is_some() {
             // Defer printing until every host has been analysed so the JSON
             // output is a single array.
         } else {
@@ -140,9 +143,17 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
         all_results.push(result);
     }
 
-    if args.json {
+    if let Some(dest) = &args.json {
         let json = serde_json::to_string_pretty(&all_results)?;
-        println!("{json}");
+        match dest {
+            Some(path) => {
+                std::fs::write(path, &json)?;
+                if !globals.quiet {
+                    eprintln!("{}", crate::output::status_ok(&format!("JSON written -> {}", path.display())));
+                }
+            },
+            None => println!("{json}"),
+        }
     }
 
     crate::cli::emit_replay(globals);
