@@ -14,7 +14,7 @@ use rustyline::history::DefaultHistory;
 
 use crate::cli::probe::{build_gid_list, make_mount_client};
 use crate::cli::target::Source as TargetSource;
-use crate::cli::{GlobalOpts, H_BEHAVIOR, H_IDENTITY, H_PERMISSIONS, H_TARGET};
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_PERMISSIONS, H_TARGET};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
@@ -49,14 +49,6 @@ pub struct ShellArgs {
     /// Export path (alternative to host:/export in the positional target)
     #[arg(short = 'e', long, value_name = "PATH", help_heading = H_TARGET)]
     pub export: Option<String>,
-
-    /// UID for NFS operations (overrides global --uid for this session)
-    #[arg(long, value_name = "UID", help_heading = H_IDENTITY)]
-    pub uid: Option<u32>,
-
-    /// GID for NFS operations (overrides global --gid for this session)
-    #[arg(long, value_name = "GID", help_heading = H_IDENTITY)]
-    pub gid: Option<u32>,
 
     /// Enable write operations (CREATE, WRITE, MKDIR, REMOVE, etc.)
     #[arg(long, help_heading = H_PERMISSIONS)]
@@ -95,8 +87,8 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         TargetSource::Handle(h) => (String::from("/"), Some(h.clone())),
         TargetSource::None => (String::from("/"), None),
     };
-    let uid = args.uid.unwrap_or(globals.uid);
-    let gid = args.gid.unwrap_or(globals.gid);
+    let uid = globals.uid;
+    let gid = globals.gid;
 
     let addr = SocketAddr::new(host, 111);
     let pool = Arc::new(match &globals.proxy {
@@ -214,8 +206,8 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let _ = target.source; // NFSv4 path doesn't use MOUNT or raw handle
     let nfs_port = globals.nfs_port.unwrap_or(2049);
     let addr = SocketAddr::new(host, nfs_port);
-    let mut uid = args.uid.unwrap_or(globals.uid);
-    let mut gid = args.gid.unwrap_or(globals.gid);
+    let mut uid = globals.uid;
+    let mut gid = globals.gid;
     let mut hostname = globals.hostname.clone();
 
     // Send the primary GID plus any --aux-gids (RFC 5531 S14, up to 16) so the

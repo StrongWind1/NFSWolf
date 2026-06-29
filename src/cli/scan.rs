@@ -59,11 +59,12 @@ pub struct ScanArgs {
     #[arg(long, help_heading = H_BEHAVIOR)]
     pub scan_udp: bool,
 
-    /// Additional NFS port(s) to probe (comma-delimited).
-    /// Added to the set of portmapper-discovered NFS ports (does not replace
-    /// portmapper discovery or the 2049 fallback).
+    /// Additional NFS port(s) to probe (comma-delimited). Added to the set of
+    /// portmapper-discovered NFS ports (does not replace portmapper discovery or
+    /// the 2049 fallback). The global `--nfs-port` override is also added to the
+    /// probe set, so both flags extend the ports scanned.
     #[arg(long, value_delimiter = ',', value_name = "PORT,...", help_heading = H_BEHAVIOR)]
-    pub nfs_port: Vec<u16>,
+    pub probe_port: Vec<u16>,
 
     /// After discovery, automatically attempt an export escape (subtree_check
     /// bypass) against every discovered export path. On success, prints a
@@ -119,7 +120,14 @@ pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         eprintln!("{}", crate::output::status_info(&format!("Scanning {} host(s)...", targets.len())));
     }
 
-    let config = ScanConfig { concurrency: args.concurrency, timeout: Duration::from_millis(globals.timeout), scan_udp: args.scan_udp, nfs_ports: args.nfs_port.clone(), mount_port: globals.mount_port };
+    // Extra ports to probe: the scan-local --probe-port list plus the global
+    // --nfs-port override (so the global flag is honoured by scan rather than
+    // silently ignored), on top of portmapper discovery and the 2049 fallback.
+    let mut probe_ports = args.probe_port.clone();
+    if let Some(p) = globals.nfs_port {
+        probe_ports.push(p);
+    }
+    let config = ScanConfig { concurrency: args.concurrency, timeout: Duration::from_millis(globals.timeout), scan_udp: args.scan_udp, nfs_ports: probe_ports, mount_port: globals.mount_port };
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let mut scanner = Scanner::new(config, stealth);
