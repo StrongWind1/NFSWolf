@@ -4,6 +4,36 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-29
+
+### Added
+
+- `scan --auto-escape`: after discovery, automatically attempt an export escape (subtree_check bypass) against every discovered export path and print a ready-to-run `shell --handle` command for each filesystem root reached. Runs only on a complete scan, with bounded concurrency and a per-host timeout; honours `--proxy` and `--delay`/`--jitter`. The escape logic is shared with the `escape` subcommand via a single `find_escape` primitive.
+- `analyze --json [FILE]`: optional file argument writes the JSON report to a file (matching `scan --json <FILE>`); with no value it still emits to stdout.
+- NFSv4 shell honours `--aux-gids` (the shadow-GID trick now works in `--nfs-version 4` mode, including across mid-session `uid`/`gid`/`hostname` reconnects).
+
+### Changed
+
+- **Breaking** -- `scan`: the "additional ports to probe" flag is renamed `--nfs-port` to `--probe-port`. `--nfs-port` now means the single-value port override consistently across every subcommand, and `scan` folds it into its probe set instead of ignoring it.
+- **Breaking** -- `convert`: `--format` is long-only; the `-f` short flag is removed (`-f` is the targets-file flag in `scan`/`analyze`).
+- `shell`: removed the local `--uid`/`--gid` that shadowed the global `-u`/`-g`; the session now uses the global identity flags consistently, so `shell -u 0` works like every other subcommand.
+- analyzer: dropped the unsound bind-mount (F-2.6) check and the tautological insecure-port (F-7.2) check (both produced false positives on well-configured servers); added a plaintext-transport check (F-3.1, Info); F-1.2 is now emitted when a forged non-root UID is honoured; F-4.1 (`no_root_squash`) and F-7.5 (`all_squash`+`anonuid=0`) are disambiguated; the world-writable/symlink check includes root-owned directories; duplicate F-1.3 findings are deduplicated.
+- Circuit breaker: trips only on genuine transient transport outages (never on `NFS3ERR_ACCES`/`PERM`, nor on `FragmentedReply`), records connection-establishment failures so a dead host opens the breaker, and escalates the cooldown once per outage rather than per failure. Every RPC also carries a per-call timeout so a stalled server cannot pin a pool connection.
+- NFSv2/NFSv4: NFSv2 raw RPC now uses a fresh AUTH_SYS stamp per call and feeds the circuit breaker; NFSv4 clients honour `StealthConfig`; both bound directory paging and XDR allocations against hostile servers; privileged source ports are used for raw NFSv2 RPC and MOUNT v1.
+- FUSE: `read` loops on short reads (no more zero-filled gaps); `readdir` pages a directory to completion with a per-inode cache; `forget` bounds inode-map growth; device major/minor are encoded correctly in `mknod`.
+- CLI: `analyze` resolves hostnames and IPv6 targets; `--nfs-port` and `--hostname` are threaded through the offensive subcommands; the connection pool re-stamps the requested credential (aux-gids/hostname) on checkout.
+
+### Fixed
+
+- Addressed roughly one hundred correctness, robustness, and protocol findings from a two-cycle security review: short-read/short-write loops in the shell and NFSv2 read paths, unbounded directory listings and in-memory reads, escape-handle byte-layout and root-confirmation correctness (fsid_type=7 length, XFS-root candidates, identity check against the export's own inode), wildcard/netmask export-ACL detection, and numerous smaller fixes. See the commit history for the full list.
+
+### Security
+
+- `shell get -r` now rejects server-controlled directory-entry names that contain a path separator or `..` before writing locally, preventing a malicious NFS server from escaping the chosen download directory (a zip-slip-class arbitrary local file write -- remote code execution when run under `sudo`).
+- Report renderers and the live `analyze` console neutralize untrusted server data: terminal control/escape sequences, Markdown/CSV/HTML injection, and Unicode bidirectional / zero-width "trojan source" characters (CVE-2021-42574 class).
+- Bounded every directory-listing and XDR allocation driven by an attacker-supplied length or count (memory-exhaustion DoS), and added per-call/per-host timeouts so an unresponsive server cannot hang the client.
+- UDP RPC binds to the target's address family and accepts replies only from the address it sent to (drops spoofed responses).
+
 ## [0.4.0] - 2026-06-28
 
 ### Added
@@ -210,7 +240,8 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.2.0...v0.3.0
