@@ -24,9 +24,20 @@ pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result
 }
 
 /// Wrap a field value in double-quotes and escape embedded double-quotes.
+///
+/// Two layers of defence, because several fields (evidence preview, export
+/// paths, titles) carry data straight from an untrusted NFS server:
+///   1. Formula-injection guard. A cell beginning with `=`, `+`, `-`, `@`, TAB
+///      or CR is treated as a formula by Excel/LibreOffice/Sheets on open, which
+///      can exfiltrate data or trigger DDE. Prefixing such a value with a single
+///      quote forces the spreadsheet to render it as literal text.
+///   2. RFC 4180 quoting. The (possibly guarded) value is always wrapped in
+///      double-quotes with embedded quotes doubled, so commas, quotes and
+///      newlines inside the field cannot break the row/column structure.
 fn csv_field(value: &str) -> String {
+    let guarded = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{value}") } else { value.to_owned() };
     // Wrapping is always safer than conditional wrapping  --  avoids corner cases
     // with values that start/end with whitespace or contain commas.
-    let escaped = value.replace('"', "\"\"");
+    let escaped = guarded.replace('"', "\"\"");
     format!("\"{escaped}\"")
 }

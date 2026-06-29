@@ -124,6 +124,40 @@ impl AutoUidResolver {
         }
     }
 
+    /// Rank harvested GIDs for step 5: most common first, deduplicated, cap 5.
+    ///
+    /// "Frequency" is how many distinct harvested owners share a GID -- a group
+    /// held by many users is the most promising group credential. Deduplicating
+    /// ensures the `MAX_HARVESTED_GIDS` cap counts distinct GIDs rather than
+    /// repeats of the same one (two owners sharing a GID would otherwise be tried
+    /// twice and waste an ACCESS round trip). `file_gid` and `current_gid` are
+    /// skipped because steps 3-4 already cover them.
+    fn ranked_harvested_gids(&self, file_gid: u32, current_gid: u32) -> Vec<u32> {
+        use std::collections::{HashMap, HashSet};
+
+        // Pass 1: count how many distinct harvested owners share each GID.
+        let mut counts: HashMap<u32, usize> = HashMap::new();
+        for &(_, gid) in &self.harvested_creds {
+            if gid != file_gid && gid != current_gid {
+                *counts.entry(gid).or_default() += 1;
+            }
+        }
+
+        // Pass 2: collect the unique GIDs in first-seen order (stable tie-break).
+        let mut ranked: Vec<u32> = Vec::new();
+        let mut seen: HashSet<u32> = HashSet::new();
+        for &(_, gid) in &self.harvested_creds {
+            if gid != file_gid && gid != current_gid && seen.insert(gid) {
+                ranked.push(gid);
+            }
+        }
+
+        // Stable sort by descending frequency; equal counts keep first-seen order.
+        ranked.sort_by_key(|gid| std::cmp::Reverse(counts.get(gid).copied().unwrap_or(0)));
+        ranked.truncate(MAX_HARVESTED_GIDS);
+        ranked
+    }
+
     /// Try ACCESS with the given credential. Returns true if any bits are granted.
     ///
     /// Permission denials are expected and logged at DEBUG  --  they do not trip
@@ -244,8 +278,8 @@ impl AutoUidResolver {
             }
         }
 
-        // Step 5: file owner UID + each harvested GID (sorted by frequency, cap 5).
-        let harvested_gids: Vec<u32> = self.harvested_creds.iter().map(|(_, g)| *g).filter(|&g| g != file_gid && g != current_gid).take(MAX_HARVESTED_GIDS).collect();
+        // Step 5: file owner UID + each harvested GID (most common GID first, cap 5).
+        let harvested_gids = self.ranked_harvested_gids(file_gid, current_gid);
         for gid in &harvested_gids {
             debug!(uid = file_uid, gid, "step 5: file uid + harvested gid");
             if self.try_access(fh, file_uid, *gid, &[*gid]).await {

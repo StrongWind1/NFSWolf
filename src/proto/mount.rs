@@ -165,7 +165,6 @@ impl NfsMountClient {
     /// MOUNT v1 EXPORT returns the NFSv2 export list; MOUNT v3 EXPORT returns
     /// the NFSv3 export list.  These are usually identical but CAN differ.
     pub async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
-        use nfs3_client::net::Connector as _;
         use nfs3_client::rpc::RpcClient;
         use nfs3_types::mount::exports;
         use nfs3_types::xdr_codec::Void;
@@ -179,12 +178,17 @@ impl NfsMountClient {
             None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1")?,
         };
         let mount_addr = SocketAddr::new(addr.ip(), port);
+        // Honour the secure-port logic the rest of NfsMountClient uses: privileged
+        // source port (<1024) first, no fallback when `privileged_required` is set;
+        // the proxy controls its own outbound port so it bypasses privileged binding.
         let io = if let Some(ref p) = self.proxy {
             let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
             let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
             nfs3_client::tokio::TokioIo::new(stream)
+        } else if self.privileged_required {
+            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
         } else {
-            nfs3_client::tokio::TokioConnector.connect(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
+            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
         };
         // RPC call: program=100005, version=1, proc=5 (EXPORT), args=Void
         let mut rpc = RpcClient::new(io);

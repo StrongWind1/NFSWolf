@@ -20,9 +20,10 @@ use tokio::net::TcpStream;
 
 use crate::proto::auth::Credential;
 use crate::proto::conn::ReconnectStrategy;
+use crate::proto::nfs4::PseudoFsEntry;
 use crate::proto::nfs4::types::{ArgOp, AttrRequest, CompoundArgs, CompoundRes, NFS4_PROC_COMPOUND, NFS4_PROGRAM, NFS4_VERSION, ResOpData};
-use crate::proto::nfs4::{LINUX_PSEUDO_ROOT_UUID, PseudoFsEntry};
 use crate::proto::pool::{ConnectionPool, PoolKey};
+use crate::util::stealth::StealthConfig;
 
 /// NFSv4 client backed by the shared connection pool.
 ///
@@ -32,6 +33,8 @@ pub struct Nfs4Client {
     pool: Arc<ConnectionPool>,
     pool_key: PoolKey,
     credential: Credential,
+    /// Timing profile applied before every COMPOUND (Critical Design Rule 10).
+    stealth: StealthConfig,
 }
 
 impl std::fmt::Debug for Nfs4Client {
@@ -42,15 +45,29 @@ impl std::fmt::Debug for Nfs4Client {
 
 impl Nfs4Client {
     /// Create a new NFSv4 client that draws connections from `pool`.
+    ///
+    /// Stealth defaults to off; chain `with_stealth` to honor `--delay`/`--jitter`.
     #[must_use]
     pub const fn new(pool: Arc<ConnectionPool>, pool_key: PoolKey, credential: Credential) -> Self {
-        Self { pool, pool_key, credential }
+        Self { pool, pool_key, credential, stealth: StealthConfig::none() }
+    }
+
+    /// Attach a stealth profile so each COMPOUND honors the configured pacing.
+    ///
+    /// Additive builder: `new` keeps its signature so existing call sites are
+    /// unaffected; callers with a configured `StealthConfig` chain this.
+    #[must_use]
+    pub const fn with_stealth(mut self, stealth: StealthConfig) -> Self {
+        self.stealth = stealth;
+        self
     }
 
     /// Send a COMPOUND containing `ops` and return the full response.
     ///
     /// Uses an empty tag and minorversion=0 (NFSv4.0).
     pub async fn compound(&self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
+        // Pace v4 traffic like the v2/v3 clients (Critical Design Rule 10).
+        self.stealth.wait().await;
         let args = CompoundArgs { tag: String::new(), minorversion: 0, ops };
         let mut conn = self.pool.checkout(self.pool_key.clone(), self.credential.clone(), ReconnectStrategy::Persistent).await.context("pool checkout for NFSv4")?;
         conn.call_raw::<CompoundArgs, CompoundRes>(NFS4_PROGRAM, NFS4_VERSION, NFS4_PROC_COMPOUND, &args).await.context("NFSv4 COMPOUND")
@@ -94,19 +111,25 @@ impl Nfs4Client {
         // Even a partial success (status != 0 but PUTROOTFH succeeded) tells us
         // the server speaks NFSv4, which is the primary detection goal here.
         let reachable = res.results.first().is_some_and(|r| r.status == 0);
-        // Check whether the root fsid matches the Linux pseudo-root UUID.
-        // When it does, the root is a synthetic namespace, not a real export
-        // (RFC 7530 S7.4; LINUX_PSEUDO_ROOT_UUID is the canonical identifier
-        // used by the Linux kernel NFSv4 server).
-        let tag = res.tag.as_str();
-        let is_linux_pseudo = tag == LINUX_PSEUDO_ROOT_UUID || tag.is_empty();
+        // Identify the pseudo-root from the decoded root fsid, not the echoed
+        // request tag (which is always our own empty tag, so the old check was
+        // unconditionally true). Linux knfsd presents the NFSv4 pseudo-root (the
+        // `fsid=0` root export, exports(5)) with an all-zero fsid4; a real export
+        // at the root reports a non-zero, device-derived fsid (RFC 7530 S7.3
+        // pseudo-file system; S5.8.1.9 fsid). We claim pseudo-root only on
+        // positive evidence (decoded fsid == 0/0); an undecodable fsid yields no
+        // pseudo-root claim rather than a false positive.
+        let fsid = res.results.iter().find_map(|op| if let ResOpData::Getattr { fsid } = &op.data { *fsid } else { None });
+        let is_pseudo_root = fsid == Some((0, 0));
         let entry = PseudoFsEntry {
             path: "/".to_owned(),
-            fsid: (0, 0),
-            is_pseudo_root: is_linux_pseudo,
+            fsid: fsid.unwrap_or((0, 0)),
+            is_pseudo_root,
             // auth_methods are populated by a separate secinfo() call.
             auth_methods: Vec::new(),
-            is_export_boundary: !is_linux_pseudo,
+            // A non-pseudo root whose fsid we decoded is itself an export
+            // boundary; with no decoded fsid we assert no boundary.
+            is_export_boundary: fsid.is_some() && !is_pseudo_root,
         };
         Ok(if reachable { vec![entry] } else { Vec::new() })
     }
@@ -130,6 +153,26 @@ pub struct Nfs4DirectClient {
     rpc: RpcClient<TokioIo<TcpStream>>,
     addr: SocketAddr,
     proxy: Option<String>,
+    /// Timing profile applied before every COMPOUND (Critical Design Rule 10).
+    stealth: StealthConfig,
+    /// Auxiliary GIDs (RFC 5531 S14) carried in the AUTH_SYS credential, kept so
+    /// a mid-session `uid`/`gid`/`hostname` reconnect preserves the operator's
+    /// `--aux-gids` (the shadow-GID trick) instead of dropping them.
+    aux_gids: Vec<u32>,
+}
+
+/// Build the AUTH_SYS GID list: primary `gid` first, then `aux_gids` (deduped).
+///
+/// Mirrors `cli::probe::build_gid_list`; duplicated here to keep the proto layer
+/// free of a dependency on the CLI layer.
+fn merge_gids(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
+    let mut gids = vec![gid];
+    for &g in aux_gids {
+        if !gids.contains(&g) {
+            gids.push(g);
+        }
+    }
+    gids
 }
 
 impl std::fmt::Debug for Nfs4DirectClient {
@@ -163,7 +206,7 @@ impl Nfs4DirectClient {
         let null_auth = nfs3_types::rpc::opaque_auth::default();
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, null_auth.clone(), null_auth);
-        Ok(Self { rpc, addr, proxy: proxy.map(String::from) })
+        Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: Vec::new() })
     }
 
     /// Connect with an AUTH_SYS credential (`uid`, `gid`, `hostname`).
@@ -181,7 +224,34 @@ impl Nfs4DirectClient {
         let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth();
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, opaque, nfs3_types::rpc::opaque_auth::default());
-        Ok(Self { rpc, addr, proxy: proxy.map(String::from) })
+        Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: Vec::new() })
+    }
+
+    /// Connect with AUTH_SYS carrying auxiliary GIDs, via an optional SOCKS5 proxy.
+    ///
+    /// Like `connect_with_auth_proxy` but sends up to 16 supplementary GIDs
+    /// (RFC 5531 S14), so the v4 shell can use the shadow-GID trick the same way
+    /// the v3 shell does (e.g. `--aux-gids 42` to read /etc/shadow without
+    /// no_root_squash). `aux_gids` are the auxiliary groups only; the primary
+    /// `gid` is prepended automatically and the set is retained for reconnects.
+    pub async fn connect_with_groups_proxy(addr: SocketAddr, uid: u32, gid: u32, aux_gids: &[u32], hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
+        use crate::proto::auth::AuthSys;
+        let gids = merge_gids(gid, aux_gids);
+        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth();
+        let io = Self::connect_tcp(addr, proxy).await?;
+        let rpc = RpcClient::new_with_auth(io, opaque, nfs3_types::rpc::opaque_auth::default());
+        Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: aux_gids.to_vec() })
+    }
+
+    /// Attach a stealth profile so each COMPOUND honors the configured pacing.
+    ///
+    /// Additive builder: the `connect*` constructors keep their signatures (used
+    /// by the scanner, analyzer, and v4 shell) and default to no stealth;
+    /// callers with a configured `StealthConfig` chain this after connecting.
+    #[must_use]
+    pub const fn with_stealth(mut self, stealth: StealthConfig) -> Self {
+        self.stealth = stealth;
+        self
     }
 
     /// Rebuild the RPC credential and reconnect the underlying TCP socket.
@@ -189,9 +259,12 @@ impl Nfs4DirectClient {
     /// Called by the interactive NFSv4 shell when the operator runs `uid`,
     /// `gid`, or `hostname` commands mid-session.  A full reconnect is required
     /// because `RpcClient` owns the IO and does not expose a credential setter.
+    /// The retained `aux_gids` are re-applied (with the possibly-changed primary
+    /// `gid`) so the shadow-GID trick survives a mid-session identity change.
     pub async fn reconnect_with_auth(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         use crate::proto::auth::AuthSys;
-        let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth();
+        let gids = merge_gids(gid, &self.aux_gids);
+        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth();
         let io = Self::connect_tcp(self.addr, self.proxy.as_deref()).await?;
         self.rpc = RpcClient::new_with_auth(io, opaque, nfs3_types::rpc::opaque_auth::default());
         Ok(())
@@ -201,6 +274,8 @@ impl Nfs4DirectClient {
     ///
     /// Uses an empty tag and minorversion=0 (NFSv4.0).
     pub async fn compound(&mut self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
+        // Pace v4 traffic like the v2/v3 clients (Critical Design Rule 10).
+        self.stealth.wait().await;
         let args = CompoundArgs { tag: String::new(), minorversion: 0, ops };
         self.rpc.call::<CompoundArgs, CompoundRes>(NFS4_PROGRAM, NFS4_VERSION, NFS4_PROC_COMPOUND, &args).await.context("NFSv4 COMPOUND")
     }

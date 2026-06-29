@@ -177,21 +177,28 @@ impl Nfs2Client {
         Ok((fh, attrs))
     }
 
-    /// Read an entire file in chunks up to the 2 GB v2 limit.
+    /// Read an entire file in chunks bounded by the NFSv2 MAXDATA limit.
+    ///
+    /// RFC 1094 fixes MAXDATA = 8192 as the maximum data in a READ reply, so a
+    /// full-size reply is only 8 KB and must NOT be mistaken for end-of-file.
+    /// READ returns the file's current attributes (RFC 1094 S2.2.6 readres), so
+    /// the loop runs until `offset` reaches the reported size or the server
+    /// returns an empty chunk -- a short read mid-file is legal and is not
+    /// treated as EOF.
     pub async fn read_file(&self, fh: &Nfs2FileHandle) -> anyhow::Result<Vec<u8>> {
-        const CHUNK: u32 = 65_536;
+        const CHUNK: u32 = 8_192; // NFSv2 MAXDATA (RFC 1094 S2.2.6)
         let mut data = Vec::new();
         let mut offset: u32 = 0;
         loop {
-            let (_, chunk) = self.read(fh, offset, CHUNK).await?;
+            let (attrs, chunk) = self.read(fh, offset, CHUNK).await?;
             if chunk.is_empty() {
-                break;
+                break; // server signalled no more data
             }
             let chunk_len = u32::try_from(chunk.len()).unwrap_or(CHUNK);
             data.extend_from_slice(&chunk);
             offset = offset.saturating_add(chunk_len);
-            if (chunk_len as usize) < CHUNK as usize {
-                break; // short read = EOF
+            if offset >= attrs.size {
+                break; // reached the file size the server reported
             }
         }
         Ok(data)

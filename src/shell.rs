@@ -1464,7 +1464,7 @@ async fn list_dir(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<Vec<
     let owner = getattr_owner(nfs3, dir_fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
     for (uid, gid) in escalation_list(caller, owner) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf")), uid, gid);
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match try_readdirplus(&esc, dir_fh).await {
             Ok(v) => {
                 tracing::debug!(uid, gid, "READDIRPLUS escalated");
@@ -1560,7 +1560,7 @@ async fn lookup_one(nfs3: &Nfs3Client, dir: &FileHandle, name: &str) -> anyhow::
     let owner = getattr_owner(nfs3, dir).await;
     let caller = (nfs3.uid(), nfs3.gid());
     for (uid, gid) in escalation_list(caller, owner) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf")), uid, gid);
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match try_lookup_one(&esc, dir, name).await {
             Ok(r) => {
                 tracing::debug!(uid, gid, name, "LOOKUP escalated");
@@ -1614,7 +1614,7 @@ async fn read_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()
     let owner = getattr_owner(nfs3, fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
     for (uid, gid) in escalation_list(caller, owner) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf")), uid, gid);
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match try_read_print(&esc, fh).await {
             Ok(()) => {
                 tracing::debug!(uid, gid, "READ escalated");
@@ -1627,21 +1627,55 @@ async fn read_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()
     anyhow::bail!("NFS3ERR_ACCES: permission denied reading file")
 }
 
-/// Single attempt: read `fh` and write entire content to stdout.
+/// Single attempt: read `fh` and write its content (capped at CAT_MAX_BYTES) to stdout.
+///
+/// Loops at the advancing offset until `ok.eof` or an empty reply: NFSv3 READ may
+/// legally return fewer bytes than requested before EOF (RFC 1813 sec. 3.3.6 --
+/// servers cap a single READ at rtmax/rtpref), so a single READ would silently
+/// truncate the tail of a small file on such a server. An explicit notice is
+/// printed when the 1 MiB cap is reached.
 async fn try_read_print(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()> {
-    let args = READ3args { file: fh.to_nfs_fh3(), offset: 0, count: CAT_MAX_BYTES };
-    match nfs3.read(&args).await? {
-        Nfs3Result::Ok(ok) => {
-            let data = ok.data.as_ref();
-            let _ = std::io::stdout().write_all(data);
-            if !data.ends_with(b"\n") {
-                println!();
-            }
-            Ok(())
-        },
-        Nfs3Result::Err((stat, _)) => anyhow::bail!("READ: {stat:?}"),
+    let mut stdout = std::io::stdout();
+    let mut offset = 0u64;
+    let mut last_byte: Option<u8> = None;
+    let mut truncated = false;
+    loop {
+        let remaining = CAT_MAX_BYTES.saturating_sub(u32::try_from(offset).unwrap_or(u32::MAX));
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
+        let count = remaining.min(CHUNK_SIZE);
+        let args = READ3args { file: fh.to_nfs_fh3(), offset, count };
+        match nfs3.read(&args).await? {
+            Nfs3Result::Ok(ok) => {
+                let data = ok.data.as_ref();
+                if data.is_empty() {
+                    break;
+                }
+                let _ = stdout.write_all(data);
+                last_byte = data.last().copied();
+                offset = offset.saturating_add(data.len() as u64);
+                if ok.eof {
+                    break;
+                }
+            },
+            Nfs3Result::Err((stat, _)) => anyhow::bail!("READ: {stat:?}"),
+        }
     }
+    if last_byte.is_some_and(|b| b != b'\n') {
+        println!();
+    }
+    if truncated {
+        eprintln!("{}", format!("[!] output truncated at {CAT_MAX_BYTES} bytes -- use `get` for the full file").yellow());
+    }
+    Ok(())
 }
+
+/// Hard cap on a single in-memory read. The NFS server is untrusted; a hostile
+/// or buggy server can return endless non-EOF chunks, so `read_all` must bound
+/// its buffer instead of growing until OOM.
+const READ_ALL_MAX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
 /// Read the entire content of `fh` into a buffer (for cp / download).
 async fn read_all(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
@@ -1656,6 +1690,9 @@ async fn read_all(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u8>>
                 offset = offset.saturating_add(data.len() as u64);
                 if ok.eof || data.is_empty() {
                     break;
+                }
+                if offset > READ_ALL_MAX_BYTES {
+                    anyhow::bail!("READ aborted at {offset} bytes: exceeds {READ_ALL_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
                 }
             },
             Nfs3Result::Err((stat, _)) => anyhow::bail!("READ at {offset}: {stat:?}"),
@@ -1713,7 +1750,7 @@ async fn download_file_escalated(nfs3: &Nfs3Client, fh: &FileHandle, dest_path: 
     let owner = getattr_owner(nfs3, fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
     for (uid, gid) in escalation_list(caller, owner) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf")), uid, gid);
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match download_file(&esc, fh, dest_path, total_size).await {
             Ok(r) => {
                 tracing::debug!(uid, gid, "download escalated");
@@ -1739,12 +1776,25 @@ async fn getattr_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result
     let owner = getattr_owner(nfs3, fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
     for (uid, gid) in escalation_list(caller, owner) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf")), uid, gid);
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         if let Ok(a) = getattr_fh(&esc, fh).await {
             return Ok(a);
         }
     }
     anyhow::bail!("NFS3ERR_ACCES: GETATTR denied (exhausted escalation ladder)")
+}
+
+/// Validate that a server-supplied directory-entry name is safe to use as a
+/// single local path component during recursive download (`get -r`).
+///
+/// The NFS server is untrusted (threat model): directory-entry names come
+/// verbatim from the READDIRPLUS reply, so a hostile server can return a name
+/// like `../../../etc/cron.d/pwn` to escape the operator's chosen download root
+/// -- a zip-slip-class arbitrary local file write (and remote code execution
+/// when nfswolf runs under sudo). Accept only a lone, normal path component:
+/// reject empty, `.`, `..`, an embedded path separator, or a NUL byte.
+fn is_safe_local_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
 }
 
 /// Recursively download a remote directory tree to a local path.
@@ -1763,7 +1813,13 @@ fn download_tree<'a>(nfs3: &'a Nfs3Client, dir_fh: &'a FileHandle, local_root: &
         let entries = list_dir(nfs3, dir_fh).await?;
         let mut total = 0u64;
 
-        for entry in entries.iter().filter(|e| e.name != "." && e.name != "..") {
+        for entry in &entries {
+            // Reject server-controlled names that would escape `local_root`
+            // before they ever reach std::fs (path-traversal guard).
+            if !is_safe_local_name(&entry.name) {
+                tracing::warn!("skipping entry with unsafe server-supplied name {:?} (path-traversal guard)", entry.name);
+                continue;
+            }
             let local_entry = format!("{local_root}/{}", entry.name);
             let is_dir = entry.attrs.as_ref().is_some_and(|a| a.file_type == FileType::Directory);
 
@@ -1892,19 +1948,33 @@ async fn create_remote(nfs3: &Nfs3Client, parent_fh: &FileHandle, filename: &str
 }
 
 /// Write `data` to `fh` in CHUNK_SIZE slices with FILE_SYNC stability.
+///
+/// Driven by a byte cursor into `data` (not a fixed chunk iterator): NFSv3 WRITE
+/// may legally write fewer bytes than requested (RFC 1813 sec. 3.3.7 -- `count`
+/// is the bytes actually written, a short write is a valid reply). Advancing only
+/// by the server-acknowledged `ok.count` resends the unwritten tail from the
+/// exact byte, so a short write no longer desyncs the cursor and silently
+/// corrupts / truncates the upload.
 async fn upload_data(nfs3: &Nfs3Client, fh: &FileHandle, data: &[u8]) -> anyhow::Result<u64> {
-    let mut offset = 0u64;
-    for chunk in data.chunks(usize::try_from(CHUNK_SIZE).unwrap_or(65536)) {
-        let count = u32::try_from(chunk.len()).unwrap_or(CHUNK_SIZE);
-        let args = WRITE3args { file: fh.to_nfs_fh3(), offset, count, stable: stable_how::FILE_SYNC, data: Opaque::owned(chunk.to_vec()) };
+    let chunk_size = usize::try_from(CHUNK_SIZE).unwrap_or(65536);
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let end = pos.saturating_add(chunk_size).min(data.len());
+        let Some(slice) = data.get(pos..end) else { break };
+        let count = u32::try_from(slice.len()).unwrap_or(CHUNK_SIZE);
+        let args = WRITE3args { file: fh.to_nfs_fh3(), offset: pos as u64, count, stable: stable_how::FILE_SYNC, data: Opaque::owned(slice.to_vec()) };
         match nfs3.write(&args).await? {
             Nfs3Result::Ok(ok) => {
-                offset = offset.saturating_add(u64::from(ok.count));
+                let written = usize::try_from(ok.count).unwrap_or(0).min(slice.len());
+                if written == 0 {
+                    anyhow::bail!("WRITE at {pos}: server acknowledged 0 bytes (no progress)");
+                }
+                pos = pos.saturating_add(written);
             },
-            Nfs3Result::Err((stat, _)) => anyhow::bail!("WRITE at {offset}: {stat:?}"),
+            Nfs3Result::Err((stat, _)) => anyhow::bail!("WRITE at {pos}: {stat:?}"),
         }
     }
-    Ok(offset)
+    Ok(pos as u64)
 }
 
 /// Recursive tree display. Uses Box::pin to allow async recursion.
@@ -2419,7 +2489,7 @@ async fn read_all_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Resul
     let owner = getattr_owner(nfs3, fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
     for (uid, gid) in escalation_list(caller, owner) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf")), uid, gid);
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match read_all(&esc, fh).await {
             Ok(buf) => {
                 tracing::debug!(uid, gid, "read_all escalated");
@@ -2435,6 +2505,15 @@ async fn read_all_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Resul
 // =============================================================================
 // last / lastb / lastlog rendering
 // =============================================================================
+
+/// Replace terminal control characters in untrusted log-record strings before
+/// display. wtmp/btmp/lastlog content (user/line/host fields) comes from a file
+/// on the UNTRUSTED NFS server, so embedded ANSI escapes or newlines must not
+/// reach the operator's terminal (cursor/colour manipulation, column-layout
+/// corruption). C0 controls, DEL, and C1 controls collapse to '.'.
+fn sanitize_term(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { '.' } else { c }).collect()
+}
 
 /// Format a wtmp `tv_sec` for the `last` / `lastb` / `lastlog` columns.
 ///
@@ -2505,7 +2584,7 @@ fn render_last(recs: &[UtmpRecord], max_recs: Option<usize>) {
             },
         };
         // Column layout follows util-linux last.c `list()` printf with full-time format.
-        println!("{:<8.8} {:<12.12} {:<16.16} {:<19} - {:<25} {}", entry.user, entry.line, entry.host, login, logout, length);
+        println!("{:<8.8} {:<12.12} {:<16.16} {:<19} - {:<25} {}", sanitize_term(&entry.user), sanitize_term(&entry.line), sanitize_term(&entry.host), login, logout, length);
         count += 1;
     }
     if count == 0 {
@@ -2527,9 +2606,9 @@ fn render_lastb(recs: &[UtmpRecord], max_recs: Option<usize>) {
         if matches!(r.ut_type, UtType::Empty) {
             continue;
         }
-        let host = pick_host(r);
-        let user = if r.user.is_empty() { "(unknown)" } else { r.user.as_str() };
-        println!("{:<8.8} {:<12.12} {:<16.16} {:<24} (failed login)", user, r.line, host, fmt_ctime(r.tv_sec));
+        let host = sanitize_term(&pick_host(r));
+        let user = if r.user.is_empty() { "(unknown)".to_owned() } else { sanitize_term(&r.user) };
+        println!("{:<8.8} {:<12.12} {:<16.16} {:<24} (failed login)", user, sanitize_term(&r.line), host, fmt_ctime(r.tv_sec));
         count += 1;
     }
     if count == 0 {
@@ -2546,7 +2625,7 @@ fn render_lastlog(recs: &[LastlogRecord], uid_to_user: &[(u32, String)]) {
         }
         let user = uid_to_user.iter().find(|(u, _)| *u == r.uid).map_or_else(|| format!("uid={}", r.uid), |(_, n)| n.clone());
         let when = fmt_ctime(r.ll_time);
-        println!("{:<16} {:<8.8} {:<24.24} {}", user, r.ll_line, r.ll_host, when);
+        println!("{:<16} {:<8.8} {:<24.24} {}", sanitize_term(&user), sanitize_term(&r.ll_line), sanitize_term(&r.ll_host), when);
         shown += 1;
     }
     if shown == 0 {
@@ -2756,7 +2835,29 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_get_dest;
+    use super::{is_safe_local_name, resolve_get_dest};
+
+    #[test]
+    fn safe_local_name_accepts_normal_entries() {
+        assert!(is_safe_local_name("passwd"));
+        assert!(is_safe_local_name(".hidden"));
+        assert!(is_safe_local_name("..."));
+        assert!(is_safe_local_name("file.tar.gz"));
+    }
+
+    #[test]
+    fn safe_local_name_rejects_traversal_and_separators() {
+        // A hostile server controls READDIRPLUS entry names; these must never
+        // reach std::fs during `get -r` (path-traversal / zip-slip guard).
+        assert!(!is_safe_local_name(""));
+        assert!(!is_safe_local_name("."));
+        assert!(!is_safe_local_name(".."));
+        assert!(!is_safe_local_name("../etc/passwd"));
+        assert!(!is_safe_local_name("../../root/.ssh/authorized_keys"));
+        assert!(!is_safe_local_name("sub/dir"));
+        assert!(!is_safe_local_name("/etc/cron.d/pwn"));
+        assert!(!is_safe_local_name("a\0b"));
+    }
 
     #[test]
     fn get_dest_uses_basename_when_local_empty() {

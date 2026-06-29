@@ -12,7 +12,7 @@
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::probe::{lookup_path, make_client, make_mount_client, parse_addr};
+use crate::cli::probe::{lookup_path, make_client, make_mount_client, parse_addr_with_port};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_IDENTITY, H_STEALTH, H_TARGET};
 use crate::engine::uid_sprayer::{SprayConfig, UidSprayer, access_bits};
 use crate::util::stealth::StealthConfig;
@@ -73,8 +73,8 @@ pub async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Result<()>
 
     eprintln!("{}", format!("[*] Spraying UIDs {}-{} on {host}:{export}", args.uid_start, args.uid_end).yellow());
 
-    let addr = parse_addr(&host)?;
-    let (_, circuit, client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref());
+    let addr = parse_addr_with_port(&host, globals.nfs_port)?;
+    let (_, circuit, client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), globals.nfs_port);
 
     // Mount to get the root handle, then walk to the target path.
     let mount = make_mount_client(globals);
@@ -82,7 +82,7 @@ pub async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Result<()>
     let target_fh = if args.path == "/" {
         mnt.handle
     } else {
-        let (_, _, lookup_client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref());
+        let (_, _, lookup_client) = make_client(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), globals.nfs_port);
         lookup_path(&lookup_client, &mnt.handle, &args.path).await?
     };
 

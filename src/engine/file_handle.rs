@@ -95,12 +95,24 @@ impl FileHandleAnalyzer {
         let data = fh.as_bytes();
 
         if data.len() == 32 {
-            // Could be Windows (always 32 bytes) or padded Linux/FreeBSD NFSv2.
-            // Windows handles have non-zero trailing bytes; Linux NFSv2 pads with zeros.
-            let tail_nonzero = data.get(28..32).is_some_and(|s| s != [0u8, 0, 0, 0]);
-            let hmac_nonzero = data.get(22..32).is_some_and(|s| s.iter().any(|&b| b != 0));
-            if tail_nonzero || hmac_nonzero {
-                return OsGuess::Windows;
+            // A 32-byte handle is ambiguous: it can be a Windows handle (always
+            // 32 bytes, non-zero HMAC tail) OR a Linux knfsd handle for an XFS
+            // UUID-based export -- [01 00 fsid_type fileid_type] + 16B UUID fsid
+            // (fsid_type 6/7) + 8B 64-bit inode + 4B generation = exactly 32 bytes.
+            // Such an XFS handle carries the Linux version/auth marker (01 00) and
+            // FILEID_INO64_GEN (0x81); whenever the file's generation is non-zero
+            // its trailing bytes are non-zero, which would otherwise trip the
+            // Windows heuristic below. Exclude Linux-format handles first so an
+            // XFS handle is not misfingerprinted as Windows (the Linux check below
+            // then classifies it correctly).
+            let linux_marker = data.first().copied() == Some(0x01) && data.get(1).copied() == Some(0x00);
+            if !linux_marker {
+                // Windows handles have non-zero trailing bytes; Linux NFSv2 pads with zeros.
+                let tail_nonzero = data.get(28..32).is_some_and(|s| s != [0u8, 0, 0, 0]);
+                let hmac_nonzero = data.get(22..32).is_some_and(|s| s.iter().any(|&b| b != 0));
+                if tail_nonzero || hmac_nonzero {
+                    return OsGuess::Windows;
+                }
             }
         }
 
@@ -570,6 +582,30 @@ mod tests {
         // A 3-byte handle can't match any known format.
         let fh = FileHandle::from_bytes(&[0xFF, 0xFE, 0xFD]);
         assert_eq!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::Unknown);
+    }
+
+    #[test]
+    fn fingerprint_xfs_uuid_handle_is_linux_not_windows() {
+        // A 32-byte Linux knfsd handle for an XFS UUID-based export:
+        //   [01 00 06 81] + 16-byte UUID fsid (fsid_type=6) + 8-byte 64-bit inode
+        //   + 4-byte generation = exactly 32 bytes (FILEID_INO64_GEN, fileid_type=0x81).
+        // With a non-zero generation the trailing 4 bytes are non-zero, which used
+        // to trip the 32-byte Windows heuristic. version=01/auth=00 must win.
+        let mut data = vec![
+            0x01, // version = 1 (Linux)
+            0x00, // auth_type = 0
+            0x06, // fsid_type = 6 (UUID-based)
+            0x81, // fileid_type = FILEID_INO64_GEN (XFS, 64-bit inode)
+        ];
+        data.extend_from_slice(&[0xAB; 16]); // 16-byte UUID fsid
+        data.extend_from_slice(&500u64.to_le_bytes()); // 64-bit inode
+        data.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // non-zero generation
+        assert_eq!(data.len(), 32, "XFS UUID handle must be exactly 32 bytes");
+        let fh = FileHandle::from_bytes(&data);
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::Linux, "32-byte XFS UUID handle must fingerprint as Linux, not Windows");
+        // Entropy must follow the Linux (32-bit generation) branch, not the 80-bit HMAC.
+        let analysis = FileHandleAnalyzer::estimate_entropy(&fh);
+        assert!((analysis.entropy_bits - 32.0).abs() < 1.0, "XFS handle entropy comes from the 32-bit generation");
     }
 
     // --- FS fingerprinting ---

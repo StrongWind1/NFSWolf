@@ -31,13 +31,13 @@ impl StealthConfig {
             return Duration::ZERO;
         }
 
-        let jitter = if self.jitter.is_zero() {
-            Duration::ZERO
-        } else {
-            let jitter_ms = u64::try_from(self.jitter.as_millis()).unwrap_or(u64::MAX);
-            let ms = rand::random_range(0..jitter_ms);
-            Duration::from_millis(ms)
-        };
+        // Resolve the jitter ceiling in whole milliseconds first. A sub-millisecond
+        // jitter (e.g. 500us) is non-zero as a Duration but truncates to 0ms here,
+        // which would make `random_range(0..0)` panic on an empty range -- so treat
+        // any zero ceiling as "no jitter". The inclusive range lets the configured
+        // maximum actually be sampled.
+        let jitter_ms = u64::try_from(self.jitter.as_millis()).unwrap_or(u64::MAX);
+        let jitter = if jitter_ms == 0 { Duration::ZERO } else { Duration::from_millis(rand::random_range(0..=jitter_ms)) };
 
         self.delay + jitter
     }
@@ -97,5 +97,24 @@ mod tests {
         let sc = StealthConfig::new(50, 0);
         let delay = sc.next_delay();
         assert_eq!(delay, Duration::from_millis(50), "zero jitter must return exact base delay");
+    }
+
+    #[test]
+    fn sub_millisecond_jitter_does_not_panic() {
+        // jitter < 1ms truncates to 0ms; next_delay must not feed an empty range
+        // (0..0) to random_range. The jitter field is public toolkit API and is
+        // directly constructible with a sub-ms Duration.
+        let sc = StealthConfig { delay: Duration::from_millis(10), jitter: Duration::from_micros(500) };
+        let d = sc.next_delay();
+        // Sub-ms jitter contributes nothing, so the result is exactly the base delay.
+        assert_eq!(d, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn sub_millisecond_jitter_with_zero_delay_returns_zero() {
+        // The exact panic-triggering path before the fix: delay=0 keeps the early
+        // zero-check from firing (jitter is non-zero), then jitter_ms truncates to 0.
+        let sc = StealthConfig { delay: Duration::ZERO, jitter: Duration::from_micros(900) };
+        assert!(sc.next_delay().is_zero());
     }
 }

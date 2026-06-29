@@ -3,7 +3,8 @@
 //! Each method checks the circuit breaker, checks out a pooled connection,
 //! applies the stealth delay, executes the NFS call, then records the result
 //! in the circuit breaker. Transport-fatal errors (IO, fragmented reply)
-//! poison the connection; all errors increment the circuit breaker.
+//! poison the connection and trip the breaker; reusable protocol-level RPC
+//! errors and NFS-status errors (which arrive as `Ok`) leave it untouched.
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::net::SocketAddr;
@@ -45,6 +46,14 @@ impl std::fmt::Debug for Nfs3Client {
     }
 }
 
+// Each procedure holds a `PooledConnection` across the stealth wait and the RPC
+// round-trip. That connection now owns the pool's admission semaphore permit, so
+// the type is "significant drop"; holding it for the full checkout -> RPC ->
+// record-result lifetime is intentional (it bounds concurrent connections), and
+// `update_circuit` consumes it to release the permit the instant the result is
+// recorded. `significant_drop_tightening` cannot see the move-into-function and
+// auto-suggests a use-after-move, so it is allowed for this impl block.
+#[allow(clippy::significant_drop_tightening, reason = "PooledConnection's admission permit is held intentionally for the whole RPC; update_circuit consumes conn to drop it promptly")]
 impl Nfs3Client {
     /// Create a new client backed by the given pool and circuit breaker.
     #[must_use]
@@ -79,6 +88,18 @@ impl Nfs3Client {
         self.pool_key.gid
     }
 
+    /// The AUTH_SYS machinename (spoofed client hostname) in this client's
+    /// credential. Escalated clones reuse this so the operator's `--hostname`
+    /// / `hostname` spoof (F-1.4) survives the auto-UID ladder instead of
+    /// being reset to a default. Falls back to "nfswolf" for `Credential::None`.
+    #[must_use]
+    pub fn machinename(&self) -> &str {
+        match &self.credential {
+            Credential::Sys(auth) => &auth.machinename,
+            Credential::None => "nfswolf",
+        }
+    }
+
     /// Clone this client with a different credential (new pool key for the new uid/gid).
     #[must_use]
     pub fn with_credential(&self, cred: Credential, uid: u32, gid: u32) -> Self {
@@ -95,7 +116,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().null().await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|()| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|()| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_NULL"))
     }
 
@@ -106,7 +127,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().getattr(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_GETATTR"))
     }
 
@@ -117,7 +138,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().setattr(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_SETATTR"))
     }
 
@@ -128,7 +149,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().lookup(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_LOOKUP"))
     }
 
@@ -142,7 +163,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().access(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_ACCESS"))
     }
 
@@ -153,7 +174,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().readlink(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_READLINK"))
     }
 
@@ -164,7 +185,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().read(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_READ"))
     }
 
@@ -175,7 +196,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().write(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_WRITE"))
     }
 
@@ -186,7 +207,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().create(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_CREATE"))
     }
 
@@ -197,7 +218,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().mkdir(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_MKDIR"))
     }
 
@@ -208,7 +229,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().symlink(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_SYMLINK"))
     }
 
@@ -219,7 +240,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().mknod(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_MKNOD"))
     }
 
@@ -230,7 +251,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().remove(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_REMOVE"))
     }
 
@@ -241,7 +262,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().rmdir(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_RMDIR"))
     }
 
@@ -252,7 +273,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().rename(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_RENAME"))
     }
 
@@ -263,7 +284,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().link(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_LINK"))
     }
 
@@ -274,7 +295,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().readdir(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_READDIR"))
     }
 
@@ -285,7 +306,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().readdirplus(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_READDIRPLUS"))
     }
 
@@ -296,7 +317,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().fsstat(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_FSSTAT"))
     }
 
@@ -307,7 +328,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().fsinfo(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_FSINFO"))
     }
 
@@ -318,7 +339,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().pathconf(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_PATHCONF"))
     }
 
@@ -329,7 +350,7 @@ impl Nfs3Client {
         let mut conn = self.checkout().await?;
         self.stealth.wait().await;
         let res = conn.inner_mut().commit(args).await;
-        update_circuit(&self.circuit, &mut conn, &res.as_ref().map(|_| &()), addr);
+        update_circuit(&self.circuit, conn, &res.as_ref().map(|_| &()), addr);
         res.map_err(|e| anyhow::anyhow!("{e}").context("NFSPROC3_COMMIT"))
     }
 
@@ -357,17 +378,31 @@ impl Nfs3Client {
 /// Update the circuit breaker and poison the connection on transport failure.
 ///
 /// Uses upstream `is_connection_reusable()` to decide whether the TCP session
-/// is still in a clean state. Only `Io` and `FragmentedReply` errors poison
-/// the connection; protocol-level errors (auth, program mismatch, etc.) leave
-/// the transport intact. All errors record a circuit breaker failure.
-fn update_circuit<T>(circuit: &CircuitBreaker, conn: &mut PooledConnection, res: &Result<T, &nfs3_client::RpcError>, addr: SocketAddr) {
+/// is still in a clean state. Only genuinely transient transport failures
+/// (non-reusable: `Io` and `FragmentedReply`) poison the connection AND trip
+/// the breaker, per critical design rule 3. Reusable protocol-level RPC errors
+/// (auth rejection, program/proc mismatch, garbage args, XDR) leave the
+/// transport intact and do NOT count as breaker failures -- they are
+/// permission-class / protocol denials, not outages. NFS-status errors
+/// (`NFS3ERR_ACCES`, etc.) arrive inside the `Ok` payload as `Nfs3Result::Err`,
+/// so they reach this function as `Ok` and never trip the breaker.
+///
+/// Takes `conn` by value so the connection (and its pool-admission permit) is
+/// returned to the pool the moment the result is recorded, rather than lingering
+/// until the end of the caller's method.
+fn update_circuit<T>(circuit: &CircuitBreaker, mut conn: PooledConnection, res: &Result<T, &nfs3_client::RpcError>, addr: SocketAddr) {
     match res {
         Ok(_) => circuit.record_success(addr),
-        Err(e) => {
-            if !e.is_connection_reusable() {
-                conn.poison();
-            }
+        // Transport is dead (Io) or left mid-fragment (FragmentedReply): the
+        // connection is unusable and this is a transient outage -- poison and
+        // count it against the breaker.
+        Err(e) if !e.is_connection_reusable() => {
+            conn.poison();
             circuit.record_failure(addr);
         },
+        // Reusable RPC error (auth/program/proc/XDR): transport stays at a clean
+        // message boundary and the failure is not transient, so leave the
+        // breaker state unchanged and keep the connection.
+        Err(_) => {},
     }
 }

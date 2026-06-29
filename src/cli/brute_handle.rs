@@ -26,7 +26,7 @@ use anyhow::{Context as _, bail};
 use clap::Parser;
 use nfs3_types::nfs3::{ACCESS3args, GETATTR3args, Nfs3Result, ftype3, nfsstat3};
 
-use crate::cli::probe::{make_client, make_mount_client, parse_addr};
+use crate::cli::probe::{make_client, make_mount_client, parse_addr_with_port};
 use crate::cli::target::{self, Source};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
 use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer, FsType};
@@ -96,7 +96,7 @@ pub async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::Result<
     // so the parser's colon-vs-handle conflict rules apply for free).
     let target = target::parse(&args.target, args.export.as_deref(), args.seed_handle.as_deref(), false)?;
     let host = target.host.to_string();
-    let addr = parse_addr(&host)?;
+    let addr = parse_addr_with_port(&host, globals.nfs_port)?;
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
 
     // Derive the seed handle (fsid + format) and the export used for the PoolKey.
@@ -111,7 +111,7 @@ pub async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::Result<
 
     // uid=0 for probes so permission errors (squashed root) are distinguishable
     // from format errors (STALE/BADHANDLE). Handles are bearer tokens.
-    let (_, _, client) = make_client(addr, &pool_export, 0, 0, &[], stealth, globals.proxy.as_deref());
+    let (_, _, client) = make_client(addr, &pool_export, 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port);
 
     let fs = resolve_fs_type(&args.fs_type, &seed);
     let mode = args.fixed_inode.map_or_else(|| format!("inode-sweep {fs:?}"), |i| format!("inode={i} gen-sweep"));
