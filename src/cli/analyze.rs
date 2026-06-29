@@ -116,7 +116,18 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
             eprintln!("{}", crate::output::status_info(&format!("Analyzing {host}...")));
         }
         let start = std::time::Instant::now();
-        let result = run_single(host, &args, globals).await?;
+        // Isolate per-host failures: one unreachable/unparseable target must not
+        // discard every other host's result (especially in --json batch mode).
+        let result = match run_single(host, &args, globals).await {
+            Ok(r) => r,
+            Err(e) => {
+                if !globals.quiet {
+                    eprintln!("{}", crate::output::status_warn(&format!("Skipping {host}: {e}")));
+                }
+                tracing::warn!(%host, err = %e, "analyze: host failed, skipping");
+                continue;
+            },
+        };
         if args.json {
             // Defer printing until every host has been analysed so the JSON
             // output is a single array.
@@ -147,7 +158,10 @@ pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> 
 fn collect_targets(args: &AnalyzeArgs) -> anyhow::Result<Vec<String>> {
     if let Some(ref file) = args.targets_file {
         let content = std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("read targets file {file}: {e}"))?;
-        Ok(content.lines().filter(|l| !l.is_empty()).map(strip_export).collect())
+        // Mirror the scanner's loader (src/engine/scanner.rs): trim each line,
+        // then skip blank lines and `#` comments so a hosts.txt that works with
+        // `scan -f` also works with `analyze -f`.
+        Ok(content.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(strip_export).collect())
     } else {
         Ok(args.target.iter().map(|t| strip_export(t)).collect())
     }
@@ -160,7 +174,14 @@ fn strip_export(s: &str) -> String {
 
 /// Analyze a single NFS host and return all findings.
 async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<AnalysisResult> {
-    let addr: SocketAddr = format!("{host}:111").parse().map_err(|_| anyhow::anyhow!("invalid host: {host}"))?;
+    // Resolve the target to an IP literal so DNS names and IPv6 work the same
+    // way they do for `scan`.  The shared resolver lives in cli::target.
+    let ip = crate::cli::target::resolve_host(host)?;
+    let addr = SocketAddr::new(ip, 111);
+    // The analyzer reconstructs `host:port` via SocketAddr::parse
+    // (engine::analyzer::analyze), so an IPv6 literal must be bracketed --
+    // `2001:db8::1:2049` is unparseable, `[2001:db8::1]:2049` is not.
+    let host_for_config = if ip.is_ipv6() { format!("[{ip}]") } else { ip.to_string() };
 
     let pool = Arc::new(match &globals.proxy {
         Some(p) => ConnectionPool::with_proxy(p.clone()),
@@ -181,7 +202,7 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
     if let Some(ref p) = globals.proxy {
         analyzer = analyzer.with_proxy(p.clone());
     }
-    let config = AnalyzeConfig { host: host.to_owned(), port: 2049, test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
+    let config = AnalyzeConfig { host: host_for_config, port: 2049, test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
     analyzer.analyze(&config).await
 }
 

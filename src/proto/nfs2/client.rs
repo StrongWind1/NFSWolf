@@ -187,6 +187,12 @@ impl Nfs2Client {
     /// treated as EOF.
     pub async fn read_file(&self, fh: &Nfs2FileHandle) -> anyhow::Result<Vec<u8>> {
         const CHUNK: u32 = 8_192; // NFSv2 MAXDATA (RFC 1094 S2.2.6)
+        // The server is untrusted: it controls both `attrs.size` and whether each
+        // chunk is non-empty, so neither can be the sole loop bound. Cap the total
+        // so a hostile server reporting a near-4 GiB size cannot drive an
+        // unbounded allocation (mirrors the v3 `read_all` READ_ALL_MAX_BYTES guard
+        // in src/shell.rs).
+        const MAX_BYTES: usize = 256 * 1024 * 1024; // 256 MiB hard cap
         let mut data = Vec::new();
         let mut offset: u32 = 0;
         loop {
@@ -196,6 +202,9 @@ impl Nfs2Client {
             }
             let chunk_len = u32::try_from(chunk.len()).unwrap_or(CHUNK);
             data.extend_from_slice(&chunk);
+            if data.len() > MAX_BYTES {
+                anyhow::bail!("NFSv2 read_file aborted at {} bytes: exceeds {MAX_BYTES}-byte cap (untrusted server returning endless data)", data.len());
+            }
             offset = offset.saturating_add(chunk_len);
             if offset >= attrs.size {
                 break; // reached the file size the server reported
@@ -214,7 +223,28 @@ impl Nfs2Client {
         self.circuit.check_or_wait(addr)?;
         let mut conn = self.pool.checkout(self.pool_key.clone(), self.credential.clone(), ReconnectStrategy::Persistent).await.context("pool checkout")?;
         self.stealth.wait().await;
-        conn.call_raw::<C, R>(NFS_PROGRAM, NFS_VERSION, proc, args).await.with_context(|| format!("NFSv2 proc {proc}"))
+        let res = conn.call_raw::<C, R>(NFS_PROGRAM, NFS_VERSION, proc, args).await;
+        // Release the pooled connection (and its admission permit) before
+        // recording the result; the breaker reads `res`, not `conn`.
+        drop(conn);
+        // Feed the host circuit breaker so v2 traffic is not invisible to it
+        // (rule 3 / DESIGN.md S11). NFS-status denials (ACCES/PERM) ride back as
+        // an Ok payload decoded later, so an Err here is an RPC/transport-level
+        // failure. Mirror the v3 `update_circuit` exactly: only a genuine
+        // transport outage (`RpcError::Io`) trips the breaker. FragmentedReply is
+        // a deterministic RFC 1831 record-marking condition (large replies), not
+        // a host outage, so it must NOT trip it; reusable protocol errors (auth /
+        // program / proc / XDR) likewise leave the breaker unchanged.
+        match &res {
+            Ok(_) => self.circuit.record_success(addr),
+            Err(e) => {
+                let is_outage = e.downcast_ref::<nfs3_client::RpcError>().is_some_and(|rpc| matches!(rpc, nfs3_client::RpcError::Io(_)));
+                if is_outage {
+                    self.circuit.record_failure(addr);
+                }
+            },
+        }
+        res.with_context(|| format!("NFSv2 proc {proc}"))
     }
 }
 
@@ -352,6 +382,31 @@ impl Unpack for ReaddirRes {
 
 // String helpers (duplicated from types.rs to avoid pub exports)
 
+/// Upper bound on bytes pre-reserved from a single wire-supplied length before
+/// any payload is read (untrusted-server hardening; mirrors the NFSv4 decoder).
+///
+/// The NFS server is untrusted (CLAUDE.md threat model): a tiny malicious reply
+/// can declare a multi-gigabyte string length (e.g. a READLINK target or a
+/// READDIR entry name) and drive `Vec` allocation into an OOM-abort
+/// (CWE-789 / CWE-770). We never reserve more than this regardless of the
+/// declared length and grow the buffer only as real bytes arrive, so a forged
+/// length cannot amplify a small reply into a huge allocation.
+const XDR_PREALLOC_CAP: usize = 1 << 20; // 1 MiB
+
+/// Read exactly `len` bytes of XDR payload without trusting `len` for
+/// pre-allocation (see `XDR_PREALLOC_CAP`).
+///
+/// Reserves at most `XDR_PREALLOC_CAP` and grows as bytes actually arrive,
+/// returning `UnexpectedEof` when fewer than `len` bytes are present.
+fn read_xdr_bytes(input: &mut impl Read, len: usize) -> nfs3_types::xdr_codec::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(len.min(XDR_PREALLOC_CAP));
+    let read = input.take(len as u64).read_to_end(&mut buf).map_err(nfs3_types::xdr_codec::Error::Io)?;
+    if read != len {
+        return Err(nfs3_types::xdr_codec::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
+    }
+    Ok(buf)
+}
+
 /// Write 1, 2, or 3 zero-padding bytes to reach a 4-byte XDR boundary.
 fn write_xdr_pad(out: &mut impl Write, pad: usize) -> nfs3_types::xdr_codec::Result<()> {
     match pad {
@@ -396,8 +451,8 @@ fn pack_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<u
 fn unpack_string(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(String, usize)> {
     let (len, mut n) = u32::unpack(input)?;
     let len = len as usize;
-    let mut buf = vec![0u8; len];
-    input.read_exact(&mut buf).map_err(nfs3_types::xdr_codec::Error::Io)?;
+    // Do not pre-size from the untrusted length; read bounded by real bytes.
+    let buf = read_xdr_bytes(input, len)?;
     n += len;
     let pad = (4 - (len % 4)) % 4;
     skip_xdr_pad(input, pad)?;

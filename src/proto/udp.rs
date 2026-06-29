@@ -48,13 +48,24 @@ where
     msg.pack(&mut buf).context("pack RPC call header")?;
     args.pack(&mut buf).context("pack RPC args")?;
 
-    // Bind an ephemeral local UDP port and send the datagram.
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.context("bind UDP socket")?;
-    socket.send_to(&buf, addr).await.context("UDP send")?;
+    // Bind an ephemeral local UDP port in the destination's address family.
+    // An IPv4-bound socket cannot send to an IPv6 peer (the families have
+    // separate address spaces, RFC 3493 S3.7), so an unconditional `0.0.0.0`
+    // bind fails every IPv6 target with a confusing low-level error.
+    let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let socket = tokio::net::UdpSocket::bind(bind_addr).await.context("bind UDP socket")?;
+    // connect() pins the peer so the kernel drops datagrams whose source is not
+    // `addr`.  Without it the socket accepts a reply from ANY host, letting an
+    // on-path or off-path attacker who guesses the cleartext XID inject a forged
+    // portmapper/NFS reply (UDP carries no connection state -- RFC 1057 S10).
+    socket.connect(addr).await.context("UDP connect")?;
+    socket.send(&buf).await.context("UDP send")?;
 
-    // Wait for a response datagram.
+    // Wait for a response datagram.  recv() (not recv_from) only returns
+    // datagrams from the connected peer, so source verification is enforced
+    // by the kernel.
     let mut recv_buf = vec![0u8; MAX_UDP_DATAGRAM];
-    let (n, _from) = tokio::time::timeout(timeout, socket.recv_from(&mut recv_buf)).await.context("UDP RPC timeout")?.context("UDP recv_from")?;
+    let n = tokio::time::timeout(timeout, socket.recv(&mut recv_buf)).await.context("UDP RPC timeout")?.context("UDP recv")?;
     recv_buf.truncate(n);
 
     // Parse the reply.  The cursor starts right at the rpc_msg (no record header).

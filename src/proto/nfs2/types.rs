@@ -230,6 +230,34 @@ fn skip_xdr_pad(input: &mut impl Read, pad: usize) -> nfs3_types::xdr_codec::Res
     }
 }
 
+/// Upper bound on bytes pre-reserved from a single wire-supplied length before
+/// any payload is read (untrusted-server hardening; mirrors the NFSv4 decoder).
+///
+/// The NFS server is untrusted (CLAUDE.md threat model): a tiny malicious reply
+/// can declare a multi-gigabyte opaque/string length and drive `Vec` allocation
+/// into an OOM-abort (CWE-789 / CWE-770). We never reserve more than this
+/// regardless of the declared length and grow the buffer only as real bytes
+/// arrive, so a forged length cannot amplify a small reply into a huge
+/// allocation. The parsed result for honest inputs is unchanged.
+const XDR_PREALLOC_CAP: usize = 1 << 20; // 1 MiB
+
+/// Read exactly `len` bytes of XDR payload without trusting `len` for
+/// pre-allocation (see `XDR_PREALLOC_CAP`).
+///
+/// Reserves at most `XDR_PREALLOC_CAP` and grows as bytes actually arrive,
+/// bounded by the remaining bytes in the RPC record, so a forged length cannot
+/// force a gigabyte allocation. Returns `UnexpectedEof` when fewer than `len`
+/// bytes are present, matching the previous `read_exact` contract for honest
+/// inputs.
+fn read_xdr_bytes(input: &mut impl Read, len: usize) -> nfs3_types::xdr_codec::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(len.min(XDR_PREALLOC_CAP));
+    let read = input.take(len as u64).read_to_end(&mut buf).map_err(nfs3_types::xdr_codec::Error::Io)?;
+    if read != len {
+        return Err(nfs3_types::xdr_codec::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
+    }
+    Ok(buf)
+}
+
 fn pack_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
     let bytes = s.as_bytes();
     let len = u32::try_from(bytes.len()).map_err(|_| nfs3_types::xdr_codec::Error::ObjectTooLarge(bytes.len()))?;
@@ -245,8 +273,8 @@ fn pack_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<u
 fn unpack_string(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(String, usize)> {
     let (len, mut n) = u32::unpack(input)?;
     let len = len as usize;
-    let mut buf = vec![0u8; len];
-    input.read_exact(&mut buf).map_err(nfs3_types::xdr_codec::Error::Io)?;
+    // Do not pre-size from the untrusted length; read bounded by real bytes.
+    let buf = read_xdr_bytes(input, len)?;
     n += len;
     let pad = (4 - (len % 4)) % 4;
     skip_xdr_pad(input, pad)?;
@@ -608,8 +636,8 @@ impl Unpack for ReadRes {
         // Data is XDR opaque: 4-byte length then raw bytes with padding
         let (data_len, n2) = u32::unpack(input)?;
         let data_len = data_len as usize;
-        let mut data = vec![0u8; data_len];
-        input.read_exact(&mut data).map_err(nfs3_types::xdr_codec::Error::Io)?;
+        // Do not pre-size from the untrusted length; read bounded by real bytes.
+        let data = read_xdr_bytes(input, data_len)?;
         let pad = (4 - (data_len % 4)) % 4;
         skip_xdr_pad(input, pad)?;
         Ok((Self { status, attrs, data }, n0 + n1 + n2 + data_len + pad))

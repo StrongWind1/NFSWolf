@@ -102,7 +102,7 @@ pub struct SprayConfig {
 
 /// UID/GID spray engine  --  iterates credential space to find NFS access.
 ///
-/// Implements F-2.1 (UID forgery) from FINDINGS.md. Each attempt is a fresh
+/// Implements F-1.1 (UID/GID Spoofing) from FINDINGS.md. Each attempt is a fresh
 /// AUTH_SYS credential with a new stamp (RFC 1057 S9.2) to avoid caching.
 pub struct UidSprayer {
     nfs3: Nfs3Client,

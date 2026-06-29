@@ -319,15 +319,68 @@ impl Nfs4DirectClient {
     /// List directory entries for the directory at `dir_fh`.
     ///
     /// Returns entry names excluding `"."` and `".."`.  Requests no inline
-    /// attributes (AttrRequest::empty) to keep the response compact.
+    /// attributes (`AttrRequest::empty`) to keep the response compact.
+    ///
+    /// NFSv4 READDIR is paginated (RFC 7530 S16.24): a directory larger than
+    /// `maxcount` is returned across multiple calls, each ending with `eof=false`,
+    /// and the client must resume from the last entry's cookie. This loops until
+    /// `eof`, accumulating entries; a single READDIR would silently truncate large
+    /// directories (the v4 `ls` feeds export/file enumeration). The loop is bounded
+    /// by `MAX_READDIR_ENTRIES` so a hostile server (CLAUDE.md threat model) that
+    /// never sets `eof` cannot spin or exhaust memory -- the same defence the v3
+    /// shell's `try_readdirplus` paging uses.
+    ///
+    /// Known limitation: RFC 7530 S16.24 also requires echoing the server's
+    /// `cookieverf` on each continuation, but the READDIR decoder currently
+    /// discards the verifier (`ResOpData::Readdir` carries no cookieverf), so this
+    /// resumes with `cookieverf=0`. Servers that strictly validate the verifier
+    /// (returning NFS4ERR_NOT_SAME / NFS4ERR_BAD_COOKIE) will error on continuation
+    /// rather than truncate; fully correct pagination requires surfacing the
+    /// cookieverf from the decoder in `proto::nfs4::types` (cross-module change).
     pub async fn list_dir(&mut self, dir_fh: &[u8]) -> anyhow::Result<Vec<String>> {
-        let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie: 0, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() }];
-        let res = self.compound(ops).await?;
-        anyhow::ensure!(res.status == 0, "READDIR failed: NFSv4 status={}", res.status);
-        match res.results.get(1).map(|op| &op.data) {
-            Some(ResOpData::Readdir { entries, .. }) => Ok(entries.iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name.clone()).collect()),
-            _ => anyhow::bail!("READDIR result missing or wrong type"),
+        // Hard cap against a server that never signals eof (untrusted-server
+        // hardening; mirrors the v3 shell readdir cap).
+        const MAX_READDIR_ENTRIES: usize = 1_000_000;
+        let mut names = Vec::new();
+        // Bound on RAW entries seen (not the filtered `names`): a hostile server
+        // can return non-empty pages whose entries are all "." / ".." with a
+        // cycling cookie, which would never grow `names` and never break.
+        let mut raw_seen: usize = 0;
+        let mut cookie: u64 = 0;
+        loop {
+            // cookieverf=0: the first call requires it, and the decoder does not yet
+            // surface the server's verifier for continuation (see method note).
+            let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() }];
+            let res = self.compound(ops).await?;
+            anyhow::ensure!(res.status == 0, "READDIR failed: NFSv4 status={}", res.status);
+            let (entries, eof) = match res.results.get(1).map(|op| &op.data) {
+                Some(ResOpData::Readdir { entries, eof }) => (entries, *eof),
+                _ => anyhow::bail!("READDIR result missing or wrong type"),
+            };
+            // An empty page means no forward progress is possible (no cookie to
+            // resume from); stop rather than re-issue the same request forever.
+            let Some(last_cookie) = entries.last().map(|e| e.cookie) else { break };
+            raw_seen = raw_seen.saturating_add(entries.len());
+            for e in entries {
+                if e.name != "." && e.name != ".." {
+                    names.push(e.name.clone());
+                }
+            }
+            if eof {
+                break;
+            }
+            if raw_seen >= MAX_READDIR_ENTRIES {
+                tracing::warn!(count = raw_seen, "NFSv4 READDIR hit entry cap; directory listing truncated");
+                break;
+            }
+            // Resume from the last entry's cookie. If it did not advance, stop to
+            // avoid an infinite loop on a misbehaving server.
+            if last_cookie == cookie {
+                break;
+            }
+            cookie = last_cookie;
         }
+        Ok(names)
     }
 
     /// Read a chunk of file data from `file_fh` at `offset`.

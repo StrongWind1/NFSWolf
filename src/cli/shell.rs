@@ -107,29 +107,18 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     let gids = build_gid_list(gid, &globals.aux_gids);
     let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &globals.hostname));
 
-    // When --handle is given, skip MOUNT for the root handle.
-    // The raw handle is used as the shell root (file handles are bearer tokens per RFC 1094
-    // S2.3.3), but we still need an NFS TCP session which requires mounting some export.
-    // Strategy:
-    //   1. List exports via portmapper to find a mountable one.
-    //   2. If portmapper is filtered, fall back to a direct NFS port connection.
+    // When --handle is given, skip MOUNT entirely and connect straight to the
+    // NFS data port. The raw handle is the shell root (file handles are bearer
+    // tokens per RFC 1094 S2.3.3 / RFC 2623 S2.6), so no MOUNT/EXPORT RPC is
+    // needed. Issuing MNTPROC_EXPORT here would block on SYN timeouts when
+    // portmapper/mountd (TCP/111) is firewalled -- the exact case --handle
+    // exists to bypass.
     let (root_fh, pool_key, direct_nfs_port) = if let Some(ref hex) = handle_hex_arg {
         let fh = FileHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?;
         eprintln!("{}", crate::output::status_info(&format!("Using raw handle: {hex}")));
 
-        // --handle always connects directly to the NFS port (no MOUNT needed).
-        // File handles are bearer tokens (RFC 2623 S2.6) -- MOUNT is bypassed entirely.
         let nfs_port = globals.nfs_port.unwrap_or(2049);
-        let mc = make_mount_client(globals);
-
-        let session_label = match mc.list_exports(addr).await {
-            Ok(exports) if !exports.is_empty() => {
-                let first = exports.into_iter().next().map(|e| e.path).unwrap_or_default();
-                format!("{host}:{first}")
-            },
-            _ => format!("{host}:{nfs_port}"),
-        };
-        eprintln!("{}", crate::output::status_info(&format!("Session via {session_label}")));
+        eprintln!("{}", crate::output::status_info(&format!("Session via {host}:{nfs_port} (MOUNT bypassed)")));
         let key = PoolKey { host: SocketAddr::new(host, nfs_port), export: format!("__handle__{nfs_port}"), uid, gid };
         (fh, key, Some(nfs_port))
     } else {
@@ -137,7 +126,11 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
         let mount_result = mount_client.mount(addr, &export).await?;
         let key = PoolKey { host: addr, export: export.clone(), uid, gid };
-        (mount_result.handle, key, None)
+        // Honour --nfs-port on the MOUNT path too: when set, route the data
+        // client directly to the chosen port (new_direct) instead of resolving
+        // it via portmapper, which hangs when TCP/111 is firewalled. `None`
+        // keeps the portmapper default (mirrors src/cli/mount.rs).
+        (mount_result.handle, key, globals.nfs_port)
     };
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
@@ -198,6 +191,14 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
 // =============================================================================
 // NFSv4 shell  --  minimal REPL for NFSv4-only servers
 // =============================================================================
+
+/// Hard cap on a single NFSv4 shell `cat` / `get` read.
+///
+/// The NFS server is untrusted (CLAUDE.md threat model): a hostile server can
+/// return full 64 KiB chunks with `eof = false` forever, so the read loop must
+/// bound its total instead of buffering until OOM or looping indefinitely.
+/// Mirrors the v3 shell's `READ_ALL_MAX_BYTES` (src/shell.rs).
+const NFS4_READ_MAX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
 /// Run an interactive NFSv4 shell.
 ///
@@ -399,6 +400,12 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
                         if eof || data.is_empty() {
                             break;
                         }
+                        // Untrusted server: stop once the cap is hit so a server
+                        // that never sets eof can't loop forever.
+                        if offset > NFS4_READ_MAX_BYTES {
+                            eprintln!("cat: aborted at {offset} bytes: exceeds {NFS4_READ_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
+                            break;
+                        }
                     },
                     Err(e) => {
                         eprintln!("cat: {e}");
@@ -432,6 +439,13 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
                         buf.extend_from_slice(&data);
                         if eof || data.is_empty() {
                             break;
+                        }
+                        // Untrusted server: abort (don't write a partial file)
+                        // once the cap is hit so endless non-EOF chunks can't
+                        // grow `buf` without bound.
+                        if offset > NFS4_READ_MAX_BYTES {
+                            eprintln!("get: aborted at {offset} bytes: exceeds {NFS4_READ_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
+                            return;
                         }
                     },
                     Err(e) => {

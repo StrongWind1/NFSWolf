@@ -63,13 +63,30 @@ pub fn banner(title: &str) {
     println!("{}", format!("+{bar}+").bold().white());
 }
 
+// --- untrusted-string sanitization -------------------------------------------
+
+/// Strip terminal control characters from untrusted server-derived strings
+/// before printing them to the live console.
+///
+/// Evidence snippets, export paths, and allowed-client lists all originate from
+/// the untrusted NFS server (file content via `from_utf8_lossy`, MOUNT export
+/// list). ESC (0x1b) is valid UTF-8 and survives lossy decoding, so a malicious
+/// server could otherwise rewrite the operator's screen the instant `analyze`
+/// prints. Mirrors the report renderers' `sanitize_control`; C0/DEL/C1 -> '.'.
+#[must_use]
+pub fn sanitize_terminal(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { '.' } else { c }).collect()
+}
+
 // --- file handle display -----------------------------------------------------
 
 /// Print a file handle (hex) on its own line, clearly labeled for copy-paste.
 ///
 /// The hex is rendered in cyan so it stands out visually.  Prints to stdout.
 pub fn print_handle(label: &str, hex: &str) {
-    println!("  {}: {}", label.bold(), hex.cyan());
+    // The label can be a server-supplied export path (analyze's File Handles
+    // section), so neutralize terminal control bytes in it; the hex is safe.
+    println!("  {}: {}", sanitize_terminal(label).bold(), hex.cyan());
 }
 
 /// Print a "next steps" suggestion after an escape, pointing the operator
@@ -135,7 +152,11 @@ pub fn print_export_table(rows: &[ExportRow]) {
     let mut builder = Builder::default();
     builder.push_record(["Path", "Allowed clients", "Auth", "Flags", "Handle (partial)"]);
     for r in rows {
-        let clients = if r.clients == "*" || r.clients.is_empty() { r.clients.red().to_string() } else { r.clients.normal().to_string() };
+        // path and clients come from the untrusted server (MOUNT export list);
+        // neutralize terminal control bytes before display.
+        let path = sanitize_terminal(&r.path);
+        let clients_clean = sanitize_terminal(&r.clients);
+        let clients = if clients_clean == "*" || clients_clean.is_empty() { clients_clean.red().to_string() } else { clients_clean.normal().to_string() };
         let flags = if r.flags.contains("WILDCARD") || r.flags.contains("NO_ROOT_SQUASH") {
             r.flags.red().to_string()
         } else if !r.flags.is_empty() {
@@ -145,7 +166,7 @@ pub fn print_export_table(rows: &[ExportRow]) {
         };
         // Show only the first 16 hex chars of the handle to keep the table narrow.
         let handle_short = if r.handle_hex.len() > 16 { format!("{}...", &r.handle_hex[..16]) } else { r.handle_hex.clone() };
-        builder.push_record([&r.path, &clients, &r.auth, &flags, &handle_short.dimmed().to_string()]);
+        builder.push_record([&path, &clients, &r.auth, &flags, &handle_short.dimmed().to_string()]);
     }
     let mut table = builder.build();
     table.with(Style::rounded());
@@ -163,10 +184,10 @@ pub fn print_findings(findings: &[crate::engine::analyzer::Finding]) {
     }
     for f in findings {
         let badge = severity_badge(f.severity);
-        let export_tag = f.export.as_deref().map_or_else(String::new, |e| format!("  {}", e.dimmed()));
+        let export_tag = f.export.as_deref().map_or_else(String::new, |e| format!("  {}", sanitize_terminal(e).dimmed()));
         println!("  {badge}{export_tag}  {}  {}", f.id.bold(), f.title);
         if !f.evidence.is_empty() {
-            println!("    {}: {}", "Evidence".dimmed(), f.evidence);
+            println!("    {}: {}", "Evidence".dimmed(), sanitize_terminal(&f.evidence));
         }
     }
 }

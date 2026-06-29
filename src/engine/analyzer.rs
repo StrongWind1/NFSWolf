@@ -397,6 +397,13 @@ impl Analyzer {
                 2 => "AUTH_SHORT".to_owned(),
                 3 => "AUTH_DH".to_owned(),
                 6 => "RPCSEC_GSS".to_owned(),
+                // RPCSEC_GSS Kerberos pseudo-flavors (RFC 2623 S2.1.1, IANA RPC
+                // auth-flavor registry). Real krb5 exports advertise these, not
+                // bare flavor 6; rendering them as GSS keeps the plaintext-transport
+                // check (F-3.1) from misfiring on a krb5p-protected export.
+                390_003 => "RPCSEC_GSS(krb5)".to_owned(),
+                390_004 => "RPCSEC_GSS(krb5i)".to_owned(),
+                390_005 => "RPCSEC_GSS(krb5p)".to_owned(),
                 _ => format!("flavor({f})"),
             })
             .collect();
@@ -408,8 +415,10 @@ impl Analyzer {
         check_windows_signing(&fh, &entry.path, findings);
         check_handle_entropy(&fh, &entry.path, findings);
 
-        // Export escape check (F-2.x).
-        ea.escape_possible = check_escape(&export_nfs3, &fh, &entry.path, findings).await;
+        // Export escape check (F-2.x). Capture the confirmed escape handle so the
+        // --test-read probes below can walk from the filesystem root.
+        let escape_fh = check_escape(&export_nfs3, &fh, &entry.path, findings).await;
+        ea.escape_possible = escape_fh.is_some();
 
         // BTRFS subvolume escape (F-2.4)  --  if handle fingerprints as BTRFS.
         check_btrfs_escape(&export_nfs3, &fh, &entry.path, findings).await;
@@ -430,7 +439,7 @@ impl Analyzer {
         // nohide/crossmnt detection (F-7.3).
         check_nohide(&export_nfs3, &fh, &entry.path, findings).await;
 
-        // Symlink attack preconditions (F-4.4)  --  writable dirs owned by non-root.
+        // Symlink attack preconditions (F-4.4)  --  any world-writable directory.
         check_symlink_preconditions(&export_nfs3, &fh, &entry.path, findings).await;
 
         // Squash probes write a small payload, then clean up. Run the non-root
@@ -459,32 +468,52 @@ impl Analyzer {
         // attributes F-7.4 to `analyze`; that cross-reference over-claims.)
 
         // File access tests from --test-read paths (F-1.3: auxiliary group injection).
+        // Walk from the confirmed escape (filesystem-root) handle when one was found
+        // -- that is the "after export escape" read --test-read documents (shadow is
+        // typically only reachable post-escape). Fall back to the export root otherwise.
+        let (probe_root, via_escape): (&FileHandle, bool) = match escape_fh.as_ref() {
+            Some(root) => (root, true),
+            None => (&fh, false),
+        };
         for path in &config.test_paths {
+            // Aggregate every credential that read this path into ONE F-1.3 finding
+            // rather than emitting a near-identical finding per GID -- the default
+            // gids=[0,42,15] previously produced three duplicates for one readable
+            // file. The dedup unit is (export, path).
+            let mut readable_creds: Vec<String> = Vec::new();
+            let mut first_preview: Option<String> = None;
             for &uid in &config.test_uids {
                 for &gid in &config.test_gids {
-                    let test = probe_file_access(&export_nfs3, &fh, path, uid, gid).await;
+                    let test = probe_file_access(&export_nfs3, probe_root, path, uid, gid, via_escape).await;
                     if test.readable {
-                        findings.push(make_finding(
-                            &FindingSpec {
-                                // F-1.3: file readable via crafted UID/GID credential
-                                // (most commonly shadow GID injection, RFC 2623 S2.1).
-                                id: "F-1.3",
-                                title: "Sensitive file readable via UID/GID credential",
-                                desc: &format!(
-                                    "File {path} readable as uid={uid} gid={gid}. \
-                                               AUTH_SYS credential spoofing (RFC 2623 S2.1) \
-                                               allows any client to claim any UID/GID."
-                                ),
-                                evidence: test.preview.as_deref().unwrap_or("(no preview)"),
-                                remediation: "Use sec=krb5p to authenticate credentials. \
-                                              Set root_squash and restrict shadow GID membership.",
-                                export: Some(&entry.path),
-                            },
-                            Severity::Critical,
-                        ));
+                        readable_creds.push(format!("uid={uid} gid={gid}"));
+                        if first_preview.is_none() {
+                            first_preview.clone_from(&test.preview);
+                        }
                     }
                     ea.file_access_tests.push(test);
                 }
+            }
+            if !readable_creds.is_empty() {
+                findings.push(make_finding(
+                    &FindingSpec {
+                        // F-1.3: file readable via crafted UID/GID credential
+                        // (most commonly shadow GID injection, RFC 2623 S2.1).
+                        id: "F-1.3",
+                        title: "Sensitive file readable via UID/GID credential",
+                        desc: &format!(
+                            "File {path} readable with spoofed AUTH_SYS credentials ({}). \
+                             AUTH_SYS credential spoofing (RFC 2623 S2.1) allows any client \
+                             to claim any UID/GID.",
+                            readable_creds.join(", ")
+                        ),
+                        evidence: first_preview.as_deref().unwrap_or("(no preview)"),
+                        remediation: "Use sec=krb5p to authenticate credentials. \
+                                      Set root_squash and restrict shadow GID membership.",
+                        export: Some(&entry.path),
+                    },
+                    Severity::Critical,
+                ));
             }
         }
 
@@ -497,27 +526,44 @@ impl Analyzer {
 /// Decide whether a single allowed-host ACL entry effectively exposes the export
 /// to the whole network (F-7.1, RFC 2623 S2.6 host-based access control).
 ///
-/// Catches three classes the old exact-string match missed:
+/// Catches four classes the old exact-string match missed:
 ///   - glob wildcards (`*`, `?`): `*`, `*.example.com`, `192.168.*` -- the ACL no
 ///     longer pins a specific host;
 ///   - the explicit world wildcards `0.0.0.0/0` and `::/0`;
 ///   - broad CIDRs: an IPv4 prefix shorter than /16 or an IPv6 prefix shorter
 ///     than /48 covers a large slice of the address space (e.g. `10.0.0.0/8`,
-///     `0.0.0.0/1`, `::/1`).
+///     `0.0.0.0/1`, `::/1`);
+///   - broad address/netmask exports: the `addr/255.0.0.0` form exports(5) also
+///     accepts, whose leading-one count falls below the same /16 (IPv4) or /48
+///     (IPv6) threshold.
 fn is_world_accessible_host(host: &str) -> bool {
     // Glob metacharacters match arbitrary hostnames.
     if host.contains('*') || host.contains('?') {
         return true;
     }
-    // CIDR with a short prefix length.
-    if let Some((addr, prefix)) = host.split_once('/')
-        && let Ok(bits) = prefix.parse::<u8>()
-    {
-        if addr.parse::<std::net::Ipv4Addr>().is_ok() {
-            return bits < 16;
+    if let Some((addr, prefix)) = host.split_once('/') {
+        // CIDR prefix-length form (e.g. 10.0.0.0/8).
+        if let Ok(bits) = prefix.parse::<u8>() {
+            if addr.parse::<std::net::Ipv4Addr>().is_ok() {
+                return bits < 16;
+            }
+            if addr.parse::<std::net::Ipv6Addr>().is_ok() {
+                return bits < 48;
+            }
         }
-        if addr.parse::<std::net::Ipv6Addr>().is_ok() {
-            return bits < 48;
+        // address/netmask form -- exports(5) also accepts e.g. 10.0.0.0/255.0.0.0,
+        // which showmount/MNTPROC_EXPORT echoes verbatim into allowed_hosts. Convert
+        // the mask to a prefix length by counting leading one-bits and apply the same
+        // broad-subnet threshold used for CIDR (F-7.1).
+        if addr.parse::<std::net::Ipv4Addr>().is_ok()
+            && let Ok(mask) = prefix.parse::<std::net::Ipv4Addr>()
+        {
+            return u32::from(mask).leading_ones() < 16;
+        }
+        if addr.parse::<std::net::Ipv6Addr>().is_ok()
+            && let Ok(mask) = prefix.parse::<std::net::Ipv6Addr>()
+        {
+            return u128::from(mask).leading_ones() < 48;
         }
     }
     false
@@ -557,11 +603,15 @@ fn check_export_acls(exports: &[ExportEntry], findings: &mut Vec<Finding>) {
 /// Backed solely by the MOUNT/SECINFO auth flavors already collected, so this is
 /// emitted once per host at Info severity rather than asserting TLS is absent.
 fn check_plaintext_transport(exports: &[ExportAnalysis], findings: &mut Vec<Finding>) {
-    // Only meaningful once we have learned at least one export's auth set;
-    // otherwise enumeration failed and we have no transport evidence.
-    let any_auth = exports.iter().any(|ea| !ea.auth_methods.is_empty());
+    // Emit only when a genuinely plaintext flavor (AUTH_SYS / AUTH_NONE) is
+    // advertised AND no export offers RPCSEC_GSS (krb5/krb5i/krb5p). A
+    // Kerberos-protected export advertises the GSS pseudo-flavors (now rendered as
+    // "RPCSEC_GSS(krb5*)" by the flavor map), so this no longer false-positives on
+    // a krb5p-only, encrypted export (F-3.1). If auth enumeration learned nothing,
+    // `any_plaintext` is false and we stay silent for lack of transport evidence.
+    let any_plaintext = exports.iter().any(|ea| ea.auth_methods.iter().any(|m| m == "AUTH_SYS" || m == "AUTH_NONE"));
     let any_gss = exports.iter().any(|ea| ea.auth_methods.iter().any(|m| m.contains("GSS")));
-    if !any_auth || any_gss {
+    if !any_plaintext || any_gss {
         return;
     }
     let flavors: Vec<String> = exports.iter().flat_map(|ea| ea.auth_methods.iter().cloned()).collect();
@@ -611,7 +661,10 @@ fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Ve
 ///
 /// Uses `FileHandleAnalyzer::construct_escape_handle` to build an out-of-export handle,
 /// then confirms it by comparing READDIRPLUS results on the escape handle vs the export.
-/// Returns true if escape is confirmed. Finding is appended only on success.
+/// Returns the confirmed filesystem-root handle when an escape is found (so the
+/// --test-read probes can walk from it), else None. The finding is appended only on
+/// confirmation, and BOTH the export-root and candidate READDIRPLUS must succeed -- a
+/// failed baseline read is a failed probe, not evidence of a boundary crossing.
 /// Test whether the filesystem root is reachable via a crafted handle (F-2.1).
 ///
 /// Tries all known root-inode candidates for the detected filesystem:
@@ -620,11 +673,16 @@ fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Ve
 ///   - BTRFS: subvolume 256
 ///
 /// For each candidate, issues READDIRPLUS and compares the entry count to the
-/// export root.  A different count (or successful listing on the escape handle)
-/// confirms the escape.  Using READDIRPLUS rather than GETATTR catches servers
-/// that accept GETATTR on the root but refuse it on the export.
-async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) -> bool {
-    let export_count = count_readdirplus(nfs3, export_fh).await;
+/// export root.  A different count -- with both reads succeeding -- confirms the
+/// escape.  Using READDIRPLUS rather than GETATTR catches servers that accept
+/// GETATTR on the root but refuse it on the export.
+async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) -> Option<FileHandle> {
+    // A confirmed escape needs a working baseline to compare against. When the
+    // export's OWN READDIRPLUS fails (transient timeout/reset, or denied to the
+    // configured uid/gid) export_count is None -- that is a failed probe, not a
+    // boundary crossing. Bail rather than let any crafted handle that merely lists
+    // successfully (Some(N) != None) fabricate a Critical F-2.1.
+    let export_count = count_readdirplus(nfs3, export_fh).await?;
 
     // Build the full candidate list: XFS 128+64, then generic escape, then BTRFS.
     let mut candidates = FileHandleAnalyzer::construct_xfs_escape_candidates(export_fh);
@@ -637,25 +695,29 @@ async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &s
     candidates.extend(FileHandleAnalyzer::construct_btrfs_subvol_handles(export_fh, 4));
 
     for candidate in candidates {
-        let root_count = count_readdirplus(nfs3, &candidate.root_handle).await;
-        let confirmed = root_count.is_some() && root_count != export_count;
-        if confirmed {
+        // Confirm only when BOTH reads succeed and the crafted handle resolves to
+        // content that DIFFERS from the export root (a different entry count means a
+        // different directory, i.e. outside the export subtree).
+        let Some(root_count) = count_readdirplus(nfs3, &candidate.root_handle).await else { continue };
+        if root_count != export_count {
             findings.push(make_finding(
                 &FindingSpec {
                     id: "F-2.1",
                     title: "Export escape possible  --  filesystem root accessible via crafted handle",
                     desc: "subtree_check is disabled (Linux default). An attacker can craft a file \
                            handle targeting any inode on the filesystem, bypassing export boundaries.",
-                    evidence: &format!("export_entries={}, root_entries={}, inode={}, fs_type={:?}, confidence={:.0}%", export_count.unwrap_or(0), root_count.unwrap_or(0), candidate.inode_number, candidate.fs_type, candidate.confidence * 100.0),
+                    evidence: &format!("export_entries={export_count}, root_entries={root_count}, inode={}, fs_type={:?}, confidence={:.0}%", candidate.inode_number, candidate.fs_type, candidate.confidence * 100.0),
                     remediation: "Enable subtree_check in /etc/exports (caution  --  impacts rename correctness).",
                     export: Some(export_path),
                 },
                 Severity::Critical,
             ));
-            return true;
+            // Hand back the confirmed escape handle so --test-read can walk the path
+            // from the filesystem root (F-1.3 shadow is only reachable post-escape).
+            return Some(candidate.root_handle);
         }
     }
-    false
+    None
 }
 
 /// Count READDIRPLUS entries for a file handle; returns None on any error.
@@ -792,10 +854,12 @@ fn check_handle_entropy(fh: &FileHandle, export_path: &str, findings: &mut Vec<F
 
 /// Probe whether a specific file is readable with given uid/gid credentials.
 ///
-/// Walks the path components via LOOKUP, then attempts READ on the final file.
+/// Walks the path components via LOOKUP starting from `root_fh`, then attempts READ
+/// on the final file. `root_fh` is the export root, or the confirmed filesystem-root
+/// escape handle when `via_escape` is set (F-1.3 shadow is only reachable post-escape).
 /// Returns a FileAccessTest recording whether the read succeeded and a preview.
-async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, uid: u32, gid: u32) -> FileAccessTest {
-    let mut result = FileAccessTest { path: path.to_owned(), uid, gid, readable: false, preview: None, via_escape: false };
+async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, uid: u32, gid: u32, via_escape: bool) -> FileAccessTest {
+    let mut result = FileAccessTest { path: path.to_owned(), uid, gid, readable: false, preview: None, via_escape };
 
     // Create a client with the specified credentials so the server sees
     // the correct uid/gid for permission checks.
@@ -855,10 +919,26 @@ async fn check_btrfs_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_pa
     if FileHandleAnalyzer::fingerprint_fs(export_fh) != FsType::Btrfs {
         return;
     }
+    // F-2.4 is scoped to reaching OTHER subvolumes (different subvol IDs), i.e.
+    // outside the export. A bare GETATTR success proves nothing when the export
+    // itself lives on the reconstructed subvolume (subvol 256, the typical export
+    // target, is the first candidate). Require a working export baseline and confirm
+    // each candidate resolves to content that DIFFERS from the export root -- the
+    // same boundary guard check_escape (F-2.1) uses.
+    let Some(export_count) = count_readdirplus(nfs3, export_fh).await else { return };
     let candidates = FileHandleAnalyzer::construct_btrfs_subvol_handles(export_fh, 16);
     let mut hits = 0u32;
+    let mut tried = 0u32;
     for candidate in &candidates {
-        if handle_exists(nfs3, &candidate.root_handle).await {
+        // Skip a candidate that reconstructs the export's own handle -- resolving it
+        // cannot demonstrate a boundary crossing.
+        if candidate.root_handle == *export_fh {
+            continue;
+        }
+        tried += 1;
+        // A different entry count means a different directory (a different subvolume),
+        // not the export's own subvolume root.
+        if matches!(count_readdirplus(nfs3, &candidate.root_handle).await, Some(c) if c != export_count) {
             hits += 1;
         }
     }
@@ -868,9 +948,10 @@ async fn check_btrfs_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_pa
                 id: "F-2.4",
                 title: "BTRFS subvolume handles resolve outside export boundary",
                 desc: "The export filesystem is BTRFS. Constructed subvolume handles \
-                       resolved successfully, indicating sub-trees outside the export \
-                       are accessible via crafted handles.",
-                evidence: &format!("candidates_tried={}, handles_resolved={hits}", candidates.len()),
+                       resolved to directories whose contents differ from the export \
+                       root, indicating sub-trees outside the export are accessible \
+                       via crafted handles.",
+                evidence: &format!("candidates_tried={tried}, handles_resolved_outside={hits}"),
                 remediation: "Use subtree_check or restrict to a single BTRFS subvolume per export.",
                 export: Some(export_path),
             },
@@ -942,11 +1023,12 @@ async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str
     }
 }
 
-/// Detect writable directories owned by non-root  --  symlink attack preconditions (F-4.4).
+/// Detect world-writable directories  --  symlink attack preconditions (F-4.4).
 ///
-/// A writable directory in an export owned by a non-root UID is a prerequisite
-/// for symlink-based escape attacks. The attacker can replace a directory entry
-/// with a symlink pointing to a privileged path.
+/// A world-writable directory in an export (regardless of owner -- the classic
+/// /tmp vector is root-owned) is a prerequisite for symlink-based escape attacks.
+/// The attacker can replace a directory entry with a symlink pointing to a
+/// privileged path.
 async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
     let args = READDIRPLUS3args { dir: root_fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
     let Ok(res) = nfs3.readdirplus(&args).await else { return };
@@ -958,18 +1040,22 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
             nfs3_types::nfs3::Nfs3Option::Some(a) => a,
             nfs3_types::nfs3::Nfs3Option::None => continue,
         };
-        // World-writable directory (mode & 0o002 != 0) not owned by root.
+        // Flag ANY world-writable directory (mode & 0o002) regardless of owner. The
+        // canonical symlink-escape target is a root-owned, world-writable, sticky dir
+        // (/tmp, /var/tmp): any client can drop a symlink there no matter who owns it,
+        // and AUTH_SYS lets the attacker assume any UID anyway. The F-4.4 precondition
+        // is simply "writable directory" (docs/FINDINGS.md F-4.4); owner UID is
+        // evidence, not a gate.
         let is_dir = attrs.type_ == nfs3_types::nfs3::ftype3::NF3DIR;
         let world_writable = (attrs.mode & 0o002) != 0;
-        let not_root_owned = attrs.uid != 0;
-        if is_dir && world_writable && not_root_owned {
+        if is_dir && world_writable {
             let name = String::from_utf8_lossy(entry.name.0.as_ref()).to_string();
             findings.push(make_finding(
                 &FindingSpec {
                     id: "F-4.4",
-                    title: "World-writable directory owned by non-root  --  symlink attack possible",
-                    desc: "A world-writable directory not owned by root is present in the export. \
-                           An attacker with write access can replace directory entries with symlinks \
+                    title: "World-writable directory  --  symlink attack possible",
+                    desc: "A world-writable directory is present in the export. An attacker \
+                           with write access can replace directory entries with symlinks \
                            pointing to privileged paths outside the export.",
                     evidence: &format!("path={export_path}/{name} mode={:04o} uid={}", attrs.mode, attrs.uid),
                     remediation: "Remove world-write permission from directories in NFS exports.",
@@ -1143,13 +1229,6 @@ pub fn infer_squash_mode(observed_uid: u32, probe_uid: u32) -> SquashProbeResult
         squash_mode,
         insecure_port: false,
     }
-}
-
-/// Verify a file handle exists on the server via GETATTR.
-/// Returns true if the server responds with a success (handle is valid).
-async fn handle_exists(nfs3: &Nfs3Client, fh: &FileHandle) -> bool {
-    let args = GETATTR3args { object: fh.to_nfs_fh3() };
-    nfs3.getattr(&args).await.is_ok_and(|r| matches!(r, nfs3_types::nfs3::Nfs3Result::Ok(_)))
 }
 
 /// Probe NFSv4 SECINFO for an export path to detect AUTH_SYS-only access via NFSv4.

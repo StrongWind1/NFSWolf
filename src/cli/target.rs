@@ -17,7 +17,7 @@
 //!   allowed.  Some subcommands only need the host (e.g. `brute-handle`,
 //!   `scan`, `analyze`); most require an explicit export.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs as _};
 
 use anyhow::{Context as _, anyhow, bail};
 
@@ -124,13 +124,21 @@ fn split_host_export(s: &str) -> anyhow::Result<(&str, Option<&str>)> {
     }
 }
 
-/// Parse `host` as an IPv4 / IPv6 / bracketed-IPv6 string.  DNS names are
-/// not currently resolved (callers historically pass IP literals only;
-/// adding a DNS lookup here would change error semantics).  Bracketed
-/// IPv6 has the brackets stripped before parsing.
+/// Resolve `host` to an `IpAddr`, accepting IPv4 / IPv6 / bracketed-IPv6
+/// literals and DNS names.  Bracketed IPv6 has the brackets stripped before
+/// parsing.  When the input is not a literal it is resolved through the system
+/// resolver (the first returned address wins), matching how `scan` resolves
+/// targets (`src/engine/scanner.rs`).
 pub fn resolve_host(host: &str) -> anyhow::Result<IpAddr> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    bare.parse::<IpAddr>().with_context(|| format!("cannot parse '{host}' as an IP address  --  use a numeric IP literal"))
+    // Fast path: a numeric literal needs no DNS lookup.
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return Ok(ip);
+    }
+    // Not a literal -- treat it as a hostname.  Port 0 is a placeholder so
+    // `to_socket_addrs` runs the system resolver; only the IP is kept.
+    let mut addrs = format!("{bare}:0").to_socket_addrs().with_context(|| format!("cannot resolve '{host}' to an IP address"))?;
+    addrs.next().map(|sa| sa.ip()).ok_or_else(|| anyhow!("no addresses found for host '{host}'"))
 }
 
 /// Convenience: extract the export path if `Source::Export`, otherwise
@@ -242,5 +250,14 @@ mod tests {
     fn unterminated_ipv6_bracket_rejected() {
         let err = parse("[2001:db8::1", None, None, true).unwrap_err();
         assert!(err.to_string().contains("unterminated"));
+    }
+
+    #[test]
+    fn resolve_host_dns_name() {
+        // `localhost` resolves through the system resolver (NSS / hosts file)
+        // without touching the network, so this exercises the DNS path
+        // deterministically.
+        let ip = resolve_host("localhost").unwrap();
+        assert!(ip.is_loopback(), "localhost should resolve to a loopback address, got {ip}");
     }
 }

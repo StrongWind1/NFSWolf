@@ -7,6 +7,7 @@
 use std::io::Write;
 
 use crate::engine::analyzer::{AnalysisResult, Severity};
+use crate::report::txt::sanitize_control;
 
 /// Write a complete HTML document to `out`.
 ///
@@ -84,7 +85,7 @@ fn push_host_section(result: &AnalysisResult, html: &mut String) {
 fn push_findings_table(findings: &[crate::engine::analyzer::Finding], html: &mut String) {
     html.push_str("<table>\n");
     html.push_str("<thead><tr>");
-    for col in &["ID", "Title", "Severity", "Export", "Description", "Remediation"] {
+    for col in &["ID", "Title", "Severity", "Export", "Description", "Evidence", "Remediation"] {
         html.push_str("<th>");
         html.push_str(col);
         html.push_str("</th>");
@@ -107,6 +108,7 @@ fn push_findings_table(findings: &[crate::engine::analyzer::Finding], html: &mut
         let export = finding.export.as_deref().unwrap_or(" -- ");
         push_td(&html_escape(export), html);
         push_td(&html_escape(&finding.description), html);
+        push_td(&html_escape(&finding.evidence), html);
         push_td(&html_escape(&finding.remediation), html);
         html.push_str("</tr>\n");
     }
@@ -133,7 +135,15 @@ const fn severity_class(sev: Severity) -> &'static str {
 }
 
 /// Escape special HTML characters to prevent XSS in evidence strings.
+///
+/// Server-derived fields (evidence, paths, hostnames) can also carry raw C0/C1
+/// ESC bytes and Unicode bidi/zero-width codepoints. A browser mostly ignores
+/// them, but an operator who inspects the `.html` through a terminal/pager would
+/// have those escapes executed. The shared `sanitize_control` helper neutralizes
+/// them to printable tokens first -- matching the txt/console/CSV renderers --
+/// before the HTML-significant characters are escaped.
 fn html_escape(s: &str) -> String {
+    let s = sanitize_control(s);
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
