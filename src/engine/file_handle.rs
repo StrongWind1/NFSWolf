@@ -174,7 +174,8 @@ impl FileHandleAnalyzer {
             0 | 3..=5 => 8, // dev major:minor
             1 => 4,         // dev number only
             2 => 12,        // dev + UUID prefix
-            6 | 7 => 16,    // UUID-based (16 bytes)
+            6 => 16,        // UUID-based: 16-byte UUID
+            7 => 24,        // compound UUID: export_inode(4) + export_gen(4) + UUID(16) = 24 (kernel FSID_UUID16_INUM key_len)
             _ => return FsType::Unknown,
         };
 
@@ -312,7 +313,8 @@ impl FileHandleAnalyzer {
             0 | 3..=5 => 8, // dev major:minor (32+32 bits)
             1 => 4,         // dev number only (32 bits)
             2 => 12,        // dev + UUID prefix
-            6 | 7 => 16,    // UUID-based
+            6 => 16,        // UUID-based: 16-byte UUID
+            7 => 24,        // compound UUID: export_inode(4) + export_gen(4) + UUID(16) = 24 (kernel FSID_UUID16_INUM key_len); matches construct_btrfs_subvol_handles
             _ => return None,
         };
 
@@ -383,13 +385,19 @@ impl FileHandleAnalyzer {
         }
 
         // Compound UUID format (fsid_type=7, fileid_type=0, 28-byte export-root handle).
-        // Guard: if the export directory IS the filesystem root (inode 2 = ext4, 128/64 = XFS),
-        // there is nothing to escape -- the export already covers the whole filesystem.
-        // nfs_analyze checks `export_fileid in [2, 128]` for the same reason.
+        // Guard: if the export directory IS the filesystem root there is nothing to
+        // escape. On a compound-UUID handle fingerprint_fs cannot tell ext4 from XFS
+        // (it returns Unknown), so only inode 2 -- the unambiguous ext4 root -- counts as
+        // "already root" here. 32/64/128 are XFS roots but ALSO ordinary low-numbered
+        // ext4 directory inodes, so aborting on them would wrongly fail escape on an ext4
+        // export; that case is handled only on the XFS-identified path (fileid_type 0x81)
+        // and otherwise left to the live STALE oracle. nfs_analyze checks
+        // `export_fileid in [2, 128]`, but it probes inode 2 separately, so its broader
+        // 128 case is harmless there -- here a single Option must not over-abort.
         if fsid_type == 7 && fileid_type == 0 && data.len() == 28 {
             let export_inode = u32::from_le_bytes([*data.get(4)?, *data.get(5)?, *data.get(6)?, *data.get(7)?]);
-            if matches!(export_inode, 2 | 32 | 64 | 128) {
-                return None; // Export IS the filesystem root -- escape has no effect
+            if export_inode == 2 {
+                return None; // Export IS the ext4 filesystem root -- escape has no effect
             }
             return Self::construct_handle_for_inode(export_fh, 2, 0);
         }
@@ -415,6 +423,32 @@ impl FileHandleAnalyzer {
     /// Use when a single `construct_escape_handle` call is insufficient.
     pub fn construct_xfs_escape_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
         [128u32, 64u32, 32u32].iter().filter_map(|&inode| Self::construct_handle_for_inode(export_fh, inode, 0)).collect()
+    }
+
+    /// All plausible filesystem-root escape handles for a non-BTRFS export handle,
+    /// ordered by likelihood. Single-call sites should iterate this rather than the
+    /// single-candidate `construct_escape_handle`, which can return only ONE inode.
+    ///
+    /// A compound-UUID export (fsid_type=7, fileid_type=0) uses the same handle format on
+    /// ext4 AND XFS and `fingerprint_fs` cannot tell them apart, so this queues the ext4
+    /// root (inode 2) first and then the XFS roots (128/64/32). Without it a single call
+    /// only ever probes ext4 inode 2 and misses the XFS root on a UUID-based XFS export.
+    /// (BTRFS uses `construct_btrfs_subvol_handles` instead.)
+    pub fn construct_root_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
+        match Self::fingerprint_fs(export_fh) {
+            FsType::Xfs => Self::construct_xfs_escape_candidates(export_fh),
+            // Compound-UUID (Unknown) is ambiguous ext4/XFS, and an ext4 fsid_type=0 handle
+            // can belong to a 32-bit-inode XFS: try the ext4 root (inode 2) first, then the
+            // XFS roots (128/64/32). probe_escape_candidate rejects non-directory hits, so a
+            // non-root inode that merely exists (e.g. inode 128 = ext4 journal) is never a
+            // false escape.
+            FsType::Unknown | FsType::Ext4 => {
+                let mut candidates: Vec<EscapeResult> = Self::construct_escape_handle(export_fh).into_iter().collect();
+                candidates.extend(Self::construct_xfs_escape_candidates(export_fh));
+                candidates
+            },
+            _ => Self::construct_escape_handle(export_fh).into_iter().collect(),
+        }
     }
 
     /// Generate BTRFS subvolume escape handles.
@@ -990,5 +1024,71 @@ mod tests {
         let raw2 = handles[1].root_handle.as_bytes();
         let root_objectid2 = u64::from_le_bytes([raw2[20], raw2[21], raw2[22], raw2[23], raw2[24], raw2[25], raw2[26], raw2[27]]);
         assert_eq!(root_objectid2, 256, "second BTRFS handle must target first user subvolume (256)");
+    }
+
+    #[test]
+    fn construct_handle_for_inode_fsid_type_7_preserves_24_byte_fsid() {
+        // A non-compound fsid_type=7 seed: the 44-byte FILEID_INO32_GEN_PARENT escape
+        // format ([01 00 07 02] | export_inode(4) | export_gen(4) | UUID(16) | file...).
+        // The fsid is the 24-byte export context (bytes 4..28); fsid_type=7 must map to a
+        // 24-byte fsid (kernel FSID_UUID16_INUM key_len) so the rewritten inode lands at
+        // offset 28, not 8 bytes inside the real fsid.
+        let mut data = vec![0x01, 0x00, 0x07, 0x02]; // version, auth, fsid_type=7, fileid_type=2
+        data.extend_from_slice(&10u32.to_le_bytes()); // export_inode
+        data.extend_from_slice(&20u32.to_le_bytes()); // export_gen
+        data.extend_from_slice(&[0xAB; 16]); // UUID
+        data.extend_from_slice(&11u32.to_le_bytes()); // file_inode
+        data.extend_from_slice(&22u32.to_le_bytes()); // file_gen
+        data.extend_from_slice(&10u32.to_le_bytes()); // parent_inode
+        data.extend_from_slice(&20u32.to_le_bytes()); // parent_gen
+        assert_eq!(data.len(), 44, "FILEID_INO32_GEN_PARENT seed must be 44 bytes");
+        let seed = FileHandle::from_bytes(&data);
+
+        let result = FileHandleAnalyzer::construct_handle_for_inode(&seed, 42, 7).expect("fsid_type=7 handle must construct");
+        let raw = result.root_handle.as_bytes();
+        // The full 24-byte fsid (bytes 4..28) must be preserved verbatim.
+        assert_eq!(&raw[4..28], &data[4..28], "the full 24-byte fsid (export context) must be preserved");
+        // The rewritten inode/gen must land at offset 28 (4 header + 24 fsid).
+        let inode = u32::from_le_bytes([raw[28], raw[29], raw[30], raw[31]]);
+        let generation = u32::from_le_bytes([raw[32], raw[33], raw[34], raw[35]]);
+        assert_eq!(inode, 42, "inode must be written at offset 28, after the full 24-byte fsid");
+        assert_eq!(generation, 7);
+    }
+
+    /// Build a 28-byte compound-UUID MOUNT handle: [01 00 07 00] | export_inode(4) |
+    /// export_gen(4) | UUID(16). fingerprint_fs returns Unknown for this format.
+    fn compound_uuid_handle(export_inode: u32) -> FileHandle {
+        let mut data = vec![0x01, 0x00, 0x07, 0x00];
+        data.extend_from_slice(&export_inode.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // export_gen
+        data.extend_from_slice(&[0xCD; 16]); // UUID
+        assert_eq!(data.len(), 28);
+        FileHandle::from_bytes(&data)
+    }
+
+    #[test]
+    fn construct_escape_handle_compound_uuid_aborts_only_on_ext4_root() {
+        // On a compound-UUID handle we cannot tell ext4 from XFS, so only inode 2 (the
+        // ext4 root) may abort the escape -- 32/64/128 are ordinary ext4 directory inodes.
+        assert!(FileHandleAnalyzer::construct_escape_handle(&compound_uuid_handle(2)).is_none(), "compound-UUID export at ext4 root inode 2 has nothing to escape");
+
+        // inode 64 is a normal low-numbered ext4 directory inode (also an XFS root, but we
+        // cannot tell): escape MUST still be attempted, not aborted.
+        let r = FileHandleAnalyzer::construct_escape_handle(&compound_uuid_handle(64)).expect("compound-UUID export at inode 64 must still attempt escape");
+        assert_eq!(r.inode_number, 2, "compound-UUID escape targets the ext4 root inode 2");
+    }
+
+    #[test]
+    fn construct_root_candidates_compound_uuid_includes_xfs_roots() {
+        // A compound-UUID export (ambiguous ext4/XFS): the candidate list must include
+        // BOTH the ext4 root (inode 2) and the XFS roots (128/64/32) so a single-call site
+        // escapes a UUID-based XFS export, not just ext4.
+        let seed = compound_uuid_handle(9999); // export at a normal subdirectory inode
+        let candidates = FileHandleAnalyzer::construct_root_candidates(&seed);
+        let inodes: Vec<u32> = candidates.iter().map(|c| c.inode_number).collect();
+        assert!(inodes.contains(&2), "must queue ext4 root inode 2");
+        assert!(inodes.contains(&128), "must queue XFS v5 root inode 128");
+        assert!(inodes.contains(&64), "must queue XFS root inode 64");
+        assert!(inodes.contains(&32), "must queue XFS root inode 32");
     }
 }

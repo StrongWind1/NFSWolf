@@ -44,7 +44,10 @@ pub struct PoolStats {
 
 /// Connection pool inner data  --  shared by clones.
 struct PoolInner {
-    pools: DashMap<PoolKey, Mutex<VecDeque<NfsConnection>>>,
+    /// Per-key idle queues. The inner `Mutex<VecDeque>` is wrapped in `Arc` so a
+    /// checkout can clone the queue handle out of the DashMap and drop the
+    /// DashMap shard guard BEFORE awaiting the async mutex (see `try_pop`).
+    pools: DashMap<PoolKey, Arc<Mutex<VecDeque<NfsConnection>>>>,
     max_per_key: usize,
     max_total: usize,
     /// Global admission gate  --  one permit per outstanding checkout. Acquiring a
@@ -129,7 +132,13 @@ impl ConnectionPool {
             return; // discard
         }
 
-        let queue = self.inner.pools.entry(key).or_insert_with(|| Mutex::new(VecDeque::new()));
+        // Clone the queue handle out and drop the DashMap entry guard before
+        // touching the inner mutex, so the shard write lock is never held across
+        // the (non-blocking) try_lock either.
+        let queue = {
+            let entry = self.inner.pools.entry(key).or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())));
+            Arc::clone(&entry)
+        };
         // Try to lock without blocking  --  if the mutex is contended, just drop.
         if let Ok(mut q) = queue.try_lock()
             && q.len() < self.inner.max_per_key
@@ -158,7 +167,10 @@ impl ConnectionPool {
 
     /// Drain all idle connections for a key (used after a host goes down).
     pub async fn drain(&self, key: &PoolKey) {
-        if let Some(queue) = self.inner.pools.get(key) {
+        // Clone the queue handle out before awaiting, dropping the DashMap read
+        // guard first (same guard-across-await hazard as `try_pop`).
+        let queue = self.inner.pools.get(key).map(|q| Arc::clone(&q));
+        if let Some(queue) = queue {
             queue.lock().await.clear();
         }
     }
@@ -174,15 +186,23 @@ impl ConnectionPool {
 
     /// Pop one idle connection, running a health check if it is stale.
     async fn try_pop(&self, key: &PoolKey) -> Option<NfsConnection> {
-        // Scope the DashMap ref and Mutex guard so both are dropped before the
-        // health_check await  --  holding them across an await would block other tasks.
-        let mut conn = {
+        // Clone the per-key queue handle out of the DashMap and drop the DashMap
+        // read guard BEFORE awaiting the async mutex. A DashMap `Ref` is a shard
+        // RwLock read guard; holding it across `.lock().await` is the documented
+        // tokio "lock held across await" footgun -- a concurrent `checkin` taking
+        // the same shard's write lock (via `entry`) can stall a worker thread, and
+        // under same-key checkout/checkin contention the runtime can wedge.
+        // `clippy::await_holding_lock` does not see DashMap guards, so this must be
+        // enforced structurally. The `get` Ref is confined to the block below, so
+        // it is dropped before `queue.lock().await`.
+        let queue = {
             let entry = self.inner.pools.get(key)?;
-            let mut queue = entry.lock().await;
-            let conn = queue.pop_back()?;
-            drop(queue);
-            drop(entry);
-            conn
+            Arc::clone(&entry)
+        };
+
+        let mut conn = {
+            let mut q = queue.lock().await;
+            q.pop_back()?
         };
 
         if conn.is_stale(self.inner.stale_threshold) && !conn.health_check().await {

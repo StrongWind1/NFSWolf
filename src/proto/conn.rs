@@ -10,6 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
+use nfs3_client::io::{AsyncRead, AsyncWrite};
 use nfs3_client::net::Connector;
 use nfs3_client::rpc::RpcClient;
 use nfs3_client::tokio::{TokioConnector, TokioIo};
@@ -60,8 +61,14 @@ impl ConnectionHealth {
 pub struct NfsConnection {
     /// NFSv3 connection including mount and NFS clients.
     inner: Nfs3Connection<NfsIo>,
-    /// Separate raw RPC connection to the NFS port for NFSv2 calls.
-    raw_rpc: RpcClient<NfsIo>,
+    /// Persistent raw-RPC stream to the NFS port for NFSv2 calls.
+    ///
+    /// A short-lived `RpcClient` is built over this stream per call (see
+    /// `call_raw`) so every NFSv2 request re-encodes its AUTH_SYS credential and
+    /// consumes a fresh stamp (rule 2; RFC 1057 S9.2). `RpcClient` bakes the
+    /// credential in at construction with no setter, so caching one would freeze
+    /// the stamp across every call on this connection.
+    raw_io: NfsIo,
     /// Remote server address (host + portmapper port).
     pub addr: SocketAddr,
     /// NFS export path this connection is mounted on.
@@ -99,12 +106,15 @@ impl NfsConnection {
 
         let host = addr.ip().to_string();
 
-        // Build the NFS+MOUNT connection via TCP (direct or proxied).
+        // Build the NFS+MOUNT connection via TCP (direct or proxied). The
+        // credential is consumed here; the raw-RPC channel re-encodes its own
+        // freshly-stamped credential per call (see call_raw), so it is not
+        // baked into a long-lived client.
         let conn = if let Some(p) = proxy {
             let proxy_addr = parse_proxy_addr(p)?;
-            Nfs3ConnectionBuilder::new(Socks5Connector { proxy_addr }, host.as_str(), export).credential(opaque.clone()).mount().await.with_context(|| format!("mount {export} on {addr} via proxy {p}"))?
+            Nfs3ConnectionBuilder::new(Socks5Connector { proxy_addr }, host.as_str(), export).credential(opaque).mount().await.with_context(|| format!("mount {export} on {addr} via proxy {p}"))?
         } else {
-            Nfs3ConnectionBuilder::new(TokioConnector, host.as_str(), export).credential(opaque.clone()).mount().await.with_context(|| format!("mount {export} on {addr}"))?
+            Nfs3ConnectionBuilder::new(TokioConnector, host.as_str(), export).credential(opaque).mount().await.with_context(|| format!("mount {export} on {addr}"))?
         };
 
         // Build a second TCP connection to the NFS port for raw RPC calls.
@@ -120,9 +130,8 @@ impl NfsConnection {
         } else {
             connect_privileged_nfs(nfs_addr).await.with_context(|| format!("raw RPC connect to {nfs_addr}"))?
         };
-        let raw_rpc = RpcClient::new_with_auth(raw_io, opaque, nfs3_types::rpc::opaque_auth::default());
 
-        Ok(Self { inner: conn, raw_rpc, addr, export: export.to_owned(), credential, reconnect, health: ConnectionHealth::new(), is_direct: false })
+        Ok(Self { inner: conn, raw_io, addr, export: export.to_owned(), credential, reconnect, health: ConnectionHealth::new(), is_direct: false })
     }
 
     /// Execute a raw RPC call on the NFS port connection.
@@ -136,7 +145,19 @@ impl NfsConnection {
     {
         self.health.request_count = self.health.request_count.saturating_add(1);
         self.health.last_used = Instant::now();
-        let result = self.raw_rpc.call::<C, R>(program, version, proc, args).await;
+        // Fresh AUTH_SYS stamp per call (rule 2; RFC 1057 S9.2 stamp field).
+        // `RpcClient` freezes its credential at construction with no setter, so a
+        // cached client would replay one stamp across every NFSv2 call and risk
+        // the server's duplicate-request cache during UID/GID spraying. Re-encode
+        // the connection's current credential (advancing the global stamp
+        // counter) and build a short-lived client that borrows the persistent
+        // stream, so the TCP session is still reused.
+        let opaque = match &self.credential {
+            Credential::None => nfs3_types::rpc::opaque_auth::default(),
+            Credential::Sys(auth) => auth.to_opaque_auth(),
+        };
+        let mut rpc = RpcClient::new_with_auth(RawIoRef(&mut self.raw_io), opaque, nfs3_types::rpc::opaque_auth::default());
+        let result = rpc.call::<C, R>(program, version, proc, args).await;
         match result {
             Ok(r) => Ok(r),
             Err(e) => {
@@ -179,7 +200,9 @@ impl NfsConnection {
 
         // Primary NFS connection -- use privileged source port when not proxied.
         let nfs_io: TokioIo<TcpStream> = if proxy.is_some() { tcp_connect(nfs_addr).await.with_context(|| format!("direct NFS connect (proxy) to {nfs_addr}"))? } else { connect_privileged_nfs(nfs_addr).await.with_context(|| format!("direct NFS connect to {nfs_addr}"))? };
-        let nfs3_client = RawNfs3::new_with_auth(nfs_io, opaque.clone(), nfs3_types::rpc::opaque_auth::default());
+        // The credential is consumed here; the raw-RPC channel re-encodes its own
+        // freshly-stamped credential per call (see call_raw).
+        let nfs3_client = RawNfs3::new_with_auth(nfs_io, opaque, nfs3_types::rpc::opaque_auth::default());
 
         // Dummy mount client on the NFS port -- satisfies the Nfs3Connection type but
         // is never called. Using NFS port here avoids an extra connection to mount port.
@@ -195,9 +218,8 @@ impl NfsConnection {
         // Raw RPC connection for NFSv2 calls -- use a privileged source port (<1024)
         // when not proxied so servers enforcing the `secure` option accept v2 calls.
         let raw_io = if proxy.is_some() { tcp_connect(nfs_addr).await.with_context(|| format!("raw RPC direct connect (proxy) to {nfs_addr}"))? } else { connect_privileged_nfs(nfs_addr).await.with_context(|| format!("raw RPC direct connect to {nfs_addr}"))? };
-        let raw_rpc = RpcClient::new_with_auth(raw_io, opaque, nfs3_types::rpc::opaque_auth::default());
 
-        Ok(Self { inner, raw_rpc, addr, export: format!("__direct__{nfs_port}"), credential, reconnect, health: ConnectionHealth::new(), is_direct: true })
+        Ok(Self { inner, raw_io, addr, export: format!("__direct__{nfs_port}"), credential, reconnect, health: ConnectionHealth::new(), is_direct: true })
     }
 
     /// Send GETATTR on the root handle; returns true if the server responds NFS3_OK.
@@ -379,6 +401,26 @@ impl Connector for Socks5Connector {
     }
 }
 
+/// Borrows the persistent raw-RPC stream so a freshly-credentialed `RpcClient`
+/// can be built per call (see `NfsConnection::call_raw`) without taking
+/// ownership of the stream -- `RpcClient` never returns its IO, so an owned
+/// client could not hand the stream back for the next call.
+///
+/// Forwards directly to the wrapped `NfsIo`'s `AsyncRead`/`AsyncWrite`.
+struct RawIoRef<'a>(&'a mut NfsIo);
+
+impl AsyncRead for RawIoRef<'_> {
+    async fn async_read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.async_read(buf).await
+    }
+}
+
+impl AsyncWrite for RawIoRef<'_> {
+    async fn async_write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.async_write(buf).await
+    }
+}
+
 /// Connect to `addr` from a privileged source port (300-1023), falling back to ephemeral.
 ///
 /// Most NFS servers require the client to bind from a port < 1024 (the `secure` export
@@ -386,8 +428,12 @@ impl Connector for Socks5Connector {
 ///
 /// `PermissionDenied` on the first attempt is treated as "cannot bind privileged ports at
 /// all" (non-root, no CAP_NET_BIND_SERVICE) and falls back immediately rather than
-/// firing 700+ SYNs against the target. `AddrInUse` and other transient errors advance
-/// to the next port so a busy local machine does not lose the entire range.
+/// firing 700+ SYNs against the target. `AddrInUse` is a local source-port conflict and
+/// advances to the next port so a busy local machine does not lose the entire range.
+/// Any other error is a destination-side condition (`ConnectionRefused`/`TimedOut`/
+/// unreachable) that is identical for every source port, so the loop breaks and falls
+/// through to the single ephemeral attempt instead of retrying all ~724 ports against an
+/// unreachable host.
 async fn connect_privileged_nfs(addr: SocketAddr) -> std::io::Result<NfsIo> {
     for port in 300_u16..1024 {
         match TokioConnector.connect_with_port(addr, port).await {
@@ -398,7 +444,11 @@ async fn connect_privileged_nfs(addr: SocketAddr) -> std::io::Result<NfsIo> {
                 break;
             },
             Err(e) => {
-                tracing::debug!(%addr, %e, "privileged port connect failed, trying next port");
+                // Destination-side failure (refused / timed out / unreachable): the
+                // same outcome awaits every other source port, so stop here rather
+                // than firing hundreds more SYNs at a dead host.
+                tracing::debug!(%addr, %e, "destination connect failed, not retrying other source ports");
+                break;
             },
         }
     }

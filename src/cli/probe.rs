@@ -93,13 +93,26 @@ pub fn parse_addr_with_port(host: &str, nfs_port: Option<u16>) -> anyhow::Result
 /// before. Handles are bearer tokens (RFC 1094 S2.3.3) obtained from the
 /// separate MOUNT step, so the direct client needs no MOUNT of its own.
 pub fn make_client(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
+    make_client_with_hostname(addr, export, uid, gid, aux_gids, stealth, proxy, nfs_port, "nfswolf")
+}
+
+/// Like [`make_client`] but honouring the operator's spoofed `--hostname`
+/// (`globals.hostname`) as the AUTH_SYS machinename.
+///
+/// The hostname is the client identity some servers key export ACLs on, and
+/// `auth_unix.machinename` carries it on the wire (F-1.4).  Offensive
+/// subcommands (escape / brute-handle / uid-spray) should pass
+/// `&globals.hostname` here so the spoof is honoured the same way `shell`,
+/// `mount` and `analyze` already do, rather than the fixed `"nfswolf"` literal
+/// the convenience [`make_client`] wrapper uses.
+pub fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
     let pool = Arc::new(match proxy {
         Some(p) => ConnectionPool::with_proxy(p.to_owned()),
         None => ConnectionPool::default_config(),
     });
     let circuit = Arc::new(CircuitBreaker::default_config());
     let gids = build_gid_list(gid, aux_gids);
-    let auth = AuthSys::with_groups(uid, gid, &gids, "nfswolf");
+    let auth = AuthSys::with_groups(uid, gid, &gids, hostname);
     let cred = Credential::Sys(auth);
     let key = PoolKey { host: addr, export: export.to_owned(), uid, gid };
     let client = match nfs_port {
@@ -150,7 +163,10 @@ pub async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &str) -> 
 
                 let mut resolved = false;
                 for (uid, gid) in &try_uids {
-                    let esc_client = client.with_credential(Credential::Sys(AuthSys::with_groups(*uid, *gid, &[*gid], "nfswolf")), *uid, *gid);
+                    // Preserve the client's spoofed machinename across the
+                    // escalation ladder (F-1.4) instead of resetting it to a
+                    // fixed literal -- so an operator's --hostname survives.
+                    let esc_client = client.with_credential(Credential::Sys(AuthSys::with_groups(*uid, *gid, &[*gid], client.machinename())), *uid, *gid);
                     let esc_args = LOOKUP3args { what: diropargs3 { dir: current.to_nfs_fh3(), name: filename3::from(component.as_bytes()) } };
                     if let Ok(Nfs3Result::Ok(ok)) = esc_client.lookup(&esc_args).await {
                         tracing::debug!(component, uid, gid, "LOOKUP succeeded with escalated credential");

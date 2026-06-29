@@ -47,6 +47,11 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::{FileAttrs, FileHandle, FileType};
 
+/// One directory entry paged from READDIRPLUS, owned so it outlives the
+/// per-page response buffer and can be cached across readdir callbacks:
+/// `(name bytes, optional attributes, optional file handle)`.
+type ReaddirEntry = (Vec<u8>, Option<FileAttrs>, Option<FileHandle>);
+
 /// TTL for FUSE attribute cache entries.
 ///
 /// Short because NFS attributes can change at any time from the server side.
@@ -97,6 +102,28 @@ impl InodeMapState {
 
     fn fh_for(&self, ino: u64) -> Option<&FileHandle> {
         self.inodes.get(&ino)
+    }
+
+    /// Reverse-lookup the inode for an already-interned handle, WITHOUT
+    /// interning a new one. readdir uses this to reuse the inode of an entry
+    /// the kernel has already referenced while avoiding permanent state for
+    /// entries that are merely listed.
+    fn ino_for_handle(&self, fh: &FileHandle) -> Option<u64> {
+        self.handles.get(fh.as_bytes()).copied()
+    }
+
+    /// Allocate a fresh inode number without recording any handle mapping.
+    /// Per the FUSE ABI a plain readdir entry takes no kernel lookup
+    /// reference (only readdirplus does), so the kernel never issues a
+    /// `forget` for entries it has only listed; permanently interning every
+    /// listed handle would grow the inode map without bound. readdir hands
+    /// such entries a transient number instead -- the kernel performs an
+    /// explicit LOOKUP (the authoritative, lookup-counted intern) before it
+    /// uses the entry.
+    const fn alloc_transient_ino(&mut self) -> u64 {
+        let n = self.next_ino;
+        self.next_ino = self.next_ino.saturating_add(1);
+        n
     }
 
     /// Record a kernel lookup reference on `ino`.
@@ -172,6 +199,14 @@ pub struct NfsFuse {
     default_cred: Credential,
     /// Per-inode (uid, gid) override discovered by the ladder.
     cred_cache: Mutex<HashMap<u64, (u32, u32)>>,
+    /// Per-directory readdir page cache, keyed by directory inode.
+    ///
+    /// Populated by the `offset == 0` `readdir` callback (the whole directory
+    /// is paged from the server exactly once) and served on every subsequent
+    /// `offset > 0` callback, so a single listing pages the server only once
+    /// instead of re-enumerating from cookie 0 on each kernel callback.
+    /// Evicted in `forget` when the kernel releases the directory inode.
+    readdir_cache: Mutex<HashMap<u64, Vec<ReaddirEntry>>>,
     /// Tokio runtime handle captured at construction.
     ///
     /// fuser invokes `Filesystem` callbacks on its own worker threads, which
@@ -203,7 +238,7 @@ impl NfsFuse {
     #[must_use]
     pub fn new(cfg: NfsFuseConfig) -> Self {
         let state = Mutex::new(InodeMapState::new(&cfg.root_fh));
-        Self { nfs3: cfg.nfs3, state, root_fh: cfg.root_fh, allow_write: cfg.allow_write, default_cred: cfg.default_cred, cred_cache: Mutex::new(HashMap::new()), rt: cfg.rt }
+        Self { nfs3: cfg.nfs3, state, root_fh: cfg.root_fh, allow_write: cfg.allow_write, default_cred: cfg.default_cred, cred_cache: Mutex::new(HashMap::new()), readdir_cache: Mutex::new(HashMap::new()), rt: cfg.rt }
     }
 
     /// Convert our `FileAttrs` to a fuser `FileAttr`.
@@ -517,6 +552,52 @@ impl NfsFuse {
         Ok((child_fh, attrs, child_ino))
     }
 
+    /// LOOKUP that resolves `(handle, attrs)` WITHOUT interning an inode.
+    ///
+    /// Used by the readdir null-attr/null-handle fix-up: a merely-listed entry
+    /// takes no kernel lookup reference, so it must not be permanently interned
+    /// (that would leak -- `forget` only reclaims lookup-counted inodes). Unlike
+    /// `try_lookup_with_ladder`, this neither interns nor follows symlinks (the
+    /// listing shows the link itself); the kernel's later explicit LOOKUP does
+    /// the authoritative, lookup-counted intern.
+    async fn lookup_no_intern(&self, parent_fh: &FileHandle, name_bytes: &[u8], parent_ino: u64) -> Result<(FileHandle, FileAttrs), nfsstat3> {
+        let result = self
+            .try_with_ladder(parent_ino, |c| {
+                let parent_fh = parent_fh.clone();
+                let name_bytes = name_bytes.to_vec();
+                async move {
+                    let args = LOOKUP3args { what: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) } };
+                    c.lookup(&args).await
+                }
+            })
+            .await
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        let (child_fh, attrs_opt) = match result {
+            Nfs3Result::Ok(ok) => (FileHandle::from_nfs_fh3(&ok.object), post_op_attr_to_attrs(ok.obj_attributes)),
+            Nfs3Result::Err((stat, _)) => return Err(stat),
+        };
+
+        let attrs = if let Some(a) = attrs_opt {
+            a
+        } else {
+            // GETATTR the child handle directly (no intern) via the ladder.
+            let fh = child_fh.clone();
+            let r = self
+                .try_with_ladder(parent_ino, move |c| {
+                    let fh = fh.clone();
+                    async move { c.getattr(&GETATTR3args { object: fh.to_nfs_fh3() }).await }
+                })
+                .await
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            match r {
+                Nfs3Result::Ok(ok) => FileAttrs::from_fattr3(&ok.obj_attributes),
+                Nfs3Result::Err((stat, _)) => return Err(stat),
+            }
+        };
+        Ok((child_fh, attrs))
+    }
+
     /// GETATTR helper that runs the credential ladder. Returns `None` on
     /// any error so the caller can map to a single ENOENT/EIO reply.
     async fn try_getattr(&self, ino: u64) -> Option<FileAttrs> {
@@ -548,6 +629,72 @@ impl NfsFuse {
         }
         let (fh, a, ino) = self.block(self.try_lookup_with_ladder(parent_fh, name_bytes, parent_ino)).ok()?;
         Some((fh, ino, a))
+    }
+
+    /// Page an entire directory via a looped READDIRPLUS, returning owned
+    /// entry tuples. NFSv3 READDIRPLUS (RFC 1813 sec. 3.3.17) returns at most
+    /// `maxcount` bytes per call and clears `eof` when more entries remain, so
+    /// we carry the server cookie + cookieverf forward until eof. Accumulation
+    /// is capped at `MAX_READDIR_ENTRIES` to stay safe against a hostile or
+    /// buggy server that never sets eof (or never advances the cookie). Each
+    /// page still runs through the credential-escalation ladder. Called once
+    /// per listing (on the `offset == 0` readdir callback) so the server is
+    /// paged a single time rather than re-enumerated on every kernel callback.
+    fn page_directory(&self, ino: u64, dir_fh: &FileHandle) -> Result<Vec<ReaddirEntry>, Errno> {
+        let mut entries: Vec<ReaddirEntry> = Vec::new();
+        let mut cookie: u64 = 0;
+        let mut cookieverf: [u8; 8] = [0u8; 8];
+        loop {
+            let result = self.block(self.try_with_ladder(ino, |c| {
+                let dir_fh = dir_fh.clone();
+                async move {
+                    let args = READDIRPLUS3args { dir: dir_fh.to_nfs_fh3(), cookie, cookieverf: cookieverf3(cookieverf), dircount: 4096, maxcount: 65_536 };
+                    c.readdirplus(&args).await
+                }
+            }));
+
+            match result {
+                Ok(Nfs3Result::Ok(ok)) => {
+                    cookieverf = ok.cookieverf.0;
+                    let eof = ok.reply.eof;
+                    let page = ok.reply.entries.into_inner();
+                    let last_cookie = page.last().map(|e| e.cookie);
+                    for e in page {
+                        let name = e.name.as_ref().to_vec();
+                        let attrs = match e.name_attributes {
+                            Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
+                            Nfs3Option::None => None,
+                        };
+                        let handle = match e.name_handle {
+                            Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
+                            Nfs3Option::None => None,
+                        };
+                        entries.push((name, attrs, handle));
+                    }
+                    // Stop at eof, on the entry cap, on an empty page, or if the
+                    // cookie fails to advance (defensive: a buggy server must
+                    // not spin us forever).
+                    let at_cap = entries.len() >= Self::MAX_READDIR_ENTRIES;
+                    match last_cookie {
+                        Some(c) if !eof && !at_cap && c != cookie => cookie = c,
+                        _ => break,
+                    }
+                },
+                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+                    tracing::debug!(?ino, "READDIRPLUS denied: NFS3ERR_ACCES");
+                    return Err(Errno::EACCES);
+                },
+                Ok(Nfs3Result::Err((stat, _))) => {
+                    tracing::debug!(?ino, ?stat, "READDIRPLUS failed");
+                    return Err(Errno::EIO);
+                },
+                Err(e) => {
+                    tracing::debug!(?ino, error = %e, "READDIRPLUS RPC error");
+                    return Err(Errno::EIO);
+                },
+            }
+        }
+        Ok(entries)
     }
 }
 
@@ -597,6 +744,7 @@ impl Filesystem for NfsFuse {
         let removed = self.state.lock().expect("inode map lock").forget(ino.0, nlookup);
         if removed {
             self.cred_cache.lock().expect("cred cache lock").remove(&ino.0);
+            self.readdir_cache.lock().expect("readdir cache lock").remove(&ino.0);
         }
     }
 
@@ -794,11 +942,21 @@ impl Filesystem for NfsFuse {
             let parent_fh = parent_fh.clone();
             let name_bytes = name_bytes.clone();
             let attrs = sattr3_for_perms(perms);
+            // FUSE delivers `rdev` in the kernel's new_encode_dev packing:
+            // minor low 8 bits, major in bits 8-19, minor high bits in bits
+            // 20-31. Both major and minor can exceed 8 bits, so decode the full
+            // values (the previous `& 0xff` masks truncated them) and place
+            // major in specdata1, minor in specdata2 -- RFC 1813 sec. 2.5: for
+            // NF3CHR / NF3BLK specdata1 and specdata2 are the major and minor
+            // device numbers respectively.
+            let major = (rdev >> 8) & 0xfff;
+            let minor = (rdev & 0xff) | ((rdev >> 12) & 0x000f_ff00);
+            let spec = specdata3 { specdata1: major, specdata2: minor };
             let what = match kind {
                 0o010_000 => mknoddata3::NF3FIFO(attrs),
                 0o014_000 => mknoddata3::NF3SOCK(attrs),
-                0o020_000 => mknoddata3::NF3CHR(devicedata3 { dev_attributes: attrs, spec: specdata3 { specdata1: (rdev >> 8) & 0xff, specdata2: rdev & 0xff } }),
-                _ => mknoddata3::NF3BLK(devicedata3 { dev_attributes: attrs, spec: specdata3 { specdata1: (rdev >> 8) & 0xff, specdata2: rdev & 0xff } }),
+                0o020_000 => mknoddata3::NF3CHR(devicedata3 { dev_attributes: attrs, spec }),
+                _ => mknoddata3::NF3BLK(devicedata3 { dev_attributes: attrs, spec }),
             };
             async move {
                 let args = MKNOD3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, what };
@@ -1079,68 +1237,21 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        // Page through the directory before emitting anything. NFSv3
-        // READDIRPLUS (RFC 1813 sec. 3.3.17) returns at most `maxcount`
-        // bytes per call and sets `eof = false` when more entries remain;
-        // a single cookie-0 call truncates large directories to the first
-        // ~64 KiB of entries. We carry the server cookie + cookieverf
-        // forward until eof, capping accumulation at MAX_READDIR_ENTRIES to
-        // stay safe against a hostile server. Each page still runs through
-        // the credential-escalation ladder. Entries are converted to owned
-        // (name bytes, attrs, handle) tuples per page so they outlive each
-        // response buffer.
-        let mut entries: Vec<(Vec<u8>, Option<FileAttrs>, Option<FileHandle>)> = Vec::new();
-        let mut cookie: u64 = 0;
-        let mut cookieverf: [u8; 8] = [0u8; 8];
-        loop {
-            let result = self.block(self.try_with_ladder(ino.0, |c| {
-                let dir_fh = dir_fh.clone();
-                async move {
-                    let args = READDIRPLUS3args { dir: dir_fh.to_nfs_fh3(), cookie, cookieverf: cookieverf3(cookieverf), dircount: 4096, maxcount: 65_536 };
-                    c.readdirplus(&args).await
-                }
-            }));
-
-            match result {
-                Ok(Nfs3Result::Ok(ok)) => {
-                    cookieverf = ok.cookieverf.0;
-                    let eof = ok.reply.eof;
-                    let page = ok.reply.entries.into_inner();
-                    let last_cookie = page.last().map(|e| e.cookie);
-                    for e in page {
-                        let name = e.name.as_ref().to_vec();
-                        let attrs = match e.name_attributes {
-                            Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-                            Nfs3Option::None => None,
-                        };
-                        let handle = match e.name_handle {
-                            Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
-                            Nfs3Option::None => None,
-                        };
-                        entries.push((name, attrs, handle));
-                    }
-                    // Stop at eof, on the entry cap, on an empty page, or if
-                    // the cookie fails to advance (defensive: a buggy server
-                    // must not spin us forever).
-                    let at_cap = entries.len() >= Self::MAX_READDIR_ENTRIES;
-                    match last_cookie {
-                        Some(c) if !eof && !at_cap && c != cookie => cookie = c,
-                        _ => break,
-                    }
+        // Offset-aware paging. The kernel resumes a large listing by re-calling
+        // readdir with an advancing `offset` each time the reply buffer fills;
+        // paging the whole directory from cookie 0 on every callback would turn
+        // one `ls` into O(callbacks x server-pages) READDIRPLUS RPCs. Instead we
+        // page the server exactly once -- on the `offset == 0` callback -- cache
+        // the fully-paged owned entry vector keyed by directory inode, and serve
+        // every later (`offset > 0`) callback from that cache. The cache entry
+        // is dropped in `forget` when the kernel releases the directory inode.
+        if offset == 0 {
+            match self.page_directory(ino.0, &dir_fh) {
+                Ok(entries) => {
+                    self.readdir_cache.lock().expect("readdir cache lock").insert(ino.0, entries);
                 },
-                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
-                    tracing::debug!(?ino, "READDIRPLUS denied: NFS3ERR_ACCES");
-                    reply.error(Errno::EACCES);
-                    return;
-                },
-                Ok(Nfs3Result::Err((stat, _))) => {
-                    tracing::debug!(?ino, ?stat, "READDIRPLUS failed");
-                    reply.error(Errno::EIO);
-                    return;
-                },
-                Err(e) => {
-                    tracing::debug!(?ino, error = %e, "READDIRPLUS RPC error");
-                    reply.error(Errno::EIO);
+                Err(errno) => {
+                    reply.error(errno);
                     return;
                 },
             }
@@ -1161,6 +1272,10 @@ impl Filesystem for NfsFuse {
             }
         }
 
+        // Serve entries from the per-inode cache populated on the offset == 0
+        // callback (cloned out so the lock is not held across the per-entry
+        // fix-up LOOKUPs below).
+        let entries = self.readdir_cache.lock().expect("readdir cache lock").get(&ino.0).cloned().unwrap_or_default();
         for (idx, (name_bytes, attrs_opt, fh_opt)) in entries.into_iter().enumerate() {
             let entry_offset = (idx as u64) + 3;
             if offset >= entry_offset {
@@ -1171,24 +1286,35 @@ impl Filesystem for NfsFuse {
                 continue;
             }
 
-            // null-attr / null-handle fix-up: re-LOOKUP if missing.
+            // null-attr / null-handle fix-up: re-LOOKUP if missing. Use the
+            // non-interning variant so a merely-listed entry is not permanently
+            // pinned in the inode map (#35) -- the kernel's explicit LOOKUP later
+            // does the authoritative, lookup-counted intern.
             let mut entry_attrs = attrs_opt;
             let mut entry_fh = fh_opt;
             if (entry_attrs.is_none() || entry_fh.is_none())
-                && let Ok((fh2, attrs2, _)) = self.block(self.try_lookup_with_ladder(&dir_fh, &name_bytes, ino.0))
+                && let Ok((fh2, attrs2)) = self.block(self.lookup_no_intern(&dir_fh, &name_bytes, ino.0))
             {
                 entry_fh = Some(fh2);
                 entry_attrs = Some(attrs2);
             }
 
             let kind = entry_attrs.as_ref().map_or(FuseFileType::RegularFile, |a| to_fuse_type(a.file_type));
-            let entry_ino = if let Some(fh) = entry_fh {
-                self.intern(fh, ino.0)
-            } else {
+            // Resolve an inode number WITHOUT pinning brand-new entries. Per
+            // the FUSE ABI a plain readdir entry takes no kernel lookup
+            // reference (only readdirplus does), so the kernel never sends a
+            // `forget` for entries it has merely listed -- permanently
+            // interning every listed handle would grow the inode map without
+            // bound (contradicting the `forget` reclamation bound). Reuse an
+            // inode only when its handle is already known (interned by a real
+            // lookup/create and reclaimed by the lookup/forget lifecycle);
+            // otherwise hand the kernel a transient number we do not store. The
+            // kernel issues an explicit LOOKUP -- the authoritative,
+            // lookup-counted intern -- before it uses the entry.
+            let entry_ino = {
                 let mut st = self.state.lock().expect("inode map lock");
-                let n = st.next_ino;
-                st.next_ino = st.next_ino.saturating_add(1);
-                n
+                let known = entry_fh.as_ref().and_then(|fh| st.ino_for_handle(fh));
+                known.unwrap_or_else(|| st.alloc_transient_ino())
             };
             if reply.add(INodeNo(entry_ino), entry_offset, kind, name_str.as_ref()) {
                 reply.ok();
@@ -1205,19 +1331,53 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
-            let fh = fh.clone();
-            async move {
-                let args = READ3args { file: fh.to_nfs_fh3(), offset, count: size };
-                c.read(&args).await
+        // NFSv3 READ may return fewer bytes than requested before true EOF
+        // (RFC 1813 sec. 3.3.6: a server caps a single READ at rtmax/rtpref).
+        // A non-direct-io FUSE mount zero-fills the unread remainder, so a single
+        // READ silently corrupts data from any server whose rtmax is below the
+        // kernel's request size. Loop until we have `size` bytes, the server
+        // signals eof, or returns an empty page. Each chunk still runs through
+        // the credential-escalation ladder (the winning cred is cached after the
+        // first chunk, so continuations stay single-RPC).
+        let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+        loop {
+            let want = size.saturating_sub(u32::try_from(buf.len()).unwrap_or(u32::MAX));
+            if want == 0 {
+                break;
             }
-        }));
-
-        match result {
-            Ok(Nfs3Result::Ok(ok)) => reply.data(ok.data.as_ref()),
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            let pos = offset.saturating_add(buf.len() as u64);
+            let chunk = self.block(self.try_with_ladder(ino.0, |c| {
+                let fh = fh.clone();
+                async move {
+                    let args = READ3args { file: fh.to_nfs_fh3(), offset: pos, count: want };
+                    c.read(&args).await
+                }
+            }));
+            match chunk {
+                Ok(Nfs3Result::Ok(ok)) => {
+                    let data = ok.data.as_ref();
+                    if data.is_empty() {
+                        break;
+                    }
+                    buf.extend_from_slice(data);
+                    if ok.eof {
+                        break;
+                    }
+                },
+                // A denial or error before any bytes were read is fatal; after a
+                // partial read, return what we have (the next read() resumes).
+                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) if buf.is_empty() => {
+                    reply.error(Errno::EACCES);
+                    return;
+                },
+                Ok(Nfs3Result::Err(_)) | Err(_) if buf.is_empty() => {
+                    reply.error(Errno::EIO);
+                    return;
+                },
+                _ => break,
+            }
         }
+        reply.data(&buf);
     }
 
     /// Write data to a file  --  only when `allow_write` is set.
@@ -1245,7 +1405,15 @@ impl Filesystem for NfsFuse {
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => reply.written(ok.count),
+            Ok(Nfs3Result::Ok(ok)) => {
+                // Clamp the server-reported write count to the bytes we
+                // actually sent. NFSv3 WRITE (RFC 1813 sec. 3.3.7) returns the
+                // committed count, but an untrusted server reporting a count
+                // larger than the request would otherwise mis-report progress
+                // to the kernel.
+                let sent = u32::try_from(data.len()).unwrap_or(u32::MAX);
+                reply.written(ok.count.min(sent));
+            },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
         }

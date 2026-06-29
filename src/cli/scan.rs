@@ -230,9 +230,15 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
         let g = globals.clone();
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire_owned().await;
-            let outcome = match escape::find_escape(&host, &export, escape::DEFAULT_BTRFS_SUBVOLS, escape::DEFAULT_MAX_ROOT_SCAN, &g, false).await {
-                Ok((_client, outcome)) => Ok(outcome),
-                Err(e) => Err(e.to_string()),
+            // The NFSv3 client has no per-call timeout, so a half-open host that
+            // completes the TCP handshake but never answers an RPC would hang this
+            // escape task -- and the join loop waits for every task, stalling the
+            // whole scan. Bound the full escape per host (scales with --timeout).
+            let per_host = Duration::from_millis(g.timeout.saturating_mul(10).max(15_000));
+            let outcome = match tokio::time::timeout(per_host, escape::find_escape(&host, &export, escape::DEFAULT_BTRFS_SUBVOLS, escape::DEFAULT_MAX_ROOT_SCAN, &g, false)).await {
+                Ok(Ok((_client, outcome))) => Ok(outcome),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(_) => Err(format!("timed out after {}ms", per_host.as_millis())),
             };
             collected.lock().await.push(AutoEscapeResult { idx, host, export, outcome });
         });
@@ -255,7 +261,14 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 println!();
                 println!("{}", crate::output::status_ok(&format!("{}:{} escaped  --  {:?} inode {} ({note})", res.host, res.export, candidate.fs_type, candidate.inode_number)));
                 crate::output::print_handle("Root handle", &hex);
-                println!("    {} shell {} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+                // Carry the network globals into the rerun hint so the printed
+                // command reproduces the scan's transport (proxy / fixed NFS or
+                // mount port); without them the suggestion can't reach a proxied
+                // or non-2049 target -- exactly the auto-escape use case.
+                let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
+                let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
+                let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
+                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
             Ok(EscapeOutcome::StaleNoRoot) => {
                 println!("  {}", format!("{}:{}  handle valid but root not found (raise `escape --max-root-scan`)", res.host, res.export).dimmed());
@@ -628,7 +641,28 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
         let mount_port = render_mount_ports(&r.mount_ports);
         let mounts = render_mounts_count(r);
         let host_info = build_host_info(r);
-        let _ = writeln!(csv, "{hostname},{ip},{portmap},\"{nfs_port}\",{v2},{v2x},{v3},{v3x},{v4},{v4x},{hint},\"{mount_port}\",{mounts},\"{host_info}\"");
+        // Every field is run through csv_field: the reverse-DNS hostname and the
+        // HostInfo column (which folds MOUNT client names/dirs and export paths)
+        // are attacker-controlled wire data, so quoting/escaping is mandatory to
+        // stop column breakage and spreadsheet formula injection.
+        let _ = writeln!(
+            csv,
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            csv_field(hostname),
+            csv_field(&ip),
+            csv_field(portmap),
+            csv_field(&nfs_port),
+            csv_field(v2),
+            csv_field(&v2x),
+            csv_field(v3),
+            csv_field(&v3x),
+            csv_field(v4),
+            csv_field(&v4x),
+            csv_field(&hint),
+            csv_field(&mount_port),
+            csv_field(&mounts),
+            csv_field(&host_info),
+        );
     }
 
     if interrupted {
@@ -667,4 +701,20 @@ fn build_host_info(r: &HostResult) -> String {
     }
 
     parts.join(";")
+}
+
+/// Quote and escape one CSV field, mirroring `report::csv::csv_field`.
+///
+/// Two layers of defence, because the scan CSV folds in untrusted server data
+/// (reverse-DNS hostname, MOUNT client names/directories, export paths):
+///   1. Formula-injection guard. A value beginning with `=`, `+`, `-`, `@`,
+///      TAB or CR is treated as a formula by Excel/LibreOffice/Sheets on open;
+///      prefixing it with a single quote forces literal-text rendering.
+///   2. RFC 4180 quoting. The (possibly guarded) value is always wrapped in
+///      double-quotes with embedded quotes doubled, so commas, quotes and
+///      newlines inside a field cannot break the row/column structure.
+fn csv_field(value: &str) -> String {
+    let guarded = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{value}") } else { value.to_owned() };
+    let escaped = guarded.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }

@@ -46,18 +46,39 @@ pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result
 /// the server rewrite the screen, hide output, or smuggle control codes. Every
 /// control codepoint (C0 `< 0x20`, DEL `0x7f`, and C1 `0x80..=0x9f`) -- newline
 /// included, since these report fields are single-line -- is rendered as a
-/// printable `\xNN` token instead. Shared with the coloured console renderer.
+/// printable `\xNN` token instead. Unicode bidirectional and zero-width
+/// formatting codepoints (the CVE-2021-42574 "trojan source" class) are not
+/// C0/C1 control bytes but can still reorder or hide displayed text, so they are
+/// rewritten to a `\u{NNNN}` token as well. Shared with the coloured console and
+/// CSV/HTML renderers.
 pub(super) fn sanitize_control(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         let cp = u32::from(ch);
         if cp < 0x20 || cp == 0x7f || (0x80..=0x9f).contains(&cp) {
             let _ = write!(out, "\\x{cp:02x}");
+        } else if is_bidi_or_zero_width(cp) {
+            let _ = write!(out, "\\u{{{cp:04x}}}");
         } else {
             out.push(ch);
         }
     }
     out
+}
+
+/// Identify Unicode bidi-control and zero-width formatting codepoints.
+///
+/// These visually reorder or hide text in a terminal without being C0/C1 control
+/// bytes (CVE-2021-42574 "trojan source"), so the report sanitizer neutralizes
+/// them alongside the classic control bytes.
+const fn is_bidi_or_zero_width(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x200b..=0x200f   // zero-width space/non-joiner/joiner, LRM, RLM
+        | 0x202a..=0x202e // bidi embeddings/overrides: LRE, RLE, PDF, LRO, RLO
+        | 0x2066..=0x2069 // bidi isolates: LRI, RLI, FSI, PDI
+        | 0xfeff          // zero-width no-break space / BOM
+    )
 }
 
 /// Return a severity label string without colour codes.

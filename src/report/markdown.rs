@@ -91,8 +91,10 @@ const fn severity_badge(sev: Severity) -> &'static str {
 /// content spoofing or stored XSS when the report is viewed. Every ASCII
 /// punctuation char with Markdown/HTML meaning is backslash-escaped (CommonMark
 /// honours `\<punct>` for any ASCII punctuation, so `<script>` renders literal),
-/// `|` included so the value is also safe inside a table cell, and control bytes
-/// other than newline are rendered as a printable `\xNN` token.
+/// `|` included so the value is also safe inside a table cell, and every control
+/// byte -- newline included, since a bare `\n` in a server-supplied export path
+/// would break out of a single-row table cell or detail line (these prose fields
+/// are single-line) -- is rendered as a printable `\xNN` token.
 fn md_escape_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -101,7 +103,6 @@ fn md_escape_text(s: &str) -> String {
                 out.push('\\');
                 out.push(ch);
             },
-            '\n' => out.push('\n'),
             c if c.is_control() => {
                 let _ = write!(out, "\\x{:02x}", u32::from(c));
             },
