@@ -124,4 +124,4 @@ jobs:
           fi
 
       - name: cargo audit
-        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0173
+        run: cargo audit --deny warnings

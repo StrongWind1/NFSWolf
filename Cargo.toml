@@ -55,7 +55,7 @@ indicatif = "0.18"
 
 # Output / Reporting
 colored = "3"
-tabled = { version = "0.21", features = ["ansi"] }
+tabled = { version = "0.21", default-features = false, features = ["ansi"] }
 
 # Cryptography
 sha2 = "0.11"
