@@ -185,7 +185,7 @@ See `nfswolf <subcommand> --help` for per-subcommand flags.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
