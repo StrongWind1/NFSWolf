@@ -1,36 +1,32 @@
 ---
 name: Bug report
-about: Something in nfswolf behaves incorrectly
-title: "[bug] "
+about: Report a bug or unexpected behavior
+title: ""
 labels: bug
+assignees: ""
 ---
 
-## Command
+**Describe the bug**
+A clear description of what happened.
 
-Exact command you ran, with flags (redact any sensitive targets):
+**Command**
+The exact `nfswolf` command you ran (redact sensitive values):
 
-```
+```bash
 nfswolf ...
 ```
 
-## Observed
-
-What happened? Paste output, truncating large logs.
+**Output**
+Paste the full output (use `-vvv` for trace-level detail where supported):
 
 ```
+...
 ```
 
-## Expected
+**Expected behavior**
+What you expected to happen.
 
-What did you expect instead?
-
-## Environment
-
-- nfswolf version: `nfswolf --version`
-- Build: prebuilt / source / crates.io
-- OS and arch: `uname -a`
-- Target NFS server (OS / version / vendor), if you know it:
-
-## Additional context
-
-Anything else useful -- stack traces with `RUST_BACKTRACE=1`, packet captures, server configuration.
+**Environment**
+- OS: [e.g. Kali 2025.1, Ubuntu 24.04, macOS 14]
+- NFSWolf version: [`nfswolf --version`]
+- Install method: [e.g. release binary, cargo install, built from source]

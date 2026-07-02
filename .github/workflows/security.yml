@@ -24,9 +24,9 @@ name: Security
 # Label each run with the workflow name so CI / Security / Release are easy
 # to tell apart in the Actions tab. Scheduled runs have no head_commit;
 # we fall back to the ref name in that case.
-run-name: "Security -- ${{ github.event.head_commit.message || github.ref_name }}"
+run-name: Security -- ${{ github.event.head_commit.message || github.ref_name }}
 
-on:
+"on":
   push:
     branches: [main]
   pull_request:
@@ -34,7 +34,7 @@ on:
     # Cron uses UTC. 06:00 UTC roughly matches start-of-business in Europe,
     # late-evening in the Americas, so newly opened issues from an overnight
     # scan land on the maintainer's morning.
-    - cron: '0 6 * * *'
+    - cron: 0 6 * * *
   workflow_dispatch:
 
 concurrency:
@@ -89,3 +89,39 @@ jobs:
 
       - name: cargo deny check
         run: cargo deny check
+
+  # ---------------------------------------------------------------------------
+  # audit -- cargo-audit is a lighter, advisory-DB-only scan. Redundant with
+  # cargo-deny's advisories check but catches a deny.toml misconfiguration that
+  # could otherwise mask a finding.
+  # ---------------------------------------------------------------------------
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo-audit binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/advisory-db/
+          key: ubuntu-cargo-audit-v1
+
+      - name: Install cargo-audit
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-audit > /dev/null 2>&1; then
+            cargo install cargo-audit --locked
+          fi
+
+      - name: cargo audit
+        run: cargo audit --deny warnings

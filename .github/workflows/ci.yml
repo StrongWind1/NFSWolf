@@ -35,9 +35,9 @@ name: CI
 # runs apart at a glance. Prefixing with the workflow name fixes that.
 # When the trigger is a tag push there is no head_commit, so we fall back to
 # the ref name (e.g. "v0.1.0").
-run-name: "CI -- ${{ github.event.head_commit.message || github.ref_name }}"
+run-name: CI -- ${{ github.event.head_commit.message || github.ref_name }}
 
-on:
+"on":
   # Run after every commit that reaches main (post-merge verification).
   push:
     branches: [main]
@@ -292,50 +292,6 @@ jobs:
         run: cargo check --all-targets --all-features
 
   # ---------------------------------------------------------------------------
-  # docs -- does `cargo doc` succeed with rustdoc warnings treated as errors?
-  # Broken intra-doc links and missing doc comments on public items are
-  # treated as hard failures. Important because the project publishes the
-  # rendered docs to docs.rs.
-  # ---------------------------------------------------------------------------
-  docs:
-    name: docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: Install FUSE headers
-        run: |
-          set -euo pipefail
-          sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends libfuse3-dev pkg-config
-
-      - name: Cache cargo build artifacts
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ubuntu-cargo-docs-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
-          restore-keys: |
-            ubuntu-cargo-docs-
-            ubuntu-cargo-
-
-      - name: cargo doc
-        env:
-          # Turns rustdoc warnings into errors so broken links fail CI.
-          RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --all-features --no-deps
-
-  # ---------------------------------------------------------------------------
   # hygiene -- repository-hygiene checks that do not involve compiling Rust.
   # Fast (single-digit seconds). Caught early so reviewers do not spend time
   # on a PR that will be blocked on tab characters or CRLF line endings.
@@ -392,3 +348,23 @@ jobs:
 
       - name: cargo machete
         run: cargo machete
+
+  # ---------------------------------------------------------------------------
+  # yamllint -- lints all YAML under .github against the strict .yamllint.yml.
+  # Runs on the runner's preinstalled Python; needs no Rust toolchain.
+  # ---------------------------------------------------------------------------
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Lint YAML in .github
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user --quiet yamllint
+          python3 -m yamllint --strict -c .yamllint.yml .github

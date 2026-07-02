@@ -1,30 +1,51 @@
 version: 2
+
+# Grouped, security-forward dependency updates.
+#   version updates  -> ONE grouped PR per ecosystem, weekly, after a cooldown
+#                       so brand-new (possibly broken) releases settle first.
+#   security updates -> ONE grouped PR per ecosystem, applied promptly --
+#                       cooldown never delays security fixes.
+# NOTE: security updates also require "Dependabot alerts" + "Dependabot
+# security updates" to be enabled in the repository's Settings -> Security.
 updates:
-  # Keep GitHub Actions pinned SHAs up to date.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
     commit-message:
-      prefix: ci
+      prefix: chore
+      include: scope
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     groups:
-      actions-minor-patch:
-        update-types:
-          - minor
-          - patch
+      github-actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      github-actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
-  # Keep Cargo dependencies up to date.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
     commit-message:
-      prefix: deps
+      prefix: chore
+      include: scope
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     groups:
-      cargo-minor-patch:
-        update-types:
-          - minor
-          - patch
-    # Major bumps get opened as individual PRs for explicit review rather than
-    # disappearing into a batched update.
-    open-pull-requests-limit: 10
+      dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
