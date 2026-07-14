@@ -22,7 +22,7 @@ use crate::proto::nfs4::types::{ArgOp, CompoundArgs, CompoundRes};
 
 /// Result of an RPC probe that distinguishes PROG_MISMATCH from other failures.
 #[derive(Debug)]
-pub enum ProbeResult<T> {
+pub(crate) enum ProbeResult<T> {
     /// RPC accepted and result decoded.  Version is confirmed.
     Accepted(T),
     /// Server supports the program but not this version.  `(low, high)` is
@@ -35,13 +35,13 @@ pub enum ProbeResult<T> {
 impl<T> ProbeResult<T> {
     /// Whether the probe was accepted (version confirmed).
     #[must_use]
-    pub const fn is_accepted(&self) -> bool {
+    pub(crate) const fn is_accepted(&self) -> bool {
         matches!(self, Self::Accepted(_))
     }
 
     /// Extract the PROG_MISMATCH version range, if any.
     #[must_use]
-    pub const fn mismatch_range(&self) -> Option<&VersionRange> {
+    pub(crate) const fn mismatch_range(&self) -> Option<&VersionRange> {
         match self {
             Self::ProgMismatch(r) => Some(r),
             _ => None,
@@ -71,11 +71,11 @@ fn build_tcp_call(xid: u32, program: u32, version: u32, proc_num: u32, args: &im
     );
 
     let mut buf = Vec::with_capacity(4 + payload_len);
-    #[allow(clippy::unwrap_used, reason = "packing into a Vec<u8> cannot fail")]
+    #[expect(clippy::unwrap_used, reason = "packing into a Vec<u8> cannot fail")]
     {
-        fh.pack(&mut buf).unwrap();
-        msg.pack(&mut buf).unwrap();
-        args.pack(&mut buf).unwrap();
+        _ = fh.pack(&mut buf).unwrap();
+        _ = msg.pack(&mut buf).unwrap();
+        _ = args.pack(&mut buf).unwrap();
     }
     buf
 }
@@ -87,7 +87,7 @@ async fn read_rpc_record(stream: &mut TcpStream) -> Result<Vec<u8>, anyhow::Erro
     let mut payload = Vec::new();
     loop {
         let mut hdr = [0u8; 4];
-        stream.read_exact(&mut hdr).await?;
+        _ = stream.read_exact(&mut hdr).await?;
         let fh: fragment_header = hdr.into();
         let frag_len = fh.fragment_length() as usize;
         if payload.len().saturating_add(frag_len) > MAX_RECORD {
@@ -96,7 +96,7 @@ async fn read_rpc_record(stream: &mut TcpStream) -> Result<Vec<u8>, anyhow::Erro
         let start = payload.len();
         payload.resize(start + frag_len, 0);
         let slice = payload.get_mut(start..).ok_or_else(|| anyhow::anyhow!("fragment slice out of bounds"))?;
-        stream.read_exact(slice).await?;
+        _ = stream.read_exact(slice).await?;
         if fh.eof() {
             break;
         }
@@ -153,7 +153,7 @@ async fn send_and_recv<R: Unpack>(stream: &mut TcpStream, program: u32, version:
 /// over one TCP connection.  Returns `(v2, v3, v4)` probe results.
 ///
 /// If the TCP connection itself fails, all three return `Failed`.
-pub async fn probe_nfs_versions_tcp(addr: SocketAddr, timeout: Duration, proxy: Option<&str>) -> (ProbeResult<Void>, ProbeResult<Void>, ProbeResult<CompoundRes>) {
+pub(crate) async fn probe_nfs_versions_tcp(addr: SocketAddr, timeout: Duration, proxy: Option<&str>) -> (ProbeResult<Void>, ProbeResult<Void>, ProbeResult<CompoundRes>) {
     let connect_result = if let Some(p) = proxy {
         let proxy_addr = match crate::proto::conn::parse_proxy_addr(p) {
             Ok(a) => a,
@@ -195,17 +195,17 @@ pub async fn probe_nfs_versions_tcp(addr: SocketAddr, timeout: Duration, proxy: 
 // --- UDP probes --------------------------------------------------------------
 
 /// Send one RPC call over UDP and return a `ProbeResult`.
-pub async fn probe_rpc_udp<R: Unpack>(addr: SocketAddr, program: u32, version: u32, proc_num: u32, args: &(impl Pack + Send + Sync), timeout: Duration) -> ProbeResult<R> {
+pub(crate) async fn probe_rpc_udp<R: Unpack>(addr: SocketAddr, program: u32, version: u32, proc_num: u32, args: &(impl Pack + Send + Sync), timeout: Duration) -> ProbeResult<R> {
     let xid = next_xid();
     let null_auth = opaque_auth::default();
     let call = call_body { rpcvers: RPC_VERSION_2, prog: program, vers: version, proc: proc_num, cred: null_auth.borrow(), verf: null_auth.borrow() };
     let msg = rpc_msg { xid, body: msg_body::CALL(call) };
 
     let mut buf = Vec::with_capacity(msg.packed_size() + args.packed_size());
-    #[allow(clippy::unwrap_used, reason = "packing into Vec cannot fail")]
+    #[expect(clippy::unwrap_used, reason = "packing into Vec cannot fail")]
     {
-        msg.pack(&mut buf).unwrap();
-        args.pack(&mut buf).unwrap();
+        _ = msg.pack(&mut buf).unwrap();
+        _ = args.pack(&mut buf).unwrap();
     }
 
     let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
@@ -227,6 +227,6 @@ pub async fn probe_rpc_udp<R: Unpack>(addr: SocketAddr, program: u32, version: u
 }
 
 /// Probe a single NFS version via UDP NULL call.
-pub async fn probe_nfs_null_udp(addr: SocketAddr, version: u32, timeout: Duration) -> ProbeResult<Void> {
+pub(crate) async fn probe_nfs_null_udp(addr: SocketAddr, version: u32, timeout: Duration) -> ProbeResult<Void> {
     probe_rpc_udp::<Void>(addr, 100_003, version, 0, &Void, timeout).await
 }

@@ -28,7 +28,7 @@ const PROG_NETAPP: u32 = 400_010;
 
 /// One entry returned by PMAPPROC_DUMP.
 #[derive(Debug, Clone)]
-pub struct PortmapEntry {
+pub(crate) struct PortmapEntry {
     /// RPC program number.
     pub program: u32,
     /// Program version.
@@ -41,7 +41,7 @@ pub struct PortmapEntry {
 
 /// NIS detection result.
 #[derive(Debug, Clone)]
-pub struct NisDetection {
+pub(crate) struct NisDetection {
     /// Whether ypserv (program 100004) is registered.
     pub ypserv_present: bool,
     /// Port ypserv is listening on, if found.
@@ -52,7 +52,7 @@ pub struct NisDetection {
 
 /// Portmapper UDP amplification measurement (F-3.2).
 #[derive(Debug, Clone)]
-pub struct PortmapAmplificationResult {
+pub(crate) struct PortmapAmplificationResult {
     /// Size of the UDP DUMP request in bytes.
     pub request_bytes: usize,
     /// Size of the DUMP response in bytes.
@@ -63,7 +63,7 @@ pub struct PortmapAmplificationResult {
 
 /// Portmapper client.
 #[derive(Debug, Clone)]
-pub struct PortmapClient {
+pub(crate) struct PortmapClient {
     /// Default portmapper port (111).
     port: u16,
     /// Optional SOCKS5 proxy for all TCP connections.
@@ -73,19 +73,19 @@ pub struct PortmapClient {
 impl PortmapClient {
     /// Create a portmapper client targeting the given port.
     #[must_use]
-    pub const fn new(port: u16) -> Self {
+    pub(crate) const fn new(port: u16) -> Self {
         Self { port, proxy: None }
     }
 
     /// Create with the standard portmapper port (111).
     #[must_use]
-    pub const fn default_port() -> Self {
+    pub(crate) const fn default_port() -> Self {
         Self::new(portmap::PMAP_PORT)
     }
 
     /// Attach a SOCKS5 proxy to this client.
     #[must_use]
-    pub fn with_proxy(mut self, proxy: String) -> Self {
+    pub(crate) fn with_proxy(mut self, proxy: String) -> Self {
         self.proxy = Some(proxy);
         self
     }
@@ -102,7 +102,7 @@ impl PortmapClient {
     }
 
     /// Resolve the port for `program`/`version` via PMAPPROC_GETPORT (TCP).
-    pub async fn query_port(&self, addr: SocketAddr, program: u32, version: u32) -> anyhow::Result<u16> {
+    pub(crate) async fn query_port(&self, addr: SocketAddr, program: u32, version: u32) -> anyhow::Result<u16> {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let io = self.connect_tcp(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
         let mut client = PortmapperClient::new(io);
@@ -110,7 +110,7 @@ impl PortmapClient {
     }
 
     /// Enumerate all registered RPC services via PMAPPROC_DUMP.
-    pub async fn dump(&self, addr: SocketAddr) -> anyhow::Result<Vec<PortmapEntry>> {
+    pub(crate) async fn dump(&self, addr: SocketAddr) -> anyhow::Result<Vec<PortmapEntry>> {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let io = self.connect_tcp(pmap_addr).await.with_context(|| format!("connect to portmapper at {pmap_addr}"))?;
         let mut client = PortmapperClient::new(io);
@@ -119,7 +119,7 @@ impl PortmapClient {
     }
 
     /// Return NFS versions (2, 3, 4) registered in the portmapper.
-    pub async fn detect_nfs_versions(&self, addr: SocketAddr) -> anyhow::Result<Vec<u32>> {
+    pub(crate) async fn detect_nfs_versions(&self, addr: SocketAddr) -> anyhow::Result<Vec<u32>> {
         let entries = self.dump(addr).await?;
         let mut versions: Vec<u32> = entries.iter().filter(|e| e.program == PROG_NFS && e.protocol == IPPROTO_TCP).map(|e| e.version).collect();
         versions.sort_unstable();
@@ -128,12 +128,12 @@ impl PortmapClient {
     }
 
     /// Resolve the mountd port (program 100005).
-    pub async fn detect_mount_port(&self, addr: SocketAddr) -> anyhow::Result<u16> {
+    pub(crate) async fn detect_mount_port(&self, addr: SocketAddr) -> anyhow::Result<u16> {
         self.query_port(addr, PROG_MOUNT, 3).await
     }
 
     /// Check for NIS (ypserv / ypbind) in the portmapper dump.
-    pub async fn detect_nis(&self, addr: SocketAddr) -> anyhow::Result<NisDetection> {
+    pub(crate) async fn detect_nis(&self, addr: SocketAddr) -> anyhow::Result<NisDetection> {
         let entries = self.dump(addr).await?;
         let ypserv = entries.iter().find(|e| e.program == PROG_YPSERV && e.protocol == IPPROTO_TCP);
         let ypbind_present = entries.iter().any(|e| e.program == PROG_YPBIND);
@@ -141,7 +141,7 @@ impl PortmapClient {
     }
 
     /// Check whether a NetApp proprietary program is registered (amplification indicator).
-    pub async fn has_netapp(&self, addr: SocketAddr) -> anyhow::Result<bool> {
+    pub(crate) async fn has_netapp(&self, addr: SocketAddr) -> anyhow::Result<bool> {
         let entries = self.dump(addr).await?;
         Ok(entries.iter().any(|e| e.program == PROG_NETAPP))
     }
@@ -151,7 +151,7 @@ impl PortmapClient {
     /// This is a TCP-based approximation. True UDP measurement would require
     /// a raw UDP socket, which lives in `proto::udp` and is wired through
     /// the `--scan-udp` flag.
-    pub async fn measure_amplification(&self, addr: SocketAddr) -> anyhow::Result<PortmapAmplificationResult> {
+    pub(crate) async fn measure_amplification(&self, addr: SocketAddr) -> anyhow::Result<PortmapAmplificationResult> {
         // Estimate request size: RPC header + DUMP args = ~64 bytes
         let request_bytes: usize = 64;
         let entries = self.dump(addr).await?;
@@ -164,7 +164,7 @@ impl PortmapClient {
 
     /// Look up the TCP port for the given protocol number in a pre-fetched dump.
     #[must_use]
-    pub fn find_port(entries: &[PortmapEntry], program: u32, proto: u32) -> Option<u16> {
+    pub(crate) fn find_port(entries: &[PortmapEntry], program: u32, proto: u32) -> Option<u16> {
         entries.iter().find(|e| e.program == program && e.protocol == proto).map(|e| e.port)
     }
 
@@ -172,7 +172,7 @@ impl PortmapClient {
     ///
     /// UDP NFS is a prerequisite for the amplification attack (F-3.2).
     #[must_use]
-    pub fn has_nfs_udp(entries: &[PortmapEntry]) -> bool {
+    pub(crate) fn has_nfs_udp(entries: &[PortmapEntry]) -> bool {
         entries.iter().any(|e| e.program == PROG_NFS && e.protocol == IPPROTO_UDP)
     }
 
@@ -180,7 +180,7 @@ impl PortmapClient {
     ///
     /// Fallback for environments where TCP/111 is firewalled but UDP/111 is open
     /// (RFC 1057 S10: portmapper MUST be available on both transports).
-    pub async fn dump_udp(&self, addr: SocketAddr, probe_timeout: Duration) -> anyhow::Result<Vec<PortmapEntry>> {
+    pub(crate) async fn dump_udp(&self, addr: SocketAddr, probe_timeout: Duration) -> anyhow::Result<Vec<PortmapEntry>> {
         use nfs3_types::xdr_codec::Void;
 
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
@@ -189,7 +189,7 @@ impl PortmapClient {
     }
 
     /// Resolve the port for `program`/`version` via PMAPPROC_GETPORT over UDP.
-    pub async fn query_port_udp(&self, addr: SocketAddr, program: u32, version: u32, probe_timeout: Duration) -> anyhow::Result<u16> {
+    pub(crate) async fn query_port_udp(&self, addr: SocketAddr, program: u32, version: u32, probe_timeout: Duration) -> anyhow::Result<u16> {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let query = portmap::mapping { prog: program, vers: version, prot: IPPROTO_TCP, port: 0 };
         let port: u32 = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 3, &query, probe_timeout).await.context("PMAPPROC_GETPORT over UDP")?;

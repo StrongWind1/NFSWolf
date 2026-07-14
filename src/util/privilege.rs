@@ -12,7 +12,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 /// Probe result for privileged port availability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrivilegedPortAvailability {
+pub(crate) enum PrivilegedPortAvailability {
     /// Binding to ports < 1024 is possible (running as root or has capability).
     Available,
     /// Binding requires elevated privileges  --  connections may be refused by servers.
@@ -25,7 +25,7 @@ pub enum PrivilegedPortAvailability {
 /// verifies the assigned port is in the privileged range.
 /// Returns `Available` if the process has the necessary capability.
 #[must_use]
-pub fn check_privileged_binding() -> PrivilegedPortAvailability {
+pub(crate) fn check_privileged_binding() -> PrivilegedPortAvailability {
     // Try ports 600-1023 to find a free privileged port.
     for port in 600_u16..1024_u16 {
         let Ok(sock) = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) else { continue };
@@ -46,7 +46,7 @@ pub fn check_privileged_binding() -> PrivilegedPortAvailability {
 ///
 /// Many NFS servers reject connections from unprivileged ports by default.
 /// Users should run nfswolf as root or grant `CAP_NET_BIND_SERVICE`.
-pub fn warn_if_unprivileged() {
+pub(crate) fn warn_if_unprivileged() {
     if check_privileged_binding() == PrivilegedPortAvailability::Unavailable {
         tracing::warn!(
             "cannot bind to privileged ports (<1024); some NFS servers may refuse connections. \

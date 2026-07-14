@@ -4,9 +4,9 @@
 //! file handle analysis, and automated exploitation primitives
 //! (escape construction, handle brute force, UID spray).
 
-pub mod analyzer;
-pub mod credential;
-pub mod file_handle;
-pub mod scan_types;
-pub mod scanner;
-pub mod uid_sprayer;
+pub(crate) mod analyzer;
+pub(crate) mod credential;
+pub(crate) mod file_handle;
+pub(crate) mod scan_types;
+pub(crate) mod scanner;
+pub(crate) mod uid_sprayer;

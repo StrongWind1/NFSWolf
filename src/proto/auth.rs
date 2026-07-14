@@ -22,7 +22,7 @@ static STAMP_COUNTER: AtomicU32 = AtomicU32::new(42);
 /// Authentication flavor identifiers (RFC 5531 S8.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum AuthFlavor {
+pub(crate) enum AuthFlavor {
     None = 0,
     Sys = 1, // AUTH_UNIX / AUTH_SYS
     Short = 2,
@@ -33,7 +33,7 @@ pub enum AuthFlavor {
 
 /// nfswolf credential  --  wraps nfs3-rs auth_unix with stamp injection.
 #[derive(Debug, Clone)]
-pub enum Credential {
+pub(crate) enum Credential {
     /// No authentication.
     None,
 
@@ -46,7 +46,7 @@ pub enum Credential {
 /// The server trusts these values without verification.
 /// Changing uid/gid is all it takes to impersonate any user.
 #[derive(Debug, Clone)]
-pub struct AuthSys {
+pub(crate) struct AuthSys {
     /// Client hostname (spoofable, used for logging only).
     pub machinename: String,
     /// Effective UID  --  the identity the server will use for permission checks.
@@ -59,19 +59,19 @@ pub struct AuthSys {
 
 impl AuthSys {
     /// Create a new AUTH_SYS credential with specified identity.
-    pub fn new(uid: u32, gid: u32, hostname: &str) -> Self {
+    pub(crate) fn new(uid: u32, gid: u32, hostname: &str) -> Self {
         Self { machinename: hostname.to_owned(), uid, gid, gids: vec![gid] }
     }
 
     /// Create a root credential (uid=0, gid=0).
-    pub fn root(hostname: &str) -> Self {
+    pub(crate) fn root(hostname: &str) -> Self {
         Self::new(0, 0, hostname)
     }
 
     /// Create credential for a specific user, with auxiliary groups.
     ///
     /// Truncates to 16 GIDs  --  the AUTH_SYS maximum (RFC 5531 section 14).
-    pub fn with_groups(uid: u32, gid: u32, gids: &[u32], hostname: &str) -> Self {
+    pub(crate) fn with_groups(uid: u32, gid: u32, gids: &[u32], hostname: &str) -> Self {
         let truncated = gids.get(..16).unwrap_or(gids);
         Self { machinename: hostname.to_owned(), uid, gid, gids: truncated.to_vec() }
     }
@@ -81,7 +81,7 @@ impl AuthSys {
     /// The counter wraps back to 42 (not 0) at `u32::MAX` so the stamp never
     /// collides with values 0-41 which may be used by other clients and their
     /// duplicate-request caches (RFC 1057 section 9.2).
-    pub fn to_opaque_auth(&self) -> opaque_auth<'static> {
+    pub(crate) fn to_opaque_auth(&self) -> opaque_auth<'static> {
         let stamp = next_stamp();
         // AUTH_SYS allows at most 16 auxiliary GIDs (RFC 5531 S14).
         let gids = self.gids.get(..16).unwrap_or(&self.gids);
@@ -161,7 +161,7 @@ mod tests {
         for _ in 0..100 {
             let auth = cred.to_opaque_auth();
             let body = auth.body.as_ref().to_vec();
-            bodies.insert(body);
+            _ = bodies.insert(body);
         }
         assert_eq!(bodies.len(), 100, "100 consecutive stamps must all be unique");
     }

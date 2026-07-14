@@ -32,7 +32,7 @@ use crate::util::stealth::StealthConfig;
 /// Delegate to the underlying `NfsConnection` for each of the 22 NFSv3
 /// procedures. Handles credential injection, connection reuse, and
 /// transient error tracking.
-pub struct Nfs3Client {
+pub(crate) struct Nfs3Client {
     pool: Arc<ConnectionPool>,
     pool_key: PoolKey,
     circuit: Arc<CircuitBreaker>,
@@ -59,11 +59,10 @@ impl std::fmt::Debug for Nfs3Client {
 // recorded. Each RPC is wrapped in `tokio::time::timeout` so a stalled server
 // cannot pin the permit forever. `significant_drop_tightening` cannot see the
 // move-into-function and auto-suggests a use-after-move, so it is allowed here.
-#[allow(clippy::significant_drop_tightening, reason = "PooledConnection's admission permit is held intentionally for the whole RPC; finish_rpc consumes conn to drop it promptly")]
 impl Nfs3Client {
     /// Create a new client backed by the given pool and circuit breaker.
     #[must_use]
-    pub const fn new(pool: Arc<ConnectionPool>, pool_key: PoolKey, circuit: Arc<CircuitBreaker>, stealth: StealthConfig, credential: Credential, reconnect: ReconnectStrategy) -> Self {
+    pub(crate) const fn new(pool: Arc<ConnectionPool>, pool_key: PoolKey, circuit: Arc<CircuitBreaker>, stealth: StealthConfig, credential: Credential, reconnect: ReconnectStrategy) -> Self {
         Self { pool, pool_key, circuit, stealth, credential, reconnect, direct_nfs_port: None }
     }
 
@@ -72,25 +71,25 @@ impl Nfs3Client {
     /// Used with `--handle` when the portmapper or MOUNT daemon is not reachable but the
     /// NFS port is directly accessible (e.g., port 111 filtered, port 2049 open).
     #[must_use]
-    pub const fn new_direct(pool: Arc<ConnectionPool>, pool_key: PoolKey, circuit: Arc<CircuitBreaker>, stealth: StealthConfig, credential: Credential, reconnect: ReconnectStrategy, nfs_port: u16) -> Self {
+    pub(crate) const fn new_direct(pool: Arc<ConnectionPool>, pool_key: PoolKey, circuit: Arc<CircuitBreaker>, stealth: StealthConfig, credential: Credential, reconnect: ReconnectStrategy, nfs_port: u16) -> Self {
         Self { pool, pool_key, circuit, stealth, credential, reconnect, direct_nfs_port: Some(nfs_port) }
     }
 
     /// Get the server address this client connects to (for circuit breaker).
     #[must_use]
-    pub const fn host(&self) -> SocketAddr {
+    pub(crate) const fn host(&self) -> SocketAddr {
         self.pool_key.host
     }
 
     /// UID embedded in this client's AUTH_SYS credential.
     #[must_use]
-    pub const fn uid(&self) -> u32 {
+    pub(crate) const fn uid(&self) -> u32 {
         self.pool_key.uid
     }
 
     /// GID embedded in this client's AUTH_SYS credential.
     #[must_use]
-    pub const fn gid(&self) -> u32 {
+    pub(crate) const fn gid(&self) -> u32 {
         self.pool_key.gid
     }
 
@@ -99,7 +98,7 @@ impl Nfs3Client {
     /// / `hostname` spoof (F-1.4) survives the auto-UID ladder instead of
     /// being reset to a default. Falls back to "nfswolf" for `Credential::None`.
     #[must_use]
-    pub fn machinename(&self) -> &str {
+    pub(crate) fn machinename(&self) -> &str {
         match &self.credential {
             Credential::Sys(auth) => &auth.machinename,
             Credential::None => "nfswolf",
@@ -108,7 +107,7 @@ impl Nfs3Client {
 
     /// Clone this client with a different credential (new pool key for the new uid/gid).
     #[must_use]
-    pub fn with_credential(&self, cred: Credential, uid: u32, gid: u32) -> Self {
+    pub(crate) fn with_credential(&self, cred: Credential, uid: u32, gid: u32) -> Self {
         let mut key = self.pool_key.clone();
         key.uid = uid;
         key.gid = gid;
@@ -116,7 +115,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_NULL`  --  no-op, used to check connectivity.
-    pub async fn null(&self) -> anyhow::Result<()> {
+    pub(crate) async fn null(&self) -> anyhow::Result<()> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -126,7 +125,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_GETATTR`  --  get file attributes.
-    pub async fn getattr(&self, args: &GETATTR3args) -> anyhow::Result<GETATTR3res> {
+    pub(crate) async fn getattr(&self, args: &GETATTR3args) -> anyhow::Result<GETATTR3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -136,7 +135,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_SETATTR`  --  set file attributes.
-    pub async fn setattr(&self, args: &SETATTR3args) -> anyhow::Result<SETATTR3res> {
+    pub(crate) async fn setattr(&self, args: &SETATTR3args) -> anyhow::Result<SETATTR3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -146,7 +145,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_LOOKUP`  --  look up a name in a directory.
-    pub async fn lookup(&self, args: &LOOKUP3args<'_>) -> anyhow::Result<LOOKUP3res> {
+    pub(crate) async fn lookup(&self, args: &LOOKUP3args<'_>) -> anyhow::Result<LOOKUP3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -159,7 +158,7 @@ impl Nfs3Client {
     ///
     /// Note: ACCESS results are advisory only (RFC 1813 S3.3.4).
     /// Always confirm by attempting the actual operation.
-    pub async fn access(&self, args: &ACCESS3args) -> anyhow::Result<ACCESS3res> {
+    pub(crate) async fn access(&self, args: &ACCESS3args) -> anyhow::Result<ACCESS3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -169,7 +168,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_READLINK`  --  read a symbolic link target.
-    pub async fn readlink(&self, args: &READLINK3args) -> anyhow::Result<READLINK3res<'static>> {
+    pub(crate) async fn readlink(&self, args: &READLINK3args) -> anyhow::Result<READLINK3res<'static>> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -179,7 +178,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_READ`  --  read file data.
-    pub async fn read(&self, args: &READ3args) -> anyhow::Result<READ3res<'static>> {
+    pub(crate) async fn read(&self, args: &READ3args) -> anyhow::Result<READ3res<'static>> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -189,7 +188,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_WRITE`  --  write file data.
-    pub async fn write(&self, args: &WRITE3args<'_>) -> anyhow::Result<WRITE3res> {
+    pub(crate) async fn write(&self, args: &WRITE3args<'_>) -> anyhow::Result<WRITE3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -199,7 +198,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_CREATE`  --  create a file.
-    pub async fn create(&self, args: &CREATE3args<'_>) -> anyhow::Result<CREATE3res> {
+    pub(crate) async fn create(&self, args: &CREATE3args<'_>) -> anyhow::Result<CREATE3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -209,7 +208,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_MKDIR`  --  create a directory.
-    pub async fn mkdir(&self, args: &MKDIR3args<'_>) -> anyhow::Result<MKDIR3res> {
+    pub(crate) async fn mkdir(&self, args: &MKDIR3args<'_>) -> anyhow::Result<MKDIR3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -219,7 +218,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_SYMLINK`  --  create a symbolic link.
-    pub async fn symlink(&self, args: &SYMLINK3args<'_>) -> anyhow::Result<SYMLINK3res> {
+    pub(crate) async fn symlink(&self, args: &SYMLINK3args<'_>) -> anyhow::Result<SYMLINK3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -229,7 +228,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_MKNOD`  --  create a special file.
-    pub async fn mknod(&self, args: &MKNOD3args<'_>) -> anyhow::Result<MKNOD3res> {
+    pub(crate) async fn mknod(&self, args: &MKNOD3args<'_>) -> anyhow::Result<MKNOD3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -239,7 +238,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_REMOVE`  --  remove a file.
-    pub async fn remove(&self, args: &REMOVE3args<'_>) -> anyhow::Result<REMOVE3res> {
+    pub(crate) async fn remove(&self, args: &REMOVE3args<'_>) -> anyhow::Result<REMOVE3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -249,7 +248,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_RMDIR`  --  remove a directory.
-    pub async fn rmdir(&self, args: &RMDIR3args<'_>) -> anyhow::Result<RMDIR3res> {
+    pub(crate) async fn rmdir(&self, args: &RMDIR3args<'_>) -> anyhow::Result<RMDIR3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -259,7 +258,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_RENAME`  --  rename a file.
-    pub async fn rename(&self, args: &RENAME3args<'_, '_>) -> anyhow::Result<RENAME3res> {
+    pub(crate) async fn rename(&self, args: &RENAME3args<'_, '_>) -> anyhow::Result<RENAME3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -269,7 +268,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_LINK`  --  create a hard link.
-    pub async fn link(&self, args: &LINK3args<'_>) -> anyhow::Result<LINK3res> {
+    pub(crate) async fn link(&self, args: &LINK3args<'_>) -> anyhow::Result<LINK3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -279,7 +278,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_READDIR`  --  read directory entries.
-    pub async fn readdir(&self, args: &READDIR3args) -> anyhow::Result<READDIR3res<'static>> {
+    pub(crate) async fn readdir(&self, args: &READDIR3args) -> anyhow::Result<READDIR3res<'static>> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -289,7 +288,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_READDIRPLUS`  --  read directory entries with attributes.
-    pub async fn readdirplus(&self, args: &READDIRPLUS3args) -> anyhow::Result<READDIRPLUS3res<'static>> {
+    pub(crate) async fn readdirplus(&self, args: &READDIRPLUS3args) -> anyhow::Result<READDIRPLUS3res<'static>> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -299,7 +298,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_FSSTAT`  --  get filesystem statistics.
-    pub async fn fsstat(&self, args: &FSSTAT3args) -> anyhow::Result<FSSTAT3res> {
+    pub(crate) async fn fsstat(&self, args: &FSSTAT3args) -> anyhow::Result<FSSTAT3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -309,7 +308,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_FSINFO`  --  get filesystem capabilities.
-    pub async fn fsinfo(&self, args: &FSINFO3args) -> anyhow::Result<FSINFO3res> {
+    pub(crate) async fn fsinfo(&self, args: &FSINFO3args) -> anyhow::Result<FSINFO3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -319,7 +318,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_PATHCONF`  --  get filesystem path configuration.
-    pub async fn pathconf(&self, args: &PATHCONF3args) -> anyhow::Result<PATHCONF3res> {
+    pub(crate) async fn pathconf(&self, args: &PATHCONF3args) -> anyhow::Result<PATHCONF3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -329,7 +328,7 @@ impl Nfs3Client {
     }
 
     /// Issue `NFSPROC3_COMMIT`  --  force unstable writes to stable storage.
-    pub async fn commit(&self, args: &COMMIT3args) -> anyhow::Result<COMMIT3res> {
+    pub(crate) async fn commit(&self, args: &COMMIT3args) -> anyhow::Result<COMMIT3res> {
         let addr = self.pool_key.host;
         self.circuit.check_or_wait(addr)?;
         self.stealth.wait().await;
@@ -343,7 +342,7 @@ impl Nfs3Client {
     /// Unlike the per-method checkout, this returns the `PooledConnection` directly
     /// so callers can issue many RPC calls on the same TCP session with different
     /// credentials without creating a new connection per call.
-    pub async fn checkout_one(&self) -> anyhow::Result<PooledConnection> {
+    pub(crate) async fn checkout_one(&self) -> anyhow::Result<PooledConnection> {
         self.checkout().await
     }
 

@@ -51,7 +51,7 @@ use crate::util::stealth::StealthConfig;
 ///   nfswolf brute-handle 192.168.1.10:/srv
 ///   nfswolf brute-handle 192.168.1.10 --seed-handle 01000200... --fs-type xfs
 #[derive(Parser)]
-pub struct BruteHandleArgs {
+pub(crate) struct BruteHandleArgs {
     /// Target host with optional :/export (e.g. 10.0.0.5:/srv).
     /// The export is mounted to derive the seed handle when --seed-handle is omitted.
     #[arg(help_heading = H_TARGET, value_name = "TARGET")]
@@ -90,7 +90,7 @@ pub struct BruteHandleArgs {
 }
 
 /// Run the brute-handle command.
-pub async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     // Reuse the shared target parser: `host:/export` derives a seed via MOUNT,
     // `--seed-handle HEX` is an explicit override (passed as the handle source,
     // so the parser's colon-vs-handle conflict rules apply for free).
@@ -182,11 +182,12 @@ async fn writability_hint(client: &Nfs3Client, fh: &FileHandle) -> String {
     // Retry the advisory check as the object's owner: catches a rw export where
     // root is squashed but the owning UID can still write.
     if let Ok(Nfs3Result::Ok(ga)) = client.getattr(&GETATTR3args { object: fh.to_nfs_fh3() }).await {
-        let (ouid, ogid) = (ga.obj_attributes.uid, ga.obj_attributes.gid);
-        if ouid != 0 {
-            let owner = client.with_credential(Credential::Sys(AuthSys::with_groups(ouid, ogid, &[ogid], "nfswolf")), ouid, ogid);
+        let attr_uid = ga.obj_attributes.uid;
+        let attr_group = ga.obj_attributes.gid;
+        if attr_uid != 0 {
+            let owner = client.with_credential(Credential::Sys(AuthSys::with_groups(attr_uid, attr_group, &[attr_group], "nfswolf")), attr_uid, attr_group);
             if access_grants_write(&owner, fh).await {
-                return format!("writable as owner uid={ouid} (advisory)");
+                return format!("writable as owner uid={attr_uid} (advisory)");
             }
         }
     }

@@ -34,7 +34,7 @@ impl HostHealth {
     fn evict_stale(&mut self, window: Duration) {
         let cutoff = Instant::now().checked_sub(window).unwrap_or_else(Instant::now);
         while self.events.front().is_some_and(|(ts, _)| *ts < cutoff) {
-            self.events.pop_front();
+            _ = self.events.pop_front();
         }
     }
 
@@ -60,7 +60,7 @@ impl HostHealth {
 /// in the rolling `window` are transient failures. Recovers automatically
 /// after cooldown with jitter.
 #[derive(Debug)]
-pub struct CircuitBreaker {
+pub(crate) struct CircuitBreaker {
     hosts: DashMap<SocketAddr, HostHealth>,
     /// Time window for the sliding error rate calculation.
     window: Duration,
@@ -77,18 +77,18 @@ pub struct CircuitBreaker {
 impl CircuitBreaker {
     /// Create a new circuit breaker with the given parameters.
     #[must_use]
-    pub fn new(window: Duration, error_threshold: f64, min_samples: usize, base_cooldown: Duration, max_cooldown: Duration) -> Self {
+    pub(crate) fn new(window: Duration, error_threshold: f64, min_samples: usize, base_cooldown: Duration, max_cooldown: Duration) -> Self {
         Self { hosts: DashMap::new(), window, error_threshold, min_samples, base_cooldown, max_cooldown }
     }
 
     /// Create with default parameters suitable for NFS scanning.
     #[must_use]
-    pub fn default_config() -> Self {
+    pub(crate) fn default_config() -> Self {
         Self::new(Duration::from_mins(1), 0.80, 10, Duration::from_secs(5), Duration::from_mins(5))
     }
 
     /// Record a successful transient-eligible call to `addr`.
-    pub fn record_success(&self, addr: SocketAddr) {
+    pub(crate) fn record_success(&self, addr: SocketAddr) {
         let mut h = self.hosts.entry(addr).or_insert_with(HostHealth::new);
         h.evict_stale(self.window);
         h.events.push_back((Instant::now(), true));
@@ -101,7 +101,7 @@ impl CircuitBreaker {
     /// Record a transient failure for `addr`.
     ///
     /// Permission denials must NOT be passed here  --  use only for IO/timeout errors.
-    pub fn record_failure(&self, addr: SocketAddr) {
+    pub(crate) fn record_failure(&self, addr: SocketAddr) {
         let now = Instant::now();
         let mut h = self.hosts.entry(addr).or_insert_with(HostHealth::new);
         h.evict_stale(self.window);
@@ -124,14 +124,14 @@ impl CircuitBreaker {
 
     /// Returns true if the breaker for `addr` is currently open (blocking calls).
     #[must_use]
-    pub fn is_tripped(&self, addr: SocketAddr) -> bool {
+    pub(crate) fn is_tripped(&self, addr: SocketAddr) -> bool {
         self.hosts.get(&addr).and_then(|h| h.tripped_until).is_some_and(|until| until > Instant::now())
     }
 
     /// Return `Ok(())` if the breaker is closed, `Err` if open.
     ///
     /// Logs a warning when within 20% of the trip threshold.
-    pub fn check_or_wait(&self, addr: SocketAddr) -> anyhow::Result<()> {
+    pub(crate) fn check_or_wait(&self, addr: SocketAddr) -> anyhow::Result<()> {
         if self.is_tripped(addr) {
             anyhow::bail!("circuit breaker open for {addr}");
         }
@@ -163,7 +163,7 @@ impl CircuitBreaker {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr};
 
     use super::*;
 

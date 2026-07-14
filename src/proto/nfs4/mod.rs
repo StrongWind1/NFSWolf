@@ -20,13 +20,13 @@
 //! - NFSv4 ACLs (fattr4_acl) not visible through v3 mode bits
 //! - Session cleanup (DESTROY_SESSION / DESTROY_CLIENTID) for stealth
 
-pub mod compound;
-pub mod types;
+pub(crate) mod compound;
+pub(crate) mod types;
 
 /// NFSv4 compound operation codes relevant to security analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum Nfs4Op {
+pub(crate) enum Nfs4Op {
     /// Check access permissions.
     Access = 3,
     /// Close a stateful open.
@@ -73,7 +73,7 @@ pub enum Nfs4Op {
 
 /// NFSv4 pseudo-filesystem entry discovered during recursive mapping.
 #[derive(Debug, Clone)]
-pub struct PseudoFsEntry {
+pub(crate) struct PseudoFsEntry {
     /// Path in the pseudo-filesystem (e.g., "/exports/home")
     pub path: String,
     /// Filesystem ID  --  changes at export boundaries.

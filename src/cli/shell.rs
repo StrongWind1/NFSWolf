@@ -41,7 +41,7 @@ use crate::util::stealth::StealthConfig;
 ///   nfswolf shell 192.168.1.10 --handle 01000200abcdef... --allow-write
 ///   nfswolf shell 192.168.1.10:/srv --uid 0
 #[derive(Parser)]
-pub struct ShellArgs {
+pub(crate) struct ShellArgs {
     /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
     #[arg(help_heading = H_TARGET)]
     pub target: String,
@@ -69,7 +69,7 @@ pub struct ShellArgs {
 }
 
 /// Entry point for the `shell` subcommand.
-pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     tracing::info!(target = %args.target, "starting NFS shell");
 
     // NFSv4 mode: bypass MOUNT, connect directly to port 2049.
@@ -154,7 +154,7 @@ pub async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
         let prompt = format!("nfswolf@{host}:{} uid={} gid={}> ", shell.cwd_path(), shell.current_uid(), shell.current_gid());
         match rl.readline(&prompt) {
             Ok(line) => {
-                let _ = rl.add_history_entry(&line);
+                drop(rl.add_history_entry(&line));
                 let trimmed = line.trim();
                 if trimmed == "exit" || trimmed == "quit" {
                     break;
@@ -203,7 +203,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 
     let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
     let host = target.host;
-    let _ = target.source; // NFSv4 path doesn't use MOUNT or raw handle
+    drop(target.source); // NFSv4 path doesn't use MOUNT or raw handle
     let nfs_port = globals.nfs_port.unwrap_or(2049);
     let addr = SocketAddr::new(host, nfs_port);
     let mut uid = globals.uid;
@@ -238,7 +238,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
         let prompt = format!("nfswolf@{host}:{cwd_path} uid={uid} hostname={hostname} [v4]> ");
         match rl.readline(&prompt) {
             Ok(line) => {
-                let _ = rl.add_history_entry(&line);
+                drop(rl.add_history_entry(&line));
                 let trimmed = line.trim();
                 if trimmed == "exit" || trimmed == "quit" {
                     break;
@@ -257,7 +257,6 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 }
 
 /// Dispatch a single command in the NFSv4 shell REPL.
-#[allow(clippy::too_many_arguments, reason = "NFSv4 shell session state requires uid/gid/hostname alongside client and path")]
 async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, line: &str, cwd_fh: &mut Vec<u8>, cwd_path: &mut String, allow_write: bool, uid: &mut u32, gid: &mut u32, hostname: &mut String) {
     let _ = allow_write; // write ops not yet implemented in NFSv4 shell
     let mut parts = line.split_whitespace();
@@ -473,7 +472,7 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
         match part {
             "" | "." => {},
             ".." => {
-                components.pop();
+                drop(components.pop());
             },
             other => components.push(other.to_owned()),
         }

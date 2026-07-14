@@ -47,7 +47,7 @@ const MAX_SERVICE_CREDS: usize = 5;
 ///
 /// Avoids a 6-argument function signature.
 #[derive(Debug)]
-pub struct AccessTarget<'a> {
+pub(crate) struct AccessTarget<'a> {
     /// Opaque file handle obtained from READDIRPLUS or LOOKUP.
     pub fh: &'a FileHandle,
     /// UID returned by GETATTR for this file.
@@ -66,7 +66,7 @@ pub struct AccessTarget<'a> {
 ///
 /// Returns the first (uid, gid) pair that the server grants access to,
 /// or `None` if all steps fail.
-pub struct AutoUidResolver {
+pub(crate) struct AutoUidResolver {
     nfs3: Nfs3Client,
     circuit: Arc<CircuitBreaker>,
     stealth: StealthConfig,
@@ -90,20 +90,20 @@ impl std::fmt::Debug for AutoUidResolver {
 impl AutoUidResolver {
     /// Create a resolver backed by the given NFSv3 client.
     #[must_use]
-    pub const fn new(nfs3: Nfs3Client, circuit: Arc<CircuitBreaker>, stealth: StealthConfig) -> Self {
+    pub(crate) const fn new(nfs3: Nfs3Client, circuit: Arc<CircuitBreaker>, stealth: StealthConfig) -> Self {
         Self { nfs3, circuit, stealth, has_v2: false, harvested_creds: Vec::new(), brute_enabled: false, max_brute_attempts: DEFAULT_MAX_BRUTE }
     }
 
     /// Enable or disable the NFSv2 downgrade step.
     #[must_use]
-    pub const fn with_v2(mut self, enabled: bool) -> Self {
+    pub(crate) const fn with_v2(mut self, enabled: bool) -> Self {
         self.has_v2 = enabled;
         self
     }
 
     /// Enable brute-force (step 8) with a maximum attempt count.
     #[must_use]
-    pub const fn with_brute(mut self, enabled: bool, max: usize) -> Self {
+    pub(crate) const fn with_brute(mut self, enabled: bool, max: usize) -> Self {
         self.brute_enabled = enabled;
         self.max_brute_attempts = max;
         self
@@ -113,7 +113,7 @@ impl AutoUidResolver {
     ///
     /// Called incrementally as directory pages arrive. Duplicates are
     /// discarded; root (0, 0) is excluded because it's tried in step 6.
-    pub fn harvest_creds(&mut self, entries: &[DirEntryPlus]) {
+    pub(crate) fn harvest_creds(&mut self, entries: &[DirEntryPlus]) {
         for entry in entries {
             if let Some(attrs) = &entry.attrs {
                 let pair = (attrs.uid, attrs.gid);
@@ -162,7 +162,7 @@ impl AutoUidResolver {
     ///
     /// Permission denials are expected and logged at DEBUG  --  they do not trip
     /// the circuit breaker (RFC 1813 S3.3.4: ACCESS is advisory).
-    pub async fn try_access(&self, fh: &FileHandle, uid: u32, gid: u32, aux_gids: &[u32]) -> bool {
+    pub(crate) async fn try_access(&self, fh: &FileHandle, uid: u32, gid: u32, aux_gids: &[u32]) -> bool {
         // ALL access bits  --  we want to know if ANY access is granted.
         const ALL_BITS: u32 = 0x003f;
 
@@ -201,7 +201,7 @@ impl AutoUidResolver {
     /// These are Debian/Ubuntu UIDs. Other distributions use different values
     /// but the defaults cover the most common case. Cap at `MAX_SERVICE_CREDS`.
     #[must_use]
-    pub fn service_creds_for_path(path: &str) -> Vec<(u32, u32)> {
+    pub(crate) fn service_creds_for_path(path: &str) -> Vec<(u32, u32)> {
         let mut creds: Vec<(u32, u32)> = Vec::new();
 
         if path.starts_with("/var/www") {
@@ -239,12 +239,12 @@ impl AutoUidResolver {
     /// Returns the first (uid, gid) pair that is granted any access,
     /// or `None` if every step fails. The caller should log all attempted
     /// credentials for the findings report when `None` is returned.
-    pub async fn resolve_access(&self, target: &AccessTarget<'_>) -> Option<(u32, u32)> {
+    pub(crate) async fn resolve_access(&self, target: &AccessTarget<'_>) -> Option<(u32, u32)> {
         let fh = target.fh;
         let file_uid = target.file_uid;
-        let file_gid = target.file_gid;
+        let owner_gid = target.file_gid;
         let current_uid = target.current_uid;
-        let current_gid = target.current_gid;
+        let caller_gid = target.current_gid;
 
         // Step 1: NFSv2 downgrade.
         // v2 has zero security negotiation (RFC 2623 S2.7); some servers
@@ -257,29 +257,29 @@ impl AutoUidResolver {
         }
 
         // Step 2: current credential (--uid/--gid or default).
-        debug!(uid = current_uid, gid = current_gid, "step 2: current credential");
-        if self.try_access(fh, current_uid, current_gid, &[]).await {
-            return Some((current_uid, current_gid));
+        debug!(uid = current_uid, gid = caller_gid, "step 2: current credential");
+        if self.try_access(fh, current_uid, caller_gid, &[]).await {
+            return Some((current_uid, caller_gid));
         }
 
         // Step 3: file owner UID + file owner GID.
-        if (file_uid, file_gid) != (current_uid, current_gid) {
-            debug!(uid = file_uid, gid = file_gid, "step 3: file owner uid+gid");
-            if self.try_access(fh, file_uid, file_gid, &[]).await {
-                return Some((file_uid, file_gid));
+        if (file_uid, owner_gid) != (current_uid, caller_gid) {
+            debug!(uid = file_uid, gid = owner_gid, "step 3: file owner uid+gid");
+            if self.try_access(fh, file_uid, owner_gid, &[]).await {
+                return Some((file_uid, owner_gid));
             }
         }
 
         // Step 4: our UID + file owner GID (group access via mode & 0o070).
-        if file_gid != current_gid {
-            debug!(uid = current_uid, gid = file_gid, "step 4: our uid + file gid");
-            if self.try_access(fh, current_uid, file_gid, &[file_gid]).await {
-                return Some((current_uid, file_gid));
+        if owner_gid != caller_gid {
+            debug!(uid = current_uid, gid = owner_gid, "step 4: our uid + file gid");
+            if self.try_access(fh, current_uid, owner_gid, &[owner_gid]).await {
+                return Some((current_uid, owner_gid));
             }
         }
 
         // Step 5: file owner UID + each harvested GID (most common GID first, cap 5).
-        let harvested_gids = self.ranked_harvested_gids(file_gid, current_gid);
+        let harvested_gids = self.ranked_harvested_gids(owner_gid, caller_gid);
         for gid in &harvested_gids {
             debug!(uid = file_uid, gid, "step 5: file uid + harvested gid");
             if self.try_access(fh, file_uid, *gid, &[*gid]).await {

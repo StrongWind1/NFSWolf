@@ -29,7 +29,7 @@ use crate::util::stealth::StealthConfig;
 ///
 /// All calls are issued as NFSv4 COMPOUND RPCs (the only non-NULL NFSv4 procedure).
 /// This is stateless in the v4.0 sense  --  no clientid or sessions are managed here.
-pub struct Nfs4Client {
+pub(crate) struct Nfs4Client {
     pool: Arc<ConnectionPool>,
     pool_key: PoolKey,
     credential: Credential,
@@ -48,7 +48,7 @@ impl Nfs4Client {
     ///
     /// Stealth defaults to off; chain `with_stealth` to honor `--delay`/`--jitter`.
     #[must_use]
-    pub const fn new(pool: Arc<ConnectionPool>, pool_key: PoolKey, credential: Credential) -> Self {
+    pub(crate) const fn new(pool: Arc<ConnectionPool>, pool_key: PoolKey, credential: Credential) -> Self {
         Self { pool, pool_key, credential, stealth: StealthConfig::none() }
     }
 
@@ -57,7 +57,7 @@ impl Nfs4Client {
     /// Additive builder: `new` keeps its signature so existing call sites are
     /// unaffected; callers with a configured `StealthConfig` chain this.
     #[must_use]
-    pub const fn with_stealth(mut self, stealth: StealthConfig) -> Self {
+    pub(crate) const fn with_stealth(mut self, stealth: StealthConfig) -> Self {
         self.stealth = stealth;
         self
     }
@@ -65,7 +65,7 @@ impl Nfs4Client {
     /// Send a COMPOUND containing `ops` and return the full response.
     ///
     /// Uses an empty tag and minorversion=0 (NFSv4.0).
-    pub async fn compound(&self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
+    pub(crate) async fn compound(&self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
         // Pace v4 traffic like the v2/v3 clients (Critical Design Rule 10).
         self.stealth.wait().await;
         let args = CompoundArgs { tag: String::new(), minorversion: 0, ops };
@@ -76,7 +76,7 @@ impl Nfs4Client {
     /// Look up a slash-decomposed path and request `attrs` on the final component.
     ///
     /// Builds: PUTROOTFH, LOOKUP(c1), LOOKUP(c2), ..., GETATTR.
-    pub async fn lookup_path(&self, components: &[&str], attrs: AttrRequest) -> anyhow::Result<CompoundRes> {
+    pub(crate) async fn lookup_path(&self, components: &[&str], attrs: AttrRequest) -> anyhow::Result<CompoundRes> {
         let mut ops = Vec::with_capacity(components.len() + 2);
         ops.push(ArgOp::Putrootfh);
         for &c in components {
@@ -90,7 +90,7 @@ impl Nfs4Client {
     ///
     /// Builds: PUTROOTFH, LOOKUP(p1), ..., SECINFO(name).
     /// SECINFO reveals which Kerberos/RPCSEC_GSS flavors the server requires (F-3.4).
-    pub async fn secinfo(&self, parent_components: &[&str], name: &str) -> anyhow::Result<CompoundRes> {
+    pub(crate) async fn secinfo(&self, parent_components: &[&str], name: &str) -> anyhow::Result<CompoundRes> {
         let mut ops = Vec::with_capacity(parent_components.len() + 2);
         ops.push(ArgOp::Putrootfh);
         for &c in parent_components {
@@ -105,7 +105,7 @@ impl Nfs4Client {
     /// Sends PUTROOTFH + GETFH + GETATTR(fsid) to discover the root.
     /// Returns a single PseudoFsEntry for the root.  Callers that need deeper
     /// enumeration should issue READDIR calls and recurse using `lookup_path`.
-    pub async fn map_pseudo_fs(&self, _depth: u32) -> anyhow::Result<Vec<PseudoFsEntry>> {
+    pub(crate) async fn map_pseudo_fs(&self, _depth: u32) -> anyhow::Result<Vec<PseudoFsEntry>> {
         let ops = vec![ArgOp::Putrootfh, ArgOp::Getfh, ArgOp::Getattr(AttrRequest::fsid_only())];
         let res = self.compound(ops).await.context("pseudo-FS root probe")?;
         // Even a partial success (status != 0 but PUTROOTFH succeeded) tells us
@@ -149,7 +149,7 @@ impl Nfs4Client {
 ///
 /// Stateless NFSv4.0: no clientid or lease management.  Each COMPOUND is
 /// sent using the anonymous principal (AUTH_NONE, null verifier).
-pub struct Nfs4DirectClient {
+pub(crate) struct Nfs4DirectClient {
     rpc: RpcClient<TokioIo<TcpStream>>,
     addr: SocketAddr,
     proxy: Option<String>,
@@ -197,12 +197,12 @@ impl Nfs4DirectClient {
     ///
     /// Suitable for anonymous probes (scanner, analyzer).  For interactive shell
     /// use `connect_with_auth` so UID/GID/hostname are sent in every COMPOUND.
-    pub async fn connect(addr: SocketAddr) -> anyhow::Result<Self> {
+    pub(crate) async fn connect(addr: SocketAddr) -> anyhow::Result<Self> {
         Self::connect_proxy(addr, None).await
     }
 
     /// Connect via an optional SOCKS5 proxy, using AUTH_NONE.
-    pub async fn connect_proxy(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Self> {
+    pub(crate) async fn connect_proxy(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Self> {
         let null_auth = nfs3_types::rpc::opaque_auth::default();
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, null_auth.clone(), null_auth);
@@ -214,12 +214,12 @@ impl Nfs4DirectClient {
     /// The credential is injected into every COMPOUND call via the standard
     /// AUTH_SYS opaque_auth structure (RFC 5531 S14 / RFC 2623 S2.1).
     /// The server cannot verify these claims, so any values can be spoofed.
-    pub async fn connect_with_auth(addr: SocketAddr, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<Self> {
+    pub(crate) async fn connect_with_auth(addr: SocketAddr, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<Self> {
         Self::connect_with_auth_proxy(addr, uid, gid, hostname, None).await
     }
 
     /// Connect with AUTH_SYS via an optional SOCKS5 proxy.
-    pub async fn connect_with_auth_proxy(addr: SocketAddr, uid: u32, gid: u32, hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
+    pub(crate) async fn connect_with_auth_proxy(addr: SocketAddr, uid: u32, gid: u32, hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
         let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth();
         let io = Self::connect_tcp(addr, proxy).await?;
@@ -234,7 +234,7 @@ impl Nfs4DirectClient {
     /// the v3 shell does (e.g. `--aux-gids 42` to read /etc/shadow without
     /// no_root_squash). `aux_gids` are the auxiliary groups only; the primary
     /// `gid` is prepended automatically and the set is retained for reconnects.
-    pub async fn connect_with_groups_proxy(addr: SocketAddr, uid: u32, gid: u32, aux_gids: &[u32], hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
+    pub(crate) async fn connect_with_groups_proxy(addr: SocketAddr, uid: u32, gid: u32, aux_gids: &[u32], hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
         let gids = merge_gids(gid, aux_gids);
         let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth();
@@ -249,7 +249,7 @@ impl Nfs4DirectClient {
     /// by the scanner, analyzer, and v4 shell) and default to no stealth;
     /// callers with a configured `StealthConfig` chain this after connecting.
     #[must_use]
-    pub const fn with_stealth(mut self, stealth: StealthConfig) -> Self {
+    pub(crate) const fn with_stealth(mut self, stealth: StealthConfig) -> Self {
         self.stealth = stealth;
         self
     }
@@ -261,7 +261,7 @@ impl Nfs4DirectClient {
     /// because `RpcClient` owns the IO and does not expose a credential setter.
     /// The retained `aux_gids` are re-applied (with the possibly-changed primary
     /// `gid`) so the shadow-GID trick survives a mid-session identity change.
-    pub async fn reconnect_with_auth(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
+    pub(crate) async fn reconnect_with_auth(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         use crate::proto::auth::AuthSys;
         let gids = merge_gids(gid, &self.aux_gids);
         let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth();
@@ -273,7 +273,7 @@ impl Nfs4DirectClient {
     /// Send a COMPOUND containing `ops` and return the full response.
     ///
     /// Uses an empty tag and minorversion=0 (NFSv4.0).
-    pub async fn compound(&mut self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
+    pub(crate) async fn compound(&mut self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
         // Pace v4 traffic like the v2/v3 clients (Critical Design Rule 10).
         self.stealth.wait().await;
         let args = CompoundArgs { tag: String::new(), minorversion: 0, ops };
@@ -284,7 +284,7 @@ impl Nfs4DirectClient {
     ///
     /// On success, the returned bytes can be used in subsequent PUTFH operations
     /// to avoid re-issuing the PUTROOTFH + LOOKUP chain on every call.
-    pub async fn get_root_fh(&mut self) -> anyhow::Result<Vec<u8>> {
+    pub(crate) async fn get_root_fh(&mut self) -> anyhow::Result<Vec<u8>> {
         let res = self.compound(vec![ArgOp::Putrootfh, ArgOp::Getfh]).await?;
         anyhow::ensure!(res.status == 0, "PUTROOTFH/GETFH failed: NFSv4 status={}", res.status);
         match res.results.get(1).map(|op| &op.data) {
@@ -298,7 +298,7 @@ impl Nfs4DirectClient {
     /// For root (`"/"`) pass an empty slice.
     /// For `"/etc"` pass `&["etc"]`.
     /// For `"/etc/nfs"` pass `&["etc", "nfs"]`.
-    pub async fn lookup_fh(&mut self, components: &[&str]) -> anyhow::Result<Vec<u8>> {
+    pub(crate) async fn lookup_fh(&mut self, components: &[&str]) -> anyhow::Result<Vec<u8>> {
         if components.is_empty() {
             return self.get_root_fh().await;
         }
@@ -337,7 +337,7 @@ impl Nfs4DirectClient {
     /// (returning NFS4ERR_NOT_SAME / NFS4ERR_BAD_COOKIE) will error on continuation
     /// rather than truncate; fully correct pagination requires surfacing the
     /// cookieverf from the decoder in `proto::nfs4::types` (cross-module change).
-    pub async fn list_dir(&mut self, dir_fh: &[u8]) -> anyhow::Result<Vec<String>> {
+    pub(crate) async fn list_dir(&mut self, dir_fh: &[u8]) -> anyhow::Result<Vec<String>> {
         // Hard cap against a server that never signals eof (untrusted-server
         // hardening; mirrors the v3 shell readdir cap).
         const MAX_READDIR_ENTRIES: usize = 1_000_000;
@@ -387,7 +387,7 @@ impl Nfs4DirectClient {
     ///
     /// Returns `(data, eof)`.  The anonymous stateid (all zeros, RFC 7530 S9.1.4.3)
     /// allows reading without a prior OPEN call on most servers.
-    pub async fn read_chunk(&mut self, file_fh: &[u8], offset: u64, count: u32) -> anyhow::Result<(Vec<u8>, bool)> {
+    pub(crate) async fn read_chunk(&mut self, file_fh: &[u8], offset: u64, count: u32) -> anyhow::Result<(Vec<u8>, bool)> {
         // Anonymous stateid: seqid=0, other=[0;12] (RFC 7530 S9.1.4.3).
         let stateid = [0u8; 16];
         let ops = vec![ArgOp::Putfh(file_fh.to_vec()), ArgOp::Read { stateid, offset, count }];
@@ -401,7 +401,7 @@ impl Nfs4DirectClient {
 
     /// Server address this client is connected to.
     #[must_use]
-    pub const fn addr(&self) -> SocketAddr {
+    pub(crate) const fn addr(&self) -> SocketAddr {
         self.addr
     }
 }
@@ -411,7 +411,7 @@ impl Nfs4DirectClient {
 /// Sends `PUTROOTFH` and returns `true` if the server responds with `NFS4_OK`.
 /// Used by the scanner to confirm NFSv4 reachability independent of portmapper.
 /// When `proxy` is `Some`, the TCP connection is tunnelled through SOCKS5.
-pub async fn probe_nfs4(ip: IpAddr, probe_timeout: Duration, proxy: Option<&str>) -> bool {
+pub(crate) async fn probe_nfs4(ip: IpAddr, probe_timeout: Duration, proxy: Option<&str>) -> bool {
     let addr = SocketAddr::new(ip, 2049);
     let connect = tokio::time::timeout(probe_timeout, Nfs4DirectClient::connect_proxy(addr, proxy)).await;
     let Ok(Ok(mut client)) = connect else { return false };

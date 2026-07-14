@@ -42,7 +42,7 @@ use nfs3_types::nfs3::Nfs3Result;
 ///   nfswolf escape 192.168.1.10:/srv
 ///   nfswolf escape 192.168.1.10 --export /srv --btrfs-subvols 32
 #[derive(Parser)]
-pub struct EscapeArgs {
+pub(crate) struct EscapeArgs {
     /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
     #[arg(help_heading = H_TARGET, value_name = "TARGET")]
     pub target: String,
@@ -64,12 +64,12 @@ pub struct EscapeArgs {
 
 /// Default BTRFS subvolume scan count. Shared with `scan --auto-escape` so the
 /// auto pass uses the same depth as a manual `escape` invocation.
-pub const DEFAULT_BTRFS_SUBVOLS: u32 = 16;
+pub(crate) const DEFAULT_BTRFS_SUBVOLS: u32 = 16;
 
 /// Default inode-scan depth for the escape fallback pass. The root inode is
 /// always within the first 200 inodes on any Linux filesystem. Shared with
 /// `scan --auto-escape`.
-pub const DEFAULT_MAX_ROOT_SCAN: u32 = 200;
+pub(crate) const DEFAULT_MAX_ROOT_SCAN: u32 = 200;
 
 /// Outcome of an escape attempt against a single export.
 ///
@@ -77,7 +77,7 @@ pub const DEFAULT_MAX_ROOT_SCAN: u32 = 200;
 /// subcommand prints a verbose report (and reads /etc/shadow on success), while
 /// `scan --auto-escape` prints a one-line-per-export summary.
 #[derive(Debug)]
-pub enum EscapeOutcome {
+pub(crate) enum EscapeOutcome {
     /// A filesystem-root handle was constructed and verified live (GETATTR
     /// returned NFS3_OK on a directory, or ACCES -- format accepted).
     Success {
@@ -95,7 +95,7 @@ pub enum EscapeOutcome {
 }
 
 /// Run the escape command.
-pub async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     let target = crate::cli::target::parse(&args.target, args.export.as_deref(), None, true)?;
     let host = target.host.to_string();
     let export = target.export().unwrap_or("/").to_owned();
@@ -148,7 +148,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
 /// Per-candidate progress lines are written to stderr only when `announce` is
 /// set. Bulk callers (`scan --auto-escape`) pass `false` and print their own
 /// one-line-per-export summary instead.
-pub async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<(Nfs3Client, EscapeOutcome)> {
+pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<(Nfs3Client, EscapeOutcome)> {
     use nfs3_types::nfs3::nfsstat3;
     let addr = parse_addr_with_port(host, globals.nfs_port)?;
     let mount = make_mount_client(globals);

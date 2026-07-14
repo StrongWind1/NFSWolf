@@ -33,7 +33,7 @@ use crate::report;
 ///   nfswolf convert -i results.json --format markdown -o report.md --title "Client NFS Audit"
 ///   nfswolf convert -i results.json --format csv -o findings.csv
 #[derive(Parser)]
-pub struct ConvertArgs {
+pub(crate) struct ConvertArgs {
     /// JSON input file produced by `analyze --json > FILE`
     #[arg(short = 'i', long, value_name = "FILE", help_heading = H_OUTPUT)]
     pub input: String,
@@ -54,7 +54,7 @@ pub struct ConvertArgs {
 
 /// Available report output formats.
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum ReportFormat {
+pub(crate) enum ReportFormat {
     /// ANSI-coloured terminal summary (prints to stdout)
     Console,
     /// Self-contained HTML with embedded CSS and severity charts
@@ -73,7 +73,7 @@ pub enum ReportFormat {
 ///
 /// Reads `args.input` as JSON, deserialises it as `Vec<AnalysisResult>`,
 /// then writes the rendered report to `args.output`.
-pub fn run(args: &ConvertArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+pub(crate) fn run(args: &ConvertArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     tracing::info!(input = %args.input, output = %args.output, "generating report");
 
     let content = fs::read_to_string(&args.input).map_err(|e| anyhow::anyhow!("cannot read {}: {e}", args.input))?;

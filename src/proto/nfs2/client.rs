@@ -23,7 +23,7 @@ use crate::util::stealth::StealthConfig;
 ///
 /// Since NFSv2 has no auth negotiation (RFC 2623 S2.7), it is the preferred
 /// downgrade path when the server supports both v2 and v3.
-pub struct Nfs2Client {
+pub(crate) struct Nfs2Client {
     pool: Arc<ConnectionPool>,
     pool_key: PoolKey,
     circuit: Arc<CircuitBreaker>,
@@ -40,18 +40,18 @@ impl std::fmt::Debug for Nfs2Client {
 impl Nfs2Client {
     /// Create a new NFSv2 client using the given connection pool.
     #[must_use]
-    pub const fn new(pool: Arc<ConnectionPool>, pool_key: PoolKey, circuit: Arc<CircuitBreaker>, stealth: StealthConfig, credential: Credential) -> Self {
+    pub(crate) const fn new(pool: Arc<ConnectionPool>, pool_key: PoolKey, circuit: Arc<CircuitBreaker>, stealth: StealthConfig, credential: Credential) -> Self {
         Self { pool, pool_key, circuit, stealth, credential }
     }
 
     /// NFSPROC_NULL (proc 0)  --  no-op connectivity check.
-    pub async fn null(&self) -> anyhow::Result<()> {
+    pub(crate) async fn null(&self) -> anyhow::Result<()> {
         self.raw_call::<Void, Void>(proc::NFSPROC_NULL, &Void).await.map(|_| ())
     }
 
     /// NFSPROC_GETATTR (proc 1)  --  get file attributes.
     /// Response is `attrstat` (RFC 1094 S2.3.9): status + fattr, no file handle.
-    pub async fn getattr(&self, fh: &Nfs2FileHandle) -> anyhow::Result<Nfs2FileAttr> {
+    pub(crate) async fn getattr(&self, fh: &Nfs2FileHandle) -> anyhow::Result<Nfs2FileAttr> {
         let res: AttrStatRes = self.raw_call(proc::NFSPROC_GETATTR, fh).await?;
         check_status(res.status)?;
         Ok(res.attrs)
@@ -59,7 +59,7 @@ impl Nfs2Client {
 
     /// NFSPROC_SETATTR (proc 2)  --  set file attributes.
     /// Response is `attrstat` (RFC 1094 S2.3.9): status + fattr, no file handle.
-    pub async fn setattr(&self, fh: &Nfs2FileHandle, attrs: &Nfs2SetAttr) -> anyhow::Result<Nfs2FileAttr> {
+    pub(crate) async fn setattr(&self, fh: &Nfs2FileHandle, attrs: &Nfs2SetAttr) -> anyhow::Result<Nfs2FileAttr> {
         // Wire format: fhandle || sattr
         let combined = FhAndSattr { fh: fh.clone(), attrs: attrs.clone() };
         let res: AttrStatRes = self.raw_call(proc::NFSPROC_SETATTR, &combined).await?;
@@ -68,7 +68,7 @@ impl Nfs2Client {
     }
 
     /// NFSPROC_LOOKUP (proc 4)  --  look up filename in directory.
-    pub async fn lookup(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
+    pub(crate) async fn lookup(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
         let args = DirOpArgs { dir: dir.clone(), name: name.to_owned() };
         let res: DirOpRes = self.raw_call(proc::NFSPROC_LOOKUP, &args).await?;
         check_status(res.status)?;
@@ -76,14 +76,14 @@ impl Nfs2Client {
     }
 
     /// NFSPROC_READLINK (proc 5)  --  read symbolic link target.
-    pub async fn readlink(&self, fh: &Nfs2FileHandle) -> anyhow::Result<String> {
+    pub(crate) async fn readlink(&self, fh: &Nfs2FileHandle) -> anyhow::Result<String> {
         let res: ReadlinkRes = self.raw_call(proc::NFSPROC_READLINK, fh).await?;
         check_status(res.status)?;
         Ok(res.data)
     }
 
     /// NFSPROC_READ (proc 6)  --  read data from file.
-    pub async fn read(&self, fh: &Nfs2FileHandle, offset: u32, count: u32) -> anyhow::Result<(Nfs2FileAttr, Vec<u8>)> {
+    pub(crate) async fn read(&self, fh: &Nfs2FileHandle, offset: u32, count: u32) -> anyhow::Result<(Nfs2FileAttr, Vec<u8>)> {
         let args = ReadArgs { file: fh.clone(), offset, count, totalcount: 0 };
         let res: ReadRes = self.raw_call(proc::NFSPROC_READ, &args).await?;
         check_status(res.status)?;
@@ -92,7 +92,7 @@ impl Nfs2Client {
 
     /// NFSPROC_WRITE (proc 8)  --  write data to file.
     /// Response is `attrstat` (RFC 1094 S2.3.9): status + fattr, no file handle.
-    pub async fn write(&self, fh: &Nfs2FileHandle, offset: u32, data: Vec<u8>) -> anyhow::Result<Nfs2FileAttr> {
+    pub(crate) async fn write(&self, fh: &Nfs2FileHandle, offset: u32, data: Vec<u8>) -> anyhow::Result<Nfs2FileAttr> {
         let args = WriteArgs { file: fh.clone(), beginoffset: 0, offset, totalcount: 0, data };
         let res: AttrStatRes = self.raw_call(proc::NFSPROC_WRITE, &args).await?;
         check_status(res.status)?;
@@ -100,7 +100,7 @@ impl Nfs2Client {
     }
 
     /// NFSPROC_CREATE (proc 9)  --  create a file.
-    pub async fn create(&self, dir: &Nfs2FileHandle, name: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
+    pub(crate) async fn create(&self, dir: &Nfs2FileHandle, name: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
         let combined = DirOpAndSattr { args: DirOpArgs { dir: dir.clone(), name: name.to_owned() }, attrs: attrs.clone() };
         let res: DirOpRes = self.raw_call(proc::NFSPROC_CREATE, &combined).await?;
         check_status(res.status)?;
@@ -108,35 +108,35 @@ impl Nfs2Client {
     }
 
     /// NFSPROC_REMOVE (proc 10)  --  remove a file.
-    pub async fn remove(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
+    pub(crate) async fn remove(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
         let args = DirOpArgs { dir: dir.clone(), name: name.to_owned() };
         let status: NfsStat = self.raw_call(proc::NFSPROC_REMOVE, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_RENAME (proc 11)  --  rename a file.
-    pub async fn rename(&self, from_dir: &Nfs2FileHandle, from: &str, to_dir: &Nfs2FileHandle, to: &str) -> anyhow::Result<()> {
+    pub(crate) async fn rename(&self, from_dir: &Nfs2FileHandle, from: &str, to_dir: &Nfs2FileHandle, to: &str) -> anyhow::Result<()> {
         let args = TwoDirOpArgs { from: DirOpArgs { dir: from_dir.clone(), name: from.to_owned() }, to: DirOpArgs { dir: to_dir.clone(), name: to.to_owned() } };
         let status: NfsStat = self.raw_call(proc::NFSPROC_RENAME, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_LINK (proc 12)  --  create a hard link.
-    pub async fn link(&self, fh: &Nfs2FileHandle, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
+    pub(crate) async fn link(&self, fh: &Nfs2FileHandle, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
         let args = LinkArgs { fh: fh.clone(), to: DirOpArgs { dir: dir.clone(), name: name.to_owned() } };
         let status: NfsStat = self.raw_call(proc::NFSPROC_LINK, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_SYMLINK (proc 13)  --  create a symbolic link.
-    pub async fn symlink(&self, dir: &Nfs2FileHandle, name: &str, target: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<()> {
+    pub(crate) async fn symlink(&self, dir: &Nfs2FileHandle, name: &str, target: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<()> {
         let args = SymlinkArgs { from: DirOpArgs { dir: dir.clone(), name: name.to_owned() }, target: target.to_owned(), attrs: attrs.clone() };
         let status: NfsStat = self.raw_call(proc::NFSPROC_SYMLINK, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_MKDIR (proc 14)  --  create a directory.
-    pub async fn mkdir(&self, dir: &Nfs2FileHandle, name: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
+    pub(crate) async fn mkdir(&self, dir: &Nfs2FileHandle, name: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
         let combined = DirOpAndSattr { args: DirOpArgs { dir: dir.clone(), name: name.to_owned() }, attrs: attrs.clone() };
         let res: DirOpRes = self.raw_call(proc::NFSPROC_MKDIR, &combined).await?;
         check_status(res.status)?;
@@ -144,14 +144,14 @@ impl Nfs2Client {
     }
 
     /// NFSPROC_RMDIR (proc 15)  --  remove a directory.
-    pub async fn rmdir(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
+    pub(crate) async fn rmdir(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
         let args = DirOpArgs { dir: dir.clone(), name: name.to_owned() };
         let status: NfsStat = self.raw_call(proc::NFSPROC_RMDIR, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_READDIR (proc 16)  --  list directory entries.
-    pub async fn readdir(&self, dir: &Nfs2FileHandle, cookie: u32, count: u32) -> anyhow::Result<Vec<ReaddirEntry>> {
+    pub(crate) async fn readdir(&self, dir: &Nfs2FileHandle, cookie: u32, count: u32) -> anyhow::Result<Vec<ReaddirEntry>> {
         let args = ReaddirArgs { dir: dir.clone(), cookie, count };
         let res: ReaddirRes = self.raw_call(proc::NFSPROC_READDIR, &args).await?;
         check_status(res.status)?;
@@ -159,14 +159,14 @@ impl Nfs2Client {
     }
 
     /// NFSPROC_STATFS (proc 17)  --  get filesystem statistics.
-    pub async fn statfs(&self, fh: &Nfs2FileHandle) -> anyhow::Result<StatFsRes> {
+    pub(crate) async fn statfs(&self, fh: &Nfs2FileHandle) -> anyhow::Result<StatFsRes> {
         let res: StatFsRes = self.raw_call(proc::NFSPROC_STATFS, fh).await?;
         check_status(res.status)?;
         Ok(res)
     }
 
     /// Walk a slash-separated path from `root` using repeated LOOKUP calls.
-    pub async fn lookup_path(&self, root: &Nfs2FileHandle, path: &str) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
+    pub(crate) async fn lookup_path(&self, root: &Nfs2FileHandle, path: &str) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
         let mut fh = root.clone();
         let mut attrs = self.getattr(&fh).await?;
         for component in path.split('/').filter(|c| !c.is_empty()) {
@@ -185,7 +185,7 @@ impl Nfs2Client {
     /// the loop runs until `offset` reaches the reported size or the server
     /// returns an empty chunk -- a short read mid-file is legal and is not
     /// treated as EOF.
-    pub async fn read_file(&self, fh: &Nfs2FileHandle) -> anyhow::Result<Vec<u8>> {
+    pub(crate) async fn read_file(&self, fh: &Nfs2FileHandle) -> anyhow::Result<Vec<u8>> {
         const CHUNK: u32 = 8_192; // NFSv2 MAXDATA (RFC 1094 S2.2.6)
         // The server is untrusted: it controls both `attrs.size` and whether each
         // chunk is non-empty, so neither can be the sole loop bound. Cap the total

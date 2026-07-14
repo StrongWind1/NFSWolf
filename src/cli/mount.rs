@@ -36,7 +36,7 @@ use crate::cli::{H_PERMISSIONS, H_STEALTH, H_TARGET};
 ///   nfswolf mount 10.0.0.5 /mnt/x -e /srv
 ///   nfswolf mount 10.0.0.5 /mnt/x --handle 01000200...
 #[derive(Parser)]
-pub struct MountArgs {
+pub(crate) struct MountArgs {
     /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
     #[arg(help_heading = H_TARGET, value_name = "TARGET")]
     pub target: String,
@@ -72,7 +72,7 @@ pub struct MountArgs {
 /// failures still surface (stdio is kept attached) but they no longer
 /// block the parent from returning to the shell.
 #[cfg(feature = "fuse")]
-pub fn preflight(args: &MountArgs) -> anyhow::Result<()> {
+pub(crate) fn preflight(args: &MountArgs) -> anyhow::Result<()> {
     if args.hide && args.handle.is_some() {
         anyhow::bail!("--hide has no effect with --handle: there is no server-side mount to unmount");
     }
@@ -98,7 +98,7 @@ pub fn preflight(args: &MountArgs) -> anyhow::Result<()> {
 ///     `noclose = 1`, but they appear "after the prompt" rather than
 ///     blocking the prompt.
 #[cfg(feature = "fuse")]
-pub async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
+pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
     use std::net::{IpAddr, SocketAddr};
     use std::path::Path;
     use std::sync::Arc;
@@ -233,7 +233,7 @@ pub async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::R
 
 /// Stub for builds without the `fuse` feature.
 #[cfg(not(feature = "fuse"))]
-pub async fn run(_args: MountArgs, _globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
+pub(crate) async fn run(_args: MountArgs, _globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
     eprintln!("FUSE support not compiled in. Rebuild with: cargo build --features fuse");
     Ok(())
 }

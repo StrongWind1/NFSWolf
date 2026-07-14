@@ -12,5 +12,5 @@
 //! generic RPC client accepts any program/version/procedure number.
 //! We define NFSv2 XDR types that implement Pack/Unpack.
 
-pub mod client;
-pub mod types;
+pub(crate) mod client;
+pub(crate) mod types;

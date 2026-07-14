@@ -29,7 +29,7 @@ use crate::util::stealth::StealthConfig;
 ///   nfswolf uid-spray 192.168.1.10:/srv --uid-start 0 --uid-end 5000
 ///   nfswolf uid-spray 192.168.1.10:/srv --path /etc/shadow --aux-gids 42,15
 #[derive(Parser)]
-pub struct UidSprayArgs {
+pub(crate) struct UidSprayArgs {
     /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
     #[arg(help_heading = H_TARGET, value_name = "TARGET")]
     pub target: String,
@@ -65,7 +65,7 @@ pub struct UidSprayArgs {
 }
 
 /// Run the uid-spray command.
-pub async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     let target = crate::cli::target::parse(&args.target, args.export.as_deref(), None, true)?;
     let host = target.host.to_string();
     let export = target.export().unwrap_or("/").to_owned();

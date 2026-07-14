@@ -22,7 +22,7 @@ use crate::proto::conn::{NfsConnection, ReconnectStrategy};
 
 /// Key identifying a unique (host, export, uid, gid) connection group.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct PoolKey {
+pub(crate) struct PoolKey {
     /// Remote server address.
     pub host: SocketAddr,
     /// NFS export path.
@@ -35,7 +35,7 @@ pub struct PoolKey {
 
 /// Pool statistics snapshot.
 #[derive(Debug, Clone)]
-pub struct PoolStats {
+pub(crate) struct PoolStats {
     /// Total connections idle across all keys.
     pub idle: usize,
     /// Total connections currently checked out.
@@ -65,7 +65,7 @@ struct PoolInner {
 /// Connections are returned in LIFO order to maximise cache warmth on the server.
 /// Thread-safe via `Arc<PoolInner>` and per-key `Mutex<VecDeque>`.
 #[derive(Clone, Debug)]
-pub struct ConnectionPool {
+pub(crate) struct ConnectionPool {
     inner: Arc<PoolInner>,
 }
 
@@ -78,13 +78,13 @@ impl std::fmt::Debug for PoolInner {
 impl ConnectionPool {
     /// Create a new pool with the given limits.
     #[must_use]
-    pub fn new(max_per_key: usize, max_total: usize, stale_threshold: Duration) -> Self {
+    pub(crate) fn new(max_per_key: usize, max_total: usize, stale_threshold: Duration) -> Self {
         Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key, max_total, admission: Arc::new(Semaphore::new(max_total)), stale_threshold, proxy: None }) }
     }
 
     /// Create with sensible defaults for interactive scanning.
     #[must_use]
-    pub fn default_config() -> Self {
+    pub(crate) fn default_config() -> Self {
         Self::new(4, 256, Duration::from_secs(5))
     }
 
@@ -92,14 +92,14 @@ impl ConnectionPool {
     ///
     /// `proxy` should be `"host:port"` or `"socks5://host:port"`.
     #[must_use]
-    pub fn with_proxy(proxy: String) -> Self {
+    pub(crate) fn with_proxy(proxy: String) -> Self {
         Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key: 4, max_total: 256, admission: Arc::new(Semaphore::new(256)), stale_threshold: Duration::from_secs(5), proxy: Some(proxy) }) }
     }
 
     /// Check out a connection for `key`, creating one if necessary.
     ///
     /// Blocks until a slot is available when `max_total` is reached.
-    pub async fn checkout(&self, key: PoolKey, credential: Credential, reconnect: ReconnectStrategy) -> anyhow::Result<PooledConnection> {
+    pub(crate) async fn checkout(&self, key: PoolKey, credential: Credential, reconnect: ReconnectStrategy) -> anyhow::Result<PooledConnection> {
         // Reserve a global slot atomically before touching the pool. The permit
         // bounds outstanding connections to `max_total` (it can never overshoot)
         // and is released on `PooledConnection` drop, which wakes the next waiter.
@@ -123,7 +123,7 @@ impl ConnectionPool {
     /// Return a connection to the idle queue (LIFO).
     ///
     /// Poisoned connections are discarded rather than re-queued.
-    pub fn checkin(&self, key: PoolKey, conn: NfsConnection) {
+    pub(crate) fn checkin(&self, key: PoolKey, conn: NfsConnection) {
         // The admission permit is released by `PooledConnection`'s drop, which runs
         // after this call (explicit Drop body first, then fields), so the slot is
         // freed and the next waiter woken only once the connection is back in the
@@ -151,7 +151,7 @@ impl ConnectionPool {
     ///
     /// `nfs_port` is the NFS port to connect to without portmapper or MOUNT.
     /// Used when `--handle` is given and portmapper is filtered but the NFS port is open.
-    pub async fn checkout_direct(&self, key: PoolKey, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy) -> anyhow::Result<PooledConnection> {
+    pub(crate) async fn checkout_direct(&self, key: PoolKey, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy) -> anyhow::Result<PooledConnection> {
         let permit = Arc::clone(&self.inner.admission).acquire_owned().await.map_err(|e| anyhow::anyhow!("connection pool closed: {e}"))?;
 
         if let Some(mut conn) = self.try_pop(&key).await {
@@ -166,7 +166,7 @@ impl ConnectionPool {
     }
 
     /// Drain all idle connections for a key (used after a host goes down).
-    pub async fn drain(&self, key: &PoolKey) {
+    pub(crate) async fn drain(&self, key: &PoolKey) {
         // Clone the queue handle out before awaiting, dropping the DashMap read
         // guard first (same guard-across-await hazard as `try_pop`).
         let queue = self.inner.pools.get(key).map(|q| Arc::clone(&q));
@@ -177,7 +177,7 @@ impl ConnectionPool {
 
     /// Snapshot current pool statistics.
     #[must_use]
-    pub fn stats(&self) -> PoolStats {
+    pub(crate) fn stats(&self) -> PoolStats {
         // Outstanding = permits handed out = max_total minus those still available.
         let outstanding = self.inner.max_total.saturating_sub(self.inner.admission.available_permits());
         let idle = self.inner.pools.iter().filter_map(|e| e.value().try_lock().ok().map(|q| q.len())).sum();
@@ -233,7 +233,7 @@ fn restamp_credential(conn: &mut NfsConnection, credential: Credential) {
 }
 
 /// RAII wrapper  --  returns the connection to the pool on drop.
-pub struct PooledConnection {
+pub(crate) struct PooledConnection {
     conn: Option<NfsConnection>,
     pool: ConnectionPool,
     key: PoolKey,

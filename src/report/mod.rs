@@ -5,12 +5,12 @@
 //! caller can target a file, stdout, or an in-memory buffer without changes.
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
-pub mod console;
-pub mod csv;
-pub mod html;
-pub mod json;
-pub mod markdown;
-pub mod txt;
+pub(crate) mod console;
+pub(crate) mod csv;
+pub(crate) mod html;
+pub(crate) mod json;
+pub(crate) mod markdown;
+pub(crate) mod txt;
 
 use std::io::Write;
 
@@ -20,7 +20,7 @@ use crate::engine::analyzer::{AnalysisResult, Finding, Severity};
 /// Dispatch to the correct renderer for `format` and write to `out`.
 ///
 /// `title` is used by HTML and Markdown renderers; other formats ignore it.
-pub fn generate(results: &[AnalysisResult], format: ReportFormat, title: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+pub(crate) fn generate(results: &[AnalysisResult], format: ReportFormat, title: &str, out: &mut dyn Write) -> anyhow::Result<()> {
     match format {
         ReportFormat::Console => console::render(results, out),
         ReportFormat::Json => json::render(results, out),
@@ -35,7 +35,7 @@ pub fn generate(results: &[AnalysisResult], format: ReportFormat, title: &str, o
 ///
 /// Weights: Critical = 10, High = 7, Medium = 4, Low = 1, Info = 0.
 /// Used for executive summary ordering and report headers.
-pub fn risk_score(findings: &[Finding]) -> u32 {
+pub(crate) fn risk_score(findings: &[Finding]) -> u32 {
     findings.iter().map(|f| severity_weight(f.severity)).sum()
 }
 
@@ -43,7 +43,7 @@ pub fn risk_score(findings: &[Finding]) -> u32 {
 ///
 /// Deduplication is needed when the same vulnerability appears on multiple
 /// code paths (e.g., UID sprayer and manual check both detect NFS3ERR_ACCES).
-pub fn deduplicate_findings(findings: &mut Vec<Finding>) {
+pub(crate) fn deduplicate_findings(findings: &mut Vec<Finding>) {
     let mut seen = std::collections::HashSet::new();
     findings.retain(|f| {
         let key = (f.id.clone(), f.export.clone());
@@ -80,7 +80,7 @@ mod tests {
         reason = "unit test  --  lints are suppressed per project policy"
     )]
     use super::*;
-    use crate::engine::analyzer::{AnalysisResult, ExportAnalysis, Finding, Severity};
+    use crate::engine::analyzer::ExportAnalysis;
 
     fn make_test_finding(id: &str, severity: Severity, export: Option<&str>) -> Finding {
         Finding { id: id.to_owned(), title: format!("Test finding {id}"), severity, description: "Test description".to_owned(), evidence: "Test evidence".to_owned(), remediation: "Test remediation".to_owned(), export: export.map(str::to_owned) }
@@ -145,7 +145,7 @@ mod tests {
         generate(&results, ReportFormat::Json, "Test", &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         // Must be valid JSON (serde_json can parse it back)
-        let _: serde_json::Value = serde_json::from_str(&output).expect("JSON output must be valid");
+        let _parsed: serde_json::Value = serde_json::from_str(&output).expect("JSON output must be valid");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::report::txt::sanitize_control;
 /// Write a coloured security report to `out`.
 ///
 /// Colour is applied per-severity so operators can skim findings quickly.
-pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
+pub(crate) fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
     for result in results {
         let header = format!("Host: {} ({})", sanitize_control(&result.host), result.timestamp);
         writeln!(out, "{}", header.bold())?;

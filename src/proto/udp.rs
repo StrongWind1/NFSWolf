@@ -30,7 +30,7 @@ const MAX_UDP_DATAGRAM: usize = 65_536;
 /// loop around this function themselves.
 ///
 /// The target `addr` must be the specific RPC program port, not the portmapper.
-pub async fn call_rpc_udp<C, R>(addr: SocketAddr, program: u32, version: u32, proc: u32, args: &C, timeout: Duration) -> anyhow::Result<R>
+pub(crate) async fn call_rpc_udp<C, R>(addr: SocketAddr, program: u32, version: u32, proc: u32, args: &C, timeout: Duration) -> anyhow::Result<R>
 where
     C: Pack + Sync,
     R: Unpack,
@@ -45,8 +45,8 @@ where
     let msg = rpc_msg { xid, body: msg_body::CALL(call) };
 
     let mut buf = Vec::with_capacity(msg.packed_size() + args.packed_size());
-    msg.pack(&mut buf).context("pack RPC call header")?;
-    args.pack(&mut buf).context("pack RPC args")?;
+    _ = msg.pack(&mut buf).context("pack RPC call header")?;
+    _ = args.pack(&mut buf).context("pack RPC args")?;
 
     // Bind an ephemeral local UDP port in the destination's address family.
     // An IPv4-bound socket cannot send to an IPv6 peer (the families have
@@ -59,7 +59,7 @@ where
     // on-path or off-path attacker who guesses the cleartext XID inject a forged
     // portmapper/NFS reply (UDP carries no connection state -- RFC 1057 S10).
     socket.connect(addr).await.context("UDP connect")?;
-    socket.send(&buf).await.context("UDP send")?;
+    _ = socket.send(&buf).await.context("UDP send")?;
 
     // Wait for a response datagram.  recv() (not recv_from) only returns
     // datagrams from the connected peer, so source verification is enforced
@@ -91,7 +91,7 @@ where
 /// Sends program/version NULL (proc 0) and returns true if a valid reply
 /// arrives within `timeout`.  Used by the scanner to detect UDP-accessible
 /// portmapper or NFS services.
-pub async fn probe_udp_rpc(addr: SocketAddr, program: u32, version: u32, timeout: Duration) -> bool {
+pub(crate) async fn probe_udp_rpc(addr: SocketAddr, program: u32, version: u32, timeout: Duration) -> bool {
     use nfs3_types::xdr_codec::Void;
 
     call_rpc_udp::<Void, Void>(addr, program, version, 0, &Void, timeout).await.is_ok()

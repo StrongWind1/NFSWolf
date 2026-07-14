@@ -27,7 +27,6 @@
 //! Toolkit API  --  not all items are used in currently-implemented phases.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -80,9 +79,9 @@ impl InodeMapState {
         let mut handles = HashMap::new();
         let mut parents = HashMap::new();
         // FUSE root is always inode 1.
-        inodes.insert(1u64, root_fh.clone());
-        handles.insert(root_fh.as_bytes().to_vec(), 1u64);
-        parents.insert(1u64, 1u64);
+        drop(inodes.insert(1u64, root_fh.clone()));
+        _ = handles.insert(root_fh.as_bytes().to_vec(), 1u64);
+        _ = parents.insert(1u64, 1u64);
         Self { inodes, handles, parents, lookups: HashMap::new(), next_ino: 2 }
     }
 
@@ -94,9 +93,9 @@ impl InodeMapState {
         }
         let ino = self.next_ino;
         self.next_ino = self.next_ino.saturating_add(1);
-        self.inodes.insert(ino, fh);
-        self.handles.insert(key, ino);
-        self.parents.insert(ino, parent_ino);
+        drop(self.inodes.insert(ino, fh));
+        _ = self.handles.insert(key, ino);
+        _ = self.parents.insert(ino, parent_ino);
         ino
     }
 
@@ -151,11 +150,11 @@ impl InodeMapState {
         if *count > 0 {
             return false;
         }
-        self.lookups.remove(&ino);
+        _ = self.lookups.remove(&ino);
         if let Some(fh) = self.inodes.remove(&ino) {
-            self.handles.remove(fh.as_bytes());
+            _ = self.handles.remove(fh.as_bytes());
         }
-        self.parents.remove(&ino);
+        _ = self.parents.remove(&ino);
         true
     }
 }
@@ -167,7 +166,7 @@ impl InodeMapState {
 /// access. Callers configure write-mode and supply the default credential
 /// + runtime handle.
 #[derive(Debug)]
-pub struct NfsFuseConfig {
+pub(crate) struct NfsFuseConfig {
     /// Pool-backed NFS client (the default-credential client).
     pub nfs3: Arc<Nfs3Client>,
     /// Root file handle (becomes FUSE inode 1).
@@ -186,7 +185,7 @@ pub struct NfsFuseConfig {
 /// credential ladder runs unconditionally on every callback; per-inode
 /// (uid, gid) winners are cached so we don't re-walk the ladder for the
 /// same inode twice.
-pub struct NfsFuse {
+pub(crate) struct NfsFuse {
     /// Default-credential pool-backed NFS client.
     nfs3: Arc<Nfs3Client>,
     /// Mutable inode mapping.
@@ -228,7 +227,7 @@ impl std::fmt::Debug for NfsFuse {
 // behavior here. `significant_drop_tightening` and `redundant_clone` are
 // inherent to the `Fn(Nfs3Client) -> Fut` ladder closures: each rung clones
 // captured values fresh, but a single rung looks "redundant" to clippy.
-#[allow(clippy::expect_used, clippy::significant_drop_tightening, clippy::redundant_clone, reason = "Mutex poison propagates and Fn-closure clones look redundant per-iteration")]
+#[expect(clippy::expect_used, clippy::significant_drop_tightening, reason = "Mutex poison propagates")]
 impl NfsFuse {
     /// Create a new FUSE adapter from a config bundle.
     ///
@@ -236,13 +235,13 @@ impl NfsFuse {
     /// connection pool; it is used to drive async NFS calls from fuser's
     /// worker threads.
     #[must_use]
-    pub fn new(cfg: NfsFuseConfig) -> Self {
+    pub(crate) fn new(cfg: NfsFuseConfig) -> Self {
         let state = Mutex::new(InodeMapState::new(&cfg.root_fh));
         Self { nfs3: cfg.nfs3, state, root_fh: cfg.root_fh, allow_write: cfg.allow_write, default_cred: cfg.default_cred, cred_cache: Mutex::new(HashMap::new()), readdir_cache: Mutex::new(HashMap::new()), rt: cfg.rt }
     }
 
     /// Convert our `FileAttrs` to a fuser `FileAttr`.
-    fn make_attr(&self, ino: u64, a: &FileAttrs) -> FileAttr {
+    fn make_attr(ino: u64, a: &FileAttrs) -> FileAttr {
         let kind = to_fuse_type(a.file_type);
         let mode16 = u16::try_from(a.mode & u32::from(u16::MAX)).unwrap_or(0);
         // Always-on owner-bit elevation: copy owner rwx bits (bits 6-8) into
@@ -301,7 +300,7 @@ impl NfsFuse {
 
     /// Record `(uid, gid)` as the working credential for `ino`.
     fn cache_cred(&self, ino: u64, uid: u32, gid: u32) {
-        self.cred_cache.lock().expect("cred cache lock").insert(ino, (uid, gid));
+        _ = self.cred_cache.lock().expect("cred cache lock").insert(ino, (uid, gid));
     }
 
     /// Bump the kernel lookup-reference count for `ino` (FUSE forget
@@ -700,7 +699,7 @@ impl NfsFuse {
 
 // The Mutex protecting the inode state can only be poisoned if a thread panics
 // while holding it, which propagates the panic anyway -- expect() is correct here.
-#[allow(clippy::expect_used, reason = "Mutex poison propagates existing panics")]
+#[expect(clippy::expect_used, reason = "Mutex poison propagates existing panics")]
 impl Filesystem for NfsFuse {
     /// Look up a directory entry by name and return its attributes.
     ///
@@ -719,9 +718,9 @@ impl Filesystem for NfsFuse {
         match result {
             Ok((child_fh, attrs, child_ino)) => {
                 self.record_lookup(child_ino);
-                let attr = self.make_attr(child_ino, &attrs);
+                let attr = Self::make_attr(child_ino, &attrs);
                 reply.entry(&ATTR_TTL, &attr, Generation(0));
-                let _ = child_fh; // file handle already interned
+                drop(child_fh); // file handle already interned
             },
             Err(nfsstat3::NFS3ERR_NOENT) => reply.error(Errno::ENOENT),
             Err(nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM) => reply.error(Errno::EACCES),
@@ -743,8 +742,8 @@ impl Filesystem for NfsFuse {
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
         let removed = self.state.lock().expect("inode map lock").forget(ino.0, nlookup);
         if removed {
-            self.cred_cache.lock().expect("cred cache lock").remove(&ino.0);
-            self.readdir_cache.lock().expect("readdir cache lock").remove(&ino.0);
+            _ = self.cred_cache.lock().expect("cred cache lock").remove(&ino.0);
+            drop(self.readdir_cache.lock().expect("readdir cache lock").remove(&ino.0));
         }
     }
 
@@ -766,7 +765,7 @@ impl Filesystem for NfsFuse {
         match result {
             Ok(Nfs3Result::Ok(ok)) => {
                 let a = FileAttrs::from_fattr3(&ok.obj_attributes);
-                let attr = self.make_attr(ino.0, &a);
+                let attr = Self::make_attr(ino.0, &a);
                 reply.attr(&ATTR_TTL, &attr);
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
@@ -780,7 +779,6 @@ impl Filesystem for NfsFuse {
     /// which fields the caller wanted to change; the unset ones come in as
     /// `None` and we map those to `set_*::DONT_CHANGE` so the server-side
     /// state is left alone.
-    #[allow(clippy::too_many_arguments, reason = "fuser callback signature")]
     fn setattr(
         &self,
         _req: &Request,
@@ -830,13 +828,13 @@ impl Filesystem for NfsFuse {
             Ok(Nfs3Result::Ok(ok)) => match ok.obj_wcc.after {
                 Nfs3Option::Some(a) => {
                     let attrs = FileAttrs::from_fattr3(&a);
-                    reply.attr(&ATTR_TTL, &self.make_attr(ino.0, &attrs));
+                    reply.attr(&ATTR_TTL, &Self::make_attr(ino.0, &attrs));
                 },
                 Nfs3Option::None => {
                     // SETATTR succeeded but server didn't return post-op attrs;
                     // re-issue GETATTR to keep the kernel in sync.
                     if let Some(attrs) = self.block(self.try_getattr(ino.0)) {
-                        reply.attr(&ATTR_TTL, &self.make_attr(ino.0, &attrs));
+                        reply.attr(&ATTR_TTL, &Self::make_attr(ino.0, &attrs));
                     } else {
                         reply.error(Errno::EIO);
                     }
@@ -973,7 +971,7 @@ impl Filesystem for NfsFuse {
                     return;
                 };
                 self.record_lookup(child_ino);
-                reply.entry(&ATTR_TTL, &self.make_attr(child_ino, &attrs), Generation(0));
+                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &attrs), Generation(0));
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
@@ -1014,7 +1012,7 @@ impl Filesystem for NfsFuse {
                     return;
                 };
                 self.record_lookup(child_ino);
-                reply.entry(&ATTR_TTL, &self.make_attr(child_ino, &attrs), Generation(0));
+                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &attrs), Generation(0));
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
@@ -1055,7 +1053,7 @@ impl Filesystem for NfsFuse {
                     return;
                 };
                 self.record_lookup(child_ino);
-                reply.entry(&ATTR_TTL, &self.make_attr(child_ino, &attrs), Generation(0));
+                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &attrs), Generation(0));
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
@@ -1104,9 +1102,9 @@ impl Filesystem for NfsFuse {
                 };
 
                 self.record_lookup(child_ino);
-                let attr = self.make_attr(child_ino, &attrs);
+                let attr = Self::make_attr(child_ino, &attrs);
                 reply.created(&ATTR_TTL, &attr, Generation(0), FuseFileHandle(0), FopenFlags::empty());
-                let _ = child_fh;
+                drop(child_fh);
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
@@ -1196,14 +1194,14 @@ impl Filesystem for NfsFuse {
             reply.error(Errno::ENOENT);
             return;
         };
-        let new_name = newname.as_encoded_bytes().to_vec();
+        let newname_bytes = newname.as_encoded_bytes().to_vec();
 
         let result = self.block(self.try_with_ladder(newparent.0, |c| {
             let target_fh = target_fh.clone();
             let parent_fh = parent_fh.clone();
-            let new_name = new_name.clone();
+            let newname_bytes = newname_bytes.clone();
             async move {
-                let args = LINK3args { file: target_fh.to_nfs_fh3(), link: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(new_name)) } };
+                let args = LINK3args { file: target_fh.to_nfs_fh3(), link: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(newname_bytes)) } };
                 c.link(&args).await
             }
         }));
@@ -1214,7 +1212,7 @@ impl Filesystem for NfsFuse {
             Ok(Nfs3Result::Ok(_)) => {
                 if let Some(attrs) = self.block(self.try_getattr(ino.0)) {
                     self.record_lookup(ino.0);
-                    reply.entry(&ATTR_TTL, &self.make_attr(ino.0, &attrs), Generation(0));
+                    reply.entry(&ATTR_TTL, &Self::make_attr(ino.0, &attrs), Generation(0));
                 } else {
                     reply.error(Errno::EIO);
                 }
@@ -1248,7 +1246,7 @@ impl Filesystem for NfsFuse {
         if offset == 0 {
             match self.page_directory(ino.0, &dir_fh) {
                 Ok(entries) => {
-                    self.readdir_cache.lock().expect("readdir cache lock").insert(ino.0, entries);
+                    drop(self.readdir_cache.lock().expect("readdir cache lock").insert(ino.0, entries));
                 },
                 Err(errno) => {
                     reply.error(errno);
@@ -1550,7 +1548,7 @@ fn post_op_fh3_to_handle(opt: Nfs3Option<nfs3_types::nfs3::nfs_fh3>) -> Option<F
 }
 
 /// Convert an optional post-op attribute reply into our `FileAttrs`.
-#[allow(clippy::missing_const_for_fn, reason = "FileAttrs::from_fattr3 is not const")]
+#[expect(clippy::missing_const_for_fn, reason = "FileAttrs::from_fattr3 is not const")]
 fn post_op_attr_to_attrs(opt: nfs3_types::nfs3::post_op_attr) -> Option<FileAttrs> {
     match opt {
         Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),

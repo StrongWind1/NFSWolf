@@ -18,51 +18,51 @@ use nfs3_types::xdr_codec::{Pack, Unpack};
 
 /// NFSv2 fixed-size file handle (32 bytes, RFC 1094 S2.3.3).
 /// Unlike v3's variable-length opaque, v2 handles are always exactly 32 bytes.
-pub const FHSIZE: usize = 32;
+pub(crate) const FHSIZE: usize = 32;
 
 /// NFSv2 program and version constants.
-pub const NFS_PROGRAM: u32 = 100_003;
+pub(crate) const NFS_PROGRAM: u32 = 100_003;
 /// NFSv2 program version number.
-pub const NFS_VERSION: u32 = 2;
+pub(crate) const NFS_VERSION: u32 = 2;
 
 /// NFSv2 procedure numbers (RFC 1094 S2.2).
-pub mod proc {
+pub(crate) mod proc {
     /// Null procedure  --  no-op.
-    pub const NFSPROC_NULL: u32 = 0;
+    pub(crate) const NFSPROC_NULL: u32 = 0;
     /// Get file attributes.
-    pub const NFSPROC_GETATTR: u32 = 1;
+    pub(crate) const NFSPROC_GETATTR: u32 = 1;
     /// Set file attributes.
-    pub const NFSPROC_SETATTR: u32 = 2;
+    pub(crate) const NFSPROC_SETATTR: u32 = 2;
     /// Obsolete (ignored).
-    pub const NFSPROC_ROOT: u32 = 3;
+    pub(crate) const NFSPROC_ROOT: u32 = 3;
     /// Lookup filename in directory.
-    pub const NFSPROC_LOOKUP: u32 = 4;
+    pub(crate) const NFSPROC_LOOKUP: u32 = 4;
     /// Read symbolic link.
-    pub const NFSPROC_READLINK: u32 = 5;
+    pub(crate) const NFSPROC_READLINK: u32 = 5;
     /// Read from file.
-    pub const NFSPROC_READ: u32 = 6;
+    pub(crate) const NFSPROC_READ: u32 = 6;
     /// Unused.
-    pub const NFSPROC_WRITECACHE: u32 = 7;
+    pub(crate) const NFSPROC_WRITECACHE: u32 = 7;
     /// Write to file.
-    pub const NFSPROC_WRITE: u32 = 8;
+    pub(crate) const NFSPROC_WRITE: u32 = 8;
     /// Create file.
-    pub const NFSPROC_CREATE: u32 = 9;
+    pub(crate) const NFSPROC_CREATE: u32 = 9;
     /// Remove file.
-    pub const NFSPROC_REMOVE: u32 = 10;
+    pub(crate) const NFSPROC_REMOVE: u32 = 10;
     /// Rename file.
-    pub const NFSPROC_RENAME: u32 = 11;
+    pub(crate) const NFSPROC_RENAME: u32 = 11;
     /// Create hard link.
-    pub const NFSPROC_LINK: u32 = 12;
+    pub(crate) const NFSPROC_LINK: u32 = 12;
     /// Create symbolic link.
-    pub const NFSPROC_SYMLINK: u32 = 13;
+    pub(crate) const NFSPROC_SYMLINK: u32 = 13;
     /// Create directory.
-    pub const NFSPROC_MKDIR: u32 = 14;
+    pub(crate) const NFSPROC_MKDIR: u32 = 14;
     /// Remove directory.
-    pub const NFSPROC_RMDIR: u32 = 15;
+    pub(crate) const NFSPROC_RMDIR: u32 = 15;
     /// Read directory entries.
-    pub const NFSPROC_READDIR: u32 = 16;
+    pub(crate) const NFSPROC_READDIR: u32 = 16;
     /// Get filesystem statistics.
-    pub const NFSPROC_STATFS: u32 = 17;
+    pub(crate) const NFSPROC_STATFS: u32 = 17;
 }
 
 /// NFSv2 status codes (RFC 1094 S2.3.1).
@@ -70,7 +70,7 @@ pub mod proc {
 /// only works on v3+, but v2 doesn't need it since handles are fixed-format).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum NfsStat {
+pub(crate) enum NfsStat {
     /// No error.
     Ok = 0,
     /// Not owner.
@@ -110,7 +110,7 @@ pub enum NfsStat {
 impl NfsStat {
     /// Decode a u32 status code from the wire.
     #[must_use]
-    pub const fn from_u32(v: u32) -> Self {
+    pub(crate) const fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Ok,
             1 => Self::Perm,
@@ -153,7 +153,7 @@ impl Unpack for NfsStat {
 /// NFSv2 file type (RFC 1094 S2.3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum FType {
+pub(crate) enum FType {
     /// Non-file (used for error cases).
     NonFile = 0,
     /// Regular file.
@@ -171,7 +171,7 @@ pub enum FType {
 impl FType {
     /// Decode from wire u32.
     #[must_use]
-    pub const fn from_u32(v: u32) -> Self {
+    pub(crate) const fn from_u32(v: u32) -> Self {
         match v {
             1 => Self::Regular,
             2 => Self::Directory,
@@ -292,12 +292,12 @@ const fn string_packed_size(s: &str) -> usize {
 
 /// NFSv2 fixed-size file handle (32 bytes, no length prefix).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Nfs2FileHandle(pub [u8; FHSIZE]);
+pub(crate) struct Nfs2FileHandle(pub [u8; FHSIZE]);
 
 impl Nfs2FileHandle {
     /// Create a handle from a byte slice, truncating or padding with zeros.
     #[must_use]
-    pub fn from_bytes(b: &[u8]) -> Self {
+    pub(crate) fn from_bytes(b: &[u8]) -> Self {
         let mut arr = [0u8; FHSIZE];
         let n = b.len().min(FHSIZE);
         if let (Some(dst), Some(src)) = (arr.get_mut(..n), b.get(..n)) {
@@ -329,7 +329,7 @@ impl Unpack for Nfs2FileHandle {
 
 /// UNIX timeval (seconds + microseconds) used in NFSv2 timestamps (RFC 1094 S2.3.5).
 #[derive(Debug, Clone, Copy)]
-pub struct Timeval {
+pub(crate) struct Timeval {
     /// Seconds since epoch.
     pub seconds: u32,
     /// Microseconds within the second.
@@ -358,7 +358,7 @@ impl Unpack for Timeval {
 /// NFSv2 file attributes (RFC 1094 S2.3.5).
 /// 32-bit sizes (vs v3's 64-bit), timeval timestamps.
 #[derive(Debug, Clone)]
-pub struct Nfs2FileAttr {
+pub(crate) struct Nfs2FileAttr {
     /// File type.
     pub ftype: FType,
     /// File mode (permission bits).
@@ -444,11 +444,11 @@ impl Unpack for Nfs2FileAttr {
 // --- Settable attributes (SETATTR) ---
 
 /// Sentinel value meaning "don't change this field" (RFC 1094 S2.3.6).
-pub const SATTR_UNCHANGED: u32 = 0xFFFF_FFFF;
+pub(crate) const SATTR_UNCHANGED: u32 = 0xFFFF_FFFF;
 
 /// Settable attributes for SETATTR  --  fields set to `SATTR_UNCHANGED` are not modified.
 #[derive(Debug, Clone)]
-pub struct Nfs2SetAttr {
+pub(crate) struct Nfs2SetAttr {
     /// New file mode, or `SATTR_UNCHANGED`.
     pub mode: u32,
     /// New owner UID, or `SATTR_UNCHANGED`.
@@ -495,7 +495,7 @@ impl Unpack for Nfs2SetAttr {
 
 /// Arguments for LOOKUP and CREATE (fhandle + filename).
 #[derive(Debug, Clone)]
-pub struct DirOpArgs {
+pub(crate) struct DirOpArgs {
     /// Parent directory handle.
     pub dir: Nfs2FileHandle,
     /// Filename within the directory.
@@ -521,7 +521,7 @@ impl Unpack for DirOpArgs {
 
 /// Result of LOOKUP or CREATE.
 #[derive(Debug, Clone)]
-pub struct DirOpRes {
+pub(crate) struct DirOpRes {
     /// Status code.
     pub status: NfsStat,
     /// New file handle (valid only if `status == Ok`).
@@ -559,7 +559,7 @@ impl Unpack for DirOpRes {
 /// XDR union: on success, contains status + fattr. On error, only status.
 /// Unlike `DirOpRes`, this does NOT include a file handle.
 #[derive(Debug, Clone)]
-pub struct AttrStatRes {
+pub(crate) struct AttrStatRes {
     /// Status code.
     pub status: NfsStat,
     /// File attributes (valid only if `status == Ok`).
@@ -583,7 +583,7 @@ impl Unpack for AttrStatRes {
 
 /// Arguments for the READ procedure.
 #[derive(Debug, Clone)]
-pub struct ReadArgs {
+pub(crate) struct ReadArgs {
     /// File handle.
     pub file: Nfs2FileHandle,
     /// Byte offset within the file.
@@ -615,7 +615,7 @@ impl Unpack for ReadArgs {
 
 /// Result of a READ call.
 #[derive(Debug, Clone)]
-pub struct ReadRes {
+pub(crate) struct ReadRes {
     /// Status code.
     pub status: NfsStat,
     /// Current file attributes.
@@ -648,7 +648,7 @@ impl Unpack for ReadRes {
 
 /// Arguments for the WRITE procedure.
 #[derive(Debug, Clone)]
-pub struct WriteArgs {
+pub(crate) struct WriteArgs {
     /// File handle.
     pub file: Nfs2FileHandle,
     /// Unused (set to 0 per RFC 1094).
@@ -686,7 +686,7 @@ impl Pack for WriteArgs {
 
 /// Arguments for the READDIR procedure.
 #[derive(Debug, Clone)]
-pub struct ReaddirArgs {
+pub(crate) struct ReaddirArgs {
     /// Directory file handle.
     pub dir: Nfs2FileHandle,
     /// Opaque cookie from previous READDIR (0 for first call).
@@ -775,7 +775,7 @@ mod tests {
     fn nfs2_file_handle_pack_unpack_round_trip() {
         let fh = Nfs2FileHandle::from_bytes(&[1, 2, 3, 4, 5]);
         let mut buf = Vec::new();
-        fh.pack(&mut buf).unwrap();
+        _ = fh.pack(&mut buf).unwrap();
         assert_eq!(buf.len(), 32);
         let (decoded, n) = Nfs2FileHandle::unpack(&mut Cursor::new(&buf)).unwrap();
         assert_eq!(n, 32);
@@ -786,16 +786,16 @@ mod tests {
     fn diropres_unpack_ok_branch_decodes_handle_and_attrs() {
         // Build a DirOpRes with status=Ok, then a 32-byte handle, then 68 bytes of attrs.
         let mut wire: Vec<u8> = Vec::new();
-        NfsStat::Ok.pack(&mut wire).unwrap();
+        _ = NfsStat::Ok.pack(&mut wire).unwrap();
         let fh = Nfs2FileHandle::from_bytes(&[0x42; 32]);
-        fh.pack(&mut wire).unwrap();
+        _ = fh.pack(&mut wire).unwrap();
         // Minimal attrs: ftype=Regular(1), then 10 u32 zeros, then 3 timevals of zeros
-        FType::Regular.pack(&mut wire).unwrap();
+        _ = FType::Regular.pack(&mut wire).unwrap();
         for _ in 0..10 {
-            0u32.pack(&mut wire).unwrap();
+            _ = 0u32.pack(&mut wire).unwrap();
         }
         for _ in 0..6 {
-            0u32.pack(&mut wire).unwrap();
+            _ = 0u32.pack(&mut wire).unwrap();
         }
         let (res, _) = DirOpRes::unpack(&mut Cursor::new(&wire)).unwrap();
         assert_eq!(res.status, NfsStat::Ok);
@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn diropres_unpack_error_branch_returns_zeroed() {
         let mut wire: Vec<u8> = Vec::new();
-        NfsStat::Acces.pack(&mut wire).unwrap();
+        _ = NfsStat::Acces.pack(&mut wire).unwrap();
         // No handle or attrs follow the error status.
         let (res, n) = DirOpRes::unpack(&mut Cursor::new(&wire)).unwrap();
         assert_eq!(res.status, NfsStat::Acces);
@@ -818,10 +818,10 @@ mod tests {
     #[test]
     fn attrstatres_unpack_ok_branch() {
         let mut wire: Vec<u8> = Vec::new();
-        NfsStat::Ok.pack(&mut wire).unwrap();
+        _ = NfsStat::Ok.pack(&mut wire).unwrap();
         let attr =
             Nfs2FileAttr { ftype: FType::Directory, mode: 0o755, nlink: 2, uid: 0, gid: 0, size: 4096, blocksize: 4096, rdev: 0, blocks: 8, fsid: 1, fileid: 2, atime: Timeval { seconds: 100, useconds: 0 }, mtime: Timeval { seconds: 200, useconds: 0 }, ctime: Timeval { seconds: 300, useconds: 0 } };
-        attr.pack(&mut wire).unwrap();
+        _ = attr.pack(&mut wire).unwrap();
         let (res, _) = AttrStatRes::unpack(&mut Cursor::new(&wire)).unwrap();
         assert_eq!(res.status, NfsStat::Ok);
         assert_eq!(res.attrs.ftype, FType::Directory);
@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn readres_unpack_error_branch() {
         let mut wire: Vec<u8> = Vec::new();
-        NfsStat::Perm.pack(&mut wire).unwrap();
+        _ = NfsStat::Perm.pack(&mut wire).unwrap();
         let (res, n) = ReadRes::unpack(&mut Cursor::new(&wire)).unwrap();
         assert_eq!(res.status, NfsStat::Perm);
         assert!(res.data.is_empty());
@@ -841,7 +841,7 @@ mod tests {
     #[test]
     fn statfsres_unpack_error_branch() {
         let mut wire: Vec<u8> = Vec::new();
-        NfsStat::Stale.pack(&mut wire).unwrap();
+        _ = NfsStat::Stale.pack(&mut wire).unwrap();
         let (res, n) = StatFsRes::unpack(&mut Cursor::new(&wire)).unwrap();
         assert_eq!(res.status, NfsStat::Stale);
         assert_eq!(res.tsize, 0);
@@ -942,7 +942,7 @@ mod tests {
 
 /// Single READDIR entry.
 #[derive(Debug, Clone)]
-pub struct ReaddirEntry {
+pub(crate) struct ReaddirEntry {
     /// Inode number.
     pub fileid: u32,
     /// File name.
@@ -964,7 +964,7 @@ impl Unpack for ReaddirEntry {
 
 /// Result of STATFS.
 #[derive(Debug, Clone)]
-pub struct StatFsRes {
+pub(crate) struct StatFsRes {
     /// Status code.
     pub status: NfsStat,
     /// Optimal transfer size in bytes.

@@ -22,13 +22,12 @@
 /// Used by the shell (ls, cd, cat), the FUSE mount, and the offensive
 /// subcommands (escape, brute-handle, uid-spray) so every NFS operation
 /// gets the same automatic privilege escalation.
-pub fn escalation_list(caller: (u32, u32), owner: Option<(u32, u32)>) -> Vec<(u32, u32)> {
-    let (caller_uid, caller_gid) = caller;
+pub(crate) fn escalation_list(caller: (u32, u32), owner: Option<(u32, u32)>) -> Vec<(u32, u32)> {
     let mut list = Vec::with_capacity(14);
-    if let Some((owner_uid, owner_gid)) = owner {
-        list.push((owner_uid, owner_gid));
-        if owner_gid != caller_gid {
-            list.push((caller_uid, owner_gid));
+    if let Some((file_uid, file_group)) = owner {
+        list.push((file_uid, file_group));
+        if file_group != caller.1 {
+            list.push((caller.0, file_group));
         }
     }
     list.push((0, 0));

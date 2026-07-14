@@ -4,7 +4,6 @@
 //! READ, WRITE, and GETATTR. Commands mirror familiar Unix tools so security
 //! researchers can explore exports without mounting them via the kernel NFS client.
 
-use std::future::Future;
 use std::io::Write as _;
 use std::path::Path;
 use std::pin::Pin;
@@ -40,7 +39,7 @@ const CHUNK_SIZE: u32 = 65_536; // 64 KiB
 const MAX_DIR_ENTRIES: usize = 1_000_000;
 
 /// All commands available in the interactive shell (for Tab completion of the first token).
-pub const SHELL_COMMANDS: &[&str] = &[
+pub(crate) const SHELL_COMMANDS: &[&str] = &[
     "ls",
     "cd",
     "pwd",
@@ -88,7 +87,7 @@ pub const SHELL_COMMANDS: &[&str] = &[
 ///
 /// Updated after every successful `cd`. The completer reads this without
 /// holding any async locks (std Mutex, not tokio).
-pub struct TabCache {
+pub(crate) struct TabCache {
     /// File handle of the directory whose entries are cached.
     pub cwd: FileHandle,
     /// Names of entries in `cwd` (updated after navigation).
@@ -104,7 +103,7 @@ pub struct TabCache {
 /// Completes:
 /// - Shell commands when at the start of a line
 /// - Remote paths for file-argument commands (uses cached or live READDIRPLUS)
-pub struct NfsCompleter {
+pub(crate) struct NfsCompleter {
     /// NFS client for live path lookups when the cache doesn't cover the directory.
     pub nfs3: Arc<Nfs3Client>,
     /// Export root handle (for absolute path resolution from `/`).
@@ -192,7 +191,7 @@ impl rustyline::Helper for NfsCompleter {}
 /// Maintains a current working directory handle and path string so that
 /// relative `cd` and `ls` operations feel like a local shell. Stores the
 /// export root handle separately so `cd /` and absolute paths always work.
-pub struct NfsShell {
+pub(crate) struct NfsShell {
     /// Pool-backed NFS client used for all RPC calls.
     nfs3: Arc<Nfs3Client>,
     /// Export root handle -- the handle returned by MOUNT. Used for `cd /` and
@@ -218,34 +217,34 @@ pub struct NfsShell {
 impl NfsShell {
     /// Create a new shell rooted at `root_fh` on the given client.
     #[must_use]
-    pub fn new(nfs3: Arc<Nfs3Client>, root_fh: FileHandle, allow_write: bool, hostname: String) -> Self {
+    pub(crate) fn new(nfs3: Arc<Nfs3Client>, root_fh: FileHandle, allow_write: bool, hostname: String) -> Self {
         let tab_cache = Arc::new(Mutex::new(TabCache { cwd: root_fh.clone(), entries: Vec::new() }));
         Self { nfs3, export_root: root_fh.clone(), cwd: root_fh, cwd_path: "/".to_owned(), allow_write, hostname, history: Vec::new(), tab_cache }
     }
 
     /// Return the current directory path for use in the prompt.
     #[must_use]
-    pub fn cwd_path(&self) -> &str {
+    pub(crate) fn cwd_path(&self) -> &str {
         &self.cwd_path
     }
 
     /// Current AUTH_SYS UID. Reflects mid-session `uid` / `impersonate` changes
     /// so the prompt stays accurate (the credential lives on `self.nfs3`).
     #[must_use]
-    pub fn current_uid(&self) -> u32 {
+    pub(crate) fn current_uid(&self) -> u32 {
         self.nfs3.uid()
     }
 
     /// Current AUTH_SYS GID. Reflects mid-session `gid` / `impersonate` changes.
     #[must_use]
-    pub fn current_gid(&self) -> u32 {
+    pub(crate) fn current_gid(&self) -> u32 {
         self.nfs3.gid()
     }
 
     /// Build a Tab completer that shares the directory cache with this shell.
     ///
     /// Call once after construction; pass the result to rustyline `Editor::set_helper`.
-    pub fn make_completer(&self) -> NfsCompleter {
+    pub(crate) fn make_completer(&self) -> NfsCompleter {
         NfsCompleter { nfs3: Arc::clone(&self.nfs3), export_root: self.export_root.clone(), cache: Arc::clone(&self.tab_cache) }
     }
 
@@ -268,7 +267,7 @@ impl NfsShell {
     ///
     /// Errors from NFS operations are printed to stderr and do not abort the
     /// shell -- the user can retry or navigate away.
-    pub async fn dispatch(&mut self, line: &str) {
+    pub(crate) async fn dispatch(&mut self, line: &str) {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             return;
@@ -1374,6 +1373,7 @@ impl NfsShell {
     // -------------------------------------------------------------------------
 
     fn cmd_lcd(&mut self, dir: &str) {
+        let _ = self;
         let d = if dir.is_empty() { "." } else { dir };
         match std::env::set_current_dir(d) {
             Ok(()) => println!("{}", std::env::current_dir().map_or_else(|_| d.to_owned(), |p| p.display().to_string()).green()),
@@ -1382,6 +1382,7 @@ impl NfsShell {
     }
 
     fn cmd_lls(&mut self, path: &str) {
+        let _ = self;
         let target = if path.is_empty() { "." } else { path };
         match std::fs::read_dir(target) {
             Ok(iter) => {
@@ -1396,6 +1397,7 @@ impl NfsShell {
     }
 
     fn cmd_lpwd(&mut self) {
+        let _ = self;
         match std::env::current_dir() {
             Ok(p) => println!("{}", p.display()),
             Err(e) => eprintln!("{}", format!("lpwd: {e}").red()),
@@ -1403,6 +1405,7 @@ impl NfsShell {
     }
 
     fn cmd_lmkdir(&mut self, dir: &str) {
+        let _ = self;
         if dir.is_empty() {
             eprintln!("{}", "usage: lmkdir <dir>".yellow());
             return;
@@ -1690,7 +1693,7 @@ async fn try_read_print(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()
                 if data.is_empty() {
                     break;
                 }
-                let _ = stdout.write_all(data);
+                drop(stdout.write_all(data));
                 last_byte = data.last().copied();
                 offset = offset.saturating_add(data.len() as u64);
                 if ok.eof {
@@ -2256,7 +2259,7 @@ fn build_path(cwd: &str, target: &str) -> String {
     let mut components: Vec<&str> = cwd.split('/').filter(|c| !c.is_empty()).collect();
     for part in target.split('/').filter(|c| !c.is_empty()) {
         if part == ".." {
-            components.pop();
+            _ = components.pop();
         } else if part != "." {
             components.push(part);
         }
@@ -2780,7 +2783,7 @@ fn pair_wtmp(recs: &[UtmpRecord]) -> Vec<LastEntry> {
                 // Replacing a record with the same ut_line means the previous
                 // entry was orphaned (no DEAD_PROCESS). The most recent USER on
                 // this line is what we keep.
-                open.insert(rec.line.clone(), OpenSession { user: rec.user.clone(), host: pick_host(&rec), login: rec.tv_sec });
+                drop(open.insert(rec.line.clone(), OpenSession { user: rec.user.clone(), host: pick_host(&rec), login: rec.tv_sec }));
             },
             UtType::DeadProcess => {
                 if let Some(sess) = open.remove(&rec.line) {

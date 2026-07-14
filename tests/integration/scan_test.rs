@@ -57,71 +57,71 @@ use tokio::net::TcpStream;
 
 #[test]
 fn help_flag_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").arg("--help").assert().success().stdout(contains("NFS").or(contains("nfs")));
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").arg("--help").assert().success().stdout(contains("NFS").or(contains("nfs")));
 }
 
 #[test]
 fn scan_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["scan", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["scan", "--help"]).assert().success();
 }
 
 #[test]
 fn scan_auto_escape_flag_in_help() {
     // The auto-escape opt-in must be discoverable in `scan --help`.
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["scan", "--help"]).assert().success().stdout(contains("--auto-escape"));
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["scan", "--help"]).assert().success().stdout(contains("--auto-escape"));
 }
 
 #[test]
 fn analyze_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["analyze", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["analyze", "--help"]).assert().success();
 }
 
 #[test]
 fn convert_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["convert", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["convert", "--help"]).assert().success();
 }
 
 #[test]
 fn shell_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["shell", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["shell", "--help"]).assert().success();
 }
 
 #[test]
 fn scan_missing_targets_fails() {
     // `scan` requires at least one target. Missing it should exit non-zero.
-    Command::cargo_bin("nfswolf").expect("binary must be built").arg("scan").assert().failure();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").arg("scan").assert().failure();
 }
 
 #[test]
 fn analyze_missing_target_fails() {
     // `analyze` requires a target argument.
-    Command::cargo_bin("nfswolf").expect("binary must be built").arg("analyze").assert().failure();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").arg("analyze").assert().failure();
 }
 
 #[test]
 fn completions_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["completions", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["completions", "--help"]).assert().success();
 }
 
 #[cfg(feature = "fuse")]
 #[test]
 fn mount_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["mount", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["mount", "--help"]).assert().success();
 }
 
 #[test]
 fn escape_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["escape", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["escape", "--help"]).assert().success();
 }
 
 #[test]
 fn brute_handle_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["brute-handle", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["brute-handle", "--help"]).assert().success();
 }
 
 #[test]
 fn uid_spray_help_succeeds() {
-    Command::cargo_bin("nfswolf").expect("binary must be built").args(["uid-spray", "--help"]).assert().success();
+    let _assert = Command::cargo_bin("nfswolf").expect("binary must be built").args(["uid-spray", "--help"]).assert().success();
 }
 
 // --- Scanner coverage: MemFs-based export enumeration ---

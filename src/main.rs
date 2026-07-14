@@ -3,6 +3,17 @@
 //! A unified tool for discovering, analyzing, and exploiting NFSv3
 //! misconfigurations during authorized security assessments.
 
+#[cfg(test)]
+use assert_cmd as _;
+#[cfg(not(feature = "fuse"))]
+use libc as _;
+#[cfg(test)]
+use nfs3_server as _;
+#[cfg(test)]
+use predicates as _;
+#[cfg(test)]
+use proptest as _;
+
 mod cli;
 mod engine;
 mod output;
@@ -48,7 +59,10 @@ fn main() -> anyhow::Result<()> {
         // FUSE error still surfaces in the operator's terminal (it
         // appears after the next shell prompt redraw rather than
         // blocking the prompt).
-        #[allow(unsafe_code, reason = "libc::daemon is the only POSIX way to detach without dropping into raw fork(); confined to this single call site")]
+        #[expect(unsafe_code, reason = "libc::daemon is the only POSIX way to detach without dropping into raw fork(); confined to this single call site")]
+        // SAFETY: libc::daemon(nochdir=1, noclose=1) is safe to call before any
+        // tokio runtime is created -- no async workers exist yet to be orphaned by
+        // fork(), and nochdir+noclose preserve cwd and stdio for error reporting.
         let rc = unsafe { libc::daemon(1, 1) };
         if rc != 0 {
             anyhow::bail!("daemonize failed: {}", std::io::Error::last_os_error());

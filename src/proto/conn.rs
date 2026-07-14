@@ -23,11 +23,11 @@ use tokio::net::TcpStream;
 use crate::proto::auth::{AuthSys, Credential};
 
 /// Concrete IO type used for all NFS connections.
-pub type NfsIo = TokioIo<TcpStream>;
+pub(crate) type NfsIo = TokioIo<TcpStream>;
 
 /// Reconnection strategy  --  matches HP-UX quirk where the server closes after each exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconnectStrategy {
+pub(crate) enum ReconnectStrategy {
     /// Keep the TCP connection open across multiple RPC calls (standard).
     Persistent,
     /// Reconnect after every RPC call (HP-UX drops connection after one exchange).
@@ -36,7 +36,7 @@ pub enum ReconnectStrategy {
 
 /// Health state of a pooled connection.
 #[derive(Debug)]
-pub struct ConnectionHealth {
+pub(crate) struct ConnectionHealth {
     /// When this connection was established.
     pub created_at: Instant,
     /// When this connection last completed a successful call.
@@ -58,7 +58,7 @@ impl ConnectionHealth {
 ///
 /// Holds two TCP connections: one for NFSv3 procedures (via nfs3_client) and
 /// one for raw RPC calls (NFSv2 via `RpcClient::call`).
-pub struct NfsConnection {
+pub(crate) struct NfsConnection {
     /// NFSv3 connection including mount and NFS clients.
     inner: Nfs3Connection<NfsIo>,
     /// Persistent raw-RPC stream to the NFS port for NFSv2 calls.
@@ -98,7 +98,7 @@ impl NfsConnection {
     /// Uses a privileged local port (300-1023) as required by most NFS servers.
     /// When `proxy` is `Some("host:port")` or `Some("socks5://host:port")`, all
     /// TCP connections are tunneled through the SOCKS5 proxy.
-    pub async fn connect(addr: SocketAddr, export: &str, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
+    pub(crate) async fn connect(addr: SocketAddr, export: &str, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
         let opaque = match &credential {
             Credential::None => nfs3_types::rpc::opaque_auth::default(),
             Credential::Sys(auth) => auth.to_opaque_auth(),
@@ -138,7 +138,7 @@ impl NfsConnection {
     ///
     /// Used for NFSv2 (program 100003, version 2).
     /// The caller is responsible for correct `program`, `version`, and `proc` values.
-    pub async fn call_raw<C, R>(&mut self, program: u32, version: u32, proc: u32, args: &C) -> anyhow::Result<R>
+    pub(crate) async fn call_raw<C, R>(&mut self, program: u32, version: u32, proc: u32, args: &C) -> anyhow::Result<R>
     where
         C: Pack + Send + Sync,
         R: Unpack,
@@ -175,7 +175,7 @@ impl NfsConnection {
     ///
     /// The inner mountres3_ok contains a dummy empty handle; health checks use
     /// NFSPROC3_NULL instead of GETATTR since no valid root handle exists.
-    pub async fn connect_direct(addr: SocketAddr, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
+    pub(crate) async fn connect_direct(addr: SocketAddr, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
         use nfs3_client::{MountClient, Nfs3Client as RawNfs3};
         use nfs3_types::mount::{dirpath, fhandle3, mountres3_ok};
         use nfs3_types::xdr_codec::Opaque;
@@ -188,7 +188,7 @@ impl NfsConnection {
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
 
         // Helper to connect to nfs_addr, optionally via SOCKS5.
-        let tcp_connect = |target: SocketAddr| async move {
+        let tcp_connect = async |target: SocketAddr| {
             if let Some(p) = proxy {
                 let proxy_addr = parse_proxy_addr(p)?;
                 let stream = socks5_connect(proxy_addr, target).await?;
@@ -227,7 +227,7 @@ impl NfsConnection {
     /// Used by the connection pool to verify a connection is still usable before reuse.
     /// Direct connections (established without MOUNT) use NFSPROC3_NULL instead since
     /// they have no valid root handle in mountres3_ok.
-    pub async fn health_check(&mut self) -> bool {
+    pub(crate) async fn health_check(&mut self) -> bool {
         if self.is_direct {
             // No valid root handle available -- use NULL as a lightweight liveness probe.
             return self.inner.null().await.is_ok();
@@ -244,7 +244,7 @@ impl NfsConnection {
     /// Mark this connection as permanently failed.
     ///
     /// A poisoned connection is discarded on return to the pool rather than re-queued.
-    pub const fn poison(&mut self) {
+    pub(crate) const fn poison(&mut self) {
         self.health.poisoned = true;
     }
 
@@ -252,7 +252,7 @@ impl NfsConnection {
     ///
     /// Stale connections are health-checked before reuse.
     #[must_use]
-    pub fn is_stale(&self, threshold: Duration) -> bool {
+    pub(crate) fn is_stale(&self, threshold: Duration) -> bool {
         self.health.last_used.elapsed() > threshold
     }
 
@@ -261,14 +261,14 @@ impl NfsConnection {
     /// This does not reconnect; the credential is only used for the next call if
     /// the underlying `Nfs3Client` is rebuilt. Primarily used to note which uid
     /// the connection was last used with.
-    pub fn update_credential(&mut self, new_cred: Credential) {
+    pub(crate) fn update_credential(&mut self, new_cred: Credential) {
         self.credential = new_cred;
     }
 
     /// Get a mutable reference to the inner NFSv3 connection.
     ///
     /// The caller borrows this exclusively, so no concurrent calls are possible.
-    pub fn inner_mut(&mut self) -> &mut Nfs3Connection<NfsIo> {
+    pub(crate) fn inner_mut(&mut self) -> &mut Nfs3Connection<NfsIo> {
         self.health.request_count = self.health.request_count.saturating_add(1);
         self.health.last_used = Instant::now();
         &mut self.inner
@@ -281,9 +281,7 @@ impl NfsConnection {
     /// subsequent pool user does not inherit the sprayed identity. This lets UID/GID
     /// spraying reuse a single mount session instead of opening a new TCP connection
     /// per (uid, gid) pair.
-    pub async fn access_as(&mut self, args: &nfs3_types::nfs3::ACCESS3args, uid: u32, gid: u32, gids: &[u32], hostname: &str) -> anyhow::Result<nfs3_types::nfs3::ACCESS3res> {
-        use crate::proto::auth::AuthSys;
-
+    pub(crate) async fn access_as(&mut self, args: &nfs3_types::nfs3::ACCESS3args, uid: u32, gid: u32, gids: &[u32], hostname: &str) -> anyhow::Result<nfs3_types::nfs3::ACCESS3res> {
         let stamp_cred = AuthSys::with_groups(uid, gid, gids, hostname).to_opaque_auth();
         self.health.request_count = self.health.request_count.saturating_add(1);
         self.health.last_used = Instant::now();
@@ -303,7 +301,7 @@ impl NfsConnection {
 
     /// Reconnect strategy in effect for this connection.
     #[must_use]
-    pub const fn reconnect_strategy(&self) -> ReconnectStrategy {
+    pub(crate) const fn reconnect_strategy(&self) -> ReconnectStrategy {
         self.reconnect
     }
 }
@@ -323,7 +321,7 @@ impl NfsConnection {
 /// The reply's bound address is variable-length keyed on its ATYP byte
 /// (IPv4/IPv6/domain, RFC 1928 S5), so it is parsed rather than assumed IPv4.
 /// IPv6 targets are not supported (NFS servers are typically IPv4).
-pub async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::io::Result<TcpStream> {
+pub(crate) async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy_addr).await?;
 
     // Step 1: greeting  --  offer NO_AUTH (method 0x00).
@@ -331,7 +329,7 @@ pub async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::
 
     // Step 2: method selection response.
     let mut method_resp = [0u8; 2];
-    stream.read_exact(&mut method_resp).await?;
+    _ = stream.read_exact(&mut method_resp).await?;
     if method_resp[0] != 0x05 || method_resp[1] != 0x00 {
         return Err(std::io::Error::other(format!("SOCKS5 auth rejected (method byte=0x{:02x})", method_resp[1])));
     }
@@ -348,7 +346,7 @@ pub async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::
     // (RFC 1928 S6). The bound-address length depends on ATYP, so read the fixed
     // 4-byte head first, then consume exactly the address+port the type implies.
     let mut head = [0u8; 4];
-    stream.read_exact(&mut head).await?;
+    _ = stream.read_exact(&mut head).await?;
     if head[1] != 0x00 {
         return Err(std::io::Error::other(format!("SOCKS5 CONNECT failed (REP=0x{:02x})", head[1])));
     }
@@ -360,19 +358,19 @@ pub async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::
         0x04 => 16 + 2,
         0x03 => {
             let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await?;
+            _ = stream.read_exact(&mut len).await?;
             usize::from(len[0]) + 2
         },
         atyp => return Err(std::io::Error::other(format!("SOCKS5 CONNECT reply has unsupported ATYP=0x{atyp:02x}"))),
     };
     let mut bnd = vec![0u8; bnd_len];
-    stream.read_exact(&mut bnd).await?;
+    _ = stream.read_exact(&mut bnd).await?;
 
     Ok(stream)
 }
 
 /// Parse a proxy string of the form `host:port` or `socks5://host:port`.
-pub fn parse_proxy_addr(proxy: &str) -> anyhow::Result<SocketAddr> {
+pub(crate) fn parse_proxy_addr(proxy: &str) -> anyhow::Result<SocketAddr> {
     let stripped = proxy.strip_prefix("socks5://").unwrap_or(proxy);
     stripped.parse::<SocketAddr>().with_context(|| format!("invalid proxy address '{proxy}' (expected host:port or socks5://host:port)"))
 }
@@ -458,6 +456,6 @@ async fn connect_privileged_nfs(addr: SocketAddr) -> std::io::Result<NfsIo> {
 
 /// Construct a default `AuthSys` credential for anonymous access.
 #[must_use]
-pub fn nobody_cred() -> Credential {
+pub(crate) fn nobody_cred() -> Credential {
     Credential::Sys(AuthSys::new(65534, 65534, "nfswolf"))
 }

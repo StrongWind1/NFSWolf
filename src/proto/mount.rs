@@ -20,7 +20,7 @@ use crate::proto::nfs3::types::FileHandle;
 
 /// Result of a successful MNT call.
 #[derive(Debug, Clone)]
-pub struct MountResult {
+pub(crate) struct MountResult {
     /// Root file handle for the exported filesystem.
     pub handle: FileHandle,
     /// Authentication flavors advertised by the server.
@@ -34,7 +34,7 @@ pub struct MountResult {
 
 /// One export with its access control list.
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
-pub struct ExportEntry {
+pub(crate) struct ExportEntry {
     /// Exported filesystem path on the server.
     pub path: String,
     /// Hostnames, IP addresses, subnets, or wildcards allowed to mount.
@@ -45,7 +45,7 @@ pub struct ExportEntry {
 
 /// A client that currently has an export mounted (from MNTPROC_DUMP).
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct MountedClient {
+pub(crate) struct MountedClient {
     /// Client hostname (as reported by the server).
     pub hostname: String,
     /// Mount point on the server.
@@ -54,7 +54,7 @@ pub struct MountedClient {
 
 /// MOUNT protocol client.
 #[derive(Debug, Clone)]
-pub struct NfsMountClient {
+pub(crate) struct NfsMountClient {
     mount_port: Option<u16>,
     /// When true, refuse to fall back to an ephemeral source port. Set when
     /// `--privileged-port` is in effect or when retrying after the server
@@ -67,27 +67,27 @@ pub struct NfsMountClient {
 impl NfsMountClient {
     /// Create a mount client that resolves the mount port via portmapper.
     #[must_use]
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { mount_port: None, privileged_required: false, proxy: None }
     }
 
     /// Create a mount client with a fixed mount port (bypasses portmapper).
     #[must_use]
-    pub const fn with_port(port: u16) -> Self {
+    pub(crate) const fn with_port(port: u16) -> Self {
         Self { mount_port: Some(port), privileged_required: false, proxy: None }
     }
 
     /// Force this client to bind a privileged source port (<1024) only.
     /// `connect()` will return an error rather than fall back to ephemeral.
     #[must_use]
-    pub const fn require_privileged(mut self) -> Self {
+    pub(crate) const fn require_privileged(mut self) -> Self {
         self.privileged_required = true;
         self
     }
 
     /// Attach a SOCKS5 proxy to this client.
     #[must_use]
-    pub fn with_proxy(mut self, proxy: String) -> Self {
+    pub(crate) fn with_proxy(mut self, proxy: String) -> Self {
         self.proxy = Some(proxy);
         self
     }
@@ -106,7 +106,7 @@ impl NfsMountClient {
     /// The retry path runs the privileged scan again with the
     /// eager-fallback path disabled, which is the same behaviour that
     /// `--privileged-port` requests explicitly.
-    pub async fn mount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+    pub(crate) async fn mount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
         match self.mount_once(addr, export).await {
             Ok(r) => Ok(r),
             Err(e) if self.privileged_required => Err(e),
@@ -133,14 +133,14 @@ impl NfsMountClient {
     }
 
     /// Unmount an export (MNTPROC_UMNT) for stealth cleanup (F-2.5).
-    pub async fn unmount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
+    pub(crate) async fn unmount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
         let mut client = self.connect(addr).await?;
         let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
         client.umnt(path).await.with_context(|| format!("UMNT {export}"))
     }
 
     /// Unmount all exports (MNTPROC_UMNTALL).
-    pub async fn unmount_all(&self, addr: SocketAddr) -> anyhow::Result<()> {
+    pub(crate) async fn unmount_all(&self, addr: SocketAddr) -> anyhow::Result<()> {
         let mut client = self.connect(addr).await?;
         client.umntall().await.context("UMNTALL")
     }
@@ -149,7 +149,7 @@ impl NfsMountClient {
     ///
     /// A wildcard or empty `allowed_hosts` list means the export is world-accessible (F-7.1).
     /// This queries MOUNT version 3 -- for NFSv2 exports, use `list_exports_v1()`.
-    pub async fn list_exports(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
+    pub(crate) async fn list_exports(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
         let mut client = self.connect(addr).await?;
         let exports = client.export().await.context("MNTPROC_EXPORT v3")?;
         Ok(exports.into_inner().into_iter().map(export_entry_from).collect())
@@ -164,7 +164,7 @@ impl NfsMountClient {
     ///
     /// MOUNT v1 EXPORT returns the NFSv2 export list; MOUNT v3 EXPORT returns
     /// the NFSv3 export list.  These are usually identical but CAN differ.
-    pub async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
+    pub(crate) async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
         use nfs3_client::rpc::RpcClient;
         use nfs3_types::mount::exports;
         use nfs3_types::xdr_codec::Void;
@@ -199,7 +199,7 @@ impl NfsMountClient {
     /// List connected clients via MNTPROC_DUMP.
     ///
     /// Returns hosts that currently have an export mounted.
-    pub async fn dump_clients(&self, addr: SocketAddr) -> anyhow::Result<Vec<MountedClient>> {
+    pub(crate) async fn dump_clients(&self, addr: SocketAddr) -> anyhow::Result<Vec<MountedClient>> {
         let mut client = self.connect(addr).await?;
         let dump = client.dump().await.context("MNTPROC_DUMP")?;
         Ok(dump.into_inner().into_iter().map(|b| MountedClient { hostname: bytes_to_string(b.ml_hostname.0.as_ref()), directory: bytes_to_string(b.ml_directory.0.as_ref()) }).collect())

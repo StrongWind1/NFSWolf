@@ -38,7 +38,7 @@ use crate::util::stealth::StealthConfig;
 
 /// Output from `scan_range` -- results plus metadata about the scan.
 #[derive(Debug)]
-pub struct ScanOutput {
+pub(crate) struct ScanOutput {
     /// Hosts with confirmed NFS (passed skip logic).
     pub results: Vec<HostResult>,
     /// Total number of targets submitted.
@@ -49,7 +49,7 @@ pub struct ScanOutput {
 
 /// Scanner configuration.
 #[derive(Debug)]
-pub struct ScanConfig {
+pub(crate) struct ScanConfig {
     /// Maximum number of hosts to scan simultaneously.
     pub concurrency: usize,
     /// Timeout for each TCP connection probe / RPC call.
@@ -72,7 +72,7 @@ impl Default for ScanConfig {
 ///
 /// Spawns one tokio task per host, bounded by a `Semaphore`.
 #[derive(Debug)]
-pub struct Scanner {
+pub(crate) struct Scanner {
     config: ScanConfig,
     stealth: StealthConfig,
     proxy: Option<String>,
@@ -81,13 +81,13 @@ pub struct Scanner {
 impl Scanner {
     /// Create a new scanner with the given configuration.
     #[must_use]
-    pub const fn new(config: ScanConfig, stealth: StealthConfig) -> Self {
+    pub(crate) const fn new(config: ScanConfig, stealth: StealthConfig) -> Self {
         Self { config, stealth, proxy: None }
     }
 
     /// Attach a SOCKS5 proxy so ALL connections are tunnelled.
     #[must_use]
-    pub fn with_proxy(mut self, proxy: String) -> Self {
+    pub(crate) fn with_proxy(mut self, proxy: String) -> Self {
         self.proxy = Some(proxy);
         self
     }
@@ -97,7 +97,7 @@ impl Scanner {
     /// Hosts where no NFS version probe succeeds are omitted.
     /// On SIGINT (Ctrl+C): cancels in-flight workers, returns partial results
     /// collected so far with `interrupted = true`.
-    pub async fn scan_range(&self, targets: Vec<TargetSpec>) -> ScanOutput {
+    pub(crate) async fn scan_range(&self, targets: Vec<TargetSpec>) -> ScanOutput {
         let total = targets.len();
         let sem = Arc::new(Semaphore::new(self.config.concurrency));
         let nfs_found = Arc::new(AtomicU32::new(0));
@@ -128,18 +128,18 @@ impl Scanner {
                 let pb = pb.clone();
                 let job = ScanJob { timeout: self.config.timeout, scan_udp: self.config.scan_udp, nfs_ports: self.config.nfs_ports.clone(), mount_port: self.config.mount_port, proxy: self.proxy.clone(), stealth: self.stealth.clone() };
 
-                join_set.spawn(async move {
+                drop(join_set.spawn(async move {
                     let _permit = permit;
                     let result = scan_host(target, job).await;
                     if let Some(ref r) = result
                         && r.has_nfs()
                     {
-                        nfs_found.fetch_add(1, Ordering::Relaxed);
+                        _ = nfs_found.fetch_add(1, Ordering::Relaxed);
                         results.lock().await.push(r.clone());
                     }
                     pb.set_message(format!("{} with NFS", nfs_found.load(Ordering::Relaxed)));
                     pb.inc(1);
-                });
+                }));
             }
             // Drain the remainder; a panicked host yields JoinError, which is
             // isolated and ignored here (per-host panic isolation preserved).
@@ -165,7 +165,7 @@ impl Scanner {
     /// Parse target specifications into a flat list of `TargetSpec`.
     ///
     /// Preserves hostnames and deduplicates by IP (first-seen hostname wins).
-    pub fn parse_targets(specs: &[String]) -> anyhow::Result<Vec<TargetSpec>> {
+    pub(crate) fn parse_targets(specs: &[String]) -> anyhow::Result<Vec<TargetSpec>> {
         let mut targets = Vec::new();
 
         for spec in specs {
@@ -215,6 +215,7 @@ struct ScanJob {
 }
 
 /// Probe a single host. Returns `None` if no NFS version is confirmed.
+#[expect(clippy::cognitive_complexity, reason = "scanner dispatch coordinates multiple protocol probes")]
 async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let start = Instant::now();
     let ip = target.ip;
@@ -286,14 +287,14 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // --- Stage 3: NFS + mountd port set assembly + dedup ---
     let mut nfs_port_set: HashSet<u16> = HashSet::new();
     for &(_, _, port) in nfs_from_dump.iter().chain(nfs_from_getport.iter()) {
-        nfs_port_set.insert(port);
+        _ = nfs_port_set.insert(port);
     }
     for &port in &job.nfs_ports {
-        nfs_port_set.insert(port);
+        _ = nfs_port_set.insert(port);
     }
     // If no NFS port from portmapper, add 2049 as fallback.
     if nfs_from_dump.is_empty() && nfs_from_getport.is_empty() {
-        nfs_port_set.insert(2049);
+        _ = nfs_port_set.insert(2049);
     }
 
     // Mountd port discovery.
@@ -302,12 +303,12 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
 
     let mut mountd_ports: HashSet<u16> = HashSet::new();
     for &(_, _, port) in mount_from_dump.iter().chain(mount_from_getport.iter()) {
-        mountd_ports.insert(port);
+        _ = mountd_ports.insert(port);
     }
 
     if mountd_ports.is_empty() {
         if let Some(mp) = job.mount_port {
-            mountd_ports.insert(mp);
+            _ = mountd_ports.insert(mp);
         } else {
             // Probe fallback ports 2049, 20048 with MOUNT NULL.
             for &port in &[2049u16, 20048] {
@@ -317,7 +318,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                     let mc = if let Some(ref p) = job.proxy { NfsMountClient::with_port(port).with_proxy(p.clone()) } else { NfsMountClient::with_port(port) };
                     job.stealth.wait().await;
                     if timeout(probe_timeout, mc.list_exports(SocketAddr::new(ip, 111))).await.is_ok_and(|r| r.is_ok()) {
-                        mountd_ports.insert(port);
+                        _ = mountd_ports.insert(port);
                         break;
                     }
                 }
@@ -415,7 +416,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // (legacy Linux artifact, not tied to any NFS version).
     let confirmed_v2 = nfs_ports_info.iter().any(|p| p.v2);
     let confirmed_v3 = nfs_ports_info.iter().any(|p| p.v3);
-    let mount_ports: Vec<MountPortInfo> = {
+    let mount_port_infos: Vec<MountPortInfo> = {
         let mut infos: Vec<MountPortInfo> = Vec::new();
         let all_mount = mount_from_dump.iter().chain(mount_from_getport.iter());
         for &(version, protocol, port) in all_mount {
@@ -447,7 +448,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
 
     // v3 exports -- only query if NFSv3 version probe succeeded
     let has_v3 = nfs_ports_info.iter().any(|p| p.v3);
-    let exports_v3 = if has_v3 && (mount_ports.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
+    let exports_v3 = if has_v3 && (mount_port_infos.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
         job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports(SocketAddr::new(ip, 111))).await {
             Ok(Ok(e)) => Some(e),
@@ -459,7 +460,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
 
     // v2 exports (via MOUNT v1) -- only query if NFSv2 version probe succeeded
     let has_v2 = nfs_ports_info.iter().any(|p| p.v2);
-    let exports_v2 = if has_v2 && mount_ports.iter().any(|m| m.versions.contains(&1)) {
+    let exports_v2 = if has_v2 && mount_port_infos.iter().any(|m| m.versions.contains(&1)) {
         job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports_v1(SocketAddr::new(ip, 111))).await {
             Ok(Ok(e)) => Some(e),
@@ -470,7 +471,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     };
 
     // MOUNT DUMP
-    let mounts = if !mountd_ports.is_empty() || mount_ports.iter().any(|m| m.tcp) {
+    let mounts = if !mountd_ports.is_empty() || mount_port_infos.iter().any(|m| m.tcp) {
         job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.dump_clients(SocketAddr::new(ip, 111))).await {
             Ok(Ok(m)) => Some(m),
@@ -497,7 +498,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // --- Stage 9: Assembly ---
     // No trailing stealth delay here: pacing is applied before each outbound
     // probe above, so the per-host burst is already spread across the scan.
-    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports, exports_v2, exports_v3, exports_v4, mounts, hint, scan_duration: start.elapsed() })
+    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, exports_v2, exports_v3, exports_v4, mounts, hint, scan_duration: start.elapsed() })
 }
 
 /// Non-blocking TCP probe: returns true if the port accepts connections within timeout.

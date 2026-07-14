@@ -21,7 +21,7 @@ use crate::proto::mount::{ExportEntry, MountedClient};
 /// CIDR-expanded addresses.  Round-robin DNS that resolves one hostname to
 /// multiple IPs produces one `TargetSpec` per IP, all sharing the hostname.
 #[derive(Debug, Clone)]
-pub struct TargetSpec {
+pub(crate) struct TargetSpec {
     /// Resolved IP address.
     pub ip: IpAddr,
     /// Original hostname from CLI input, if the target was a hostname.
@@ -36,7 +36,7 @@ pub struct TargetSpec {
 /// `Unreachable`.  With `--scan-udp`, both protocols are tested independently.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PortReachability {
+pub(crate) enum PortReachability {
     /// TCP only (default mode, or TCP succeeded without UDP test).
     Tcp,
     /// UDP only (TCP failed, UDP succeeded with `--scan-udp`).
@@ -50,7 +50,7 @@ pub enum PortReachability {
 impl PortReachability {
     /// Build from TCP/UDP probe results.
     #[must_use]
-    pub const fn from_probes(tcp: bool, udp: bool) -> Self {
+    pub(crate) const fn from_probes(tcp: bool, udp: bool) -> Self {
         match (tcp, udp) {
             (true, true) => Self::TcpUdp,
             (true, false) => Self::Tcp,
@@ -61,13 +61,13 @@ impl PortReachability {
 
     /// Whether the portmapper was reachable on at least one protocol.
     #[must_use]
-    pub const fn is_reachable(&self) -> bool {
+    pub(crate) const fn is_reachable(&self) -> bool {
         !matches!(self, Self::Unreachable)
     }
 
     /// Whether TCP is available.
     #[must_use]
-    pub const fn has_tcp(&self) -> bool {
+    pub(crate) const fn has_tcp(&self) -> bool {
         matches!(self, Self::Tcp | Self::TcpUdp)
     }
 }
@@ -99,7 +99,7 @@ impl fmt::Display for PortReachability {
 /// the contiguous range of supported versions `(low, high)`.  This is "free
 /// intelligence" from a failed probe and populates the Hint column.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct VersionRange {
+pub(crate) struct VersionRange {
     /// Lowest supported version.
     pub low: u32,
     /// Highest supported version.
@@ -121,7 +121,7 @@ impl fmt::Display for VersionRange {
 /// COMPOUND v4).  The booleans record which probes were accepted by the
 /// server's RPC layer.
 #[derive(Debug, Clone, Serialize)]
-pub struct NfsPortInfo {
+pub(crate) struct NfsPortInfo {
     /// Port number.
     pub port: u16,
     /// Reachable over TCP.
@@ -139,7 +139,7 @@ pub struct NfsPortInfo {
 impl NfsPortInfo {
     /// Whether any NFS version probe succeeded on this port.
     #[must_use]
-    pub const fn any_version(&self) -> bool {
+    pub(crate) const fn any_version(&self) -> bool {
         self.v2 || self.v3 || self.v4
     }
 }
@@ -148,7 +148,7 @@ impl NfsPortInfo {
 
 /// Information about a discovered mountd port.
 #[derive(Debug, Clone, Serialize)]
-pub struct MountPortInfo {
+pub(crate) struct MountPortInfo {
     /// Port number.
     pub port: u16,
     /// Reachable over TCP.
@@ -166,7 +166,7 @@ pub struct MountPortInfo {
 /// Unlike MOUNT EXPORT entries, these have no ACL information -- they are
 /// just directory names from the pseudo-filesystem namespace.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct V4ExportEntry {
+pub(crate) struct V4ExportEntry {
     /// Entry name from the pseudo-root READDIR (e.g., `"srv"`, `"data"`).
     pub path: String,
 }
@@ -178,7 +178,7 @@ pub struct V4ExportEntry {
 /// Assembled by `scan_host()` after all probe stages complete.  Consumed by
 /// every output format (table, JSON, CSV, per-host detail).
 #[derive(Debug, Clone, Serialize)]
-pub struct HostResult {
+pub(crate) struct HostResult {
     /// Target IP address.
     pub ip: IpAddr,
     /// Original hostname from CLI input (if target was a hostname).
@@ -209,25 +209,25 @@ pub struct HostResult {
 impl HostResult {
     /// Whether any NFS version was confirmed on any port.
     #[must_use]
-    pub fn has_nfs(&self) -> bool {
+    pub(crate) fn has_nfs(&self) -> bool {
         self.nfs_ports.iter().any(NfsPortInfo::any_version)
     }
 
     /// Whether NFSv2 was confirmed on any port.
     #[must_use]
-    pub fn has_v2(&self) -> bool {
+    pub(crate) fn has_v2(&self) -> bool {
         self.nfs_ports.iter().any(|p| p.v2)
     }
 
     /// Whether NFSv3 was confirmed on any port.
     #[must_use]
-    pub fn has_v3(&self) -> bool {
+    pub(crate) fn has_v3(&self) -> bool {
         self.nfs_ports.iter().any(|p| p.v3)
     }
 
     /// Whether NFSv4 was confirmed on any port.
     #[must_use]
-    pub fn has_v4(&self) -> bool {
+    pub(crate) fn has_v4(&self) -> bool {
         self.nfs_ports.iter().any(|p| p.v4)
     }
 }
@@ -238,7 +238,7 @@ mod duration_ms {
 
     use serde::{self, Serializer};
 
-    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_u64(d.as_millis().try_into().map_err(serde::ser::Error::custom)?)
     }
 }

@@ -16,7 +16,7 @@ use nfs3_types::xdr_codec::Opaque;
 /// used this type.  Both encode and decode are trivially implementable with
 /// stdlib, so the crate is not needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HexError;
+pub(crate) struct HexError;
 
 impl std::fmt::Display for HexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,18 +29,18 @@ impl std::error::Error for HexError {}
 /// Opaque file handle  --  identifies a file/directory on the server.
 /// Max 64 bytes for NFSv3 (RFC 1813 S2.3.1). Wraps nfs3_types::nfs3::nfs_fh3.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FileHandle(pub Vec<u8>);
+pub(crate) struct FileHandle(pub Vec<u8>);
 
 impl FileHandle {
-    pub fn from_bytes(data: &[u8]) -> Self {
+    pub(crate) fn from_bytes(data: &[u8]) -> Self {
         Self(data.to_vec())
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
-    pub fn to_hex(&self) -> String {
+    pub(crate) fn to_hex(&self) -> String {
         // Two lowercase hex chars per byte -- no crate needed for this.
         self.0.iter().fold(String::with_capacity(self.0.len() * 2), |mut s, b| {
             use std::fmt::Write as _;
@@ -50,7 +50,7 @@ impl FileHandle {
     }
 
     /// Decode a lowercase or uppercase hex string (optional 0x prefix) into a handle.
-    pub fn from_hex(s: &str) -> Result<Self, HexError> {
+    pub(crate) fn from_hex(s: &str) -> Result<Self, HexError> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         if !s.len().is_multiple_of(2) {
             return Err(HexError);
@@ -59,21 +59,21 @@ impl FileHandle {
         Ok(Self(bytes))
     }
 
-    pub const fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.0.len()
     }
 
-    pub const fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Convert to nfs3-rs wire type.
-    pub fn to_nfs_fh3(&self) -> nfs_fh3 {
+    pub(crate) fn to_nfs_fh3(&self) -> nfs_fh3 {
         nfs_fh3 { data: Opaque::owned(self.0.clone()) }
     }
 
     /// Convert from nfs3-rs wire type.
-    pub fn from_nfs_fh3(fh: &nfs_fh3) -> Self {
+    pub(crate) fn from_nfs_fh3(fh: &nfs_fh3) -> Self {
         Self(fh.data.as_ref().to_vec())
     }
 }
@@ -81,7 +81,7 @@ impl FileHandle {
 /// File type (ftype3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum FileType {
+pub(crate) enum FileType {
     Regular = 1,
     Directory = 2,
     Block = 3,
@@ -93,7 +93,7 @@ pub enum FileType {
 
 impl FileType {
     /// Convert from nfs3-rs ftype3.
-    pub const fn from_ftype3(ft: ftype3) -> Self {
+    pub(crate) const fn from_ftype3(ft: ftype3) -> Self {
         match ft {
             ftype3::NF3REG => Self::Regular,
             ftype3::NF3DIR => Self::Directory,
@@ -108,7 +108,7 @@ impl FileType {
 
 /// File attributes (fattr3). Wraps nfs3_types::nfs3::fattr3.
 #[derive(Debug, Clone)]
-pub struct FileAttrs {
+pub(crate) struct FileAttrs {
     pub file_type: FileType,
     pub mode: u32,
     pub nlink: u32,
@@ -126,7 +126,7 @@ pub struct FileAttrs {
 
 impl FileAttrs {
     /// Convert from nfs3-rs fattr3.
-    pub const fn from_fattr3(a: &fattr3) -> Self {
+    pub(crate) const fn from_fattr3(a: &fattr3) -> Self {
         Self {
             file_type: FileType::from_ftype3(a.type_),
             mode: a.mode,
@@ -147,14 +147,14 @@ impl FileAttrs {
 
 /// NFS timestamp (seconds + nanoseconds since epoch).
 #[derive(Debug, Clone, Copy)]
-pub struct NfsTime {
+pub(crate) struct NfsTime {
     pub seconds: u32,
     pub nseconds: u32,
 }
 
 /// Directory entry from READDIRPLUS.
 #[derive(Debug, Clone)]
-pub struct DirEntryPlus {
+pub(crate) struct DirEntryPlus {
     pub fileid: u64,
     pub name: String,
     pub cookie: u64,
@@ -164,7 +164,7 @@ pub struct DirEntryPlus {
 
 /// Directory entry from READDIR.
 #[derive(Debug, Clone)]
-pub struct DirEntry {
+pub(crate) struct DirEntry {
     pub fileid: u64,
     pub name: String,
     pub cookie: u64,
@@ -172,7 +172,7 @@ pub struct DirEntry {
 
 /// Filesystem statistics (from FSSTAT).
 #[derive(Debug, Clone)]
-pub struct FsStat {
+pub(crate) struct FsStat {
     pub total_bytes: u64,
     pub free_bytes: u64,
     pub avail_bytes: u64,
@@ -183,7 +183,7 @@ pub struct FsStat {
 
 /// Filesystem info (from FSINFO).
 #[derive(Debug, Clone)]
-pub struct FsInfo {
+pub(crate) struct FsInfo {
     pub rtmax: u32,
     pub rtpref: u32,
     pub rtmult: u32,
@@ -201,30 +201,30 @@ pub struct FsInfo {
 /// These are the six access types the client can request in one call.
 /// ACCESS results are advisory only  --  always confirm with the actual
 /// operation (READ, WRITE, etc.) per RFC 1813 S3.3.4.
-pub mod access {
+pub(crate) mod access {
     /// Read file data or list directory entries.
-    pub const READ: u32 = 0x0001;
+    pub(crate) const READ: u32 = 0x0001;
     /// Look up a name in a directory.
-    pub const LOOKUP: u32 = 0x0002;
+    pub(crate) const LOOKUP: u32 = 0x0002;
     /// Write data or modify file attributes.
-    pub const MODIFY: u32 = 0x0004;
+    pub(crate) const MODIFY: u32 = 0x0004;
     /// Append data to a file or add entries to a directory.
-    pub const EXTEND: u32 = 0x0008;
+    pub(crate) const EXTEND: u32 = 0x0008;
     /// Delete a file or directory entry.
-    pub const DELETE: u32 = 0x0010;
+    pub(crate) const DELETE: u32 = 0x0010;
     /// Execute a file.
-    pub const EXECUTE: u32 = 0x0020;
+    pub(crate) const EXECUTE: u32 = 0x0020;
     /// All six bits OR'd  --  request the full access mask in one call.
-    pub const ALL: u32 = READ | LOOKUP | MODIFY | EXTEND | DELETE | EXECUTE;
+    pub(crate) const ALL: u32 = READ | LOOKUP | MODIFY | EXTEND | DELETE | EXECUTE;
 
     /// The write-capability bits: modify data/attrs, extend/create, or delete.
     /// A handle granting any of these is writable. ACCESS is advisory only
     /// (RFC 1813 S3.3.4)  --  confirm with an actual CREATE/WRITE.
-    pub const WRITE_BITS: u32 = MODIFY | EXTEND | DELETE;
+    pub(crate) const WRITE_BITS: u32 = MODIFY | EXTEND | DELETE;
 
     /// Whether an ACCESS result mask grants any write capability.
     #[must_use]
-    pub const fn grants_write(mask: u32) -> bool {
+    pub(crate) const fn grants_write(mask: u32) -> bool {
         mask & WRITE_BITS != 0
     }
 }
@@ -232,7 +232,7 @@ pub mod access {
 /// Write stability levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum WriteStable {
+pub(crate) enum WriteStable {
     Unstable = 0,
     DataSync = 1,
     FileSync = 2,
@@ -241,7 +241,7 @@ pub enum WriteStable {
 /// Create mode for CREATE operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum CreateMode {
+pub(crate) enum CreateMode {
     Unchecked = 0,
     Guarded = 1,
     Exclusive = 2,
