@@ -24,7 +24,7 @@ use crate::engine::scanner::{ScanConfig, ScanOutput, Scanner};
 use crate::util::stealth::StealthConfig;
 
 // Re-export for convenience.
-#[allow(unused_imports, reason = "used in type signatures below")]
+#[expect(unused_imports, reason = "used in type signatures below")]
 use crate::engine::scan_types;
 
 /// Discover NFS servers on a network.
@@ -39,7 +39,7 @@ use crate::engine::scan_types;
 ///   nfswolf scan -f hosts.txt
 ///   nfswolf scan --scan-udp 10.0.0.0/16
 #[derive(Parser)]
-pub struct ScanArgs {
+pub(crate) struct ScanArgs {
     /// Targets: IPs, CIDRs, hostnames. Omit if using -f.
     #[arg(required_unless_present = "targets_file", help_heading = H_TARGET)]
     pub targets: Vec<String>,
@@ -87,7 +87,7 @@ pub struct ScanArgs {
 
 impl ScanArgs {
     /// Merge positional targets and file-based targets into one list.
-    pub fn all_target_specs(&self) -> Vec<String> {
+    pub(crate) fn all_target_specs(&self) -> Vec<String> {
         let mut specs = self.targets.clone();
         if let Some(ref f) = self.targets_file {
             specs.push(f.clone());
@@ -97,7 +97,7 @@ impl ScanArgs {
 }
 
 /// Run the scan command.
-pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     // Validate mutual exclusion: --scan-udp and --proxy cannot coexist.
     if args.scan_udp && globals.proxy.is_some() {
         anyhow::bail!("UDP probes cannot be tunneled through SOCKS5");
@@ -157,8 +157,7 @@ pub async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
 
     if interrupted {
         let nfs_count = results.len();
-        eprintln!("{}", crate::output::status_warn(&format!("Interrupted  --  {} of {} host(s) completed, {} with NFS", results.len(), total, nfs_count)));
-        std::process::exit(130);
+        anyhow::bail!("Interrupted  --  {} of {} host(s) completed, {} with NFS", results.len(), total, nfs_count);
     }
 
     // Auto-escape pass: only on a complete scan (a Ctrl+C above already exited).
@@ -253,7 +252,7 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
         handles.push(handle);
     }
     for handle in handles {
-        let _ = handle.await;
+        drop(handle.await);
     }
 
     // Drain and sort into stable host/export order for printing.
@@ -371,7 +370,7 @@ fn render_nfs_ports(ports: &[NfsPortInfo]) -> String {
         return format!("{}/{proto}", p.port);
     }
     // Multiple ports -- show per version.
-    let mut parts = Vec::new();
+    let mut segments = Vec::new();
     for p in ports {
         if !p.any_version() {
             continue;
@@ -387,9 +386,9 @@ fn render_nfs_ports(ports: &[NfsPortInfo]) -> String {
         if p.v4 {
             vers.push("v4");
         }
-        parts.push(format!("{}/{proto} ({})", p.port, vers.join(",")));
+        segments.push(format!("{}/{proto} ({})", p.port, vers.join(",")));
     }
-    if parts.is_empty() { "--".to_owned() } else { parts.join(", ") }
+    if segments.is_empty() { "--".to_owned() } else { segments.join(", ") }
 }
 
 const fn port_proto_str(tcp: bool, udp: bool) -> &'static str {
@@ -441,7 +440,7 @@ fn render_mount_ports(ports: &[crate::engine::scan_types::MountPortInfo]) -> Str
     if ports.is_empty() {
         return "--".to_owned();
     }
-    let parts: Vec<String> = ports
+    let segments: Vec<String> = ports
         .iter()
         .map(|p| {
             let proto = port_proto_str(p.tcp, p.udp);
@@ -449,7 +448,7 @@ fn render_mount_ports(ports: &[crate::engine::scan_types::MountPortInfo]) -> Str
             format!("{}/{proto} ({})", p.port, vers.join(","))
         })
         .collect();
-    parts.join(", ")
+    segments.join(", ")
 }
 
 /// Render mounts count.
@@ -567,12 +566,11 @@ fn exports_equal(a: &ExportListKind<'_>, b: &ExportListKind<'_>) -> bool {
 fn write_json(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyhow::Result<()> {
     let mut wrapper = serde_json::Map::new();
     if interrupted {
-        wrapper.insert("interrupted".to_owned(), serde_json::Value::Bool(true));
+        drop(wrapper.insert("interrupted".to_owned(), serde_json::Value::Bool(true)));
     }
     let json_results: Vec<serde_json::Value> = results.iter().map(host_to_json).collect();
-    wrapper.insert("hosts".to_owned(), serde_json::Value::Array(json_results));
-    #[allow(clippy::unwrap_used, reason = "serializing known-good structures")]
-    let json = serde_json::to_string_pretty(&serde_json::Value::Object(wrapper)).unwrap();
+    drop(wrapper.insert("hosts".to_owned(), serde_json::Value::Array(json_results)));
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(wrapper))?;
     std::fs::write(path, json)?;
     tracing::info!(path = %path.display(), "JSON written");
     Ok(())

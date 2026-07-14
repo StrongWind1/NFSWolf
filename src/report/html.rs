@@ -12,7 +12,7 @@ use crate::report::txt::sanitize_control;
 /// Write a complete HTML document to `out`.
 ///
 /// The output is a single file with inlined CSS  --  no external assets required.
-pub fn render(results: &[AnalysisResult], title: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+pub(crate) fn render(results: &[AnalysisResult], title: &str, out: &mut dyn Write) -> anyhow::Result<()> {
     let mut html = String::new();
     push_head(&mut html, title);
     push_body(results, title, &mut html);
@@ -162,7 +162,7 @@ fn html_escape(s: &str) -> String {
 // Embedded CSS  --  inlined to keep the report a single portable file.
 // ---------------------------------------------------------------------------
 
-const CSS: &str = r"<style>
+const CSS: &str = "<style>
 body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #222; margin: 0; padding: 0; }
 .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
 h1 { font-size: 2rem; border-bottom: 3px solid #333; padding-bottom: .5rem; }

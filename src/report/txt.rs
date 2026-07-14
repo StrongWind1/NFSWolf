@@ -9,7 +9,7 @@ use std::io::Write;
 use crate::engine::analyzer::{AnalysisResult, Severity};
 
 /// Write a plain-text security report to `out`.
-pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
+pub(crate) fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
     for result in results {
         writeln!(out, "==============================")?;
         writeln!(out, "Host: {}", sanitize_control(&result.host))?;

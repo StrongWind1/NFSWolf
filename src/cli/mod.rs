@@ -1,15 +1,15 @@
 //! CLI argument parsing and subcommand dispatch.
 
-pub mod analyze;
-pub mod brute_handle;
-pub mod convert;
-pub mod escape;
-pub mod mount;
-pub mod probe;
-pub mod scan;
-pub mod shell;
-pub mod target;
-pub mod uid_spray;
+pub(crate) mod analyze;
+pub(crate) mod brute_handle;
+pub(crate) mod convert;
+pub(crate) mod escape;
+pub(crate) mod mount;
+pub(crate) mod probe;
+pub(crate) mod scan;
+pub(crate) mod shell;
+pub(crate) mod target;
+pub(crate) mod uid_spray;
 
 use clap::{Parser, Subcommand};
 
@@ -23,28 +23,28 @@ use clap::{Parser, Subcommand};
 
 /// Where the toolkit gets the root file handle from (positional target,
 /// `--export`, or `--handle`).
-pub const H_TARGET: &str = "Target / Source";
+pub(crate) const H_TARGET: &str = "Target / Source";
 
 /// AUTH_SYS credential fields (uid, gid, hostname, aux GIDs).
-pub const H_IDENTITY: &str = "Identity";
+pub(crate) const H_IDENTITY: &str = "Identity";
 
 /// Per-operation safety belts (currently just `--allow-write`; the auto-UID
 /// ladder, owner-bit elevation, suid/dev passthrough, and shared-mount
 /// visibility are always-on across `shell` and `mount`).
-pub const H_PERMISSIONS: &str = "Permissions";
+pub(crate) const H_PERMISSIONS: &str = "Permissions";
 
 /// Network-level toggles: alternate ports, transport, proxy, timeout.
-pub const H_NETWORK: &str = "Network";
+pub(crate) const H_NETWORK: &str = "Network";
 
 /// Timing knobs that make traffic less recognisable.
-pub const H_STEALTH: &str = "Stealth";
+pub(crate) const H_STEALTH: &str = "Stealth";
 
 /// Reporting / verbosity / file-output flags.
-pub const H_OUTPUT: &str = "Output";
+pub(crate) const H_OUTPUT: &str = "Output";
 
 /// Per-subcommand behavior switches (the long tail of `--check-*`,
 /// `--probe-*`, `--no-*`, etc.).
-pub const H_BEHAVIOR: &str = "Behavior";
+pub(crate) const H_BEHAVIOR: &str = "Behavior";
 
 // -----------------------------------------------------------------------------
 
@@ -67,7 +67,7 @@ pub const H_BEHAVIOR: &str = "Behavior";
     help_template = "{about-with-newline}\n{usage-heading} {usage}\n\n{options}\n{after-help}",
     after_help = COMMANDS_HELP,
 )]
-pub struct Cli {
+pub(crate) struct Cli {
     /// AUTH_SYS UID to present to the NFS server (spoofed  --  server trusts this)
     #[arg(short = 'u', long, global = true, default_value = "1000", value_name = "UID", help_heading = H_IDENTITY)]
     pub uid: u32,
@@ -136,7 +136,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
     // --- Recon: discover, audit, and break out of exports ---
     /// Discover NFS servers on a network
     Scan(scan::ScanArgs),
@@ -218,7 +218,7 @@ const COMMANDS_HELP: &str = concat!(
 );
 
 #[derive(Parser)]
-pub struct CompletionsArgs {
+pub(crate) struct CompletionsArgs {
     /// Shell to generate completions for
     #[arg(value_enum)]
     pub shell: clap_complete::Shell,
@@ -226,7 +226,7 @@ pub struct CompletionsArgs {
 
 /// Global options extracted from the top-level CLI for passing to subcommands.
 #[derive(Debug, Clone)]
-pub struct GlobalOpts {
+pub(crate) struct GlobalOpts {
     /// Override UID for all NFS operations.
     pub uid: u32,
     /// Override GID for all NFS operations.
@@ -263,7 +263,7 @@ impl Cli {
     /// Called in main() before matching on the subcommand so global
     /// values survive the partial move of `cli.command`.
     #[must_use]
-    pub fn global_opts(&self) -> GlobalOpts {
+    pub(crate) fn global_opts(&self) -> GlobalOpts {
         GlobalOpts {
             uid: self.uid,
             gid: self.gid,
@@ -283,7 +283,7 @@ impl Cli {
     }
 }
 
-pub fn completions(args: &CompletionsArgs) {
+pub(crate) fn completions(args: &CompletionsArgs) {
     let mut cmd = <Cli as clap::CommandFactory>::command();
     clap_complete::generate(args.shell, &mut cmd, "nfswolf", &mut std::io::stdout());
 }
@@ -293,7 +293,7 @@ pub fn completions(args: &CompletionsArgs) {
 /// The line echoes back the literal argv the user typed (minus the
 /// program name), which is the most useful thing to copy into shell
 /// history. Skipped when `--quiet` is set.
-pub fn emit_replay(globals: &GlobalOpts) {
+pub(crate) fn emit_replay(globals: &GlobalOpts) {
     if globals.quiet {
         return;
     }

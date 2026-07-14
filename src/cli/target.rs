@@ -23,7 +23,7 @@ use anyhow::{Context as _, anyhow, bail};
 
 /// Resolved host + chosen handle source.
 #[derive(Debug, Clone)]
-pub struct Target {
+pub(crate) struct Target {
     /// Server IP. DNS names are resolved at parse time.
     pub host: IpAddr,
     /// Where the root file handle comes from.
@@ -32,7 +32,7 @@ pub struct Target {
 
 /// How the toolkit obtains the root file handle for the session.
 #[derive(Debug, Clone)]
-pub enum Source {
+pub(crate) enum Source {
     /// Mount this export via the MOUNT protocol to obtain a fresh handle.
     Export(String),
     /// Use this raw handle directly; skip MOUNT entirely.
@@ -52,7 +52,7 @@ pub enum Source {
 /// without colon-form, `--export`, or `--handle` is an error (the
 /// subcommand needs an export); `require_source = false` allows the
 /// `Source::None` case.
-pub fn parse(positional: &str, export_flag: Option<&str>, handle_flag: Option<&str>, require_source: bool) -> anyhow::Result<Target> {
+pub(crate) fn parse(positional: &str, export_flag: Option<&str>, handle_flag: Option<&str>, require_source: bool) -> anyhow::Result<Target> {
     // Split off the trailing ":/..." if any.
     // IPv6 literals must be in brackets, e.g. "[2001:db8::1]:/srv"; the
     // first colon outside the brackets starts the export.
@@ -86,7 +86,7 @@ pub fn parse(positional: &str, export_flag: Option<&str>, handle_flag: Option<&s
 /// Convenience: parse with no positional target (only flags).  Used by
 /// subcommands that already split the host into its own positional but
 /// still want to honour `--export`/`--handle` consistently.
-pub fn parse_flags_only(host: &str, export_flag: Option<&str>, handle_flag: Option<&str>, require_source: bool) -> anyhow::Result<Target> {
+pub(crate) fn parse_flags_only(host: &str, export_flag: Option<&str>, handle_flag: Option<&str>, require_source: bool) -> anyhow::Result<Target> {
     parse(host, export_flag, handle_flag, require_source)
 }
 
@@ -129,7 +129,7 @@ fn split_host_export(s: &str) -> anyhow::Result<(&str, Option<&str>)> {
 /// parsing.  When the input is not a literal it is resolved through the system
 /// resolver (the first returned address wins), matching how `scan` resolves
 /// targets (`src/engine/scanner.rs`).
-pub fn resolve_host(host: &str) -> anyhow::Result<IpAddr> {
+pub(crate) fn resolve_host(host: &str) -> anyhow::Result<IpAddr> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     // Fast path: a numeric literal needs no DNS lookup.
     if let Ok(ip) = bare.parse::<IpAddr>() {
@@ -146,7 +146,7 @@ pub fn resolve_host(host: &str) -> anyhow::Result<IpAddr> {
 impl Target {
     /// Borrow the export path if this target was set up to mount one.
     #[must_use]
-    pub const fn export(&self) -> Option<&str> {
+    pub(crate) const fn export(&self) -> Option<&str> {
         match &self.source {
             Source::Export(p) => Some(p.as_str()),
             _ => None,
@@ -155,7 +155,7 @@ impl Target {
 
     /// Borrow the raw handle hex if this target uses `--handle`.
     #[must_use]
-    pub const fn handle_hex(&self) -> Option<&str> {
+    pub(crate) const fn handle_hex(&self) -> Option<&str> {
         match &self.source {
             Source::Handle(h) => Some(h.as_str()),
             _ => None,

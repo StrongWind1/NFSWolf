@@ -148,115 +148,216 @@ overflow-checks = true
 
 # --- Lint policy ---
 [lints.rust]
-# Relaxed from "forbid" to "deny" so `nfswolf mount` can call
-# libc::daemon under a single `#[allow(unsafe_code, reason = ...)]`.
-# Every unsafe call site must carry a justification string; outside of
-# the one in src/main.rs there are none, and adding new ones requires
-# the same explicit allow-with-reason.
+# --- Forbid (no override possible) ------------------------------------------
+# Provable integer overflow at compile time.
+arithmetic_overflow = "forbid"
+# Dereferencing a null pointer -- always UB.
+deref_nullptr = "forbid"
+# Wrong memory ordering on atomic operations -- always a bug.
+invalid_atomic_ordering = "forbid"
+# Passing null to a function requiring non-null -- always UB.
+invalid_null_arguments = "forbid"
+# Casting &T to &mut T -- always UB.
+invalid_reference_casting = "forbid"
+# transmute(&T) to &mut T -- always UB.
+mutable_transmutes = "forbid"
+# Homoglyph attack vector -- no non-ASCII in identifiers.
+non_ascii_idents = "forbid"
+# Literal doesn't fit its type -- always a bug.
+overflowing_literals = "forbid"
+# Unicode bidi attack vector in comments.
+text_direction_codepoint_in_comment = "forbid"
+# Unicode bidi attack vector in string literals.
+text_direction_codepoint_in_literal = "forbid"
+# Code that provably panics at runtime -- always a bug.
+unconditional_panic = "forbid"
+# All unused-code lints (dead_code, unused_variables, unused_imports, etc.).
+unused = { level = "allow", priority = -3 }
+# --- Deny (per-project override) --------------------------------------------
+# Deny (not forbid) -- NFSWolf needs one #[allow] for libc::daemon in src/main.rs.
 unsafe_code = "deny"
-missing_docs = "warn"
-missing_debug_implementations = "warn"
-unreachable_pub = "allow"
-unused_import_braces = "warn"
-unused_qualifications = "warn"
-unused_lifetimes = "warn"
-trivial_casts = "warn"
-trivial_numeric_casts = "warn"
+# --- Deny (deny-by-default) -------------------------------------------------
+ambiguous_associated_items = "deny"
+ambiguous_glob_imports = "deny"
+binary_asm_labels = "deny"
+bindings_with_variant_name = "deny"
+conflicting_repr_hints = "deny"
+dangerous_implicit_autorefs = "deny"
+dependency_on_unit_never_type_fallback = "deny"
+duplicate_features = "deny"
+elided_lifetimes_in_associated_constant = "deny"
+enum_intrinsics_non_enums = "deny"
+explicit_builtin_cfgs_in_flags = "deny"
+ill_formed_attribute_input = "deny"
+incomplete_include = "deny"
+ineffective_unstable_trait_impl = "deny"
+invalid_from_utf8_unchecked = "deny"
+invalid_macro_export_arguments = "deny"
+invalid_type_param_default = "deny"
+legacy_derive_helpers = "deny"
+let_underscore_lock = "deny"
+long_running_const_eval = "deny"
+macro_expanded_macro_exports_accessed_by_absolute_paths = "deny"
+named_asm_labels = "deny"
+never_type_fallback_flowing_into_unsafe = "deny"
+no_mangle_const_items = "deny"
+out_of_scope_macro_calls = "deny"
+patterns_in_fns_without_body = "deny"
+proc_macro_derive_resolution_fallback = "deny"
+pub_use_of_private_extern_crate = "deny"
+repr_transparent_non_zst_fields = "deny"
+semicolon_in_expressions_from_macros = "deny"
+undropped_manually_drops = "deny"
+uninhabited_static = "deny"
+unknown_crate_types = "deny"
+useless_deprecated = "deny"
+# --- Warn (upgraded from allow) ----------------------------------------------
+absolute_paths_not_starting_with_crate = "warn"
+ambiguous_negative_literals = "warn"
+closure_returning_async_block = "warn"
+deprecated_in_future = "warn"
+deprecated_safe_2024 = "warn"
+deref_into_dyn_supertrait = "warn"
+edition_2024_expr_fragment_specifier = "warn"
 elided_lifetimes_in_paths = "warn"
 explicit_outlives_requirements = "warn"
-keyword_idents = { level = "deny", priority = 1 }
-macro_use_extern_crate = "deny"
-non_ascii_idents = "forbid"
+ffi_unwind_calls = "warn"
+if_let_rescope = "warn"
+impl_trait_overcaptures = "warn"
+impl_trait_redundant_captures = "warn"
+keyword_idents_2018 = "warn"
+keyword_idents_2024 = "warn"
+let_underscore_drop = "warn"
+linker_info = "warn"
+linker_messages = "warn"
+macro_use_extern_crate = "warn"
+meta_variable_misuse = "warn"
+missing_copy_implementations = "warn"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+missing_unsafe_on_extern = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+rust_2021_incompatible_closure_captures = "warn"
+rust_2021_incompatible_or_patterns = "warn"
+rust_2021_prefixes_incompatible_syntax = "warn"
+rust_2021_prelude_collisions = "warn"
+rust_2024_guarded_string_incompatible_syntax = "warn"
+rust_2024_incompatible_pat = "warn"
+rust_2024_prelude_collisions = "warn"
 single_use_lifetimes = "warn"
-unused_extern_crates = "warn"
-dead_code = "allow"
+tail_expr_drop_order = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unit_bindings = "warn"
+unnameable_types = "warn"
+unreachable_pub = "warn"
+unsafe_attr_outside_unsafe = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unstable_features = "warn"
+unused_crate_dependencies = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+unused_results = "warn"
 variant_size_differences = "warn"
 
 [lints.clippy]
-# Lint groups  --  enable everything, then allow specific false-positive-prone lints below.
-all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
-
-# --- Restriction lints (cherry-picked, not the whole group) ---
-# Each must be justified; the restriction group contains contradictory lints.
-# No #[allow(...)] without a reason string.
-allow_attributes_without_reason = "warn"
+# --- Lint groups (explicit levels) -------------------------------------------
+# Priority -1 so per-lint overrides (default priority 0) take precedence.
+all                = { level = "deny", priority = -2 }
+correctness        = { level = "deny", priority = -1 }
+suspicious         = { level = "deny", priority = -1 }
+complexity         = { level = "deny", priority = -1 }
+perf               = { level = "deny", priority = -1 }
+style              = { level = "deny", priority = -1 }
+pedantic           = { level = "deny", priority = -1 }
+cargo              = { level = "deny", priority = -1 }
+restriction        = { level = "allow", priority = -1 }
+nursery            = { level = "allow", priority = -1 }
+# --- Restriction lints promoted to deny --------------------------------------
 # No dbg!() in committed code.
 dbg_macro = "deny"
-# Prefer .clone() / .to_owned() over .to_string() for non-Display conversions.
-str_to_string = "warn"
-# No std::mem::forget  --  almost always a bug.
+# No process::exit -- return from main or propagate errors.
+exit = "deny"
+# No std::mem::forget -- almost always a resource leak bug.
 mem_forget = "deny"
-# No indexing into slices  --  use .get() for safe access.
-indexing_slicing = "warn"
-# No unwrap/expect in library code  --  force proper error propagation.
-unwrap_used = "warn"
+# No todo!() -- use proper error handling or file an issue.
+todo = "deny"
+# No unimplemented!() -- handle all code paths.
+unimplemented = "deny"
+# No .unwrap() inside functions returning Result -- propagate the error.
+unwrap_in_result = "deny"
+# --- Restriction lints promoted to warn --------------------------------------
+# Prefer #[expect] over #[allow] -- warns when the suppression becomes unnecessary.
+allow_attributes = "warn"
+# Every #[allow] / #[expect] must carry a reason = "..." string.
+allow_attributes_without_reason = "warn"
+# Flag functions exceeding the complexity threshold (set in clippy.toml).
+cognitive_complexity = "warn"
+# Prefer create_dir_all -- create_dir fails if parents are missing.
+create_dir = "warn"
+# Empty Drop impl is a code smell -- runs on every drop for no effect.
+empty_drop = "warn"
+# No .expect() in library code -- force proper error propagation.
 expect_used = "warn"
-# No panic!  --  handle errors properly.
-panic = "warn"
-# Detect lossy float-to-int or int-to-float casts.
-cast_possible_truncation = "warn"
-cast_sign_loss = "warn"
-cast_precision_loss = "warn"
-cast_possible_wrap = "warn"
-# Warn on large enum variant size differences (consider Box).
-large_enum_variant = "warn"
-# No .unwrap() on mutex locks  --  can panic on poisoning.
+# No container[index] via .get_unwrap() -- use .get() + match.
+get_unwrap = "warn"
+# No direct slice[index] -- use .get() for bounds-checked access.
+indexing_slicing = "warn"
+# Flag large files pulled in via include_bytes! / include_str!.
+large_include_file = "warn"
+# Require assert!(slice.len() > N) before multi-index access.
+missing_asserts_for_indexing = "warn"
+# No reads and writes to the same variable in one expression.
+mixed_read_write_in_expression = "warn"
+# One unsafe operation per unsafe block for precise safety justification.
+multiple_unsafe_ops_per_block = "warn"
+# Prefer AtomicBool / AtomicUsize over Mutex<bool> / Mutex<usize>.
 mutex_atomic = "warn"
-# Explicit iteration: prefer .iter() / .iter_mut() over implicit deref.
-explicit_iter_loop = "warn"
-explicit_into_iter_loop = "warn"
-# Require `Self` in impl blocks where possible.
-use_self = "warn"
-# Warn on needlessly borrowed references.
-needless_borrow = "warn"
-needless_pass_by_value = "warn"
-
-# --- Allow list (justify every entry) ---
-# module_name_repetitions: common in idiomatic Rust (e.g. error::Error).
-module_name_repetitions = "allow"
-# wildcard_imports: deny everywhere; selectively #[allow] in test modules.
-wildcard_imports = "deny"
-# missing_errors_doc / missing_panics_doc: too noisy for an internal toolkit; every public fn would
-# need boilerplate docs. The crate is not published as a stable library API.
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-# multiple_crate_versions: transitive dependency duplicates we cannot control.
+# Prefer AtomicU32 / AtomicI64 over Mutex<u32> / Mutex<i64>.
+mutex_integer = "warn"
+# No r"..." when the string contains no backslashes or quotes.
+needless_raw_strings = "warn"
+# Suggest NonZeroU32 etc. where a value is known non-zero.
+non_zero_suggestions = "warn"
+# No panic!() in library code -- return errors.
+panic = "warn"
+# No panic!() in functions that return Result.
+panic_in_result_fn = "warn"
+# Use PathBuf::from("a/b") instead of PathBuf::new() + push("a") + push("b").
+pathbuf_init_then_push = "warn"
+# Parenthesize bitwise operations to make precedence explicit.
+precedence_bits = "warn"
+# Use Rc<str> instead of Rc<String> -- avoids double indirection.
+rc_buffer = "warn"
+# Rc<Mutex<T>> is almost always a mistake -- use Arc<Mutex<T>>.
+rc_mutex = "warn"
+# Trait impl parameter names should match the trait definition.
+renamed_function_params = "warn"
+# Use .to_owned() instead of .to_string() on &str.
+str_to_string = "warn"
+# Use .contains(ch) instead of .chars().any(|c| c == ch).
+string_lit_chars_any = "warn"
+# Flag ^ used where ** (power) was likely intended.
+suspicious_xor_used_as_pow = "warn"
+# Every unsafe block must have a // SAFETY: comment.
+undocumented_unsafe_blocks = "warn"
+# Remove stale // SAFETY: comments on safe code.
+unnecessary_safety_comment = "warn"
+# Remove stale # Safety doc sections on safe functions.
+unnecessary_safety_doc = "warn"
+# Don't silently discard Result via .ok().
+unused_result_ok = "warn"
+# No .unwrap() in library code -- force proper error propagation.
+unwrap_used = "warn"
+# --- Cargo group: override to allow -----------------------------------------
+# Transitive dependency version conflicts are not actionable.
 multiple_crate_versions = "allow"
-# missing_docs_in_private_items: too pedantic for an internal toolkit.
-missing_docs_in_private_items = "allow"
-# doc_markdown: automatic backtick insertion is overly aggressive for
-# identifiers like "AUTH_SYS", "NFSv2", etc. that are not Rust items.
+# --- Pedantic group: overrides to allow --------------------------------------
+# Protocol identifiers (AUTH_SYS, NFSv2, CRC32) trigger false positives.
 doc_markdown = "allow"
-# must_use_candidate / must_use_attribute: too noisy; we add #[must_use] where
-# meaningful (e.g. builder patterns) but not on every getter.
-must_use_candidate = "allow"
-# missing_fields_in_debug: too pedantic.
-missing_fields_in_debug = "allow"
-# similar_names: false-positive prone (file_uid/file_gid are intentional).
-similar_names = "allow"
-# many_single_char_names: algorithmic functions (datetime conversion) legitimately
-# use single-char variables to match mathematical notation.
-many_single_char_names = "allow"
-# struct_excessive_bools: CLI args and config structs legitimately use many bool flags.
-struct_excessive_bools = "allow"
-# fn_params_excessive_bools: same rationale as struct_excessive_bools.
-fn_params_excessive_bools = "allow"
-# too_many_arguments: internal attack/protocol functions legitimately take many params
-# (e.g. run_brute_handle needs host, fs_type, seed, max_attempts, fixed_inode, gen_start,
-# gen_end, stealth). This is an application, not a library; grouping into a struct would
-# be artificial ceremony for single-call-site helpers.
-too_many_arguments = "allow"
-# too_many_lines: some command implementations are long by nature (attack modules, shell
-# dispatch) and splitting them would hurt readability without improving correctness.
-too_many_lines = "allow"
-# option_if_let_else: map_or_else is often less readable than if let/else for multi-line
-# closures, especially when early-return or side-effects are involved.
-option_if_let_else = "allow"
-# unused_self / needless_pass_by_ref_mut: local-filesystem shell commands (lcd, lls,
-# lpwd, lmkdir) live in NfsShell impl for dispatch consistency but don't touch shell
-# state. Using &self keeps the dispatch API uniform; the lint is a false positive here.
-unused_self = "allow"
-needless_pass_by_ref_mut = "allow"
+# Too noisy for internal tools -- every pub fn returning Result would need # Errors.
+missing_errors_doc = "allow"
+# Too noisy for internal tools -- every panicking pub fn would need # Panics.
+missing_panics_doc = "allow"

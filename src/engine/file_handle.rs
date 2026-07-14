@@ -12,7 +12,7 @@ use crate::proto::nfs3::types::FileHandle;
 
 /// Detected operating system from file handle format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OsGuess {
+pub(crate) enum OsGuess {
     Linux,
     Windows,
     FreeBsd,
@@ -27,7 +27,7 @@ pub enum OsGuess {
 /// Covers all types nfs_analyze identifies from inode patterns
 /// in Linux file handles (byte 2 = fsid_type, plus inode structure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FsType {
+pub(crate) enum FsType {
     Ext4,
     Xfs,
     Btrfs,
@@ -43,7 +43,7 @@ pub enum FsType {
 
 /// Windows file handle signing status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SigningStatus {
+pub(crate) enum SigningStatus {
     /// Handle is signed (HMAC bytes are non-zero)
     Enabled,
     /// Handle is NOT signed (HMAC bytes are zero)  --  full FS access possible
@@ -54,7 +54,7 @@ pub enum SigningStatus {
 
 /// Which NFS version's handle format was checked for Windows signing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowsHandleVersion {
+pub(crate) enum WindowsHandleVersion {
     /// NFSv3: 32-byte handle, last 10 bytes are HMAC
     V3,
     /// NFSv4.1: 28-byte handle, last 16 bytes are HMAC
@@ -63,7 +63,7 @@ pub enum WindowsHandleVersion {
 
 /// Result of file handle entropy analysis.
 #[derive(Debug, Clone)]
-pub struct EntropyAnalysis {
+pub(crate) struct EntropyAnalysis {
     /// Total bits of randomness estimated in the handle
     pub entropy_bits: f64,
     /// Estimated brute-force time at 10,000 attempts/sec
@@ -74,7 +74,7 @@ pub struct EntropyAnalysis {
 
 /// Filesystem root handle construction for export escape.
 #[derive(Debug, Clone)]
-pub struct EscapeResult {
+pub(crate) struct EscapeResult {
     /// Constructed file handle for filesystem root
     pub root_handle: FileHandle,
     /// Filesystem type detected
@@ -87,11 +87,11 @@ pub struct EscapeResult {
 
 /// Analyze and manipulate NFS file handles.
 #[derive(Debug)]
-pub struct FileHandleAnalyzer;
+pub(crate) struct FileHandleAnalyzer;
 
 impl FileHandleAnalyzer {
     /// Determine the server OS from file handle structure.
-    pub fn fingerprint_os(fh: &FileHandle) -> OsGuess {
+    pub(crate) fn fingerprint_os(fh: &FileHandle) -> OsGuess {
         let data = fh.as_bytes();
 
         if data.len() == 32 {
@@ -139,7 +139,7 @@ impl FileHandleAnalyzer {
     /// Uses the same inode-pattern heuristics as nfs_analyze: fsid_type (byte 2)
     /// combined with inode numbering patterns to distinguish ext4/xfs/btrfs and
     /// detect rarer filesystems (udf, nilfs, fat, lustre).
-    pub fn fingerprint_fs(fh: &FileHandle) -> FsType {
+    pub(crate) fn fingerprint_fs(fh: &FileHandle) -> FsType {
         let data = fh.as_bytes();
         if data.len() < 8 {
             return FsType::Unknown;
@@ -207,7 +207,7 @@ impl FileHandleAnalyzer {
     /// - **NFSv4.1**: 28-byte handle, last 16 bytes (offset 12..28) are HMAC.
     ///
     /// All-zero HMAC means signing is disabled -> arbitrary handle forgery possible.
-    pub fn check_windows_signing(fh: &FileHandle) -> SigningStatus {
+    pub(crate) fn check_windows_signing(fh: &FileHandle) -> SigningStatus {
         let data = fh.as_bytes();
 
         // NFSv3: 32-byte handle, HMAC in last 10 bytes (offset 22..32)
@@ -226,7 +226,7 @@ impl FileHandleAnalyzer {
     }
 
     /// Detect which Windows handle version format we're looking at.
-    pub fn detect_windows_handle_version(fh: &FileHandle) -> Option<WindowsHandleVersion> {
+    pub(crate) fn detect_windows_handle_version(fh: &FileHandle) -> Option<WindowsHandleVersion> {
         match fh.as_bytes().len() {
             32 => Some(WindowsHandleVersion::V3),
             28 => Some(WindowsHandleVersion::V41),
@@ -243,7 +243,7 @@ impl FileHandleAnalyzer {
     /// `construct_escape_handle` is sugar that calls this with the FS root inode.
     /// Researchers can call this directly with any inode + generation to target
     /// specific files discovered via inode enumeration or brute-force.
-    pub fn construct_handle_for_inode(export_fh: &FileHandle, inode: u32, generation: u32) -> Option<EscapeResult> {
+    pub(crate) fn construct_handle_for_inode(export_fh: &FileHandle, inode: u32, generation: u32) -> Option<EscapeResult> {
         let data = export_fh.as_bytes();
         if data.len() < 8 {
             return None;
@@ -371,7 +371,7 @@ impl FileHandleAnalyzer {
     /// For XFS, tries inode 128 (default v5 format) first, then inode 64
     /// (v4 format or `mkfs.xfs -i size=256`).  Returns the first candidate;
     /// the caller should verify against the server with GETATTR.
-    pub fn construct_escape_handle(export_fh: &FileHandle) -> Option<EscapeResult> {
+    pub(crate) fn construct_escape_handle(export_fh: &FileHandle) -> Option<EscapeResult> {
         let data = export_fh.as_bytes();
         let &fileid_type = data.get(3)?;
         let &fsid_type = data.get(2)?;
@@ -421,7 +421,7 @@ impl FileHandleAnalyzer {
     ///    32 -- v4 with 1024-byte inodes (`-m crc=0 -i size=1024`)
     ///
     /// Use when a single `construct_escape_handle` call is insufficient.
-    pub fn construct_xfs_escape_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
+    pub(crate) fn construct_xfs_escape_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
         [128u32, 64u32, 32u32].iter().filter_map(|&inode| Self::construct_handle_for_inode(export_fh, inode, 0)).collect()
     }
 
@@ -434,7 +434,7 @@ impl FileHandleAnalyzer {
     /// root (inode 2) first and then the XFS roots (128/64/32). Without it a single call
     /// only ever probes ext4 inode 2 and misses the XFS root on a UUID-based XFS export.
     /// (BTRFS uses `construct_btrfs_subvol_handles` instead.)
-    pub fn construct_root_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
+    pub(crate) fn construct_root_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
         match Self::fingerprint_fs(export_fh) {
             FsType::Xfs => Self::construct_xfs_escape_candidates(export_fh),
             // Compound-UUID (Unknown) is ambiguous ext4/XFS, and an ext4 fsid_type=0 handle
@@ -462,7 +462,7 @@ impl FileHandleAnalyzer {
     /// Candidates tried:
     ///   1. FS_TREE_OBJECTID (5)  -- the default subvolume on any fresh btrfs filesystem
     ///   2. User subvolumes 256 .. 256 + max_subvols  -- user-created subvolumes
-    pub fn construct_btrfs_subvol_handles(export_fh: &FileHandle, max_subvols: u32) -> Vec<EscapeResult> {
+    pub(crate) fn construct_btrfs_subvol_handles(export_fh: &FileHandle, max_subvols: u32) -> Vec<EscapeResult> {
         // BTRFS_FIRST_FREE_OBJECTID: the inode object ID of any subvolume root directory.
         const ROOT_OBJECTID: u64 = 256;
         // BTRFS_FS_TREE_OBJECTID: the default/main subvolume on a fresh btrfs filesystem.
@@ -510,7 +510,7 @@ impl FileHandleAnalyzer {
             handle_data.extend_from_slice(&ROOT_OBJECTID.to_le_bytes()); // root dir inode
             handle_data.extend_from_slice(&root_id.to_le_bytes()); // subvolume ID
             handle_data.extend_from_slice(&0u32.to_le_bytes()); // gen = 0
-            #[allow(clippy::cast_possible_truncation, reason = "subvol IDs fit in u32 in practice")]
+            #[expect(clippy::cast_possible_truncation, reason = "subvol IDs fit in u32 in practice")]
             EscapeResult { root_handle: FileHandle(handle_data), fs_type: FsType::Btrfs, confidence, inode_number: root_id as u32 }
         };
 
@@ -530,7 +530,7 @@ impl FileHandleAnalyzer {
     }
 
     /// Estimate the entropy (randomness) of a file handle.
-    pub fn estimate_entropy(fh: &FileHandle) -> EntropyAnalysis {
+    pub(crate) fn estimate_entropy(fh: &FileHandle) -> EntropyAnalysis {
         let data = fh.as_bytes();
         let os = Self::fingerprint_os(fh);
 
@@ -783,6 +783,7 @@ mod tests {
         // The returned handle bytes must embed inode 2 (root) in LE at the inode offset.
         let raw = result.root_handle.as_bytes();
         // For fsid_type=0: inode offset = 4 + 8 = 12
+        assert!(raw.len() >= 16, "escape handle must be at least 16 bytes for inode read");
         let inode = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]);
         assert_eq!(inode, 2, "escape handle must target root inode 2");
     }
@@ -808,6 +809,7 @@ mod tests {
         let export_fh = linux_ext4_handle(5, 1);
         let result = FileHandleAnalyzer::construct_handle_for_inode(&export_fh, 42, 7).expect("handle construction must succeed");
         let raw = result.root_handle.as_bytes();
+        assert!(raw.len() >= 20, "handle must be at least 20 bytes for inode+generation read");
         let inode = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]);
         let generation_out = u32::from_le_bytes([raw[16], raw[17], raw[18], raw[19]]);
         assert_eq!(inode, 42);
@@ -886,6 +888,7 @@ mod tests {
         let r = result.unwrap();
         // inode offset for fsid_type=1: 4 + 4 (fsid) = 8
         let raw = r.root_handle.as_bytes();
+        assert!(raw.len() >= 12, "handle must be at least 12 bytes for fsid_type=1 inode read");
         let inode = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]);
         assert_eq!(inode, 42);
     }
@@ -906,6 +909,7 @@ mod tests {
         let r = result.unwrap();
         // inode offset for fsid_type=2: 4 + 12 = 16
         let raw = r.root_handle.as_bytes();
+        assert!(raw.len() >= 20, "handle must be at least 20 bytes for fsid_type=2 inode read");
         let inode = u32::from_le_bytes([raw[16], raw[17], raw[18], raw[19]]);
         assert_eq!(inode, 99);
     }
@@ -932,6 +936,7 @@ mod tests {
         assert_eq!(r.fs_type, FsType::Xfs);
         // Root inode on XFS v5 is 128; stored as 64-bit LE at inode offset 4+16=20
         let raw = r.root_handle.as_bytes();
+        assert!(raw.len() >= 28, "XFS handle must be at least 28 bytes for 64-bit inode read");
         let inode = u64::from_le_bytes([raw[20], raw[21], raw[22], raw[23], raw[24], raw[25], raw[26], raw[27]]);
         assert_eq!(inode, 128, "XFS escape must target root inode 128");
     }
@@ -1018,10 +1023,12 @@ mod tests {
         // Handle layout for fsid_type=0: 4B header + 8B fsid + 8B objectid + 8B root_objectid + 4B gen
         //   root_objectid offset = 4 + 8 + 8 = 20
         let raw = handles[0].root_handle.as_bytes();
+        assert!(raw.len() >= 28, "BTRFS handle must be at least 28 bytes for root_objectid read");
         let root_objectid = u64::from_le_bytes([raw[20], raw[21], raw[22], raw[23], raw[24], raw[25], raw[26], raw[27]]);
         assert_eq!(root_objectid, 5, "first BTRFS handle must target FS_TREE_OBJECTID (5)");
         // Second handle is the first user subvolume (root_objectid = 256).
         let raw2 = handles[1].root_handle.as_bytes();
+        assert!(raw2.len() >= 28, "BTRFS handle must be at least 28 bytes for root_objectid read");
         let root_objectid2 = u64::from_le_bytes([raw2[20], raw2[21], raw2[22], raw2[23], raw2[24], raw2[25], raw2[26], raw2[27]]);
         assert_eq!(root_objectid2, 256, "second BTRFS handle must target first user subvolume (256)");
     }
@@ -1046,6 +1053,7 @@ mod tests {
 
         let result = FileHandleAnalyzer::construct_handle_for_inode(&seed, 42, 7).expect("fsid_type=7 handle must construct");
         let raw = result.root_handle.as_bytes();
+        assert!(raw.len() >= 36, "fsid_type=7 handle must be at least 36 bytes for fsid+inode+gen read");
         // The full 24-byte fsid (bytes 4..28) must be preserved verbatim.
         assert_eq!(&raw[4..28], &data[4..28], "the full 24-byte fsid (export context) must be preserved");
         // The rewritten inode/gen must land at offset 28 (4 header + 24 fsid).

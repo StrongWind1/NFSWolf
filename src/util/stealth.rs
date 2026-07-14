@@ -9,7 +9,7 @@ use std::time::Duration;
 
 /// Stealth configuration for timing-sensitive operations.
 #[derive(Debug, Clone)]
-pub struct StealthConfig {
+pub(crate) struct StealthConfig {
     /// Fixed delay between operations
     pub delay: Duration,
     /// Maximum random jitter added to delay
@@ -17,16 +17,16 @@ pub struct StealthConfig {
 }
 
 impl StealthConfig {
-    pub const fn none() -> Self {
+    pub(crate) const fn none() -> Self {
         Self { delay: Duration::ZERO, jitter: Duration::ZERO }
     }
 
-    pub const fn new(delay_ms: u64, jitter_ms: u64) -> Self {
+    pub(crate) const fn new(delay_ms: u64, jitter_ms: u64) -> Self {
         Self { delay: Duration::from_millis(delay_ms), jitter: Duration::from_millis(jitter_ms) }
     }
 
     /// Get the next delay duration (base + random jitter).
-    pub fn next_delay(&self) -> Duration {
+    pub(crate) fn next_delay(&self) -> Duration {
         if self.delay.is_zero() && self.jitter.is_zero() {
             return Duration::ZERO;
         }
@@ -43,7 +43,7 @@ impl StealthConfig {
     }
 
     /// Sleep for the configured delay + jitter.
-    pub async fn wait(&self) {
+    pub(crate) async fn wait(&self) {
         let d = self.next_delay();
         if !d.is_zero() {
             tokio::time::sleep(d).await;

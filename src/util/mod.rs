@@ -1,5 +1,5 @@
 //! Utility modules  --  privilege handling, stealth timing, on-disk binary log parsers.
 
-pub mod privilege;
-pub mod stealth;
-pub mod utmp;
+pub(crate) mod privilege;
+pub(crate) mod stealth;
+pub(crate) mod utmp;

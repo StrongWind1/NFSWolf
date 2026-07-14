@@ -27,7 +27,7 @@ use crate::util::stealth::StealthConfig;
 ///
 /// Used by every subcommand that calls `MNT` (escape, shell, mount,
 /// uid-spray, brute-handle) so the same flags propagate everywhere.
-pub fn make_mount_client(globals: &GlobalOpts) -> NfsMountClient {
+pub(crate) fn make_mount_client(globals: &GlobalOpts) -> NfsMountClient {
     let mut base = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
     if let Some(ref p) = globals.proxy {
         base = base.with_proxy(p.clone());
@@ -44,7 +44,7 @@ pub fn make_mount_client(globals: &GlobalOpts) -> NfsMountClient {
 /// Accepts the same `<TARGET>` shapes as the rest of the CLI:
 /// `host`, `host:port`, `host:/export` (export portion ignored here), and
 /// IPv6 literals (bare `2001:db8::1` or bracketed `[2001:db8::1]` / `[..]:port`).
-pub fn parse_addr(host: &str) -> anyhow::Result<SocketAddr> {
+pub(crate) fn parse_addr(host: &str) -> anyhow::Result<SocketAddr> {
     parse_addr_with_port(host, None)
 }
 
@@ -57,7 +57,7 @@ pub fn parse_addr(host: &str) -> anyhow::Result<SocketAddr> {
 /// IPv6 literals need brackets before a port can be appended -- `SocketAddr`
 /// rejects an unbracketed `2001:db8::1:2049` -- so the address is built
 /// structurally from a parsed `IpAddr` rather than via string formatting.
-pub fn parse_addr_with_port(host: &str, nfs_port: Option<u16>) -> anyhow::Result<SocketAddr> {
+pub(crate) fn parse_addr_with_port(host: &str, nfs_port: Option<u16>) -> anyhow::Result<SocketAddr> {
     let port = nfs_port.unwrap_or(2049);
     // Strip an optional `:/export` suffix so the colon-form target works
     // wherever a bare host did before. IPv6 literals use `::`, never `:/`,
@@ -92,7 +92,7 @@ pub fn parse_addr_with_port(host: &str, nfs_port: Option<u16>) -> anyhow::Result
 /// knows the fixed NFS port. `None` resolves the NFS port via portmapper as
 /// before. Handles are bearer tokens (RFC 1094 S2.3.3) obtained from the
 /// separate MOUNT step, so the direct client needs no MOUNT of its own.
-pub fn make_client(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
+pub(crate) fn make_client(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
     make_client_with_hostname(addr, export, uid, gid, aux_gids, stealth, proxy, nfs_port, "nfswolf")
 }
 
@@ -105,7 +105,7 @@ pub fn make_client(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids:
 /// `&globals.hostname` here so the spoof is honoured the same way `shell`,
 /// `mount` and `analyze` already do, rather than the fixed `"nfswolf"` literal
 /// the convenience [`make_client`] wrapper uses.
-pub fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
+pub(crate) fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
     let pool = Arc::new(match proxy {
         Some(p) => ConnectionPool::with_proxy(p.to_owned()),
         None => ConnectionPool::default_config(),
@@ -126,7 +126,7 @@ pub fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: 
 ///
 /// Public so the shell, mount, and FUSE adapters can build the same shape
 /// of `gids` vector when constructing `AuthSys::with_groups`.
-pub fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
+pub(crate) fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
     let mut gids = vec![gid];
     for &g in aux_gids {
         if !gids.contains(&g) {
@@ -144,7 +144,7 @@ pub fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
 /// then well-known service accounts. File handles are bearer tokens
 /// (RFC 1094 S2.3.3), so every successful escalation produces a handle
 /// the caller can use with any later credential.
-pub async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &str) -> anyhow::Result<FileHandle> {
+pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &str) -> anyhow::Result<FileHandle> {
     use nfs3_types::nfs3::{LOOKUP3args, Nfs3Result, diropargs3, filename3, nfsstat3};
 
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();

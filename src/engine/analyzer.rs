@@ -15,16 +15,16 @@ use serde::{Deserialize, Serialize};
 
 /// Well-known shadow group GIDs per distro family.
 /// Provided as defaults for `--test-read-gids` when no explicit GIDs given.
-pub const SHADOW_GID_DEBIAN: u32 = 42;
-pub const SHADOW_GID_SUSE: u32 = 15;
+pub(crate) const SHADOW_GID_DEBIAN: u32 = 42;
+pub(crate) const SHADOW_GID_SUSE: u32 = 15;
 
 /// Well-known anonuid values that indicate misconfiguration.
-pub const ANON_UID_ROOT: u32 = 0;
-pub const ANON_UID_NOBODY: u32 = 65534;
+pub(crate) const ANON_UID_ROOT: u32 = 0;
+pub(crate) const ANON_UID_NOBODY: u32 = 65534;
 
 /// Security finding from analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Finding {
+pub(crate) struct Finding {
     pub id: String,
     pub title: String,
     pub severity: Severity,
@@ -37,7 +37,7 @@ pub struct Finding {
 /// Finding severity levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Severity {
+pub(crate) enum Severity {
     Critical,
     High,
     Medium,
@@ -47,7 +47,7 @@ pub enum Severity {
 
 /// Complete analysis result for a host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnalysisResult {
+pub(crate) struct AnalysisResult {
     pub host: String,
     pub timestamp: String,
     pub os_guess: Option<String>,
@@ -58,7 +58,7 @@ pub struct AnalysisResult {
 
 /// Analysis of a single export.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExportAnalysis {
+pub(crate) struct ExportAnalysis {
     pub path: String,
     pub allowed_hosts: Vec<String>,
     pub auth_methods: Vec<String>,
@@ -78,7 +78,7 @@ pub struct ExportAnalysis {
 /// This is the generic replacement for the old hardcoded "shadow_readable" check.
 /// The analyzer runs one test per (path, uid, gid) combination the user requested.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileAccessTest {
+pub(crate) struct FileAccessTest {
     /// Path that was tested (e.g., "/etc/shadow", "/etc/passwd")
     pub path: String,
     /// UID used for the test
@@ -95,7 +95,7 @@ pub struct FileAccessTest {
 
 /// A single NFSv4 access control entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Nfs4Ace {
+pub(crate) struct Nfs4Ace {
     pub ace_type: String,
     pub flags: u32,
     pub access_mask: u32,
@@ -104,7 +104,7 @@ pub struct Nfs4Ace {
 
 /// Result of symlink attack precondition check.
 #[derive(Debug, Clone, Serialize)]
-pub struct SymlinkPrecondition {
+pub(crate) struct SymlinkPrecondition {
     pub writable_path: String,
     pub owner_uid: u32,
     pub owner_gid: u32,
@@ -113,7 +113,7 @@ pub struct SymlinkPrecondition {
 
 /// Result of escape confirmation via directory comparison.
 #[derive(Debug, Clone, Serialize)]
-pub struct EscapeConfirmation {
+pub(crate) struct EscapeConfirmation {
     pub root_entries: u32,
     pub export_entries: u32,
     pub confirmed: bool,
@@ -124,7 +124,7 @@ pub struct EscapeConfirmation {
 /// Creates a test file and inspects the resulting ownership to infer
 /// the effective squash settings (anonuid, root_squash, all_squash).
 #[derive(Debug, Clone, Serialize)]
-pub struct SquashProbeResult {
+pub(crate) struct SquashProbeResult {
     /// UID of a file created with AUTH_SYS uid=99999 (arbitrary non-root).
     /// If the file is owned by 99999: no_all_squash (attacker controls identity).
     /// If owned by 65534 (nobody): all_squash with default anonuid.
@@ -146,7 +146,7 @@ pub struct SquashProbeResult {
 /// request v2 to bypass sec=krb5 or other v3+ security features.
 /// See docs/issues/21-nfsv2-downgrade-attack.md.
 #[derive(Debug, Clone, Serialize)]
-pub struct VersionDowngradeResult {
+pub(crate) struct VersionDowngradeResult {
     /// NFS versions the server advertises (e.g., [2, 3, 4]).
     pub supported_versions: Vec<u32>,
     /// Whether v2 is enabled alongside newer versions (the downgrade risk).
@@ -162,7 +162,7 @@ pub struct VersionDowngradeResult {
 /// the host can be weaponized as a DDoS reflector.
 /// See docs/issues/20-portmapper-amplification-ddos.md.
 #[derive(Debug, Clone, Serialize)]
-pub struct PortmapAmplificationResult {
+pub(crate) struct PortmapAmplificationResult {
     /// Whether UDP port 111 responded to a DUMP request.
     pub udp_responsive: bool,
     /// Size of the request packet (typically 68 bytes).
@@ -181,7 +181,7 @@ pub struct PortmapAmplificationResult {
 /// the export point without requiring explicit export entries. This enables
 /// traversal to sibling filesystems that may contain more sensitive data.
 #[derive(Debug, Clone, Serialize)]
-pub struct NohideExportResult {
+pub(crate) struct NohideExportResult {
     /// Export path checked.
     pub export_path: String,
     /// Whether sub-mount traversal was detected (nohide or crossmnt active).
@@ -198,7 +198,7 @@ pub struct NohideExportResult {
 /// and host tables without authentication.
 /// See docs/issues/22-nis-credential-extraction.md.
 #[derive(Debug, Clone, Serialize)]
-pub struct NisDetectionResult {
+pub(crate) struct NisDetectionResult {
     /// Whether ypserv (program 100004) is registered in portmapper.
     pub ypserv_present: bool,
     /// Whether ypbind (program 100007) is registered in portmapper.
@@ -216,7 +216,7 @@ pub struct NisDetectionResult {
 /// or tunneling through a local fake portmapper.
 /// See docs/issues/23-portmapper-tunnel-bypass.md.
 #[derive(Debug, Clone, Serialize)]
-pub struct PortmapBypassResult {
+pub(crate) struct PortmapBypassResult {
     /// Whether port 111 is filtered/closed.
     pub portmapper_filtered: bool,
     /// Whether NFS port 2049 is open despite filtered portmapper.
@@ -252,7 +252,7 @@ use crate::util::stealth::StealthConfig;
 /// per-run knobs are which paths/UIDs/GIDs to use for the file-access
 /// probes.
 #[derive(Debug)]
-pub struct AnalyzeConfig {
+pub(crate) struct AnalyzeConfig {
     /// Target hostname or IP address.
     pub host: String,
     /// NFS port (default 2049).
@@ -271,7 +271,7 @@ pub struct AnalyzeConfig {
 ///
 /// Holds pool-backed protocol clients and dispatches to per-check helper functions.
 /// Each check is a free function to keep `analyze()` under the 80-line limit.
-pub struct Analyzer {
+pub(crate) struct Analyzer {
     /// Pool-backed NFSv3 client.
     pub nfs3: Arc<Nfs3Client>,
     /// MOUNT protocol client for export enumeration and handle acquisition.
@@ -293,14 +293,14 @@ impl std::fmt::Debug for Analyzer {
 impl Analyzer {
     /// Construct an Analyzer from pre-built clients.
     #[must_use]
-    #[allow(clippy::missing_const_for_fn, reason = "Arc<T> cannot be used in const context")]
-    pub fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient) -> Self {
+    #[expect(clippy::missing_const_for_fn, reason = "Arc<T> cannot be used in const context")]
+    pub(crate) fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient) -> Self {
         Self { nfs3, mount, portmap, proxy: None, stealth: StealthConfig::none() }
     }
 
     /// Attach a SOCKS5 proxy for NFSv4 SECINFO probes.
     #[must_use]
-    pub fn with_proxy(mut self, proxy: String) -> Self {
+    pub(crate) fn with_proxy(mut self, proxy: String) -> Self {
         self.proxy = Some(proxy);
         self
     }
@@ -311,8 +311,8 @@ impl Analyzer {
     /// so a `--delay`/`--jitter` run would still emit a full-rate burst of mount,
     /// READDIRPLUS, and write probes (Critical Design Rule 10).
     #[must_use]
-    #[allow(clippy::missing_const_for_fn, reason = "moves a Drop-bearing Analyzer (Arc/String fields) through the builder")]
-    pub fn with_stealth(mut self, stealth: StealthConfig) -> Self {
+    #[expect(clippy::missing_const_for_fn, reason = "moves a Drop-bearing Analyzer (Arc/String fields) through the builder")]
+    pub(crate) fn with_stealth(mut self, stealth: StealthConfig) -> Self {
         self.stealth = stealth;
         self
     }
@@ -321,7 +321,7 @@ impl Analyzer {
     ///
     /// Enumerates exports via MOUNT, acquires root handles, and dispatches
     /// per-export and global checks. Returns findings even on partial failure.
-    pub async fn analyze(&self, config: &AnalyzeConfig) -> anyhow::Result<AnalysisResult> {
+    pub(crate) async fn analyze(&self, config: &AnalyzeConfig) -> anyhow::Result<AnalysisResult> {
         let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
         let timestamp = chrono_now();
         let mut findings: Vec<Finding> = Vec::new();
@@ -1097,7 +1097,7 @@ async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_pat
     };
 
     // Always attempt cleanup regardless of getattr result.
-    let _ = root_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await;
+    drop(root_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await);
 
     // If the uid=99999 probe ALSO landed as uid 0, every client UID is squashed
     // to root (all_squash + anonuid=0) -- that is F-7.5, not no_root_squash, so
@@ -1154,7 +1154,7 @@ async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path
     };
 
     // Cleanup probe file before reporting.
-    let _ = probe_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await;
+    drop(probe_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await);
 
     let uid = observed_uid?;
     let result = infer_squash_mode(uid, PROBE_UID);
@@ -1209,7 +1209,7 @@ async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path
 /// - Any other UID: custom `anonuid`
 ///
 /// Returns a human-readable squash mode string and whether uid=0 was accepted.
-pub fn infer_squash_mode(observed_uid: u32, probe_uid: u32) -> SquashProbeResult {
+pub(crate) fn infer_squash_mode(observed_uid: u32, probe_uid: u32) -> SquashProbeResult {
     let (squash_mode, root_squash_bypassed) = if observed_uid == probe_uid {
         ("no_all_squash (client UID honoured)".to_owned(), probe_uid == 0)
     } else if observed_uid == ANON_UID_ROOT {
@@ -1325,8 +1325,8 @@ fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     // Format as YYYY-MM-DDTHH:MM:SSZ (manual, no chrono dep).
-    let (y, mo, d, h, mi, s) = secs_to_datetime(secs);
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+    let (year, month, day, hour, min, sec) = secs_to_datetime(secs);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
 
 /// Decompose Unix epoch seconds into (year, month, day, hour, minute, second).
@@ -1334,20 +1334,20 @@ fn chrono_now() -> String {
 /// Implements the Gregorian calendar algorithm from the C standard library.
 /// Only used for timestamp formatting  --  not a general-purpose calendar.
 const fn secs_to_datetime(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3600) % 24;
     let days = secs / 86400;
     // Shift epoch from 1970-01-01 to 2000-03-01 for simpler leap-year math.
     let days400 = days + 719_468;
     let era = days400 / 146_097;
     let doe = days400 % 146_097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
+    let year = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 { y + 1 } else { y };
-    (y, mo, d, h, m, s)
+    let month_pos = (5 * doy + 2) / 153;
+    let day = doy - (153 * month_pos + 2) / 5 + 1;
+    let month = if month_pos < 10 { month_pos + 3 } else { month_pos - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day, hour, min, sec)
 }

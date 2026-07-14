@@ -12,7 +12,7 @@ use thiserror::Error;
 
 /// NFSv3 status codes  --  wraps nfs3_types::nfs3::nfsstat3 with Display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum Nfs3Error {
+pub(crate) enum Nfs3Error {
     #[error("NFS3ERR_PERM: not owner")]
     Perm,
     #[error("NFS3ERR_NOENT: no such file or directory")]
@@ -75,7 +75,7 @@ pub enum Nfs3Error {
 
 impl Nfs3Error {
     /// Convert from nfs3-rs nfsstat3.
-    pub const fn from_nfsstat3(stat: nfsstat3) -> Option<Self> {
+    pub(crate) const fn from_nfsstat3(stat: nfsstat3) -> Option<Self> {
         match stat {
             nfsstat3::NFS3_OK => None, // not an error
             nfsstat3::NFS3ERR_PERM => Some(Self::Perm),
@@ -112,25 +112,25 @@ impl Nfs3Error {
     /// Is this a transient error (for circuit breaker)?
     /// Permission denials are NOT transient  --  they're expected during UID spraying.
     #[must_use]
-    pub const fn is_transient(self) -> bool {
+    pub(crate) const fn is_transient(self) -> bool {
         matches!(self, Self::Io | Self::Jukebox | Self::ServerFault)
     }
 
     /// Is this a permission error (expected during auto-uid)?
     #[must_use]
-    pub const fn is_permission_denied(self) -> bool {
+    pub(crate) const fn is_permission_denied(self) -> bool {
         matches!(self, Self::Perm | Self::Acces)
     }
 
     /// Handle oracle: BADHANDLE = wrong format, STALE = right format wrong inode/gen.
     #[must_use]
-    pub const fn is_handle_oracle_hit(self) -> bool {
+    pub(crate) const fn is_handle_oracle_hit(self) -> bool {
         matches!(self, Self::Stale)
     }
 
     /// Handle oracle: BADHANDLE = wrong format entirely.
     #[must_use]
-    pub const fn is_handle_oracle_miss(self) -> bool {
+    pub(crate) const fn is_handle_oracle_miss(self) -> bool {
         matches!(self, Self::BadHandle)
     }
 }

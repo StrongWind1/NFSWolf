@@ -11,7 +11,7 @@ use crate::engine::analyzer::AnalysisResult;
 ///
 /// The consumer is expected to pipe the output into jq or save it as the
 /// input file for a subsequent `export` command invocation.
-pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
+pub(crate) fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
     serde_json::to_writer_pretty(out, results)?;
     Ok(())
 }

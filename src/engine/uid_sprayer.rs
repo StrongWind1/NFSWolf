@@ -20,11 +20,11 @@ use crate::util::stealth::StealthConfig;
 ///
 /// Re-exported here so callers that work with `UidSprayer` don't need to
 /// import from the protocol layer directly.
-pub use crate::proto::nfs3::types::access as access_bits;
+pub(crate) use crate::proto::nfs3::types::access as access_bits;
 
 /// Result of a UID spray attempt.
 #[derive(Debug, Clone)]
-pub struct SprayResult {
+pub(crate) struct SprayResult {
     /// UID that was tested.
     pub uid: u32,
     /// GID that was tested.
@@ -37,50 +37,50 @@ pub struct SprayResult {
 impl SprayResult {
     /// True if the server granted READ access.
     #[must_use]
-    pub const fn can_read(&self) -> bool {
+    pub(crate) const fn can_read(&self) -> bool {
         self.access & access_bits::READ != 0
     }
 
     /// True if the server granted LOOKUP (directory list) access.
     #[must_use]
-    pub const fn can_lookup(&self) -> bool {
+    pub(crate) const fn can_lookup(&self) -> bool {
         self.access & access_bits::LOOKUP != 0
     }
 
     /// True if the server granted MODIFY (write/setattr) access.
     #[must_use]
-    pub const fn can_modify(&self) -> bool {
+    pub(crate) const fn can_modify(&self) -> bool {
         self.access & access_bits::MODIFY != 0
     }
 
     /// True if the server granted EXTEND (append/create) access.
     #[must_use]
-    pub const fn can_extend(&self) -> bool {
+    pub(crate) const fn can_extend(&self) -> bool {
         self.access & access_bits::EXTEND != 0
     }
 
     /// True if the server granted DELETE access.
     #[must_use]
-    pub const fn can_delete(&self) -> bool {
+    pub(crate) const fn can_delete(&self) -> bool {
         self.access & access_bits::DELETE != 0
     }
 
     /// True if the server granted EXECUTE access.
     #[must_use]
-    pub const fn can_execute(&self) -> bool {
+    pub(crate) const fn can_execute(&self) -> bool {
         self.access & access_bits::EXECUTE != 0
     }
 
     /// Check whether a specific set of required access bits are all granted.
     #[must_use]
-    pub const fn has_access(&self, required: u32) -> bool {
+    pub(crate) const fn has_access(&self, required: u32) -> bool {
         self.access & required == required
     }
 }
 
 /// Configuration for UID spraying.
 #[derive(Debug)]
-pub struct SprayConfig {
+pub(crate) struct SprayConfig {
     /// Inclusive UID range to iterate.
     pub uid_range: std::ops::RangeInclusive<u32>,
     /// Inclusive GID range to iterate.
@@ -104,7 +104,7 @@ pub struct SprayConfig {
 ///
 /// Implements F-1.1 (UID/GID Spoofing) from FINDINGS.md. Each attempt is a fresh
 /// AUTH_SYS credential with a new stamp (RFC 1057 S9.2) to avoid caching.
-pub struct UidSprayer {
+pub(crate) struct UidSprayer {
     nfs3: Nfs3Client,
     circuit: Arc<CircuitBreaker>,
     stealth: StealthConfig,
@@ -119,7 +119,7 @@ impl std::fmt::Debug for UidSprayer {
 impl UidSprayer {
     /// Create a new sprayer backed by the given NFSv3 client.
     #[must_use]
-    pub const fn new(nfs3: Nfs3Client, circuit: Arc<CircuitBreaker>, stealth: StealthConfig) -> Self {
+    pub(crate) const fn new(nfs3: Nfs3Client, circuit: Arc<CircuitBreaker>, stealth: StealthConfig) -> Self {
         Self { nfs3, circuit, stealth }
     }
 
@@ -133,7 +133,7 @@ impl UidSprayer {
     /// the AUTH_SYS credential per-call (RFC 1057 S9.2).  This avoids
     /// creating one connection per (uid, gid) pair, which would exhaust the
     /// privileged source-port range (300-1023) after a few hundred attempts.
-    pub async fn spray(&self, config: &SprayConfig, fh: &FileHandle) -> Vec<SprayResult> {
+    pub(crate) async fn spray(&self, config: &SprayConfig, fh: &FileHandle) -> Vec<SprayResult> {
         let mut results = Vec::new();
         let nfs_fh = fh.to_nfs_fh3();
         let args = ACCESS3args { object: nfs_fh, access: access_bits::ALL };

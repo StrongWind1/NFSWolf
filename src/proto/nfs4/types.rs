@@ -13,14 +13,14 @@ use std::io::{Read, Write};
 use nfs3_types::xdr_codec::{Pack, Unpack};
 
 /// NFSv4 RPC program number (shared with NFSv2/v3  --  version distinguishes).
-pub const NFS4_PROGRAM: u32 = 100_003;
+pub(crate) const NFS4_PROGRAM: u32 = 100_003;
 
 /// NFSv4.0 version number for the COMPOUND procedure.
-pub const NFS4_VERSION: u32 = 4;
+pub(crate) const NFS4_VERSION: u32 = 4;
 
 /// COMPOUND is the sole non-NULL procedure in NFSv4 (RFC 7530 S15.2).
 /// All operations are batched inside a single COMPOUND call.
-pub const NFS4_PROC_COMPOUND: u32 = 1;
+pub(crate) const NFS4_PROC_COMPOUND: u32 = 1;
 
 // --- NFSv4 operation codes (RFC 7530 S16) ---
 // NFSv4.0 defines operations in section 16 (not 18, which is RFC 5661/NFSv4.1).
@@ -103,7 +103,7 @@ fn skip_xdr_pad(input: &mut impl Read, pad: usize) -> nfs3_types::xdr_codec::Res
 }
 
 /// Pack an XDR string: 4-byte length, data bytes, zero-pad to 4-byte boundary.
-pub fn pack_xdr_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
+pub(crate) fn pack_xdr_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
     let bytes = s.as_bytes();
     let len = u32::try_from(bytes.len()).map_err(|_| nfs3_types::xdr_codec::Error::ObjectTooLarge(bytes.len()))?;
     let mut n = len.pack(out)?;
@@ -116,7 +116,7 @@ pub fn pack_xdr_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::
 }
 
 /// Unpack an XDR string: read 4-byte length, data bytes, skip padding.
-pub fn unpack_xdr_string(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(String, usize)> {
+pub(crate) fn unpack_xdr_string(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(String, usize)> {
     let (len, mut n) = u32::unpack(input)?;
     let len = len as usize;
     // Do not pre-size from the untrusted length; read bounded by real bytes.
@@ -129,7 +129,7 @@ pub fn unpack_xdr_string(input: &mut impl Read) -> nfs3_types::xdr_codec::Result
 }
 
 /// Compute packed size for an XDR string.
-pub const fn xdr_string_size(s: &str) -> usize {
+pub(crate) const fn xdr_string_size(s: &str) -> usize {
     let len = s.len();
     4 + len + (4 - (len % 4)) % 4
 }
@@ -158,7 +158,7 @@ const fn opaque_packed_size(data: &[u8]) -> usize {
 /// Attributes are addressed by bit position across a variable-length word array.
 /// Word 0 covers mandatory attributes 0-31, word 1 covers recommended 32-63.
 #[derive(Debug, Clone)]
-pub struct AttrRequest {
+pub(crate) struct AttrRequest {
     /// Attribute bitmap words (XDR array of uint32_t).
     pub words: Vec<u32>,
 }
@@ -166,13 +166,13 @@ pub struct AttrRequest {
 impl AttrRequest {
     /// Request no attributes  --  used when we only want the file handle.
     #[must_use]
-    pub fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self { words: vec![0, 0] }
     }
 
     /// Request just fsid (bit 8 in word 0, RFC 7530 S5.8.1.9).
     #[must_use]
-    pub fn fsid_only() -> Self {
+    pub(crate) fn fsid_only() -> Self {
         // FATTR4_FSID = 8 -> word 0, bit 8
         Self { words: vec![1 << 8, 0] }
     }
@@ -215,7 +215,7 @@ impl Unpack for AttrRequest {
 /// Only the operations nfswolf uses are represented  --  PUTROOTFH, PUTFH, LOOKUP,
 /// GETATTR, GETFH, SECINFO, READDIR, READ.  Wire format is: 4-byte op code + op data.
 #[derive(Debug, Clone)]
-pub enum ArgOp {
+pub(crate) enum ArgOp {
     /// Set the current FH to the server's pseudo-root (RFC 7530 S16.22).
     Putrootfh,
     /// Set the current FH to a known handle (RFC 7530 S16.20).
@@ -321,7 +321,7 @@ impl Pack for ArgOp {
 /// inside a single COMPOUND call. The server processes them in order, stopping
 /// at the first error.
 #[derive(Debug, Clone)]
-pub struct CompoundArgs {
+pub(crate) struct CompoundArgs {
     /// Arbitrary tag for correlating requests with responses (usually empty).
     pub tag: String,
     /// Protocol minor version: 0 for NFSv4.0, 1 for NFSv4.1.
@@ -351,7 +351,7 @@ impl Pack for CompoundArgs {
 
 /// A single directory entry returned by NFSv4 READDIR (RFC 7530 S16.24).
 #[derive(Debug, Clone)]
-pub struct DirEntry4 {
+pub(crate) struct DirEntry4 {
     /// Resume cookie for pagination (opaque to the client).
     pub cookie: u64,
     /// Entry name.
@@ -363,7 +363,7 @@ pub struct DirEntry4 {
 /// Most operations produce no inline data beyond the status code.
 /// GETFH, READDIR, READ, and SECINFO carry operation-specific results.
 #[derive(Debug, Clone, Default)]
-pub enum ResOpData {
+pub(crate) enum ResOpData {
     /// File handle bytes from GETFH (RFC 7530 S16.8).
     Fh(Vec<u8>),
     /// fsid from a GETATTR fsid request (RFC 7530 S16.7; attribute 8, S5.8.1.9).
@@ -403,7 +403,7 @@ pub enum ResOpData {
 ///
 /// Carries the op code, NFS4 status, and (for data-carrying ops) decoded result data.
 #[derive(Debug, Clone)]
-pub struct ResOp {
+pub(crate) struct ResOp {
     /// Operation code that produced this result.
     pub op_code: u32,
     /// NFS4 status (0 = NFS4_OK, non-zero = error).
@@ -414,7 +414,7 @@ pub struct ResOp {
 
 /// NFSv4 COMPOUND response (RFC 7530 S15.2.3).
 #[derive(Debug, Clone)]
-pub struct CompoundRes {
+pub(crate) struct CompoundRes {
     /// Top-level status  --  status of the first failing op, or NFS4_OK.
     pub status: u32,
     /// Echo of the request tag.
@@ -607,7 +607,7 @@ fn skip_opaque(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<usize> {
     let len = len as usize;
     if len > 0 {
         // Read and discard the data bytes, bounded by real bytes (untrusted len).
-        read_xdr_bytes(input, len)?;
+        let _discarded = read_xdr_bytes(input, len)?;
         n += len;
         let pad = (4 - (len % 4)) % 4;
         skip_xdr_pad(input, pad)?;
@@ -624,7 +624,7 @@ fn skip_opaque(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<usize> {
 /// captured as `Unknown(u32)` so callers can still inspect the raw code
 /// rather than silently mapping every unrecognized value to `BadXdr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Nfs4Status {
+pub(crate) enum Nfs4Status {
     /// No error (NFS4_OK = 0).
     Ok,
     /// Permission denied (NFS4ERR_ACCESS = 13, RFC 7530 S13.1.6).
@@ -644,7 +644,7 @@ pub enum Nfs4Status {
 impl Nfs4Status {
     /// Decode a u32 from the wire into a known variant or `Unknown`.
     #[must_use]
-    pub const fn from_u32(v: u32) -> Self {
+    pub(crate) const fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Ok,
             13 => Self::Acces,
@@ -658,7 +658,7 @@ impl Nfs4Status {
 
     /// Convert back to the raw u32 wire value.
     #[must_use]
-    pub const fn as_u32(self) -> u32 {
+    pub(crate) const fn as_u32(self) -> u32 {
         match self {
             Self::Ok => 0,
             Self::Acces => 13,
@@ -756,7 +756,7 @@ mod tests {
     fn compound_args_tag_is_encoded_as_xdr_string() {
         let args = CompoundArgs { tag: "nfswolf".to_owned(), minorversion: 0, ops: vec![] };
         let mut buf = Vec::new();
-        args.pack(&mut buf).unwrap();
+        _ = args.pack(&mut buf).unwrap();
         // First 4 bytes: string length
         let tag_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
         assert_eq!(tag_len, 7, "tag 'nfswolf' must be encoded as 7-byte XDR string");
@@ -798,7 +798,7 @@ mod tests {
     fn argop_read_encodes_opcode_25() {
         let op = ArgOp::Read { stateid: [0u8; 16], offset: 0, count: 1024 };
         let mut buf = Vec::new();
-        op.pack(&mut buf).unwrap();
+        _ = op.pack(&mut buf).unwrap();
         let opcode = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
         assert_eq!(opcode, 25, "READ op code must be 25 per RFC 7530 S16.23");
     }
@@ -815,7 +815,7 @@ mod tests {
     fn compound_args_minorversion_is_encoded() {
         let args = CompoundArgs { tag: String::new(), minorversion: 1, ops: vec![] };
         let mut buf = Vec::new();
-        args.pack(&mut buf).unwrap();
+        _ = args.pack(&mut buf).unwrap();
         // After the tag (4 bytes for empty string), the next 4 bytes are minorversion
         let mv = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
         assert_eq!(mv, 1, "minorversion=1 must be encoded at offset 4");

@@ -9,7 +9,7 @@ use crate::engine::analyzer::{AnalysisResult, Severity};
 /// Write a Markdown-formatted security report to `out`.
 ///
 /// Structure: document title -> per-host section -> per-finding table row.
-pub fn render(results: &[AnalysisResult], title: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+pub(crate) fn render(results: &[AnalysisResult], title: &str, out: &mut dyn Write) -> anyhow::Result<()> {
     writeln!(out, "# {title}")?;
     writeln!(out)?;
 

@@ -18,7 +18,7 @@ use crate::engine::analyzer::Severity;
 ///
 /// Must be called before any output is produced.  Uses `colored`'s global
 /// override so that every `.red()` / `.bold()` call becomes a no-op.
-pub fn apply_no_color(no_color: bool) {
+pub(crate) fn apply_no_color(no_color: bool) {
     if no_color {
         colored::control::set_override(false);
     }
@@ -27,35 +27,35 @@ pub fn apply_no_color(no_color: bool) {
 // --- status line helpers -----------------------------------------------------
 
 /// `[*] msg` in bold blue  --  informational progress line.
-pub fn status_info(msg: &str) -> String {
+pub(crate) fn status_info(msg: &str) -> String {
     format!("{} {msg}", "[*]".bold().blue())
 }
 
 /// `[+] msg` in bold green  --  success / found.
-pub fn status_ok(msg: &str) -> String {
+pub(crate) fn status_ok(msg: &str) -> String {
     format!("{} {msg}", "[+]".bold().green())
 }
 
 /// `[!] msg` in bold yellow  --  advisory warning.
-pub fn status_warn(msg: &str) -> String {
+pub(crate) fn status_warn(msg: &str) -> String {
     format!("{} {msg}", "[!]".bold().yellow())
 }
 
 /// `[-] msg` in bold red  --  failure / not found.
-pub fn status_err(msg: &str) -> String {
+pub(crate) fn status_err(msg: &str) -> String {
     format!("{} {msg}", "[-]".bold().red())
 }
 
 // --- section headers ---------------------------------------------------------
 
 /// Print a bold section header:  `---  TITLE  -------------------------------`
-pub fn section_header(title: &str) {
+pub(crate) fn section_header(title: &str) {
     let line = format!("  {}  {}", title, "-".repeat(60usize.saturating_sub(title.len() + 4)));
     println!("{}", line.bold().white());
 }
 
 /// Print a top-level banner for a host/operation.
-pub fn banner(title: &str) {
+pub(crate) fn banner(title: &str) {
     let width = title.len() + 4;
     let bar = "=".repeat(width);
     println!("{}", format!("+{bar}+").bold().white());
@@ -74,7 +74,7 @@ pub fn banner(title: &str) {
 /// server could otherwise rewrite the operator's screen the instant `analyze`
 /// prints. Mirrors the report renderers' `sanitize_control`; C0/DEL/C1 -> '.'.
 #[must_use]
-pub fn sanitize_terminal(s: &str) -> String {
+pub(crate) fn sanitize_terminal(s: &str) -> String {
     s.chars().map(|c| if c.is_control() { '.' } else { c }).collect()
 }
 
@@ -83,7 +83,7 @@ pub fn sanitize_terminal(s: &str) -> String {
 /// Print a file handle (hex) on its own line, clearly labeled for copy-paste.
 ///
 /// The hex is rendered in cyan so it stands out visually.  Prints to stdout.
-pub fn print_handle(label: &str, hex: &str) {
+pub(crate) fn print_handle(label: &str, hex: &str) {
     // The label can be a server-supplied export path (analyze's File Handles
     // section), so neutralize terminal control bytes in it; the hex is safe.
     println!("  {}: {}", sanitize_terminal(label).bold(), hex.cyan());
@@ -93,7 +93,7 @@ pub fn print_handle(label: &str, hex: &str) {
 /// at the two surfaces that consume a raw handle (`shell --handle` and
 /// `mount --handle`). Both honour `--allow-write` and the auto-UID ladder,
 /// so any read/write/walk/grep workflow works through them.
-pub fn print_handle_next_steps(hex: &str, host: &str) {
+pub(crate) fn print_handle_next_steps(hex: &str, host: &str) {
     println!();
     println!("  {} Copy the handle above and use it with:", "Next steps:".bold().yellow());
     println!("    {} shell {} --handle {}", "nfswolf".dimmed(), host, hex.cyan());
@@ -103,7 +103,7 @@ pub fn print_handle_next_steps(hex: &str, host: &str) {
 // --- timing ------------------------------------------------------------------
 
 /// Format an elapsed duration as `"1.23s"` or `"304ms"`.
-pub fn elapsed(start: Instant) -> String {
+pub(crate) fn elapsed(start: Instant) -> String {
     let d = start.elapsed();
     if d < Duration::from_secs(1) { format!("{}ms", d.as_millis()) } else { format!("{:.2}s", d.as_secs_f64()) }
 }
@@ -111,7 +111,7 @@ pub fn elapsed(start: Instant) -> String {
 // --- severity badges ---------------------------------------------------------
 
 /// Return a padded, coloured severity label for terminal output.
-pub fn severity_badge(sev: Severity) -> String {
+pub(crate) fn severity_badge(sev: Severity) -> String {
     match sev {
         Severity::Critical => "[CRITICAL]".red().bold().to_string(),
         Severity::High => "[HIGH]    ".yellow().bold().to_string(),
@@ -122,7 +122,7 @@ pub fn severity_badge(sev: Severity) -> String {
 }
 
 /// Return a short colour-coded severity word for table cells.
-pub fn severity_cell(sev: Severity) -> String {
+pub(crate) fn severity_cell(sev: Severity) -> String {
     match sev {
         Severity::Critical => "CRITICAL".red().bold().to_string(),
         Severity::High => "HIGH".yellow().bold().to_string(),
@@ -135,7 +135,7 @@ pub fn severity_cell(sev: Severity) -> String {
 // --- export table -------------------------------------------------------------
 
 /// One row for the exports summary table.
-pub struct ExportRow {
+pub(crate) struct ExportRow {
     pub path: String,
     pub clients: String,
     pub auth: String,
@@ -144,7 +144,7 @@ pub struct ExportRow {
 }
 
 /// Build and print an exports table using the rounded tabled style.
-pub fn print_export_table(rows: &[ExportRow]) {
+pub(crate) fn print_export_table(rows: &[ExportRow]) {
     if rows.is_empty() {
         println!("  {}", "(no exports found)".dimmed());
         return;
@@ -169,15 +169,15 @@ pub fn print_export_table(rows: &[ExportRow]) {
         builder.push_record([&path, &clients, &r.auth, &flags, &handle_short.dimmed().to_string()]);
     }
     let mut table = builder.build();
-    table.with(Style::rounded());
-    table.with(Modify::new(Columns::first()).with(Alignment::left()));
+    _ = table.with(Style::rounded());
+    _ = table.with(Modify::new(Columns::first()).with(Alignment::left()));
     println!("{table}");
 }
 
 // --- findings list ------------------------------------------------------------
 
 /// Print a list of findings with severity badge, export tag, and evidence.
-pub fn print_findings(findings: &[crate::engine::analyzer::Finding]) {
+pub(crate) fn print_findings(findings: &[crate::engine::analyzer::Finding]) {
     if findings.is_empty() {
         println!("  {}", status_ok("No findings  --  server appears well-configured"));
         return;
@@ -193,7 +193,7 @@ pub fn print_findings(findings: &[crate::engine::analyzer::Finding]) {
 }
 
 /// Print a compact findings count summary line.
-pub fn print_findings_summary(findings: &[crate::engine::analyzer::Finding]) {
+pub(crate) fn print_findings_summary(findings: &[crate::engine::analyzer::Finding]) {
     let critical = findings.iter().filter(|f| matches!(f.severity, Severity::Critical)).count();
     let high = findings.iter().filter(|f| matches!(f.severity, Severity::High)).count();
     let medium = findings.iter().filter(|f| matches!(f.severity, Severity::Medium)).count();

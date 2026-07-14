@@ -46,7 +46,7 @@ use crate::util::stealth::StealthConfig;
 ///   nfswolf analyze --json target > results.json && \
 ///     nfswolf convert -i results.json --format html -o report.html
 #[derive(Parser)]
-pub struct AnalyzeArgs {
+pub(crate) struct AnalyzeArgs {
     /// Target NFS server: IP or hostname. Omit if using -f.
     #[arg(required_unless_present = "targets_file", help_heading = H_TARGET)]
     pub target: Option<String>,
@@ -81,14 +81,14 @@ pub struct AnalyzeArgs {
     /// it goes to stdout (`nfswolf analyze --json target > results.json`); with a
     /// path it is written to that file, matching `scan --json <FILE>`.
     #[arg(long, value_name = "FILE", num_args = 0..=1, help_heading = H_OUTPUT)]
-    #[allow(clippy::option_option, reason = "clap optional-value flag: None = absent, Some(None) = --json (stdout), Some(Some(path)) = --json FILE")]
+    #[expect(clippy::option_option, reason = "clap optional-value flag: None = absent, Some(None) = --json (stdout), Some(Some(path)) = --json FILE")]
     pub json: Option<Option<PathBuf>>,
 }
 
 impl AnalyzeArgs {
     /// Effective GIDs to use for file read tests.
     /// Falls back to well-known shadow GIDs if none specified.
-    pub fn effective_test_gids(&self) -> Vec<u32> {
+    pub(crate) fn effective_test_gids(&self) -> Vec<u32> {
         if self.test_read_gids.is_empty() {
             vec![0, 42, 15] // root, Debian shadow, SuSE shadow
         } else {
@@ -97,19 +97,19 @@ impl AnalyzeArgs {
     }
 
     /// Effective UIDs to use for file read tests.
-    pub fn effective_test_uids(&self) -> Vec<u32> {
+    pub(crate) fn effective_test_uids(&self) -> Vec<u32> {
         if self.test_read_uids.is_empty() { vec![0] } else { self.test_read_uids.clone() }
     }
 
     /// Effective paths to test readability on.  Defaults to /etc/shadow when
     /// the operator did not supply any explicit `--test-read` paths.
-    pub fn effective_test_paths(&self) -> Vec<String> {
+    pub(crate) fn effective_test_paths(&self) -> Vec<String> {
         if self.test_read_paths.is_empty() { vec!["/etc/shadow".to_owned()] } else { self.test_read_paths.clone() }
     }
 }
 
 /// Run the analyze command.
-pub async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+pub(crate) async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     let targets = collect_targets(&args)?;
     let mut all_results: Vec<AnalysisResult> = Vec::with_capacity(targets.len());
 

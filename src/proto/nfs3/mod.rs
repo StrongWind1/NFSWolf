@@ -7,6 +7,6 @@
 //! - Auto-UID resolution (via proto::auto_uid)
 //! - Error mapping: nfs3_types::nfs3::nfsstat3 -> our domain errors
 
-pub mod client;
-pub mod errors;
-pub mod types;
+pub(crate) mod client;
+pub(crate) mod errors;
+pub(crate) mod types;

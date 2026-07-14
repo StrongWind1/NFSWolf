@@ -13,7 +13,7 @@ const HEADER: &str = "host,export,finding_id,title,severity,description,evidence
 ///
 /// Fields that may contain commas or newlines are wrapped in double-quotes
 /// with internal double-quotes escaped as `""` (RFC 4180).
-pub fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
+pub(crate) fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow::Result<()> {
     writeln!(out, "{HEADER}")?;
     for result in results {
         for finding in &result.findings {

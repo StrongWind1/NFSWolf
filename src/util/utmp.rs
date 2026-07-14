@@ -19,28 +19,28 @@
 
 /// Length of the tty device name field (`ut_line` / `ll_line`).
 /// Per glibc `<bits/utmp.h>`: `#define UT_LINESIZE 32`.
-pub const UT_LINESIZE: usize = 32;
+pub(crate) const UT_LINESIZE: usize = 32;
 
 /// Length of the username field (`ut_user`).
 /// Per glibc `<bits/utmp.h>`: `#define UT_NAMESIZE 32`.
-pub const UT_NAMESIZE: usize = 32;
+pub(crate) const UT_NAMESIZE: usize = 32;
 
 /// Length of the host field (`ut_host` / `ll_host`).
 /// Per glibc `<bits/utmp.h>`: `#define UT_HOSTSIZE 256`.
-pub const UT_HOSTSIZE: usize = 256;
+pub(crate) const UT_HOSTSIZE: usize = 256;
 
 /// Size of one wtmp/btmp record on disk.
 /// Per glibc `struct utmpx`: 2+2+4+32+4+32+256+4+4+8+16+20 = 384 bytes.
-pub const UTMP_RECORD_SIZE: usize = 384;
+pub(crate) const UTMP_RECORD_SIZE: usize = 384;
 
 /// Size of one lastlog record on disk.
 /// Per glibc `struct lastlog`: 4+32+256 = 292 bytes.
-pub const LASTLOG_RECORD_SIZE: usize = 292;
+pub(crate) const LASTLOG_RECORD_SIZE: usize = 292;
 
 /// `ut_type` values from glibc `<bits/utmp.h>`.
 /// Per util-linux 2.42 `login-utils/last.c` lines 130-133, 786-892.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UtType {
+pub(crate) enum UtType {
     /// Record is empty / unused.
     Empty,
     /// Change in system run-level (`init` writes these).
@@ -68,7 +68,7 @@ pub enum UtType {
 impl UtType {
     /// Decode the on-disk 16-bit value into a `UtType`.
     #[must_use]
-    pub const fn from_raw(v: i16) -> Self {
+    pub(crate) const fn from_raw(v: i16) -> Self {
         match v {
             0 => Self::Empty,
             1 => Self::RunLvl,
@@ -87,7 +87,7 @@ impl UtType {
 
 /// One decoded wtmp/btmp record. Field semantics match glibc `struct utmpx`.
 #[derive(Debug, Clone)]
-pub struct UtmpRecord {
+pub(crate) struct UtmpRecord {
     /// Record kind (login, logout, reboot, runlevel, ...).
     pub ut_type: UtType,
     /// PID of the login process.
@@ -121,7 +121,7 @@ impl UtmpRecord {
     /// after the length check go through `slice::get` so a corrupt record can
     /// never panic the parser.
     #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
         // Pin the slice to the canonical fixed-size layout. Everything past
         // this point operates on a `&[u8; 384]`-shaped reference via helpers.
         if bytes.len() != UTMP_RECORD_SIZE {
@@ -139,16 +139,16 @@ impl UtmpRecord {
         let e_termination = i16::from_ne_bytes(read_arr::<2>(bytes, 332)?);
         let e_exit = i16::from_ne_bytes(read_arr::<2>(bytes, 334)?);
         let session = i32::from_ne_bytes(read_arr::<4>(bytes, 336)?);
-        let tv_sec = i32::from_ne_bytes(read_arr::<4>(bytes, 340)?);
-        let tv_usec = i32::from_ne_bytes(read_arr::<4>(bytes, 344)?);
+        let timestamp_secs = i32::from_ne_bytes(read_arr::<4>(bytes, 340)?);
+        let timestamp_micros = i32::from_ne_bytes(read_arr::<4>(bytes, 344)?);
         let addr_v6 = read_arr::<16>(bytes, 348)?;
-        Some(Self { ut_type: UtType::from_raw(ut_type), pid, line, id, user, host, e_termination, e_exit, session, tv_sec, tv_usec, addr_v6 })
+        Some(Self { ut_type: UtType::from_raw(ut_type), pid, line, id, user, host, e_termination, e_exit, session, tv_sec: timestamp_secs, tv_usec: timestamp_micros, addr_v6 })
     }
 
     /// True when `ut_addr_v6` decodes as an IPv4-mapped or plain-IPv4 address.
     /// Mirrors the heuristic in util-linux `last.c::dns_lookup()` (lines 311-329).
     #[must_use]
-    pub fn addr_is_ipv4(&self) -> bool {
+    pub(crate) fn addr_is_ipv4(&self) -> bool {
         let a = self.addr_u32_le();
         // IPv4-in-IPv6 mapped: ::ffff:x.x.x.x -> first 8 bytes 0, then 0xffff in network order.
         let mapped = a[0] == 0 && a[1] == 0 && a[2] == u32::from_be(0x0000_ffff);
@@ -158,7 +158,7 @@ impl UtmpRecord {
 
     /// Render `ut_addr_v6` as a numeric address string. Empty string when zero.
     #[must_use]
-    pub fn addr_string(&self) -> String {
+    pub(crate) fn addr_string(&self) -> String {
         use std::fmt::Write as _;
 
         if self.addr_v6.iter().all(|b| *b == 0) {
@@ -206,13 +206,13 @@ impl UtmpRecord {
 
 /// Parse a wtmp/btmp blob into records. Trailing partial records are silently dropped.
 #[must_use]
-pub fn parse_utmp(bytes: &[u8]) -> Vec<UtmpRecord> {
+pub(crate) fn parse_utmp(bytes: &[u8]) -> Vec<UtmpRecord> {
     bytes.chunks_exact(UTMP_RECORD_SIZE).filter_map(UtmpRecord::from_bytes).collect()
 }
 
 /// One decoded lastlog slot. The slot's `uid` is the array index in the file.
 #[derive(Debug, Clone)]
-pub struct LastlogRecord {
+pub(crate) struct LastlogRecord {
     /// Linux UID this slot belongs to (file offset / 292).
     pub uid: u32,
     /// Login time (Unix seconds, 32-bit on disk per glibc layout).
@@ -229,7 +229,7 @@ pub struct LastlogRecord {
 /// Per util-linux 2.42 `liblastlog2/src/lastlog2.c::ll2_import_lastlog()`, the
 /// file is an array indexed by UID; offset = uid * sizeof(struct lastlog).
 #[must_use]
-pub fn parse_lastlog(bytes: &[u8]) -> Vec<LastlogRecord> {
+pub(crate) fn parse_lastlog(bytes: &[u8]) -> Vec<LastlogRecord> {
     bytes
         .chunks_exact(LASTLOG_RECORD_SIZE)
         .enumerate()
@@ -247,7 +247,7 @@ pub fn parse_lastlog(bytes: &[u8]) -> Vec<LastlogRecord> {
 /// Tolerant of blank lines and comments; ignores entries that don't have at
 /// least three colon-separated fields or whose UID isn't a valid `u32`.
 #[must_use]
-pub fn parse_passwd(bytes: &[u8]) -> Vec<(u32, String)> {
+pub(crate) fn parse_passwd(bytes: &[u8]) -> Vec<(u32, String)> {
     let text = String::from_utf8_lossy(bytes);
     let mut out = Vec::new();
     for line in text.lines() {
@@ -286,7 +286,7 @@ fn read_cstr_at(buf: &[u8], off: usize, len: usize) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing, reason = "unit test  --  lints are suppressed per project policy")]
+#[expect(clippy::pedantic, reason = "unit test  --  lints are suppressed per project policy")]
 mod tests {
     use super::*;
 
