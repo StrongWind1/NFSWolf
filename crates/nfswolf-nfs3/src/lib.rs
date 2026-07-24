@@ -42,7 +42,7 @@ mod error_mount;
 pub mod mount;
 mod raw;
 
-pub use api::{CreateMode, DirEntry, DirEntryPlus, FileAttrs, FileHandle, FileType, FsInfo, FsStat, HexError, NfsTime, WriteStable, access};
+pub use api::{CreateMode, DirEntry, DirEntryPlus, DirPage, FileAttrs, FileHandle, FileType, FsInfo, FsStat, HexError, Nfs3Fault, NfsTime, ReadChunk, WriteAck, WriteStable, access};
 pub use error::Nfs3Error;
 pub use error_mount::MountError;
 pub use mount::MountClient;
