@@ -25,13 +25,11 @@ use crate::proto::auth::{AuthSys, Credential};
 /// Concrete IO type used for all NFS connections.
 pub(crate) type NfsIo = TokioIo<TcpStream>;
 
-/// Reconnection strategy  --  matches HP-UX quirk where the server closes after each exchange.
+/// Reconnection strategy for a pooled connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReconnectStrategy {
     /// Keep the TCP connection open across multiple RPC calls (standard).
     Persistent,
-    /// Reconnect after every RPC call (HP-UX drops connection after one exchange).
-    ResetPerCall,
 }
 
 /// Health state of a pooled connection.
@@ -298,12 +296,6 @@ impl NfsConnection {
         self.inner.nfs3_client.set_credential(orig);
         result
     }
-
-    /// Reconnect strategy in effect for this connection.
-    #[must_use]
-    pub(crate) const fn reconnect_strategy(&self) -> ReconnectStrategy {
-        self.reconnect
-    }
 }
 
 // =============================================================================
@@ -452,10 +444,4 @@ async fn connect_privileged_nfs(addr: SocketAddr) -> std::io::Result<NfsIo> {
     }
     tracing::warn!(%addr, "privileged NFS port binding failed, falling back to ephemeral port");
     TokioConnector.connect(addr).await
-}
-
-/// Construct a default `AuthSys` credential for anonymous access.
-#[must_use]
-pub(crate) fn nobody_cred() -> Credential {
-    Credential::Sys(AuthSys::new(65534, 65534, "nfswolf"))
 }

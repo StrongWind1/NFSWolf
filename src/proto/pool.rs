@@ -33,15 +33,6 @@ pub(crate) struct PoolKey {
     pub gid: u32,
 }
 
-/// Pool statistics snapshot.
-#[derive(Debug, Clone)]
-pub(crate) struct PoolStats {
-    /// Total connections idle across all keys.
-    pub idle: usize,
-    /// Total connections currently checked out.
-    pub outstanding: usize,
-}
-
 /// Connection pool inner data  --  shared by clones.
 struct PoolInner {
     /// Per-key idle queues. The inner `Mutex<VecDeque>` is wrapped in `Arc` so a
@@ -163,25 +154,6 @@ impl ConnectionPool {
 
         let conn = NfsConnection::connect_direct(key.host, nfs_port, credential, reconnect, self.inner.proxy.as_deref()).await?;
         Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit })
-    }
-
-    /// Drain all idle connections for a key (used after a host goes down).
-    pub(crate) async fn drain(&self, key: &PoolKey) {
-        // Clone the queue handle out before awaiting, dropping the DashMap read
-        // guard first (same guard-across-await hazard as `try_pop`).
-        let queue = self.inner.pools.get(key).map(|q| Arc::clone(&q));
-        if let Some(queue) = queue {
-            queue.lock().await.clear();
-        }
-    }
-
-    /// Snapshot current pool statistics.
-    #[must_use]
-    pub(crate) fn stats(&self) -> PoolStats {
-        // Outstanding = permits handed out = max_total minus those still available.
-        let outstanding = self.inner.max_total.saturating_sub(self.inner.admission.available_permits());
-        let idle = self.inner.pools.iter().filter_map(|e| e.value().try_lock().ok().map(|q| q.len())).sum();
-        PoolStats { idle, outstanding }
     }
 
     /// Pop one idle connection, running a health check if it is stale.

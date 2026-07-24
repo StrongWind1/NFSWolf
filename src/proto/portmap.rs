@@ -10,22 +10,17 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use nfs_proto::PortmapperClient;
-use nfs_proto::portmap::{self, IPPROTO_TCP, IPPROTO_UDP};
+use nfs_proto::portmap::{self, IPPROTO_TCP};
 use nfs_proto::transport::net::Connector as _;
 use nfs_proto::transport::tokio::{TokioConnector, TokioIo};
 
 /// RPC program numbers relevant to NFS infrastructure.
 /// NFSv2/v3/v4 server (program 100003, RFC 1057 S9).
 const PROG_NFS: u32 = 100_003;
-/// NFS MOUNT protocol (program 100005, RFC 1813 Appendix I).
-const PROG_MOUNT: u32 = 100_005;
 /// NIS / ypserv (program 100004, vulnerable to map dump).
 const PROG_YPSERV: u32 = 100_004;
 /// NIS ypbind (program 100007).
 const PROG_YPBIND: u32 = 100_007;
-/// NetApp proprietary program (amplification indicator).
-const PROG_NETAPP: u32 = 400_010;
-
 /// One entry returned by PMAPPROC_DUMP.
 #[derive(Debug, Clone)]
 pub(crate) struct PortmapEntry {
@@ -127,23 +122,12 @@ impl PortmapClient {
         Ok(versions)
     }
 
-    /// Resolve the mountd port (program 100005).
-    pub(crate) async fn detect_mount_port(&self, addr: SocketAddr) -> anyhow::Result<u16> {
-        self.query_port(addr, PROG_MOUNT, 3).await
-    }
-
     /// Check for NIS (ypserv / ypbind) in the portmapper dump.
     pub(crate) async fn detect_nis(&self, addr: SocketAddr) -> anyhow::Result<NisDetection> {
         let entries = self.dump(addr).await?;
         let ypserv = entries.iter().find(|e| e.program == PROG_YPSERV && e.protocol == IPPROTO_TCP);
         let ypbind_present = entries.iter().any(|e| e.program == PROG_YPBIND);
         Ok(NisDetection { ypserv_present: ypserv.is_some(), ypserv_port: ypserv.map(|e| e.port), ypbind_present })
-    }
-
-    /// Check whether a NetApp proprietary program is registered (amplification indicator).
-    pub(crate) async fn has_netapp(&self, addr: SocketAddr) -> anyhow::Result<bool> {
-        let entries = self.dump(addr).await?;
-        Ok(entries.iter().any(|e| e.program == PROG_NETAPP))
     }
 
     /// Measure UDP amplification by comparing DUMP request/response sizes.
@@ -160,20 +144,6 @@ impl PortmapClient {
         // Entry counts are always small (< 1000); u32->f64 is exact for values this size.
         let factor = f64::from(u32::try_from(response_bytes).unwrap_or(u32::MAX)) / f64::from(u32::try_from(request_bytes).unwrap_or(1u32));
         Ok(PortmapAmplificationResult { request_bytes, response_bytes, factor })
-    }
-
-    /// Look up the TCP port for the given protocol number in a pre-fetched dump.
-    #[must_use]
-    pub(crate) fn find_port(entries: &[PortmapEntry], program: u32, proto: u32) -> Option<u16> {
-        entries.iter().find(|e| e.program == program && e.protocol == proto).map(|e| e.port)
-    }
-
-    /// Return true if the dump shows both TCP and UDP registrations for NFS.
-    ///
-    /// UDP NFS is a prerequisite for the amplification attack (F-3.2).
-    #[must_use]
-    pub(crate) fn has_nfs_udp(entries: &[PortmapEntry]) -> bool {
-        entries.iter().any(|e| e.program == PROG_NFS && e.protocol == IPPROTO_UDP)
     }
 
     /// Enumerate all registered RPC services via PMAPPROC_DUMP over UDP.

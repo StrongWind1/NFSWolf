@@ -140,12 +140,6 @@ impl NfsMountClient {
         client.umnt(path).await.with_context(|| format!("UMNT {export}"))
     }
 
-    /// Unmount all exports (MNTPROC_UMNTALL).
-    pub(crate) async fn unmount_all(&self, addr: SocketAddr) -> anyhow::Result<()> {
-        let mut client = self.connect(addr).await?;
-        client.umntall().await.context("UMNTALL")
-    }
-
     /// List all exports with their ACLs via MOUNT v3 EXPORT (MNTPROC_EXPORT).
     ///
     /// A wildcard or empty `allowed_hosts` list means the export is world-accessible (F-7.1).
