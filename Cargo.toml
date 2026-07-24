@@ -5,11 +5,15 @@
 # crates so the binary's application layer (pool, circuit breaker, stealth,
 # auto-UID) stays cleanly separated from the wire format:
 #
-#   crates/nfs_xdr    -- #[derive(XdrCodec)] proc macro (RFC 4506 encoding)
-#   crates/nfs_proto  -- XDR codec, ONC RPC, NFSv2/v3/v4, MOUNT, portmapper
+#   crates/nfswolf-xdr-derive -- #[derive(XdrCodec)] proc macro (RFC 4506)
+#   crates/nfswolf-xdr        -- XDR codec (RFC 4506)
+#   crates/nfswolf-rpc        -- ONC RPC v2, portmapper, AUTH_SYS (RFC 5531)
+#   crates/nfswolf-nfs2       -- NFS v2 (RFC 1094)
+#   crates/nfswolf-nfs3       -- NFS v3 + MOUNT v3 (RFC 1813)
+#   crates/nfswolf-nfs4       -- NFS v4.0 COMPOUND (RFC 7530)
 #
 # Both crates originate from Vaiz/nfs3 (Unlicense / public domain) plus the
-# NFSv2 and NFSv4 layers NFSWolf wrote itself.  See crates/nfs_proto/NOTICE.
+# NFSv2 and NFSv4 layers NFSWolf wrote itself.  See the NOTICE file in each crate.
 # ---------------------------------------------------------------------------
 [workspace]
 members = [

@@ -1,5 +1,5 @@
-Provenance of nfswolf-xdr
-=========================
+Provenance of nfswolf-xdr-derive
+================================
 
 This crate contains code derived from the Vaiz/nfs3 project
 <https://github.com/Vaiz/nfs3>, which is released into the public domain under
@@ -10,15 +10,8 @@ This NOTICE records the origin as a matter of good practice, not obligation.
 
 Code absorbed from Vaiz/nfs3 (Unlicense):
 
-  From crate nfs3_types:
-    src/xdr_codec/*.rs          -> src/{error,list,opaque,primitives,traits,void}.rs
-
-Written by the NFSWolf authors (Apache-2.0, no upstream origin):
-
-    src/util.rs                 -- length-hardened decoders for untrusted input.
-                                   Upstream sized allocations directly from a
-                                   peer-supplied length; these cap the
-                                   preallocation instead (CWE-789).
+  From crate nfs3_macros:
+    src/lib.rs                  -> src/lib.rs
 
 Deviations from upstream (workspace-wide):
 
