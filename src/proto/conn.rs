@@ -20,7 +20,7 @@ use nfs_proto::{Nfs3Connection, Nfs3ConnectionBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::proto::auth::{AuthSys, Credential};
+use crate::proto::auth::{AuthSys, Credential, next_stamp};
 
 /// Concrete IO type used for all NFS connections.
 pub(crate) type NfsIo = TokioIo<TcpStream>;
@@ -97,10 +97,7 @@ impl NfsConnection {
     /// When `proxy` is `Some("host:port")` or `Some("socks5://host:port")`, all
     /// TCP connections are tunneled through the SOCKS5 proxy.
     pub(crate) async fn connect(addr: SocketAddr, export: &str, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
-        let opaque = match &credential {
-            Credential::None => nfs_proto::rpc::opaque_auth::default(),
-            Credential::Sys(auth) => auth.to_opaque_auth(),
-        };
+        let opaque = credential.to_opaque_auth();
 
         let host = addr.ip().to_string();
 
@@ -150,10 +147,7 @@ impl NfsConnection {
         // the connection's current credential (advancing the global stamp
         // counter) and build a short-lived client that borrows the persistent
         // stream, so the TCP session is still reused.
-        let opaque = match &self.credential {
-            Credential::None => nfs_proto::rpc::opaque_auth::default(),
-            Credential::Sys(auth) => auth.to_opaque_auth(),
-        };
+        let opaque = self.credential.to_opaque_auth();
         let mut rpc = RpcClient::new_with_auth(RawIoRef(&mut self.raw_io), opaque, nfs_proto::rpc::opaque_auth::default());
         let result = rpc.call::<C, R>(program, version, proc, args).await;
         match result {
@@ -178,10 +172,7 @@ impl NfsConnection {
         use nfs_proto::xdr::Opaque;
         use nfs_proto::{MountClient, Nfs3Client as RawNfs3};
 
-        let opaque = match &credential {
-            Credential::None => nfs_proto::rpc::opaque_auth::default(),
-            Credential::Sys(auth) => auth.to_opaque_auth(),
-        };
+        let opaque = credential.to_opaque_auth();
 
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
 
@@ -280,7 +271,7 @@ impl NfsConnection {
     /// spraying reuse a single mount session instead of opening a new TCP connection
     /// per (uid, gid) pair.
     pub(crate) async fn access_as(&mut self, args: &nfs_proto::nfs3::ACCESS3args, uid: u32, gid: u32, gids: &[u32], hostname: &str) -> anyhow::Result<nfs_proto::nfs3::ACCESS3res> {
-        let stamp_cred = AuthSys::with_groups(uid, gid, gids, hostname).to_opaque_auth();
+        let stamp_cred = AuthSys::with_groups(uid, gid, gids, hostname).to_opaque_auth(next_stamp());
         self.health.request_count = self.health.request_count.saturating_add(1);
         self.health.last_used = Instant::now();
         // Swap credential on the inner nfs3_client for this one call.  This
@@ -289,10 +280,7 @@ impl NfsConnection {
         let result = self.inner.access(args).await.map_err(|e| anyhow::anyhow!("{e}"));
         // Always restore the registered credential so the next pool user
         // receives a connection stamped with the pool key's identity.
-        let orig = match &self.credential {
-            Credential::None => nfs_proto::rpc::opaque_auth::default(),
-            Credential::Sys(auth) => auth.to_opaque_auth(),
-        };
+        let orig = self.credential.to_opaque_auth();
         self.inner.nfs3_client.set_credential(orig);
         result
     }

@@ -106,7 +106,7 @@ impl Nfs4DirectClient {
     /// Connect with AUTH_SYS via an optional SOCKS5 proxy.
     pub(crate) async fn connect_with_auth_proxy(addr: SocketAddr, uid: u32, gid: u32, hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
-        let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth();
+        let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, opaque, nfs_proto::rpc::opaque_auth::default());
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: Vec::new() })
@@ -122,7 +122,7 @@ impl Nfs4DirectClient {
     pub(crate) async fn connect_with_groups_proxy(addr: SocketAddr, uid: u32, gid: u32, aux_gids: &[u32], hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
         let gids = merge_gids(gid, aux_gids);
-        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth();
+        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, opaque, nfs_proto::rpc::opaque_auth::default());
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: aux_gids.to_vec() })
@@ -149,7 +149,7 @@ impl Nfs4DirectClient {
     pub(crate) async fn reconnect_with_auth(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         use crate::proto::auth::AuthSys;
         let gids = merge_gids(gid, &self.aux_gids);
-        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth();
+        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(self.addr, self.proxy.as_deref()).await?;
         self.rpc = RpcClient::new_with_auth(io, opaque, nfs_proto::rpc::opaque_auth::default());
         Ok(())

@@ -684,6 +684,7 @@ dependencies = [
  "libc",
  "nfs3_server",
  "nfs_proto",
+ "nfswolf-rpc",
  "predicates",
  "proptest",
  "rand 0.10.2",

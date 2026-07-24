@@ -27,17 +27,21 @@
 //! |--------|----------|
 //! | [`rpc`] | RPC v2 message types and the generic [`RpcClient`] |
 //! | [`portmap`] | Portmapper / RPCBIND v2 (program 100000) |
-//! | [`transport`] | `AsyncRead`/`AsyncWrite` traits, `Connector`, tokio backend |
+//! | [`transport`] | The [`RpcTransport`] seam, a direct implementation, and the tokio backend |
+//! | [`auth`] | AUTH_SYS credentials (RFC 5531 sec. 14) |
 //!
 //! [RFC 5531]: https://www.rfc-editor.org/rfc/rfc5531
 //! [RFC 1057]: https://www.rfc-editor.org/rfc/rfc1057
 
+pub mod auth;
 pub mod portmap;
 pub mod rpc;
 pub mod transport;
 
 mod error;
 
+pub use auth::{AuthFlavor, AuthSys};
 pub use error::{PortmapError, RpcError};
 pub use portmap::PortmapperClient;
 pub use rpc::RpcClient;
+pub use transport::{DirectTransport, RpcTransport};
