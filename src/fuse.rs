@@ -473,7 +473,10 @@ impl NfsFuse {
             let c = self.client_for(u, g);
             let r = op(c).await;
             match r {
-                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+                // Only a permission refusal is worth another rung. Any other
+                // status is a real answer -- climbing the ladder would just
+                // repeat it under identities that cannot change it.
+                Ok(Nfs3Result::Err((status, _))) if is_permission_refusal(status) => {
                     last = Some(r);
                 },
                 Ok(_) => {
@@ -495,7 +498,10 @@ impl NfsFuse {
             let c = self.client_for(u, g);
             let r = op(c).await;
             match r {
-                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+                // Only a permission refusal is worth another rung. Any other
+                // status is a real answer -- climbing the ladder would just
+                // repeat it under identities that cannot change it.
+                Ok(Nfs3Result::Err((status, _))) if is_permission_refusal(status) => {
                     last = Some(r);
                 },
                 Ok(_) => {
@@ -1558,8 +1564,21 @@ fn post_op_attr_to_attrs(opt: nfswolf_nfs3::wire::post_op_attr) -> Option<FileAt
     }
 }
 
+/// Whether a status means "the server refused you" rather than "that failed".
+///
+/// The distinction drives credential escalation: only a refusal is worth
+/// retrying under a different identity.
+const fn is_permission_refusal(status: nfsstat3) -> bool {
+    matches!(status, nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM)
+}
+
 /// Reply to a no-data NFS3 callback (REMOVE / RMDIR / RENAME / COMMIT)
 /// based on the server's status code.
+///
+/// This table stays at the wire level on purpose. It maps NFS status codes
+/// onto POSIX errnos, and that is a translation between two specifications --
+/// `Nfs3Error` is the same set of codes under Rust names, so routing through
+/// it would rename the left-hand column without changing what the table says.
 fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>, reply: ReplyEmpty) {
     match result {
         Ok(Nfs3Result::Ok(_)) => reply.ok(),
