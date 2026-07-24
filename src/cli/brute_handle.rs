@@ -24,15 +24,13 @@
 
 use anyhow::{Context as _, bail};
 use clap::Parser;
-use nfswolf_nfs3::Nfs3Error;
-use nfswolf_nfs3::wire::{ACCESS3args, GETATTR3args, Nfs3Result, ftype3, nfsstat3};
 
 use crate::cli::probe::{make_client_with_hostname, make_mount_client, parse_addr_with_port};
 use crate::cli::target::{self, Source};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
 use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer, FsType};
 use crate::proto::auth::{AuthSys, Credential};
-use crate::proto::nfs3::types::{FileHandle, access};
+use crate::proto::nfs3::types::{FileHandle, FileType, access};
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::stealth::StealthConfig;
 
@@ -166,25 +164,13 @@ enum Probe {
 /// object -- keep varying the inode), `is_handle_oracle_miss` means it rejected
 /// the structure outright (wrong format -- varying the inode is wasted work).
 async fn probe(client: &Nfs3Client, fh: &FileHandle) -> Probe {
-    let args = GETATTR3args { object: fh.to_nfs_fh3() };
-    match client.getattr(&args).await {
-        Ok(Nfs3Result::Ok(ok)) if ok.obj_attributes.type_ == ftype3::NF3DIR => Probe::Dir,
-        Ok(Nfs3Result::Ok(_)) => Probe::NonDir,
-        Ok(Nfs3Result::Err((status, _))) => {
-            // from_nfsstat3 yields None only for NFS3_OK, which cannot appear
-            // in the Err arm; treat the impossible case as a miss rather than
-            // panicking on a hostile server's malformed reply.
-            let Some(err) = Nfs3Error::from_nfsstat3(status) else { return Probe::Miss };
-            if err.is_permission_denied() {
-                // The server resolved the handle and then refused the caller,
-                // which still confirms the handle is real.
-                Probe::Denied
-            } else if err.is_handle_oracle_hit() {
-                Probe::Stale
-            } else {
-                Probe::Miss
-            }
-        },
+    match client.attrs(fh).await {
+        Ok(a) if a.file_type == FileType::Directory => Probe::Dir,
+        Ok(_) => Probe::NonDir,
+        // The server resolved the handle and then refused the caller, which
+        // still confirms the handle is real.
+        Err(e) if e.is_permission_denied() => Probe::Denied,
+        Err(e) if e.is_stale() => Probe::Stale,
         Err(_) => Probe::Miss,
     }
 }
@@ -202,9 +188,9 @@ async fn writability_hint(client: &Nfs3Client, fh: &FileHandle) -> String {
     }
     // Retry the advisory check as the object's owner: catches a rw export where
     // root is squashed but the owning UID can still write.
-    if let Ok(Nfs3Result::Ok(ga)) = client.getattr(&GETATTR3args { object: fh.to_nfs_fh3() }).await {
-        let attr_uid = ga.obj_attributes.uid;
-        let attr_group = ga.obj_attributes.gid;
+    if let Ok(ga) = client.attrs(fh).await {
+        let attr_uid = ga.uid;
+        let attr_group = ga.gid;
         if attr_uid != 0 {
             let owner = client.with_credential(Credential::Sys(AuthSys::with_groups(attr_uid, attr_group, &[attr_group], "nfswolf")), attr_uid, attr_group);
             if access_grants_write(&owner, fh).await {
@@ -217,7 +203,7 @@ async fn writability_hint(client: &Nfs3Client, fh: &FileHandle) -> String {
 
 /// Whether the client's credential is granted any write bit on the handle (advisory).
 async fn access_grants_write(client: &Nfs3Client, fh: &FileHandle) -> bool {
-    matches!(client.access(&ACCESS3args { object: fh.to_nfs_fh3(), access: access::ALL }).await, Ok(Nfs3Result::Ok(ok)) if access::grants_write(ok.access))
+    matches!(client.check_access(fh, access::ALL).await, Ok(granted) if access::grants_write(granted))
 }
 
 /// Print a found handle with its (non-destructive) writability hint and next steps.
