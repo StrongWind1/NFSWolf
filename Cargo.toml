@@ -19,6 +19,7 @@ members = [
   "crates/nfswolf-rpc",
   "crates/nfswolf-nfs2",
   "crates/nfswolf-nfs3",
+  "crates/nfswolf-nfs4",
   "crates/nfs_proto",
 ]
 resolver = "3"
@@ -36,6 +37,7 @@ nfswolf-xdr = { version = "0.6.0", path = "crates/nfswolf-xdr" }
 nfswolf-rpc = { version = "0.6.0", path = "crates/nfswolf-rpc" }
 nfswolf-nfs2 = { version = "0.6.0", path = "crates/nfswolf-nfs2" }
 nfswolf-nfs3 = { version = "0.6.0", path = "crates/nfswolf-nfs3" }
+nfswolf-nfs4 = { version = "0.6.0", path = "crates/nfswolf-nfs4" }
 nfs_proto = { version = "0.6.0", path = "crates/nfs_proto" }
 
 [package]
