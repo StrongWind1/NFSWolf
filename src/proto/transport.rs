@@ -128,6 +128,12 @@ impl PooledTransport {
             Err(_elapsed) => {
                 // The reply may be half-read, so the stream is desynchronised
                 // regardless of what the server does next.
+                //
+                // Poisoning also covers a second case: a timeout cancels the
+                // future mid-flight, so a `call_as` that was running under a
+                // borrowed identity never reaches its restore. Discarding the
+                // connection is what stops that identity leaking to whoever
+                // checks it out next.
                 conn.poison();
                 self.circuit.record_failure(addr);
                 drop(conn);
