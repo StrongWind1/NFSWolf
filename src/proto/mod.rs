@@ -6,7 +6,6 @@
 //! auto-UID resolution, SOCKS5 transport, and privileged port binding.
 
 pub(crate) mod auth;
-pub(crate) mod auto_uid;
 pub(crate) mod circuit;
 pub(crate) mod conn;
 pub(crate) mod mount;

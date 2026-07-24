@@ -22,7 +22,24 @@
 /// Used by the shell (ls, cd, cat), the FUSE mount, and the offensive
 /// subcommands (escape, brute-handle, uid-spray) so every NFS operation
 /// gets the same automatic privilege escalation.
-pub(crate) fn escalation_list(caller: (u32, u32), owner: Option<(u32, u32)>) -> Vec<(u32, u32)> {
+/// The credential ladder: identities to try, in priority order.
+///
+/// AUTH_SYS lets a client assert any identity, so when an operation is refused
+/// the useful next move is to try a different one. This returns the candidates
+/// in priority order; the caller attempts each until one is accepted.
+///
+/// The order is not arbitrary. The file's own owner comes first because it is
+/// the identity most likely to be permitted; then the caller's UID paired with
+/// the file's group, which catches group-readable files; then root, which a
+/// `no_root_squash` export honours; then the service accounts that own most
+/// interesting files on a typical host.
+///
+/// Two related capabilities live elsewhere rather than here. Exhaustive
+/// UID/GID brute force is the `uid-spray` subcommand, because it is loud enough
+/// to be an explicit operator decision rather than an automatic fallback. The
+/// NFSv2 downgrade -- some servers apply `root_squash` on their v3 path but not
+/// their v2 one -- is not implemented; see the backlog.
+pub(crate) fn credential_ladder(caller: (u32, u32), owner: Option<(u32, u32)>) -> Vec<(u32, u32)> {
     let mut list = Vec::with_capacity(14);
     if let Some((file_uid, file_group)) = owner {
         list.push((file_uid, file_group));
@@ -59,7 +76,7 @@ mod tests {
         // owner=(0,0) with a non-zero caller_gid puts (0,0) at index 0 and again
         // at the root push (index 2), separated by (caller_uid, 0). Vec::dedup
         // would leave both; the seen-set pass must keep exactly one.
-        let list = escalation_list((1001, 1001), Some((0, 0)));
+        let list = credential_ladder((1001, 1001), Some((0, 0)));
         let mut seen = std::collections::HashSet::new();
         for pair in &list {
             assert!(seen.insert(*pair), "duplicate credential {pair:?} in escalation ladder");
@@ -72,14 +89,14 @@ mod tests {
     fn escalation_list_dedups_owner_matching_service_account() {
         // owner=(1000,1000) collides with the fixed (1000,1000) service push,
         // which sits several entries later -- a non-adjacent duplicate.
-        let list = escalation_list((42, 42), Some((1000, 1000)));
+        let list = credential_ladder((42, 42), Some((1000, 1000)));
         assert_eq!(list.iter().filter(|p| **p == (1000, 1000)).count(), 1);
         assert_eq!(list[0], (1000, 1000));
     }
 
     #[test]
     fn escalation_list_has_no_duplicates_without_owner() {
-        let list = escalation_list((33, 33), None);
+        let list = credential_ladder((33, 33), None);
         let mut seen = std::collections::HashSet::new();
         for pair in &list {
             assert!(seen.insert(*pair), "duplicate credential {pair:?}");

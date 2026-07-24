@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 
 use crate::cli::GlobalOpts;
-use crate::engine::credential::escalation_list;
+use crate::engine::credential::credential_ladder;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
@@ -141,7 +141,7 @@ pub(crate) fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
 /// escalated credentials on `NFS3ERR_ACCES`.
 ///
 /// The escalation ladder mirrors the one the shell and FUSE adapter use
-/// (see `engine::credential::escalation_list`): owner first, then root,
+/// (see `engine::credential::credential_ladder`): owner first, then root,
 /// then well-known service accounts. File handles are bearer tokens
 /// (RFC 1094 S2.3.3), so every successful escalation produces a handle
 /// the caller can use with any later credential.
@@ -153,7 +153,7 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
             Ok((fh, _)) => current = fh,
             Err(e) if e.is_permission_denied() => {
                 let owner_uid = get_owner_uid(client, &current).await;
-                let try_uids = escalation_list((client.uid(), client.gid()), owner_uid);
+                let try_uids = credential_ladder((client.uid(), client.gid()), owner_uid);
 
                 let mut resolved = false;
                 for (uid, gid) in &try_uids {

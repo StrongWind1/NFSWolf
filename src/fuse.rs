@@ -15,7 +15,7 @@
 //!   complete metadata.
 //! - **Auto-UID ladder (always on).** Any callback that returns
 //!   NFS3ERR_ACCES triggers the same credential-escalation ladder the
-//!   interactive shell uses (`engine::credential::escalation_list`),
+//!   interactive shell uses (`engine::credential::credential_ladder`),
 //!   and the resolved (uid, gid) is cached per inode so future calls
 //!   skip the search.
 //!
@@ -41,7 +41,7 @@ use nfswolf_nfs3::wire::{
 };
 use nfswolf_xdr::Opaque;
 
-use crate::engine::credential::escalation_list;
+use crate::engine::credential::credential_ladder;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::{FileAttrs, FileHandle, FileType};
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
@@ -312,7 +312,7 @@ impl NfsFuse {
 
     /// Build the credential-escalation ladder for `subject_ino`.
     ///
-    /// Mirrors the shell's behavior in `engine::credential::escalation_list`:
+    /// Mirrors the shell's behavior in `engine::credential::credential_ladder`:
     /// owner first (when known via GETATTR), then root, then well-known
     /// service UIDs. Root rungs are always included -- this is a security
     /// toolkit, the goal is unobstructed access.
@@ -331,7 +331,7 @@ impl NfsFuse {
                 None => None,
             }
         };
-        escalation_list(caller, owner)
+        credential_ladder(caller, owner)
     }
 
     /// Retrieve the file handle for inode `ino` from the inode map.
@@ -437,7 +437,7 @@ impl NfsFuse {
     ///
     /// Tries, in order: any per-inode cached credential, then the default
     /// credential. Only if BOTH are rejected with `NFS3ERR_ACCES` /
-    /// `NFS3ERR_PERM` does it walk the rungs of `escalation_list(caller,
+    /// `NFS3ERR_PERM` does it walk the rungs of `credential_ladder(caller,
     /// owner)` -- so the happy path never pays for the owner-discovery
     /// GETATTR inside `ladder_for`. The first attempt that does not return
     /// `NFS3ERR_ACCES` / `NFS3ERR_PERM` wins; the winning credential is
