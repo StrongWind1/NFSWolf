@@ -665,6 +665,7 @@ version = "0.6.0"
 dependencies = [
  "nfswolf-nfs2",
  "nfswolf-nfs3",
+ "nfswolf-nfs4",
  "nfswolf-rpc",
  "nfswolf-xdr",
 ]
@@ -715,6 +716,13 @@ dependencies = [
  "nfswolf-rpc",
  "nfswolf-xdr",
  "thiserror",
+]
+
+[[package]]
+name = "nfswolf-nfs4"
+version = "0.6.0"
+dependencies = [
+ "nfswolf-xdr",
 ]
 
 [[package]]
