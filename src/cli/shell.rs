@@ -64,7 +64,11 @@ pub(crate) struct ShellArgs {
     #[arg(long, value_name = "HEX", help_heading = H_TARGET)]
     pub handle: Option<String>,
 
-    /// NFS protocol version (2, 3, or 4)
+    /// NFS protocol version (3 or 4).
+    ///
+    /// Version 2 is not implemented in the shell: obtaining a v2 root handle
+    /// needs a MOUNT v1 MNT call, which this binary does not make. `scan` and
+    /// `analyze` still detect and report a v2-capable server (F-1.6).
     #[arg(long, default_value = "3", value_name = "VER", help_heading = H_BEHAVIOR)]
     pub nfs_version: u32,
 }
@@ -76,6 +80,20 @@ pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     // NFSv4 mode: bypass MOUNT, connect directly to port 2049.
     if args.nfs_version == 4 {
         return run_nfs4_shell(args, globals).await;
+    }
+
+    // Reject rather than silently fall through to v3. Answering a v2 request
+    // with a v3 session would be worse than refusing: an operator probing for
+    // a v2 downgrade would read the v3 result as proof the server allows v2,
+    // which is a wrong finding rather than a missing feature.
+    if args.nfs_version != 3 {
+        anyhow::bail!(
+            "--nfs-version {} is not supported by the shell (use 3 or 4).\n\
+             NFSv2 wire support exists in the nfswolf-nfs2 crate, but the shell cannot obtain a\n\
+             v2 root handle without a MOUNT v1 MNT call, which is not implemented.\n\
+             `scan` and `analyze` do detect a v2-capable server and report it as F-1.6.",
+            args.nfs_version
+        );
     }
 
     // Parse `<TARGET>` + --export + --handle into the unified form. The
