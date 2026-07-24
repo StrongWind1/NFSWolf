@@ -1,8 +1,7 @@
-//! NFSv4 protocol support  --  custom COMPOUND encoder for security analysis.
+//! NFSv4 protocol support  --  COMPOUND client for security analysis.
 //!
-//! nfs3-rs does not cover NFSv4. libnfs covers it but requires C FFI.
-//! We implement a minimal NFSv4 COMPOUND encoder for the ~6 operations
-//! nfswolf needs, using nfs3_types XDR primitives for encoding.
+//! The wire types live in `nfs_proto::nfs4`; this module holds the pooled
+//! client that drives them and the analysis results it produces.
 //!
 //! Operations needed:
 //! - PUTROOTFH + LOOKUP + GETATTR + GETFH  --  pseudo-FS mapping (F-5.5)
@@ -20,8 +19,11 @@
 //! - NFSv4 ACLs (fattr4_acl) not visible through v3 mode bits
 //! - Session cleanup (DESTROY_SESSION / DESTROY_CLIENTID) for stealth
 
+/// NFSv4 wire types live in the protocol crate; re-exported under the name
+/// call sites already use.
+pub(crate) use nfs_proto::nfs4 as types;
+
 pub(crate) mod compound;
-pub(crate) mod types;
 
 /// NFSv4 compound operation codes relevant to security analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

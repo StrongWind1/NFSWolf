@@ -38,13 +38,13 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use nfs3_client::MountClient;
-use nfs3_client::PortmapperClient;
-use nfs3_client::tokio::TokioIo;
+use nfs_proto::MountClient;
+use nfs_proto::PortmapperClient;
+use nfs_proto::mount::dirpath;
+use nfs_proto::transport::tokio::TokioIo;
+use nfs_proto::xdr::Opaque;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfs3_types::mount::dirpath;
-use nfs3_types::xdr_codec::Opaque;
 use tokio::net::TcpStream;
 
 // --- Helpers ---
@@ -153,6 +153,6 @@ async fn memfs_portmapper_responds_to_nfs_getport() {
 
     let mut pm = portmap_client(port).await;
     // PMAPPROC_GETPORT for NFS v3 -- MemFs serves NFS on the same port it was bound to.
-    let nfs_port = pm.getport(100_003, 3, nfs3_types::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
+    let nfs_port = pm.getport(100_003, 3, nfs_proto::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
     assert_eq!(nfs_port, port, "portmapper must report NFS v3 port matching server bind port");
 }

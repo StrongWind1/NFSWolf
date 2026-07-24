@@ -1,4 +1,4 @@
-//! NFSv3 error codes  --  maps nfs3_types::nfs3::nfsstat3 to domain errors.
+//! NFSv3 error codes  --  maps nfs_proto::nfs3::nfsstat3 to domain errors.
 //!
 //! The critical distinction for nfswolf is NFS3ERR_STALE (70) vs
 //! NFS3ERR_BADHANDLE (10001)  --  this oracle enables targeted handle
@@ -7,10 +7,10 @@
 // Enum variants mirror RFC 1813 SAppendix A status codes; individual docs
 // would repeat the error name verbatim.
 // Toolkit API  --  not all items are used in currently-implemented phases.
-use nfs3_types::nfs3::nfsstat3;
+use nfs_proto::nfs3::nfsstat3;
 use thiserror::Error;
 
-/// NFSv3 status codes  --  wraps nfs3_types::nfs3::nfsstat3 with Display.
+/// NFSv3 status codes  --  wraps nfs_proto::nfs3::nfsstat3 with Display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum Nfs3Error {
     #[error("NFS3ERR_PERM: not owner")]
@@ -74,7 +74,7 @@ pub(crate) enum Nfs3Error {
 }
 
 impl Nfs3Error {
-    /// Convert from nfs3-rs nfsstat3.
+    /// Convert from `nfs_proto` nfsstat3.
     pub(crate) const fn from_nfsstat3(stat: nfsstat3) -> Option<Self> {
         match stat {
             nfsstat3::NFS3_OK => None, // not an error

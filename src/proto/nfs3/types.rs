@@ -1,14 +1,14 @@
-//! NFSv3 type wrappers  --  re-exports and conversions from nfs3_types.
+//! NFSv3 type wrappers  --  re-exports and conversions from `nfs_proto`.
 //!
-//! nfs3_types provides the raw XDR types (nfs_fh3, fattr3, nfsstat3, etc.).
+//! `nfs_proto::nfs3` provides the raw XDR types (nfs_fh3, fattr3, nfsstat3).
 //! This module provides nfswolf-friendly wrappers with hex encoding,
 //! display formatting, and domain methods.
 
 // Struct fields and enum variants are wire-protocol values; individual
 // field docs would be redundant with the module-level RFC citations.
 // Toolkit API  --  not all items are used in currently-implemented phases.
-use nfs3_types::nfs3::{fattr3, ftype3, nfs_fh3};
-use nfs3_types::xdr_codec::Opaque;
+use nfs_proto::nfs3::{fattr3, ftype3, nfs_fh3};
+use nfs_proto::xdr::Opaque;
 
 /// Error returned when a hex string is not valid (odd length or non-hex chars).
 ///
@@ -27,7 +27,7 @@ impl std::fmt::Display for HexError {
 impl std::error::Error for HexError {}
 
 /// Opaque file handle  --  identifies a file/directory on the server.
-/// Max 64 bytes for NFSv3 (RFC 1813 S2.3.1). Wraps nfs3_types::nfs3::nfs_fh3.
+/// Max 64 bytes for NFSv3 (RFC 1813 S2.3.1). Wraps nfs_proto::nfs3::nfs_fh3.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FileHandle(pub Vec<u8>);
 
@@ -67,12 +67,12 @@ impl FileHandle {
         self.0.is_empty()
     }
 
-    /// Convert to nfs3-rs wire type.
+    /// Convert to `nfs_proto` wire type.
     pub(crate) fn to_nfs_fh3(&self) -> nfs_fh3 {
         nfs_fh3 { data: Opaque::owned(self.0.clone()) }
     }
 
-    /// Convert from nfs3-rs wire type.
+    /// Convert from `nfs_proto` wire type.
     pub(crate) fn from_nfs_fh3(fh: &nfs_fh3) -> Self {
         Self(fh.data.as_ref().to_vec())
     }
@@ -92,7 +92,7 @@ pub(crate) enum FileType {
 }
 
 impl FileType {
-    /// Convert from nfs3-rs ftype3.
+    /// Convert from `nfs_proto` ftype3.
     pub(crate) const fn from_ftype3(ft: ftype3) -> Self {
         match ft {
             ftype3::NF3REG => Self::Regular,
@@ -106,7 +106,7 @@ impl FileType {
     }
 }
 
-/// File attributes (fattr3). Wraps nfs3_types::nfs3::fattr3.
+/// File attributes (fattr3). Wraps nfs_proto::nfs3::fattr3.
 #[derive(Debug, Clone)]
 pub(crate) struct FileAttrs {
     pub file_type: FileType,
@@ -125,7 +125,7 @@ pub(crate) struct FileAttrs {
 }
 
 impl FileAttrs {
-    /// Convert from nfs3-rs fattr3.
+    /// Convert from `nfs_proto` fattr3.
     pub(crate) const fn from_fattr3(a: &fattr3) -> Self {
         Self {
             file_type: FileType::from_ftype3(a.type_),

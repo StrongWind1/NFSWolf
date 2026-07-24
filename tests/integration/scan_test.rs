@@ -40,15 +40,15 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use assert_cmd::Command;
-use nfs3_client::MountClient;
-use nfs3_client::Nfs3Client;
-use nfs3_client::PortmapperClient;
-use nfs3_client::tokio::TokioIo;
+use nfs_proto::MountClient;
+use nfs_proto::Nfs3Client;
+use nfs_proto::PortmapperClient;
+use nfs_proto::mount::dirpath;
+use nfs_proto::nfs3::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3};
+use nfs_proto::transport::tokio::TokioIo;
+use nfs_proto::xdr::Opaque;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfs3_types::mount::dirpath;
-use nfs3_types::nfs3::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3};
-use nfs3_types::xdr_codec::Opaque;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use tokio::net::TcpStream;
@@ -163,7 +163,7 @@ async fn memfs_portmapper_responds_to_getport() {
 
     // PMAPPROC_GETPORT: query where NFS v3 is listening.
     // MemFs serves NFS on the same port it was bound to.
-    let nfs_port = pm.getport(100_003, 3, nfs3_types::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
+    let nfs_port = pm.getport(100_003, 3, nfs_proto::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
     assert_eq!(nfs_port, port, "portmapper must report NFS port matching server bind port");
 }
 
@@ -229,7 +229,7 @@ async fn memfs_getattr_on_root() {
     // MOUNT to get the root handle.
     let mut mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
-    let root_fh = nfs3_types::nfs3::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
+    let root_fh = nfs_proto::nfs3::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     // GETATTR on the root handle.
     let mut nfs = nfs3_client(port).await;
@@ -238,7 +238,7 @@ async fn memfs_getattr_on_root() {
     match result {
         Nfs3Result::Ok(ok) => {
             // Root must be a directory.
-            assert_eq!(ok.obj_attributes.type_, nfs3_types::nfs3::ftype3::NF3DIR, "root must be a directory");
+            assert_eq!(ok.obj_attributes.type_, nfs_proto::nfs3::ftype3::NF3DIR, "root must be a directory");
         },
         Nfs3Result::Err((stat, _)) => {
             panic!("GETATTR failed: {stat:?}");
@@ -257,7 +257,7 @@ async fn memfs_lookup_file_in_root() {
 
     let mut mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
-    let root_fh = nfs3_types::nfs3::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
+    let root_fh = nfs_proto::nfs3::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let mut nfs = nfs3_client(port).await;
 
@@ -277,7 +277,7 @@ async fn memfs_lookup_file_in_root() {
 
 #[tokio::test]
 async fn memfs_lookup_missing_file_returns_noent() {
-    use nfs3_types::nfs3::nfsstat3;
+    use nfs_proto::nfs3::nfsstat3;
 
     let config = MemFsConfig::default();
     let (_server, port) = start_memfs_server(config).await;
@@ -285,7 +285,7 @@ async fn memfs_lookup_missing_file_returns_noent() {
 
     let mut mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
-    let root_fh = nfs3_types::nfs3::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
+    let root_fh = nfs_proto::nfs3::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let mut nfs = nfs3_client(port).await;
     let result = nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"does_not_exist.txt")) } }).await.expect("LOOKUP RPC must succeed (protocol level)");
@@ -301,7 +301,7 @@ async fn memfs_lookup_missing_file_returns_noent() {
 
 #[tokio::test]
 async fn memfs_read_file_content() {
-    use nfs3_types::nfs3::{LOOKUP3args, READ3args, diropargs3};
+    use nfs_proto::nfs3::{LOOKUP3args, READ3args, diropargs3};
 
     let expected = b"integration test content";
     let mut config = MemFsConfig::default();
@@ -312,7 +312,7 @@ async fn memfs_read_file_content() {
 
     let mut mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
-    let root_fh = nfs3_types::nfs3::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
+    let root_fh = nfs_proto::nfs3::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let mut nfs = nfs3_client(port).await;
 

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nfs3_types::nfs3::ACCESS3args;
+use nfs_proto::nfs3::ACCESS3args;
 use tracing::{debug, warn};
 
 use crate::proto::circuit::CircuitBreaker;
@@ -168,14 +168,14 @@ impl UidSprayer {
 
                 match conn.access_as(&args, uid, gid, &aux, "nfswolf").await {
                     Ok(res) => match res {
-                        nfs3_types::nfs3::Nfs3Result::Ok(ok) => {
+                        nfs_proto::nfs3::Nfs3Result::Ok(ok) => {
                             let granted = ok.access;
                             debug!(uid, gid, access = granted, "spray: access granted");
                             if granted & config.required_access != 0 {
                                 results.push(SprayResult { uid, gid, access: granted });
                             }
                         },
-                        nfs3_types::nfs3::Nfs3Result::Err((stat, _)) => {
+                        nfs_proto::nfs3::Nfs3Result::Err((stat, _)) => {
                             debug!(uid, gid, ?stat, "spray: access denied");
                         },
                     },

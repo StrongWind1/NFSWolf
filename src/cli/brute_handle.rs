@@ -24,7 +24,7 @@
 
 use anyhow::{Context as _, bail};
 use clap::Parser;
-use nfs3_types::nfs3::{ACCESS3args, GETATTR3args, Nfs3Result, ftype3, nfsstat3};
+use nfs_proto::nfs3::{ACCESS3args, GETATTR3args, Nfs3Result, ftype3, nfsstat3};
 
 use crate::cli::probe::{make_client_with_hostname, make_mount_client, parse_addr_with_port};
 use crate::cli::target::{self, Source};

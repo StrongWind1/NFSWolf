@@ -1,4 +1,4 @@
-//! NFSv2 client  --  calls via nfs3-rs's generic RpcClient.
+//! NFSv2 client  --  calls via the generic RpcClient in `nfs_proto`.
 //!
 //! Uses `NfsConnection::call_raw(NFS_PROGRAM, 2, proc, args)` for all operations.
 //! Implements the 18 NFSv2 procedures (RFC 1094).
@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use nfs3_types::xdr_codec::Void;
+use nfs_proto::xdr::Void;
 
 use crate::proto::auth::Credential;
 use crate::proto::circuit::CircuitBreaker;
@@ -61,7 +61,7 @@ impl Nfs2Client {
     /// Response is `attrstat` (RFC 1094 S2.3.9): status + fattr, no file handle.
     pub(crate) async fn setattr(&self, fh: &Nfs2FileHandle, attrs: &Nfs2SetAttr) -> anyhow::Result<Nfs2FileAttr> {
         // Wire format: fhandle || sattr
-        let combined = FhAndSattr { fh: fh.clone(), attrs: attrs.clone() };
+        let combined = FhAndSattr { fh: *fh, attrs: *attrs };
         let res: AttrStatRes = self.raw_call(proc::NFSPROC_SETATTR, &combined).await?;
         check_status(res.status)?;
         Ok(res.attrs)
@@ -69,7 +69,7 @@ impl Nfs2Client {
 
     /// NFSPROC_LOOKUP (proc 4)  --  look up filename in directory.
     pub(crate) async fn lookup(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
-        let args = DirOpArgs { dir: dir.clone(), name: name.to_owned() };
+        let args = DirOpArgs { dir: *dir, name: name.to_owned() };
         let res: DirOpRes = self.raw_call(proc::NFSPROC_LOOKUP, &args).await?;
         check_status(res.status)?;
         Ok((res.handle, res.attrs))
@@ -84,7 +84,7 @@ impl Nfs2Client {
 
     /// NFSPROC_READ (proc 6)  --  read data from file.
     pub(crate) async fn read(&self, fh: &Nfs2FileHandle, offset: u32, count: u32) -> anyhow::Result<(Nfs2FileAttr, Vec<u8>)> {
-        let args = ReadArgs { file: fh.clone(), offset, count, totalcount: 0 };
+        let args = ReadArgs { file: *fh, offset, count, totalcount: 0 };
         let res: ReadRes = self.raw_call(proc::NFSPROC_READ, &args).await?;
         check_status(res.status)?;
         Ok((res.attrs, res.data))
@@ -93,7 +93,7 @@ impl Nfs2Client {
     /// NFSPROC_WRITE (proc 8)  --  write data to file.
     /// Response is `attrstat` (RFC 1094 S2.3.9): status + fattr, no file handle.
     pub(crate) async fn write(&self, fh: &Nfs2FileHandle, offset: u32, data: Vec<u8>) -> anyhow::Result<Nfs2FileAttr> {
-        let args = WriteArgs { file: fh.clone(), beginoffset: 0, offset, totalcount: 0, data };
+        let args = WriteArgs { file: *fh, beginoffset: 0, offset, totalcount: 0, data };
         let res: AttrStatRes = self.raw_call(proc::NFSPROC_WRITE, &args).await?;
         check_status(res.status)?;
         Ok(res.attrs)
@@ -101,7 +101,7 @@ impl Nfs2Client {
 
     /// NFSPROC_CREATE (proc 9)  --  create a file.
     pub(crate) async fn create(&self, dir: &Nfs2FileHandle, name: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
-        let combined = DirOpAndSattr { args: DirOpArgs { dir: dir.clone(), name: name.to_owned() }, attrs: attrs.clone() };
+        let combined = DirOpAndSattr { args: DirOpArgs { dir: *dir, name: name.to_owned() }, attrs: *attrs };
         let res: DirOpRes = self.raw_call(proc::NFSPROC_CREATE, &combined).await?;
         check_status(res.status)?;
         Ok((res.handle, res.attrs))
@@ -109,35 +109,35 @@ impl Nfs2Client {
 
     /// NFSPROC_REMOVE (proc 10)  --  remove a file.
     pub(crate) async fn remove(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
-        let args = DirOpArgs { dir: dir.clone(), name: name.to_owned() };
+        let args = DirOpArgs { dir: *dir, name: name.to_owned() };
         let status: NfsStat = self.raw_call(proc::NFSPROC_REMOVE, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_RENAME (proc 11)  --  rename a file.
     pub(crate) async fn rename(&self, from_dir: &Nfs2FileHandle, from: &str, to_dir: &Nfs2FileHandle, to: &str) -> anyhow::Result<()> {
-        let args = TwoDirOpArgs { from: DirOpArgs { dir: from_dir.clone(), name: from.to_owned() }, to: DirOpArgs { dir: to_dir.clone(), name: to.to_owned() } };
+        let args = TwoDirOpArgs { from: DirOpArgs { dir: *from_dir, name: from.to_owned() }, to: DirOpArgs { dir: *to_dir, name: to.to_owned() } };
         let status: NfsStat = self.raw_call(proc::NFSPROC_RENAME, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_LINK (proc 12)  --  create a hard link.
     pub(crate) async fn link(&self, fh: &Nfs2FileHandle, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
-        let args = LinkArgs { fh: fh.clone(), to: DirOpArgs { dir: dir.clone(), name: name.to_owned() } };
+        let args = LinkArgs { fh: *fh, to: DirOpArgs { dir: *dir, name: name.to_owned() } };
         let status: NfsStat = self.raw_call(proc::NFSPROC_LINK, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_SYMLINK (proc 13)  --  create a symbolic link.
     pub(crate) async fn symlink(&self, dir: &Nfs2FileHandle, name: &str, target: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<()> {
-        let args = SymlinkArgs { from: DirOpArgs { dir: dir.clone(), name: name.to_owned() }, target: target.to_owned(), attrs: attrs.clone() };
+        let args = SymlinkArgs { from: DirOpArgs { dir: *dir, name: name.to_owned() }, target: target.to_owned(), attrs: *attrs };
         let status: NfsStat = self.raw_call(proc::NFSPROC_SYMLINK, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_MKDIR (proc 14)  --  create a directory.
     pub(crate) async fn mkdir(&self, dir: &Nfs2FileHandle, name: &str, attrs: &Nfs2SetAttr) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
-        let combined = DirOpAndSattr { args: DirOpArgs { dir: dir.clone(), name: name.to_owned() }, attrs: attrs.clone() };
+        let combined = DirOpAndSattr { args: DirOpArgs { dir: *dir, name: name.to_owned() }, attrs: *attrs };
         let res: DirOpRes = self.raw_call(proc::NFSPROC_MKDIR, &combined).await?;
         check_status(res.status)?;
         Ok((res.handle, res.attrs))
@@ -145,14 +145,14 @@ impl Nfs2Client {
 
     /// NFSPROC_RMDIR (proc 15)  --  remove a directory.
     pub(crate) async fn rmdir(&self, dir: &Nfs2FileHandle, name: &str) -> anyhow::Result<()> {
-        let args = DirOpArgs { dir: dir.clone(), name: name.to_owned() };
+        let args = DirOpArgs { dir: *dir, name: name.to_owned() };
         let status: NfsStat = self.raw_call(proc::NFSPROC_RMDIR, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_READDIR (proc 16)  --  list directory entries.
     pub(crate) async fn readdir(&self, dir: &Nfs2FileHandle, cookie: u32, count: u32) -> anyhow::Result<Vec<ReaddirEntry>> {
-        let args = ReaddirArgs { dir: dir.clone(), cookie, count };
+        let args = ReaddirArgs { dir: *dir, cookie, count };
         let res: ReaddirRes = self.raw_call(proc::NFSPROC_READDIR, &args).await?;
         check_status(res.status)?;
         Ok(res.entries)
@@ -167,7 +167,7 @@ impl Nfs2Client {
 
     /// Walk a slash-separated path from `root` using repeated LOOKUP calls.
     pub(crate) async fn lookup_path(&self, root: &Nfs2FileHandle, path: &str) -> anyhow::Result<(Nfs2FileHandle, Nfs2FileAttr)> {
-        let mut fh = root.clone();
+        let mut fh = *root;
         let mut attrs = self.getattr(&fh).await?;
         for component in path.split('/').filter(|c| !c.is_empty()) {
             let (next_fh, next_attrs) = self.lookup(&fh, component).await.with_context(|| format!("lookup {component}"))?;
@@ -238,7 +238,7 @@ impl Nfs2Client {
         match &res {
             Ok(_) => self.circuit.record_success(addr),
             Err(e) => {
-                let is_outage = e.downcast_ref::<nfs3_client::RpcError>().is_some_and(|rpc| matches!(rpc, nfs3_client::RpcError::Io(_)));
+                let is_outage = e.downcast_ref::<nfs_proto::RpcError>().is_some_and(|rpc| matches!(rpc, nfs_proto::RpcError::Io(_)));
                 if is_outage {
                     self.circuit.record_failure(addr);
                 }
@@ -250,7 +250,7 @@ impl Nfs2Client {
 
 // --- Wire helpers for compound argument types ---
 
-use nfs3_types::xdr_codec::{Pack, Unpack};
+use nfs_proto::xdr::{Pack, Unpack};
 use std::io::{Read, Write};
 
 /// Wire-encodes fhandle followed by sattr (for SETATTR).
@@ -263,7 +263,7 @@ impl Pack for FhAndSattr {
     fn packed_size(&self) -> usize {
         self.fh.packed_size() + self.attrs.packed_size()
     }
-    fn pack(&self, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfs_proto::xdr::Result<usize> {
         Ok(self.fh.pack(out)? + self.attrs.pack(out)?)
     }
 }
@@ -278,7 +278,7 @@ impl Pack for DirOpAndSattr {
     fn packed_size(&self) -> usize {
         self.args.packed_size() + self.attrs.packed_size()
     }
-    fn pack(&self, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfs_proto::xdr::Result<usize> {
         Ok(self.args.pack(out)? + self.attrs.pack(out)?)
     }
 }
@@ -293,7 +293,7 @@ impl Pack for TwoDirOpArgs {
     fn packed_size(&self) -> usize {
         self.from.packed_size() + self.to.packed_size()
     }
-    fn pack(&self, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfs_proto::xdr::Result<usize> {
         Ok(self.from.pack(out)? + self.to.pack(out)?)
     }
 }
@@ -308,7 +308,7 @@ impl Pack for LinkArgs {
     fn packed_size(&self) -> usize {
         self.fh.packed_size() + self.to.packed_size()
     }
-    fn pack(&self, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfs_proto::xdr::Result<usize> {
         Ok(self.fh.pack(out)? + self.to.pack(out)?)
     }
 }
@@ -324,7 +324,7 @@ impl Pack for SymlinkArgs {
     fn packed_size(&self) -> usize {
         self.from.packed_size() + string_packed_size(&self.target) + self.attrs.packed_size()
     }
-    fn pack(&self, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfs_proto::xdr::Result<usize> {
         Ok(self.from.pack(out)? + pack_string(&self.target, out)? + self.attrs.pack(out)?)
     }
 }
@@ -338,7 +338,7 @@ struct ReadlinkRes {
 impl Unpack for ReadlinkRes {
     /// RFC 1094  --  readlinkres is an XDR union: on error status, only the
     /// status discriminant is present (no path string follows).
-    fn unpack(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfs_proto::xdr::Result<(Self, usize)> {
         let (status, n0) = NfsStat::unpack(input)?;
         if status != NfsStat::Ok {
             return Ok((Self { status, data: String::new() }, n0));
@@ -357,7 +357,7 @@ struct ReaddirRes {
 impl Unpack for ReaddirRes {
     /// RFC 1094  --  readdirres is an XDR union: on error status, only the
     /// status discriminant is present (no entry list or EOF flag follows).
-    fn unpack(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfs_proto::xdr::Result<(Self, usize)> {
         let (status, mut n) = NfsStat::unpack(input)?;
         if status != NfsStat::Ok {
             return Ok((Self { status, entries: Vec::new() }, n));
@@ -398,49 +398,49 @@ const XDR_PREALLOC_CAP: usize = 1 << 20; // 1 MiB
 ///
 /// Reserves at most `XDR_PREALLOC_CAP` and grows as bytes actually arrive,
 /// returning `UnexpectedEof` when fewer than `len` bytes are present.
-fn read_xdr_bytes(input: &mut impl Read, len: usize) -> nfs3_types::xdr_codec::Result<Vec<u8>> {
+fn read_xdr_bytes(input: &mut impl Read, len: usize) -> nfs_proto::xdr::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(len.min(XDR_PREALLOC_CAP));
-    let read = input.take(len as u64).read_to_end(&mut buf).map_err(nfs3_types::xdr_codec::Error::Io)?;
+    let read = input.take(len as u64).read_to_end(&mut buf).map_err(nfs_proto::xdr::Error::Io)?;
     if read != len {
-        return Err(nfs3_types::xdr_codec::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
+        return Err(nfs_proto::xdr::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
     }
     Ok(buf)
 }
 
 /// Write 1, 2, or 3 zero-padding bytes to reach a 4-byte XDR boundary.
-fn write_xdr_pad(out: &mut impl Write, pad: usize) -> nfs3_types::xdr_codec::Result<()> {
+fn write_xdr_pad(out: &mut impl Write, pad: usize) -> nfs_proto::xdr::Result<()> {
     match pad {
-        1 => out.write_all(&[0u8]).map_err(nfs3_types::xdr_codec::Error::Io),
-        2 => out.write_all(&[0u8; 2]).map_err(nfs3_types::xdr_codec::Error::Io),
-        3 => out.write_all(&[0u8; 3]).map_err(nfs3_types::xdr_codec::Error::Io),
+        1 => out.write_all(&[0u8]).map_err(nfs_proto::xdr::Error::Io),
+        2 => out.write_all(&[0u8; 2]).map_err(nfs_proto::xdr::Error::Io),
+        3 => out.write_all(&[0u8; 3]).map_err(nfs_proto::xdr::Error::Io),
         _ => Ok(()),
     }
 }
 
 /// Read and discard 1, 2, or 3 XDR padding bytes.
-fn skip_xdr_pad(input: &mut impl Read, pad: usize) -> nfs3_types::xdr_codec::Result<()> {
+fn skip_xdr_pad(input: &mut impl Read, pad: usize) -> nfs_proto::xdr::Result<()> {
     match pad {
         1 => {
             let mut b = [0u8; 1];
-            input.read_exact(&mut b).map_err(nfs3_types::xdr_codec::Error::Io)
+            input.read_exact(&mut b).map_err(nfs_proto::xdr::Error::Io)
         },
         2 => {
             let mut b = [0u8; 2];
-            input.read_exact(&mut b).map_err(nfs3_types::xdr_codec::Error::Io)
+            input.read_exact(&mut b).map_err(nfs_proto::xdr::Error::Io)
         },
         3 => {
             let mut b = [0u8; 3];
-            input.read_exact(&mut b).map_err(nfs3_types::xdr_codec::Error::Io)
+            input.read_exact(&mut b).map_err(nfs_proto::xdr::Error::Io)
         },
         _ => Ok(()),
     }
 }
 
-fn pack_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<usize> {
+fn pack_string(s: &str, out: &mut impl Write) -> nfs_proto::xdr::Result<usize> {
     let bytes = s.as_bytes();
-    let len = u32::try_from(bytes.len()).map_err(|_| nfs3_types::xdr_codec::Error::ObjectTooLarge(bytes.len()))?;
+    let len = u32::try_from(bytes.len()).map_err(|_| nfs_proto::xdr::Error::ObjectTooLarge(bytes.len()))?;
     let mut n = len.pack(out)?;
-    out.write_all(bytes).map_err(nfs3_types::xdr_codec::Error::Io)?;
+    out.write_all(bytes).map_err(nfs_proto::xdr::Error::Io)?;
     n += bytes.len();
     let pad = (4 - (bytes.len() % 4)) % 4;
     write_xdr_pad(out, pad)?;
@@ -448,7 +448,7 @@ fn pack_string(s: &str, out: &mut impl Write) -> nfs3_types::xdr_codec::Result<u
     Ok(n)
 }
 
-fn unpack_string(input: &mut impl Read) -> nfs3_types::xdr_codec::Result<(String, usize)> {
+fn unpack_string(input: &mut impl Read) -> nfs_proto::xdr::Result<(String, usize)> {
     let (len, mut n) = u32::unpack(input)?;
     let len = len as usize;
     // Do not pre-size from the untrusted length; read bounded by real bytes.

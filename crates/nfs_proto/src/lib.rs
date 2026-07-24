@@ -1,0 +1,64 @@
+//! Pure-Rust NFS wire protocol stack.
+//!
+//! This crate is the wire layer NFSWolf is built on: XDR encoding, ONC RPC
+//! framing, and the NFSv2, NFSv3, NFSv4, MOUNT, and portmapper protocols.  It
+//! deliberately holds no policy -- no connection pooling, no retry logic, no
+//! circuit breaking, no credential escalation.  Those decisions belong to the
+//! caller, because a security tool needs to make them differently from a
+//! filesystem client.
+//!
+//! # Layout
+//!
+//! | Module | Protocol | Spec |
+//! |--------|----------|------|
+//! | [`xdr`] | External Data Representation | [RFC 4506] |
+//! | [`rpc`] | ONC RPC version 2 | [RFC 5531] |
+//! | [`portmap`] | Portmapper / RPCBIND v2 | [RFC 1057] app. A |
+//! | [`mount`] | MOUNT version 3 | [RFC 1813] app. I |
+//! | [`nfs2`] | NFS version 2 | [RFC 1094] |
+//! | [`nfs3`] | NFS version 3 | [RFC 1813] |
+//! | [`nfs4`] | NFS version 4.0 (read-only subset) | [RFC 7530] |
+//! | [`transport`] | Async I/O traits and TCP connectors | -- |
+//!
+//! # Deliberate deviations
+//!
+//! Two behaviours differ from a conventional NFS client, both because a
+//! security tool needs information a filesystem client would discard:
+//!
+//! * A `PROG_MISMATCH` rejection preserves the server's supported
+//!   `(low, high)` version range rather than collapsing into an opaque error,
+//!   because that range is a version-enumeration oracle.
+//! * [`rpc::RpcClient`] allows its AUTH_SYS credential to be replaced on an
+//!   established connection, so one TCP session can issue calls under many
+//!   identities without re-handshaking.
+//!
+//! [RFC 4506]: https://www.rfc-editor.org/rfc/rfc4506
+//! [RFC 5531]: https://www.rfc-editor.org/rfc/rfc5531
+//! [RFC 1057]: https://www.rfc-editor.org/rfc/rfc1057
+//! [RFC 1094]: https://www.rfc-editor.org/rfc/rfc1094
+//! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
+//! [RFC 7530]: https://www.rfc-editor.org/rfc/rfc7530
+
+// The XdrCodec derive macro expands to `nfs_proto::xdr::...` paths so that it
+// works for downstream crates.  This alias lets those same paths resolve when
+// the macro is used inside this crate.
+extern crate self as nfs_proto;
+
+pub mod mount;
+pub mod nfs2;
+pub mod nfs3;
+pub mod nfs4;
+pub mod portmap;
+pub mod rpc;
+pub mod transport;
+pub mod xdr;
+
+mod connect;
+mod error;
+
+pub use connect::{Nfs3Connection, Nfs3ConnectionBuilder};
+pub use error::{ConnectError, MountError, PortmapError, RpcError};
+pub use mount::MountClient;
+pub use nfs3::Nfs3Client;
+pub use portmap::PortmapperClient;
+pub use rpc::RpcClient;

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use nfs3_types::nfs3::{
+use nfs_proto::nfs3::{
     ACCESS3args, ACCESS3res, COMMIT3args, COMMIT3res, CREATE3args, CREATE3res, FSINFO3args, FSINFO3res, FSSTAT3args, FSSTAT3res, GETATTR3args, GETATTR3res, LINK3args, LINK3res, LOOKUP3args, LOOKUP3res, MKDIR3args, MKDIR3res, MKNOD3args, MKNOD3res, PATHCONF3args, PATHCONF3res, READ3args, READ3res,
     READDIR3args, READDIR3res, READDIRPLUS3args, READDIRPLUS3res, READLINK3args, READLINK3res, REMOVE3args, REMOVE3res, RENAME3args, RENAME3res, RMDIR3args, RMDIR3res, SETATTR3args, SETATTR3res, SYMLINK3args, SYMLINK3res, WRITE3args, WRITE3res,
 };
@@ -397,7 +397,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// Takes `conn` by value so the permit is freed the instant the result (or
 /// timeout) is recorded, rather than lingering until the end of the caller's
 /// method.
-fn finish_rpc<T>(circuit: &CircuitBreaker, mut conn: PooledConnection, timed: Result<Result<T, nfs3_client::RpcError>, tokio::time::error::Elapsed>, addr: SocketAddr, proc: &'static str) -> anyhow::Result<T> {
+fn finish_rpc<T>(circuit: &CircuitBreaker, mut conn: PooledConnection, timed: Result<Result<T, nfs_proto::RpcError>, tokio::time::error::Elapsed>, addr: SocketAddr, proc: &'static str) -> anyhow::Result<T> {
     match timed {
         Ok(res) => {
             update_circuit(circuit, conn, &res.as_ref().map(|_| &()), addr);
@@ -436,7 +436,7 @@ fn finish_rpc<T>(circuit: &CircuitBreaker, mut conn: PooledConnection, timed: Re
 /// Takes `conn` by value so the connection (and its pool-admission permit) is
 /// returned to the pool the moment the result is recorded, rather than lingering
 /// until the end of the caller's method.
-fn update_circuit<T>(circuit: &CircuitBreaker, mut conn: PooledConnection, res: &Result<T, &nfs3_client::RpcError>, addr: SocketAddr) {
+fn update_circuit<T>(circuit: &CircuitBreaker, mut conn: PooledConnection, res: &Result<T, &nfs_proto::RpcError>, addr: SocketAddr) {
     match res {
         Ok(_) => circuit.record_success(addr),
         Err(e) => {
@@ -448,7 +448,7 @@ fn update_circuit<T>(circuit: &CircuitBreaker, mut conn: PooledConnection, res: 
             // Only a real transport outage (Io: reset/timeout) trips the breaker.
             // FragmentedReply is deterministic protocol framing, not an outage, so
             // it poisons the connection above but is NOT recorded as a failure.
-            if matches!(e, nfs3_client::RpcError::Io(_)) {
+            if matches!(e, nfs_proto::RpcError::Io(_)) {
                 circuit.record_failure(addr);
             }
         },

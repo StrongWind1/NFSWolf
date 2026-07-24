@@ -25,7 +25,7 @@
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::sync::Arc;
 
-use nfs3_types::nfs3::{ACCESS3args, Nfs3Result};
+use nfs_proto::nfs3::{ACCESS3args, Nfs3Result};
 use tracing::{debug, warn};
 
 use crate::proto::auth::{AuthSys, Credential};

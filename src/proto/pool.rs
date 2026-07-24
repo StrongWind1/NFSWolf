@@ -225,7 +225,7 @@ impl ConnectionPool {
 /// the per-call credential swap `NfsConnection::access_as` already performs.
 fn restamp_credential(conn: &mut NfsConnection, credential: Credential) {
     let opaque = match &credential {
-        Credential::None => nfs3_types::rpc::opaque_auth::default(),
+        Credential::None => nfs_proto::rpc::opaque_auth::default(),
         Credential::Sys(auth) => auth.to_opaque_auth(),
     };
     conn.inner_mut().nfs3_client.set_credential(opaque);

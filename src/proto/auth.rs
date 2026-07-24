@@ -1,6 +1,6 @@
-//! AUTH_SYS stamp injection  --  wraps nfs3-rs auth_unix.
+//! AUTH_SYS stamp injection  --  wraps `nfs_proto` auth_unix.
 //!
-//! nfs3-rs provides the `auth_unix` struct and `opaque_auth::auth_unix()` encoder.
+//! `nfs_proto` provides the `auth_unix` struct and `opaque_auth::auth_unix()` encoder.
 //! We add a global atomic stamp counter (starting at 42, incremented per encode)
 //! to defeat duplicate-request caching during UID spraying (RFC 1057 S9.2).
 
@@ -8,8 +8,8 @@
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use nfs3_types::rpc::{auth_unix, opaque_auth};
-use nfs3_types::xdr_codec::Opaque;
+use nfs_proto::rpc::{auth_unix, opaque_auth};
+use nfs_proto::xdr::Opaque;
 
 /// Global stamp counter  --  incremented per AUTH_SYS request.
 ///
@@ -31,7 +31,7 @@ pub(crate) enum AuthFlavor {
     Unknown = 255, // Unrecognized flavor (e.g., vendor-specific GSS sub-mechanisms)
 }
 
-/// nfswolf credential  --  wraps nfs3-rs auth_unix with stamp injection.
+/// nfswolf credential  --  wraps `nfs_proto` auth_unix with stamp injection.
 #[derive(Debug, Clone)]
 pub(crate) enum Credential {
     /// No authentication.
@@ -76,7 +76,7 @@ impl AuthSys {
         Self { machinename: hostname.to_owned(), uid, gid, gids: truncated.to_vec() }
     }
 
-    /// Convert to nfs3-rs `opaque_auth` with auto-incremented stamp.
+    /// Convert to `nfs_proto` `opaque_auth` with auto-incremented stamp.
     ///
     /// The counter wraps back to 42 (not 0) at `u32::MAX` so the stamp never
     /// collides with values 0-41 which may be used by other clients and their

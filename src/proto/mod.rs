@@ -1,9 +1,9 @@
-//! NFS protocol layer  --  built on nfs3-rs for NFSv3/MOUNT/portmapper.
+//! NFS protocol layer  --  policy on top of the `nfs_proto` wire stack.
 //!
-//! Uses nfs3_client/nfs3_types crates for all NFSv3 wire protocol.
-//! Adds: AUTH_SYS stamp injection, connection pooling, circuit breaker,
-//! auto-UID resolution, SOCKS5 transport, privileged port binding.
-//! NFSv4 COMPOUND encoder is custom (minimal, ~6 ops).
+//! `nfs_proto` owns the wire format for NFSv2/v3/v4, MOUNT, and the
+//! portmapper and holds no policy of its own.  This layer supplies the
+//! policy: AUTH_SYS stamp injection, connection pooling, circuit breaking,
+//! auto-UID resolution, SOCKS5 transport, and privileged port binding.
 
 pub(crate) mod auth;
 pub(crate) mod auto_uid;

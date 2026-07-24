@@ -1,6 +1,7 @@
-//! MOUNT protocol client  --  wraps nfs3_client mount support (RFC 1813 Appendix I).
+//! MOUNT protocol client  --  wraps `nfs_proto::MountClient`
+//! (RFC 1813 Appendix I).
 //!
-//! nfs3_client provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
+//! `nfs_proto` provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
 //! This module adds:
 //! - Auth flavor extraction from MNT response (F-1.1)
 //! - Export ACL parsing (wildcards, subnets) (F-7.1)
@@ -11,9 +12,9 @@
 use std::net::SocketAddr;
 
 use anyhow::Context as _;
-use nfs3_client::MountClient;
-use nfs3_types::mount::{dirpath, export_node};
-use nfs3_types::xdr_codec::Opaque;
+use nfs_proto::MountClient;
+use nfs_proto::mount::{dirpath, export_node};
+use nfs_proto::xdr::Opaque;
 
 use crate::proto::auth::AuthFlavor;
 use crate::proto::nfs3::types::FileHandle;
@@ -157,7 +158,7 @@ impl NfsMountClient {
 
     /// List NFSv2 exports via MOUNT v1 EXPORT (program 100005, version 1, proc 5).
     ///
-    /// The nfs3_client `MountClient` hardcodes version 3.  This method issues a
+    /// `MountClient` hardcodes version 3.  This method issues a
     /// raw RPC call with version 1 and deserializes using the same `exports` XDR
     /// type (the wire format is identical between v1 and v3 EXPORT -- only the
     /// version number in the RPC header differs).
@@ -165,9 +166,9 @@ impl NfsMountClient {
     /// MOUNT v1 EXPORT returns the NFSv2 export list; MOUNT v3 EXPORT returns
     /// the NFSv3 export list.  These are usually identical but CAN differ.
     pub(crate) async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
-        use nfs3_client::rpc::RpcClient;
-        use nfs3_types::mount::exports;
-        use nfs3_types::xdr_codec::Void;
+        use nfs_proto::mount::exports;
+        use nfs_proto::rpc::RpcClient;
+        use nfs_proto::xdr::Void;
 
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
@@ -184,7 +185,7 @@ impl NfsMountClient {
         let io = if let Some(ref p) = self.proxy {
             let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
             let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            nfs3_client::tokio::TokioIo::new(stream)
+            nfs_proto::transport::tokio::TokioIo::new(stream)
         } else if self.privileged_required {
             connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
         } else {
@@ -235,7 +236,7 @@ impl NfsMountClient {
         let io = if let Some(ref p) = self.proxy {
             let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
             let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd at {mount_addr} via {p}"))?;
-            nfs3_client::tokio::TokioIo::new(stream)
+            nfs_proto::transport::tokio::TokioIo::new(stream)
         } else if self.privileged_required {
             connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} (privileged-only)"))?
         } else {
@@ -256,10 +257,10 @@ impl NfsMountClient {
             let mount_addr = SocketAddr::new(addr.ip(), port);
             let io_result = if let Some(ref p) = self.proxy {
                 let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-                crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.map(nfs3_client::tokio::TokioIo::new)
+                crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.map(nfs_proto::transport::tokio::TokioIo::new)
             } else {
-                use nfs3_client::net::Connector as _;
-                nfs3_client::tokio::TokioConnector.connect(mount_addr).await
+                use nfs_proto::transport::net::Connector as _;
+                nfs_proto::transport::tokio::TokioConnector.connect(mount_addr).await
             };
             let Ok(io) = io_result else { continue };
             let mut mc = MountClient::new(io);
@@ -282,10 +283,10 @@ impl Default for NfsMountClient {
 ///
 /// Used to decide whether to retry with a privileged source port.
 /// We walk the anyhow source chain because `mount_once` wraps the raw
-/// `nfs3_client::Error::MountError` with a `with_context`.
+/// `nfs_proto::MountError` with a `with_context`.
 fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
-    use nfs3_client::MountError;
-    use nfs3_types::mount::mountstat3;
+    use nfs_proto::MountError;
+    use nfs_proto::mount::mountstat3;
     err.chain().any(|cause| matches!(cause.downcast_ref::<MountError>(), Some(MountError::Denied(mountstat3::MNT3ERR_ACCES))))
 }
 
@@ -297,8 +298,8 @@ fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
 /// against TIME_WAIT pile-up on busy hosts that would otherwise eat the
 /// privileged range and silently slide us onto an ephemeral port.
 async fn connect_privileged_or_fallback(addr: SocketAddr) -> std::io::Result<crate::proto::conn::NfsIo> {
-    use nfs3_client::net::Connector as _;
-    use nfs3_client::tokio::TokioConnector;
+    use nfs_proto::transport::net::Connector as _;
+    use nfs_proto::transport::tokio::TokioConnector;
 
     for local_port in 300_u16..1024 {
         match TokioConnector.connect_with_port(addr, local_port).await {
@@ -322,8 +323,8 @@ async fn connect_privileged_or_fallback(addr: SocketAddr) -> std::io::Result<cra
 /// `MNT3ERR_ACCES`. Returns the last error if every port in 300-1023
 /// fails to bind/connect.
 async fn connect_privileged_only(addr: SocketAddr) -> std::io::Result<crate::proto::conn::NfsIo> {
-    use nfs3_client::net::Connector as _;
-    use nfs3_client::tokio::TokioConnector;
+    use nfs_proto::transport::net::Connector as _;
+    use nfs_proto::transport::tokio::TokioConnector;
 
     let mut last_err: Option<std::io::Error> = None;
     for local_port in 300_u16..1024 {

@@ -1,6 +1,6 @@
 //! PROG_MISMATCH-aware RPC probe for NFS version detection.
 //!
-//! The nfs3_client `RpcClient::call()` converts PROG_MISMATCH to an opaque
+//! `RpcClient::call()` converts PROG_MISMATCH to an opaque
 //! `RpcError::ProgMismatch` that drops the `(low, high)` version range.
 //! The scanner needs that range for the Hint column.
 //!
@@ -12,8 +12,8 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use nfs3_types::rpc::{RPC_VERSION_2, accept_stat_data, call_body, fragment_header, msg_body, opaque_auth, reply_body, rpc_msg};
-use nfs3_types::xdr_codec::{Pack, Unpack, Void};
+use nfs_proto::rpc::{RPC_VERSION_2, accept_stat_data, call_body, fragment_header, msg_body, opaque_auth, reply_body, rpc_msg};
+use nfs_proto::xdr::{Pack, Unpack, Void};
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpStream;
 
