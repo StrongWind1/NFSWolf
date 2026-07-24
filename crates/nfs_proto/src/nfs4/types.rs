@@ -3,7 +3,7 @@
 //! Minimal subset needed for nfswolf's security analysis: COMPOUND encoding,
 //! SECINFO, GETATTR, READDIR, and pseudo-FS mapping.
 //! Only the ~7 operations nfswolf actually uses are implemented.
-//! All types implement crate::xdr::{Pack, Unpack}.
+//! All types implement nfswolf_xdr::{Pack, Unpack}.
 
 #![allow(missing_docs, reason = "these are mechanical transcriptions of the RFC's XDR type table -- per-field prose would restate the field name and nothing more. The module doc cites the defining RFC section, which is the real documentation")]
 #![allow(
@@ -17,7 +17,7 @@
 // NFSv4 XDR Pack/Unpack slices are at fixed offsets matching the RFC 7530 wire format.
 use std::io::{Read, Write};
 
-use crate::xdr::{Pack, Unpack};
+use nfswolf_xdr::{Pack, Unpack};
 
 /// NFSv4 RPC program number (shared with NFSv2/v3  --  version distinguishes).
 pub const NFS4_PROGRAM: u32 = 100_003;
@@ -52,13 +52,13 @@ const OP_READ: u32 = 25;
 // --- XDR helpers ---
 
 /// Pack XDR opaque<> (variable-length): 4-byte length + bytes + padding.
-fn pack_opaque(data: &[u8], out: &mut impl Write) -> crate::xdr::Result<usize> {
-    let len = u32::try_from(data.len()).map_err(|_| crate::xdr::Error::ObjectTooLarge(data.len()))?;
+fn pack_opaque(data: &[u8], out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+    let len = u32::try_from(data.len()).map_err(|_| nfswolf_xdr::Error::ObjectTooLarge(data.len()))?;
     let mut n = len.pack(out)?;
-    out.write_all(data).map_err(crate::xdr::Error::Io)?;
+    out.write_all(data).map_err(nfswolf_xdr::Error::Io)?;
     n += data.len();
     let pad = (4 - (data.len() % 4)) % 4;
-    crate::xdr::write_pad(out, pad)?;
+    nfswolf_xdr::write_pad(out, pad)?;
     n += pad;
     Ok(n)
 }
@@ -101,8 +101,8 @@ impl Pack for AttrRequest {
         4 + self.words.len() * 4
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
-        let count = u32::try_from(self.words.len()).map_err(|_| crate::xdr::Error::ObjectTooLarge(self.words.len()))?;
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        let count = u32::try_from(self.words.len()).map_err(|_| nfswolf_xdr::Error::ObjectTooLarge(self.words.len()))?;
         let mut n = count.pack(out)?;
         for &w in &self.words {
             n += w.pack(out)?;
@@ -112,10 +112,10 @@ impl Pack for AttrRequest {
 }
 
 impl Unpack for AttrRequest {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (count, mut n) = u32::unpack(input)?;
         // Clamp the speculative reservation: `count` is attacker-controlled.
-        let mut words = crate::xdr::vec_with_capacity(count as usize);
+        let mut words = nfswolf_xdr::vec_with_capacity(count as usize);
         for _ in 0..count {
             let (w, wn) = u32::unpack(input)?;
             words.push(w);
@@ -177,7 +177,7 @@ impl Pack for ArgOp {
         match self {
             Self::Putrootfh | Self::Getfh => 4, // only the opcode (4 bytes), no arguments
             Self::Putfh(fh) => 4 + opaque_packed_size(fh),
-            Self::Lookup(name) | Self::Secinfo(name) => 4 + crate::xdr::string_packed_size(name),
+            Self::Lookup(name) | Self::Secinfo(name) => 4 + nfswolf_xdr::string_packed_size(name),
             Self::Getattr(attrs) => 4 + attrs.packed_size(),
             Self::Readdir { attr_request, .. } => 4 + 8 + 8 + 4 + 4 + attr_request.packed_size(),
             // 4 (opcode) + 16 (stateid) + 8 (offset) + 4 (count)
@@ -185,7 +185,7 @@ impl Pack for ArgOp {
         }
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         match self {
             Self::Putrootfh => OP_PUTROOTFH.pack(out),
             Self::Putfh(fh) => {
@@ -195,7 +195,7 @@ impl Pack for ArgOp {
             },
             Self::Lookup(name) => {
                 let mut n = OP_LOOKUP.pack(out)?;
-                n += crate::xdr::pack_string(name, out)?;
+                n += nfswolf_xdr::pack_string(name, out)?;
                 Ok(n)
             },
             Self::Getattr(attrs) => {
@@ -206,7 +206,7 @@ impl Pack for ArgOp {
             Self::Getfh => OP_GETFH.pack(out),
             Self::Secinfo(name) => {
                 let mut n = OP_SECINFO.pack(out)?;
-                n += crate::xdr::pack_string(name, out)?;
+                n += nfswolf_xdr::pack_string(name, out)?;
                 Ok(n)
             },
             Self::Readdir { cookie, cookieverf, dircount, maxcount, attr_request } => {
@@ -220,7 +220,7 @@ impl Pack for ArgOp {
             },
             Self::Read { stateid, offset, count } => {
                 let mut n = OP_READ.pack(out)?;
-                out.write_all(stateid).map_err(crate::xdr::Error::Io)?;
+                out.write_all(stateid).map_err(nfswolf_xdr::Error::Io)?;
                 n += 16;
                 n += offset.pack(out)?;
                 n += count.pack(out)?;
@@ -249,13 +249,13 @@ pub struct CompoundArgs {
 
 impl Pack for CompoundArgs {
     fn packed_size(&self) -> usize {
-        crate::xdr::string_packed_size(&self.tag) + 4 + 4 + self.ops.iter().map(Pack::packed_size).sum::<usize>()
+        nfswolf_xdr::string_packed_size(&self.tag) + 4 + 4 + self.ops.iter().map(Pack::packed_size).sum::<usize>()
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
-        let mut n = crate::xdr::pack_string(&self.tag, out)?;
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        let mut n = nfswolf_xdr::pack_string(&self.tag, out)?;
         n += self.minorversion.pack(out)?;
-        let count = u32::try_from(self.ops.len()).map_err(|_| crate::xdr::Error::ObjectTooLarge(self.ops.len()))?;
+        let count = u32::try_from(self.ops.len()).map_err(|_| nfswolf_xdr::Error::ObjectTooLarge(self.ops.len()))?;
         n += count.pack(out)?;
         for op in &self.ops {
             n += op.pack(out)?;
@@ -341,13 +341,13 @@ pub struct CompoundRes {
 }
 
 impl Unpack for CompoundRes {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (status, n0) = u32::unpack(input)?;
-        let (tag, n1) = crate::xdr::unpack_string(input)?;
+        let (tag, n1) = nfswolf_xdr::unpack_string(input)?;
         let (count, n2) = u32::unpack(input)?;
         let mut n = n0 + n1 + n2;
         // Clamp the speculative reservation: `count` is attacker-controlled.
-        let mut results = crate::xdr::vec_with_capacity(count as usize);
+        let mut results = nfswolf_xdr::vec_with_capacity(count as usize);
         for _ in 0..count {
             let (op_code, on) = u32::unpack(input)?;
             let (op_status, sn) = u32::unpack(input)?;
@@ -384,7 +384,7 @@ impl Unpack for CompoundRes {
 /// - SECINFO: u32 array count + per-entry flavor/gss-info (S16.31)
 /// - READDIR: verifier + linked-list entries + eof (S16.24)
 /// - READ: bool eof + opaque<> data (S16.23)
-fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Result<(ResOpData, usize)> {
+fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> nfswolf_xdr::Result<(ResOpData, usize)> {
     match op_code {
         // No result data beyond status.
         OP_PUTROOTFH | OP_PUTFH | OP_LOOKUP => Ok((ResOpData::None, 0)),
@@ -394,10 +394,10 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
             let (len, mut n) = u32::unpack(input)?;
             let len = len as usize;
             // Do not pre-size from the untrusted length; read bounded by real bytes.
-            let fh = crate::xdr::read_bytes(input, len)?;
+            let fh = nfswolf_xdr::read_bytes(input, len)?;
             n += len;
             let pad = (4 - (len % 4)) % 4;
-            crate::xdr::skip_pad(input, pad)?;
+            nfswolf_xdr::skip_pad(input, pad)?;
             n += pad;
             Ok((ResOpData::Fh(fh), n))
         },
@@ -421,10 +421,10 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
             let (attrval_len, ln) = u32::unpack(input)?;
             n += ln;
             let attrval_len = attrval_len as usize;
-            let attrvals = crate::xdr::read_bytes(input, attrval_len)?;
+            let attrvals = nfswolf_xdr::read_bytes(input, attrval_len)?;
             n += attrval_len;
             let pad = (4 - (attrval_len % 4)) % 4;
-            crate::xdr::skip_pad(input, pad)?;
+            nfswolf_xdr::skip_pad(input, pad)?;
             n += pad;
             // FATTR4_FSID is bit 8 of word 0; fsid4 = { major u64, minor u64 }.
             // Only safe to read at offset 0 when no lower-numbered word-0
@@ -446,7 +446,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
         OP_SECINFO => {
             let (arr_count, mut n) = u32::unpack(input)?;
             // Clamp the speculative reservation: `arr_count` is attacker-controlled.
-            let mut flavors = crate::xdr::vec_with_capacity(arr_count as usize);
+            let mut flavors = nfswolf_xdr::vec_with_capacity(arr_count as usize);
             for _ in 0..arr_count {
                 let (flavor, fn_) = u32::unpack(input)?;
                 n += fn_;
@@ -470,10 +470,10 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
             n += dn;
             let data_len = data_len as usize;
             // Do not pre-size from the untrusted length; read bounded by real bytes.
-            let data = crate::xdr::read_bytes(input, data_len)?;
+            let data = nfswolf_xdr::read_bytes(input, data_len)?;
             n += data_len;
             let pad = (4 - (data_len % 4)) % 4;
-            crate::xdr::skip_pad(input, pad)?;
+            nfswolf_xdr::skip_pad(input, pad)?;
             n += pad;
             Ok((ResOpData::Read { eof: eof_raw != 0, data }, n))
         },
@@ -483,7 +483,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
         OP_READDIR => {
             // Skip cookieverf (8 bytes).
             let mut verifier = [0u8; 8];
-            input.read_exact(&mut verifier).map_err(crate::xdr::Error::Io)?;
+            input.read_exact(&mut verifier).map_err(nfswolf_xdr::Error::Io)?;
             let mut n = 8;
             let mut entries = Vec::new();
             // XDR linked list: value_follows(u32) then entry, repeat.
@@ -495,7 +495,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
                 }
                 let (cookie, cn) = u64::unpack(input)?;
                 n += cn;
-                let (name, nn) = crate::xdr::unpack_string(input)?;
+                let (name, nn) = nfswolf_xdr::unpack_string(input)?;
                 n += nn;
                 // Skip fattr4: bitmap (u32 count + N u32 words) + opaque<> attrvals.
                 let (bitmap_count, bn) = u32::unpack(input)?;
@@ -513,21 +513,21 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
         },
 
         // Unknown or unimplemented op  --  caller should stop parsing here.
-        _ => Err(crate::xdr::Error::InvalidEnumValue(op_code)),
+        _ => Err(nfswolf_xdr::Error::InvalidEnumValue(op_code)),
     }
 }
 
 /// Read and discard a single XDR opaque<>: 4-byte length + data + padding.
 /// Returns the total bytes consumed.
-fn skip_opaque(input: &mut impl Read) -> crate::xdr::Result<usize> {
+fn skip_opaque(input: &mut impl Read) -> nfswolf_xdr::Result<usize> {
     let (len, mut n) = u32::unpack(input)?;
     let len = len as usize;
     if len > 0 {
         // Read and discard the data bytes, bounded by real bytes (untrusted len).
-        let _discarded = crate::xdr::read_bytes(input, len)?;
+        let _discarded = nfswolf_xdr::read_bytes(input, len)?;
         n += len;
         let pad = (4 - (len % 4)) % 4;
-        crate::xdr::skip_pad(input, pad)?;
+        nfswolf_xdr::skip_pad(input, pad)?;
         n += pad;
     }
     Ok(n)

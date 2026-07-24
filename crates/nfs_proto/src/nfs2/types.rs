@@ -2,7 +2,7 @@
 //!
 //! Simpler than NFSv3: fixed 32-byte handles, 32-bit file sizes,
 //! no READDIRPLUS, synchronous writes only.
-//! All types implement crate::xdr::{Pack, Unpack} for wire encoding.
+//! All types implement nfswolf_xdr::{Pack, Unpack} for wire encoding.
 //! XDR encoding rules (RFC 1094 S2.1):
 //! - File handles: fixed 32 bytes, no length prefix
 //! - Strings: 4-byte length + data + zero-padding to 4-byte boundary
@@ -21,7 +21,7 @@
 // guarded by the protocol's fixed field sizes (e.g., exact 32-byte file handle).
 use std::io::{Read, Write};
 
-use crate::xdr::{Pack, Unpack};
+use nfswolf_xdr::{Pack, Unpack};
 
 /// NFSv2 fixed-size file handle (32 bytes, RFC 1094 S2.3.3).
 /// Unlike v3's variable-length opaque, v2 handles are always exactly 32 bytes.
@@ -145,13 +145,13 @@ impl Pack for NfsStat {
     fn packed_size(&self) -> usize {
         4
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         (*self as u32).pack(out)
     }
 }
 
 impl Unpack for NfsStat {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (v, n) = u32::unpack(input)?;
         Ok((Self::from_u32(v), n))
     }
@@ -194,13 +194,13 @@ impl Pack for FType {
     fn packed_size(&self) -> usize {
         4
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         (*self as u32).pack(out)
     }
 }
 
 impl Unpack for FType {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (v, n) = u32::unpack(input)?;
         Ok((Self::from_u32(v), n))
     }
@@ -229,16 +229,16 @@ impl Pack for Nfs2FileHandle {
     fn packed_size(&self) -> usize {
         FHSIZE
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
-        out.write_all(&self.0).map_err(crate::xdr::Error::Io)?;
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        out.write_all(&self.0).map_err(nfswolf_xdr::Error::Io)?;
         Ok(FHSIZE)
     }
 }
 
 impl Unpack for Nfs2FileHandle {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let mut buf = [0u8; FHSIZE];
-        input.read_exact(&mut buf).map_err(crate::xdr::Error::Io)?;
+        input.read_exact(&mut buf).map_err(nfswolf_xdr::Error::Io)?;
         Ok((Self(buf), FHSIZE))
     }
 }
@@ -258,13 +258,13 @@ impl Pack for Timeval {
     fn packed_size(&self) -> usize {
         8
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         Ok(self.seconds.pack(out)? + self.useconds.pack(out)?)
     }
 }
 
 impl Unpack for Timeval {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (seconds, n1) = u32::unpack(input)?;
         let (useconds, n2) = u32::unpack(input)?;
         Ok((Self { seconds, useconds }, n1 + n2))
@@ -318,7 +318,7 @@ impl Pack for Nfs2FileAttr {
     fn packed_size(&self) -> usize {
         4 * 11 + 8 * 3
     } // 11 u32 fields + 3 timevals
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         let mut n = 0;
         n += self.ftype.pack(out)?;
         n += self.mode.pack(out)?;
@@ -339,7 +339,7 @@ impl Pack for Nfs2FileAttr {
 }
 
 impl Unpack for Nfs2FileAttr {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (ftype, n0) = FType::unpack(input)?;
         let (mode, n1) = u32::unpack(input)?;
         let (nlink, n2) = u32::unpack(input)?;
@@ -385,7 +385,7 @@ impl Pack for Nfs2SetAttr {
     fn packed_size(&self) -> usize {
         4 * 4 + 8 * 2
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         let mut n = 0;
         n += self.mode.pack(out)?;
         n += self.uid.pack(out)?;
@@ -398,7 +398,7 @@ impl Pack for Nfs2SetAttr {
 }
 
 impl Unpack for Nfs2SetAttr {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (mode, n0) = u32::unpack(input)?;
         let (uid, n1) = u32::unpack(input)?;
         let (gid, n2) = u32::unpack(input)?;
@@ -422,17 +422,17 @@ pub struct DirOpArgs {
 
 impl Pack for DirOpArgs {
     fn packed_size(&self) -> usize {
-        FHSIZE + crate::xdr::string_packed_size(&self.name)
+        FHSIZE + nfswolf_xdr::string_packed_size(&self.name)
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
-        Ok(self.dir.pack(out)? + crate::xdr::pack_string(&self.name, out)?)
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        Ok(self.dir.pack(out)? + nfswolf_xdr::pack_string(&self.name, out)?)
     }
 }
 
 impl Unpack for DirOpArgs {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (dir, n0) = Nfs2FileHandle::unpack(input)?;
-        let (name, n1) = crate::xdr::unpack_string(input)?;
+        let (name, n1) = nfswolf_xdr::unpack_string(input)?;
         Ok((Self { dir, name }, n0 + n1))
     }
 }
@@ -452,7 +452,7 @@ impl Pack for DirOpRes {
     fn packed_size(&self) -> usize {
         4 + FHSIZE + self.attrs.packed_size()
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         Ok(self.status.pack(out)? + self.handle.pack(out)? + self.attrs.pack(out)?)
     }
 }
@@ -460,7 +460,7 @@ impl Pack for DirOpRes {
 impl Unpack for DirOpRes {
     /// RFC 1094  --  diropres is an XDR union: on error status, only the status
     /// discriminant is present (no handle or attrs follow).
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (status, n0) = NfsStat::unpack(input)?;
         if status != NfsStat::Ok {
             return Ok((Self { status, handle: Nfs2FileHandle([0u8; FHSIZE]), attrs: Nfs2FileAttr::zeroed() }, n0));
@@ -487,7 +487,7 @@ pub struct AttrStatRes {
 impl Unpack for AttrStatRes {
     /// RFC 1094  --  attrstat is an XDR union: on error status, only the status
     /// discriminant is present (no attrs follow).
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (status, n0) = NfsStat::unpack(input)?;
         if status != NfsStat::Ok {
             return Ok((Self { status, attrs: Nfs2FileAttr::zeroed() }, n0));
@@ -516,13 +516,13 @@ impl Pack for ReadArgs {
     fn packed_size(&self) -> usize {
         FHSIZE + 12
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         Ok(self.file.pack(out)? + self.offset.pack(out)? + self.count.pack(out)? + self.totalcount.pack(out)?)
     }
 }
 
 impl Unpack for ReadArgs {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (file, n0) = Nfs2FileHandle::unpack(input)?;
         let (offset, n1) = u32::unpack(input)?;
         let (count, n2) = u32::unpack(input)?;
@@ -545,7 +545,7 @@ pub struct ReadRes {
 impl Unpack for ReadRes {
     /// RFC 1094  --  readres is an XDR union: on error status, only the status
     /// discriminant is present (no attrs or data follow).
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (status, n0) = NfsStat::unpack(input)?;
         if status != NfsStat::Ok {
             return Ok((Self { status, attrs: Nfs2FileAttr::zeroed(), data: Vec::new() }, n0));
@@ -555,9 +555,9 @@ impl Unpack for ReadRes {
         let (data_len, n2) = u32::unpack(input)?;
         let data_len = data_len as usize;
         // Do not pre-size from the untrusted length; read bounded by real bytes.
-        let data = crate::xdr::read_bytes(input, data_len)?;
+        let data = nfswolf_xdr::read_bytes(input, data_len)?;
         let pad = (4 - (data_len % 4)) % 4;
-        crate::xdr::skip_pad(input, pad)?;
+        nfswolf_xdr::skip_pad(input, pad)?;
         Ok((Self { status, attrs, data }, n0 + n1 + n2 + data_len + pad))
     }
 }
@@ -583,18 +583,18 @@ impl Pack for WriteArgs {
     fn packed_size(&self) -> usize {
         FHSIZE + 12 + 4 + self.data.len() + (4 - (self.data.len() % 4)) % 4
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         let mut n = self.file.pack(out)?;
         n += self.beginoffset.pack(out)?;
         n += self.offset.pack(out)?;
         n += self.totalcount.pack(out)?;
         // Write data as XDR opaque
-        let data_len = u32::try_from(self.data.len()).map_err(|_| crate::xdr::Error::ObjectTooLarge(self.data.len()))?;
+        let data_len = u32::try_from(self.data.len()).map_err(|_| nfswolf_xdr::Error::ObjectTooLarge(self.data.len()))?;
         n += data_len.pack(out)?;
-        out.write_all(&self.data).map_err(crate::xdr::Error::Io)?;
+        out.write_all(&self.data).map_err(nfswolf_xdr::Error::Io)?;
         n += self.data.len();
         let pad = (4 - (self.data.len() % 4)) % 4;
-        crate::xdr::write_pad(out, pad)?;
+        nfswolf_xdr::write_pad(out, pad)?;
         n += pad;
         Ok(n)
     }
@@ -617,7 +617,7 @@ impl Pack for ReaddirArgs {
     fn packed_size(&self) -> usize {
         FHSIZE + 8
     }
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         Ok(self.dir.pack(out)? + self.cookie.pack(out)? + self.count.pack(out)?)
     }
 }
@@ -870,9 +870,9 @@ pub struct ReaddirEntry {
 }
 
 impl Unpack for ReaddirEntry {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (fileid, n0) = u32::unpack(input)?;
-        let (name, n1) = crate::xdr::unpack_string(input)?;
+        let (name, n1) = nfswolf_xdr::unpack_string(input)?;
         let (cookie, n2) = u32::unpack(input)?;
         Ok((Self { fileid, name, cookie }, n0 + n1 + n2))
     }
@@ -900,7 +900,7 @@ pub struct StatFsRes {
 impl Unpack for StatFsRes {
     /// RFC 1094  --  statfsres is an XDR union: on error status, only the status
     /// discriminant is present (no filesystem info follows).
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (status, n0) = NfsStat::unpack(input)?;
         if status != NfsStat::Ok {
             return Ok((Self { status, tsize: 0, bsize: 0, blocks: 0, bfree: 0, bavail: 0 }, n0));

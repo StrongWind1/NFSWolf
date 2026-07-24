@@ -9,7 +9,7 @@
 
 //! This module contains the definitions of the Port Mapper protocol as defined in RFC 1057.
 
-use crate::xdr::{List, Opaque, XdrCodec};
+use nfswolf_xdr::{List, Opaque, XdrCodec};
 
 pub const IPPROTO_TCP: u32 = 6;
 pub const IPPROTO_UDP: u32 = 17;
@@ -53,7 +53,7 @@ pub enum PMAP_PROG {
 }
 
 impl TryFrom<u32> for PMAP_PROG {
-    type Error = crate::xdr::Error;
+    type Error = nfswolf_xdr::Error;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
@@ -63,7 +63,7 @@ impl TryFrom<u32> for PMAP_PROG {
             3 => Ok(Self::PMAPPROC_GETPORT),
             4 => Ok(Self::PMAPPROC_DUMP),
             5 => Ok(Self::PMAPPROC_CALLIT),
-            _ => Err(crate::xdr::Error::InvalidEnumValue(value)),
+            _ => Err(nfswolf_xdr::Error::InvalidEnumValue(value)),
         }
     }
 }

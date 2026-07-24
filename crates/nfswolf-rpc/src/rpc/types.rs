@@ -11,9 +11,9 @@
 
 use std::io::{Read, Write};
 
-use nfs_xdr::XdrCodec;
+use nfswolf_xdr::XdrCodec;
 
-use crate::xdr::{Opaque, Pack, Unpack};
+use nfswolf_xdr::{Opaque, Pack, Unpack};
 
 /// RPC header
 ///
@@ -217,7 +217,7 @@ impl Pack for accept_stat_data {
         }
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         let len = match self {
             Self::SUCCESS => accept_stat::SUCCESS.pack(out)?,
             Self::PROG_UNAVAIL => accept_stat::PROG_UNAVAIL.pack(out)?,
@@ -231,7 +231,7 @@ impl Pack for accept_stat_data {
 }
 
 impl Unpack for accept_stat_data {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (accept_stat, len) = accept_stat::unpack(input)?;
         let (body, body_len) = match accept_stat {
             accept_stat::SUCCESS => (Self::SUCCESS, 0),
@@ -274,7 +274,7 @@ impl Pack for rejected_reply {
         }
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         let len = match self {
             Self::RPC_MISMATCH { low, high } => reject_stat::RPC_MISMATCH.pack(out)? + low.pack(out)? + high.pack(out)?,
             Self::AUTH_ERROR(auth_stat) => reject_stat::AUTH_ERROR.pack(out)? + auth_stat.pack(out)?,
@@ -284,7 +284,7 @@ impl Pack for rejected_reply {
 }
 
 impl Unpack for rejected_reply {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (reject_stat, len) = reject_stat::unpack(input)?;
         let (body, body_len) = match reject_stat {
             reject_stat::RPC_MISMATCH => {

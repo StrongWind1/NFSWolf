@@ -12,7 +12,13 @@
 # NFSv2 and NFSv4 layers NFSWolf wrote itself.  See crates/nfs_proto/NOTICE.
 # ---------------------------------------------------------------------------
 [workspace]
-members = [".", "crates/nfs_xdr", "crates/nfs_proto"]
+members = [
+  ".",
+  "crates/nfswolf-xdr-derive",
+  "crates/nfswolf-xdr",
+  "crates/nfswolf-rpc",
+  "crates/nfs_proto",
+]
 resolver = "3"
 
 [workspace.package]
@@ -23,7 +29,9 @@ license = "Apache-2.0"
 repository = "https://github.com/StrongWind1/NFSWolf"
 
 [workspace.dependencies]
-nfs_xdr = { version = "0.6.0", path = "crates/nfs_xdr" }
+nfswolf-xdr-derive = { version = "0.6.0", path = "crates/nfswolf-xdr-derive" }
+nfswolf-xdr = { version = "0.6.0", path = "crates/nfswolf-xdr" }
+nfswolf-rpc = { version = "0.6.0", path = "crates/nfswolf-rpc" }
 nfs_proto = { version = "0.6.0", path = "crates/nfs_proto" }
 
 [package]

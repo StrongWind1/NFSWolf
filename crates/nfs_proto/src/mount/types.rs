@@ -11,7 +11,7 @@
 
 use std::io::{Read, Write};
 
-use crate::xdr::{List, Opaque, Pack, Unpack, XdrCodec};
+use nfswolf_xdr::{List, Opaque, Pack, Unpack, XdrCodec};
 
 pub const PROGRAM: u32 = 100_005;
 pub const VERSION: u32 = 3;
@@ -99,7 +99,7 @@ impl Pack for mountres3<'_> {
         }
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         let len = match self {
             Self::Ok(ok) => {
                 let mut len = mountstat3::MNT3_OK.pack(out)?;
@@ -113,7 +113,7 @@ impl Pack for mountres3<'_> {
 }
 
 impl Unpack for mountres3<'_> {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (stat, len) = mountstat3::unpack(input)?;
         let (res, res_len) = match stat {
             mountstat3::MNT3_OK => {
@@ -154,7 +154,7 @@ pub enum MOUNT_PROGRAM {
 }
 
 impl TryFrom<u32> for MOUNT_PROGRAM {
-    type Error = crate::xdr::Error;
+    type Error = nfswolf_xdr::Error;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
@@ -164,7 +164,7 @@ impl TryFrom<u32> for MOUNT_PROGRAM {
             3 => Ok(Self::MOUNTPROC3_UMNT),
             4 => Ok(Self::MOUNTPROC3_UMNTALL),
             5 => Ok(Self::MOUNTPROC3_EXPORT),
-            _ => Err(crate::xdr::Error::InvalidEnumValue(value)),
+            _ => Err(nfswolf_xdr::Error::InvalidEnumValue(value)),
         }
     }
 }

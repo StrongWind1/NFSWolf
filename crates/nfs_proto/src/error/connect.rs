@@ -1,7 +1,8 @@
 use std::error::Error as StdError;
 use std::fmt;
 
-use super::{MountError, PortmapError};
+use super::MountError;
+use nfswolf_rpc::PortmapError;
 
 /// Error when establishing an NFS3 connection.
 ///

@@ -39,26 +39,30 @@
 //! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
 //! [RFC 7530]: https://www.rfc-editor.org/rfc/rfc7530
 
-// The XdrCodec derive macro expands to `nfs_proto::xdr::...` paths so that it
-// works for downstream crates.  This alias lets those same paths resolve when
-// the macro is used inside this crate.
-extern crate self as nfs_proto;
-
+// Facade stage of the crate split: the XDR codec now lives in `nfswolf-xdr`
+// and the RPC/transport/portmapper layers in `nfswolf-rpc`.  The `xdr`, `rpc`,
+// `transport`, and `portmap` modules below re-export them under their previous
+// paths so the binary does not churn while the per-version crates are carved
+// out.  This facade is removed once that work lands.
 pub mod mount;
 pub mod nfs2;
 pub mod nfs3;
 pub mod nfs4;
-pub mod portmap;
-pub mod rpc;
-pub mod transport;
-pub mod xdr;
+
+/// Portmapper / RPCBIND v2 -- re-exported from [`nfswolf_rpc`].
+pub use nfswolf_rpc::portmap;
+/// ONC RPC v2 -- re-exported from [`nfswolf_rpc`].
+pub use nfswolf_rpc::rpc;
+/// Async transport traits and the tokio backend -- re-exported from [`nfswolf_rpc`].
+pub use nfswolf_rpc::transport;
+/// XDR codec -- re-exported from [`nfswolf_xdr`].
+pub use nfswolf_xdr as xdr;
 
 mod connect;
 mod error;
 
 pub use connect::{Nfs3Connection, Nfs3ConnectionBuilder};
-pub use error::{ConnectError, MountError, PortmapError, RpcError};
+pub use error::{ConnectError, MountError};
 pub use mount::MountClient;
 pub use nfs3::Nfs3Client;
-pub use portmap::PortmapperClient;
-pub use rpc::RpcClient;
+pub use nfswolf_rpc::{PortmapError, PortmapperClient, RpcClient, RpcError};

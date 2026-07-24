@@ -14,7 +14,7 @@
 //! would be error-prone busywork, so `#[derive(XdrCodec)]` generates them.
 //! Types whose wire form does not follow the mechanical rules above (NFSv2's
 //! fixed-width 32-byte file handles, the RPC reply body's nested unions) still
-//! implement the traits by hand in `nfs_proto`.
+//! implement the traits by hand in the protocol crate that defines them.
 //!
 //! # Discriminant values
 //!
@@ -100,7 +100,7 @@ impl<'a> NamedFieldsGenerator<'a> {
         self.fields.named.iter().map(|f| {
             let name = &f.ident;
             quote! {
-                total_size += nfs_proto::xdr::Pack::packed_size(&self.#name);
+                total_size += ::nfswolf_xdr::Pack::packed_size(&self.#name);
             }
         })
     }
@@ -109,7 +109,7 @@ impl<'a> NamedFieldsGenerator<'a> {
         self.fields.named.iter().map(|f| {
             let name = &f.ident;
             quote! {
-                let (#name, read_bytes) = nfs_proto::xdr::Unpack::unpack(input)?;
+                let (#name, read_bytes) = ::nfswolf_xdr::Unpack::unpack(input)?;
                 total_read += read_bytes;
             }
         })
@@ -146,7 +146,7 @@ impl<'a> UnnamedFieldsGenerator<'a> {
         self.fields.unnamed.iter().enumerate().map(|(i, _)| {
             let index = Index::from(i);
             quote! {
-                total_size += nfs_proto::xdr::Pack::packed_size(&self.#index);
+                total_size += ::nfswolf_xdr::Pack::packed_size(&self.#index);
             }
         })
     }
@@ -155,7 +155,7 @@ impl<'a> UnnamedFieldsGenerator<'a> {
         self.fields.unnamed.iter().enumerate().map(|(i, _)| {
             let var_name = Ident::new(&format!("field_{i}"), proc_macro2::Span::call_site());
             quote! {
-                let (#var_name, read_bytes) = nfs_proto::xdr::Unpack::unpack(input)?;
+                let (#var_name, read_bytes) = ::nfswolf_xdr::Unpack::unpack(input)?;
                 total_read += read_bytes;
             }
         })
@@ -185,7 +185,7 @@ fn generate_struct_impl(name: &Ident, generics: &syn::Generics, fields: &Fields)
             let struct_fields = generator.struct_construction_fields();
 
             quote! {
-                impl #impl_generics nfs_proto::xdr::Pack for #name #ty_generics
+                impl #impl_generics ::nfswolf_xdr::Pack for #name #ty_generics
                 #where_clause {
                     fn packed_size(&self) -> usize {
                         let mut total_size = 0;
@@ -193,17 +193,17 @@ fn generate_struct_impl(name: &Ident, generics: &syn::Generics, fields: &Fields)
                         total_size
                     }
 
-                    fn pack(&self, out: &mut impl std::io::Write) -> nfs_proto::xdr::Result<usize> {
-                        use nfs_proto::xdr::Pack;
+                    fn pack(&self, out: &mut impl std::io::Write) -> ::nfswolf_xdr::Result<usize> {
+                        use ::nfswolf_xdr::Pack;
                         let mut total_write = 0;
                         #(#pack_fields)*
                         Ok(total_write)
                     }
                 }
-                impl #impl_generics nfs_proto::xdr::Unpack for #name #ty_generics
+                impl #impl_generics ::nfswolf_xdr::Unpack for #name #ty_generics
                 #where_clause {
-                    fn unpack(input: &mut impl std::io::Read) -> nfs_proto::xdr::Result<(Self, usize)> {
-                        use nfs_proto::xdr::Unpack;
+                    fn unpack(input: &mut impl std::io::Read) -> ::nfswolf_xdr::Result<(Self, usize)> {
+                        use ::nfswolf_xdr::Unpack;
                         let mut total_read = 0;
                         #(#unpack_fields)*
                         Ok((Self { #(#struct_fields)* }, total_read))
@@ -219,7 +219,7 @@ fn generate_struct_impl(name: &Ident, generics: &syn::Generics, fields: &Fields)
             let struct_fields = generator.struct_construction_fields();
 
             quote! {
-                impl #impl_generics nfs_proto::xdr::Pack for #name #ty_generics
+                impl #impl_generics ::nfswolf_xdr::Pack for #name #ty_generics
                 #where_clause {
                     fn packed_size(&self) -> usize {
                         let mut total_size = 0;
@@ -227,17 +227,17 @@ fn generate_struct_impl(name: &Ident, generics: &syn::Generics, fields: &Fields)
                         total_size
                     }
 
-                    fn pack(&self, out: &mut impl std::io::Write) -> nfs_proto::xdr::Result<usize> {
-                        use nfs_proto::xdr::Pack;
+                    fn pack(&self, out: &mut impl std::io::Write) -> ::nfswolf_xdr::Result<usize> {
+                        use ::nfswolf_xdr::Pack;
                         let mut total_write = 0;
                         #(#pack_fields)*
                         Ok(total_write)
                     }
                 }
-                impl #impl_generics nfs_proto::xdr::Unpack for #name #ty_generics
+                impl #impl_generics ::nfswolf_xdr::Unpack for #name #ty_generics
                 #where_clause {
-                    fn unpack(input: &mut impl std::io::Read) -> nfs_proto::xdr::Result<(Self, usize)> {
-                        use nfs_proto::xdr::Unpack;
+                    fn unpack(input: &mut impl std::io::Read) -> ::nfswolf_xdr::Result<(Self, usize)> {
+                        use ::nfswolf_xdr::Unpack;
                         let mut total_read = 0;
                         #(#unpack_fields)*
                         Ok((Self(#(#struct_fields),*), total_read))
@@ -247,19 +247,19 @@ fn generate_struct_impl(name: &Ident, generics: &syn::Generics, fields: &Fields)
         },
         Fields::Unit => {
             quote! {
-                impl #impl_generics nfs_proto::xdr::Pack for #name #ty_generics
+                impl #impl_generics ::nfswolf_xdr::Pack for #name #ty_generics
                 #where_clause {
                     fn packed_size(&self) -> usize {
                         0
                     }
 
-                    fn pack(&self, _out: &mut impl std::io::Write) -> nfs_proto::xdr::Result<usize> {
+                    fn pack(&self, _out: &mut impl std::io::Write) -> ::nfswolf_xdr::Result<usize> {
                         Ok(0)
                     }
                 }
-                impl #impl_generics nfs_proto::xdr::Unpack for #name #ty_generics
+                impl #impl_generics ::nfswolf_xdr::Unpack for #name #ty_generics
                 #where_clause {
-                    fn unpack(_input: &mut impl std::io::Read) -> nfs_proto::xdr::Result<(Self, usize)> {
+                    fn unpack(_input: &mut impl std::io::Read) -> ::nfswolf_xdr::Result<(Self, usize)> {
                         Ok((Self, 0))
                     }
                 }
@@ -344,7 +344,7 @@ fn generate_complex_enum_unpack_variant(variant: &Variant) -> TokenStream2 {
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             quote! {
                 #xdr_value => {
-                    let (val, val_bytes) = nfs_proto::xdr::Unpack::unpack(input)?;
+                    let (val, val_bytes) = ::nfswolf_xdr::Unpack::unpack(input)?;
                     bytes_read += val_bytes;
                     Ok(Self::#ident(val))
                 },
@@ -376,26 +376,26 @@ fn generate_simple_enum_impl(name: &Ident, generics: &syn::Generics, data: &Data
     });
 
     quote! {
-        impl #impl_generics nfs_proto::xdr::Pack for #name #ty_generics
+        impl #impl_generics ::nfswolf_xdr::Pack for #name #ty_generics
         #where_clause {
             fn packed_size(&self) -> usize {
                 4
             }
 
-            fn pack(&self, out: &mut impl std::io::Write) -> nfs_proto::xdr::Result<usize> {
-                use nfs_proto::xdr::Pack;
+            fn pack(&self, out: &mut impl std::io::Write) -> ::nfswolf_xdr::Result<usize> {
+                use ::nfswolf_xdr::Pack;
                 match self {
                     #(#pack_variants)*
                 }
             }
         }
-        impl #impl_generics nfs_proto::xdr::Unpack for #name #ty_generics
+        impl #impl_generics ::nfswolf_xdr::Unpack for #name #ty_generics
         #where_clause {
-            fn unpack(input: &mut impl std::io::Read) -> nfs_proto::xdr::Result<(Self, usize)> {
+            fn unpack(input: &mut impl std::io::Read) -> ::nfswolf_xdr::Result<(Self, usize)> {
                 let (tag, bytes_read) = u32::unpack(input)?;
                 let result = match tag {
                     #(#unpack_variants)*
-                    _ => Err(nfs_proto::xdr::Error::InvalidEnumValue(tag)),
+                    _ => Err(::nfswolf_xdr::Error::InvalidEnumValue(tag)),
                 };
                 result.map(|value| (value, bytes_read))
             }
@@ -422,7 +422,7 @@ fn generate_complex_enum_impl(name: &Ident, generics: &syn::Generics, data: &Dat
     let unpack_variants = data.variants.iter().map(generate_complex_enum_unpack_variant);
 
     quote! {
-        impl #impl_generics nfs_proto::xdr::Pack for #name #ty_generics
+        impl #impl_generics ::nfswolf_xdr::Pack for #name #ty_generics
         #where_clause {
             fn packed_size(&self) -> usize {
                 match self {
@@ -430,21 +430,21 @@ fn generate_complex_enum_impl(name: &Ident, generics: &syn::Generics, data: &Dat
                 }
             }
 
-            fn pack(&self, out: &mut impl std::io::Write) -> nfs_proto::xdr::Result<usize> {
-                use nfs_proto::xdr::Pack;
+            fn pack(&self, out: &mut impl std::io::Write) -> ::nfswolf_xdr::Result<usize> {
+                use ::nfswolf_xdr::Pack;
                 match self {
                     #(#pack_variants)*
                 }
             }
         }
-        impl #impl_generics nfs_proto::xdr::Unpack for #name #ty_generics
+        impl #impl_generics ::nfswolf_xdr::Unpack for #name #ty_generics
         #where_clause {
-            fn unpack(input: &mut impl std::io::Read) -> nfs_proto::xdr::Result<(Self, usize)> {
-                use nfs_proto::xdr::Unpack;
+            fn unpack(input: &mut impl std::io::Read) -> ::nfswolf_xdr::Result<(Self, usize)> {
+                use ::nfswolf_xdr::Unpack;
                 let (tag, mut bytes_read) = u32::unpack(input)?;
                 let result = match tag {
                     #(#unpack_variants)*
-                    _ => Err(nfs_proto::xdr::Error::InvalidEnumValue(tag)),
+                    _ => Err(::nfswolf_xdr::Error::InvalidEnumValue(tag)),
                 };
                 result.map(|value| (value, bytes_read))
             }

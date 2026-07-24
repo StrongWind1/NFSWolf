@@ -1,0 +1,17 @@
+[package]
+name = "nfswolf-xdr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "XDR (RFC 4506) codec: Pack/Unpack traits, opaque and list types, and length-hardened decoders for untrusted input."
+keywords = ["xdr", "rfc4506", "codec", "serialization", "onc-rpc"]
+categories = ["encoding", "network-programming"]
+readme = "README.md"
+
+[dependencies]
+nfswolf-xdr-derive = { workspace = true }
+
+[lints]
+workspace = true

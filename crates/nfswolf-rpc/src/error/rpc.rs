@@ -6,8 +6,8 @@ use crate::rpc::{accept_stat_data, auth_stat, rejected_reply};
 /// Error from an RPC call.
 ///
 /// Covers I/O failures, XDR encoding/decoding issues, and RPC protocol errors.
-/// Returned by [`RpcClient::call`](crate::rpc::RpcClient::call) and all
-/// [`Nfs3Client`](crate::Nfs3Client) operations.
+/// Returned by [`RpcClient::call`](crate::rpc::RpcClient::call) and by every
+/// protocol client built on it.
 ///
 /// # Connection state after an error
 ///
@@ -19,7 +19,7 @@ pub enum RpcError {
     /// An I/O error occurred during network communication.
     Io(std::io::Error),
     /// Failed to serialize or deserialize an XDR-encoded message.
-    Xdr(crate::xdr::Error),
+    Xdr(nfswolf_xdr::Error),
     /// Received a CALL message when a REPLY was expected.
     UnexpectedCall,
     /// Server rejected the request due to an authentication failure.
@@ -107,8 +107,8 @@ impl From<std::io::Error> for RpcError {
     }
 }
 
-impl From<crate::xdr::Error> for RpcError {
-    fn from(e: crate::xdr::Error) -> Self {
+impl From<nfswolf_xdr::Error> for RpcError {
+    fn from(e: nfswolf_xdr::Error) -> Self {
         Self::Xdr(e)
     }
 }

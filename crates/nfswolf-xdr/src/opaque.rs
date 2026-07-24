@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::ops::Deref;
 
-use crate::xdr::util::{add_padding, get_padding, zero_padding};
-use crate::xdr::{Error, Pack, Unpack};
+use crate::util::{add_padding, get_padding, zero_padding};
+use crate::{Error, Pack, Unpack};
 
 /// XDR variable-length opaque data -- a length-prefixed, zero-padded byte
 /// string (RFC 4506 sec. 4.10).

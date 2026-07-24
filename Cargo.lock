@@ -664,17 +664,8 @@ name = "nfs_proto"
 version = "0.6.0"
 dependencies = [
  "fastrand",
- "nfs_xdr",
- "tokio",
-]
-
-[[package]]
-name = "nfs_xdr"
-version = "0.6.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "nfswolf-rpc",
+ "nfswolf-xdr",
 ]
 
 [[package]]
@@ -705,6 +696,31 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nfswolf-rpc"
+version = "0.6.0"
+dependencies = [
+ "fastrand",
+ "nfswolf-xdr",
+ "tokio",
+]
+
+[[package]]
+name = "nfswolf-xdr"
+version = "0.6.0"
+dependencies = [
+ "nfswolf-xdr-derive",
+]
+
+[[package]]
+name = "nfswolf-xdr-derive"
+version = "0.6.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
