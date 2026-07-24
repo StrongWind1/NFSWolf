@@ -31,13 +31,13 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use nfs3_client::MountClient;
-use nfs3_client::Nfs3Client;
-use nfs3_client::tokio::TokioIo;
+use nfs_proto::MountClient;
+use nfs_proto::Nfs3Client;
+use nfs_proto::mount::dirpath;
+use nfs_proto::transport::tokio::TokioIo;
+use nfs_proto::xdr::Opaque;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfs3_types::mount::dirpath;
-use nfs3_types::xdr_codec::Opaque;
 use tokio::net::TcpStream;
 
 // --- Server helpers ---
@@ -199,7 +199,7 @@ async fn memfs_escape_attempt_fails_gracefully() {
     // Verifies that constructing an escape handle against MemFs returns BADHANDLE or STALE,
     // confirming the handle oracle works (BADHANDLE = wrong format, STALE = wrong inode).
     // MemFs handles are synthetic and don't follow the ext4/XFS filesystem format.
-    use nfs3_types::nfs3::{GETATTR3args, Nfs3Result, nfsstat3};
+    use nfs_proto::nfs3::{GETATTR3args, Nfs3Result, nfsstat3};
 
     let config = MemFsConfig::default();
     let (_server, port) = start_server(config).await;
@@ -217,7 +217,7 @@ async fn memfs_escape_attempt_fails_gracefully() {
     // inode = 2 (ext4 root) at offset 20
     escape_handle[27] = 2;
 
-    let fake_fh = nfs3_types::nfs3::nfs_fh3 { data: nfs3_types::xdr_codec::Opaque::owned(escape_handle) };
+    let fake_fh = nfs_proto::nfs3::nfs_fh3 { data: nfs_proto::xdr::Opaque::owned(escape_handle) };
     let res = nfs.getattr(&GETATTR3args { object: fake_fh }).await.expect("GETATTR RPC must succeed at protocol level");
 
     // MemFs must reject an escape handle with BADHANDLE or STALE -- never panic or succeed.

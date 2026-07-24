@@ -1,7 +1,7 @@
-//! NfsConnection  --  wraps nfs3_client::Nfs3Connection with nfswolf management.
+//! NfsConnection  --  wraps nfs_proto::Nfs3Connection with nfswolf management.
 //!
 //! Adds AUTH_SYS stamp injection, reconnection strategy, and health tracking.
-//! Each connection wraps a single nfs3_client TCP connection to one (host, export).
+//! Each connection wraps a single `nfs_proto` TCP connection to one (host, export).
 //! A second TCP connection to the NFS port is kept for raw RPC calls (NFSv2).
 //! When a SOCKS5 proxy is configured, both connections are tunneled through it.
 
@@ -10,13 +10,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use nfs3_client::io::{AsyncRead, AsyncWrite};
-use nfs3_client::net::Connector;
-use nfs3_client::rpc::RpcClient;
-use nfs3_client::tokio::{TokioConnector, TokioIo};
-use nfs3_client::{Nfs3Connection, Nfs3ConnectionBuilder};
-use nfs3_types::nfs3::{GETATTR3args, Nfs3Result, nfs_fh3, nfsstat3};
-use nfs3_types::xdr_codec::{Pack, Unpack};
+use nfs_proto::nfs3::{GETATTR3args, Nfs3Result, nfs_fh3, nfsstat3};
+use nfs_proto::rpc::RpcClient;
+use nfs_proto::transport::io::{AsyncRead, AsyncWrite};
+use nfs_proto::transport::net::Connector;
+use nfs_proto::transport::tokio::{TokioConnector, TokioIo};
+use nfs_proto::xdr::{Pack, Unpack};
+use nfs_proto::{Nfs3Connection, Nfs3ConnectionBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -54,9 +54,9 @@ impl ConnectionHealth {
     }
 }
 
-/// Wraps nfs3_client::Nfs3Connection with nfswolf-specific management.
+/// Wraps nfs_proto::Nfs3Connection with nfswolf-specific management.
 ///
-/// Holds two TCP connections: one for NFSv3 procedures (via nfs3_client) and
+/// Holds two TCP connections: one for NFSv3 procedures (via `nfs_proto`) and
 /// one for raw RPC calls (NFSv2 via `RpcClient::call`).
 pub(crate) struct NfsConnection {
     /// NFSv3 connection including mount and NFS clients.
@@ -100,7 +100,7 @@ impl NfsConnection {
     /// TCP connections are tunneled through the SOCKS5 proxy.
     pub(crate) async fn connect(addr: SocketAddr, export: &str, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
         let opaque = match &credential {
-            Credential::None => nfs3_types::rpc::opaque_auth::default(),
+            Credential::None => nfs_proto::rpc::opaque_auth::default(),
             Credential::Sys(auth) => auth.to_opaque_auth(),
         };
 
@@ -153,10 +153,10 @@ impl NfsConnection {
         // counter) and build a short-lived client that borrows the persistent
         // stream, so the TCP session is still reused.
         let opaque = match &self.credential {
-            Credential::None => nfs3_types::rpc::opaque_auth::default(),
+            Credential::None => nfs_proto::rpc::opaque_auth::default(),
             Credential::Sys(auth) => auth.to_opaque_auth(),
         };
-        let mut rpc = RpcClient::new_with_auth(RawIoRef(&mut self.raw_io), opaque, nfs3_types::rpc::opaque_auth::default());
+        let mut rpc = RpcClient::new_with_auth(RawIoRef(&mut self.raw_io), opaque, nfs_proto::rpc::opaque_auth::default());
         let result = rpc.call::<C, R>(program, version, proc, args).await;
         match result {
             Ok(r) => Ok(r),
@@ -176,12 +176,12 @@ impl NfsConnection {
     /// The inner mountres3_ok contains a dummy empty handle; health checks use
     /// NFSPROC3_NULL instead of GETATTR since no valid root handle exists.
     pub(crate) async fn connect_direct(addr: SocketAddr, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
-        use nfs3_client::{MountClient, Nfs3Client as RawNfs3};
-        use nfs3_types::mount::{dirpath, fhandle3, mountres3_ok};
-        use nfs3_types::xdr_codec::Opaque;
+        use nfs_proto::mount::{dirpath, fhandle3, mountres3_ok};
+        use nfs_proto::xdr::Opaque;
+        use nfs_proto::{MountClient, Nfs3Client as RawNfs3};
 
         let opaque = match &credential {
-            Credential::None => nfs3_types::rpc::opaque_auth::default(),
+            Credential::None => nfs_proto::rpc::opaque_auth::default(),
             Credential::Sys(auth) => auth.to_opaque_auth(),
         };
 
@@ -202,7 +202,7 @@ impl NfsConnection {
         let nfs_io: TokioIo<TcpStream> = if proxy.is_some() { tcp_connect(nfs_addr).await.with_context(|| format!("direct NFS connect (proxy) to {nfs_addr}"))? } else { connect_privileged_nfs(nfs_addr).await.with_context(|| format!("direct NFS connect to {nfs_addr}"))? };
         // The credential is consumed here; the raw-RPC channel re-encodes its own
         // freshly-stamped credential per call (see call_raw).
-        let nfs3_client = RawNfs3::new_with_auth(nfs_io, opaque, nfs3_types::rpc::opaque_auth::default());
+        let nfs3_client = RawNfs3::new_with_auth(nfs_io, opaque, nfs_proto::rpc::opaque_auth::default());
 
         // Dummy mount client on the NFS port -- satisfies the Nfs3Connection type but
         // is never called. Using NFS port here avoids an extra connection to mount port.
@@ -281,7 +281,7 @@ impl NfsConnection {
     /// subsequent pool user does not inherit the sprayed identity. This lets UID/GID
     /// spraying reuse a single mount session instead of opening a new TCP connection
     /// per (uid, gid) pair.
-    pub(crate) async fn access_as(&mut self, args: &nfs3_types::nfs3::ACCESS3args, uid: u32, gid: u32, gids: &[u32], hostname: &str) -> anyhow::Result<nfs3_types::nfs3::ACCESS3res> {
+    pub(crate) async fn access_as(&mut self, args: &nfs_proto::nfs3::ACCESS3args, uid: u32, gid: u32, gids: &[u32], hostname: &str) -> anyhow::Result<nfs_proto::nfs3::ACCESS3res> {
         let stamp_cred = AuthSys::with_groups(uid, gid, gids, hostname).to_opaque_auth();
         self.health.request_count = self.health.request_count.saturating_add(1);
         self.health.last_used = Instant::now();
@@ -292,7 +292,7 @@ impl NfsConnection {
         // Always restore the registered credential so the next pool user
         // receives a connection stamped with the pool key's identity.
         let orig = match &self.credential {
-            Credential::None => nfs3_types::rpc::opaque_auth::default(),
+            Credential::None => nfs_proto::rpc::opaque_auth::default(),
             Credential::Sys(auth) => auth.to_opaque_auth(),
         };
         self.inner.nfs3_client.set_credential(orig);
@@ -375,7 +375,7 @@ pub(crate) fn parse_proxy_addr(proxy: &str) -> anyhow::Result<SocketAddr> {
     stripped.parse::<SocketAddr>().with_context(|| format!("invalid proxy address '{proxy}' (expected host:port or socks5://host:port)"))
 }
 
-/// nfs3-rs `Connector` implementation that tunnels through a SOCKS5 proxy.
+/// `nfs_proto` `Connector` implementation that tunnels through a SOCKS5 proxy.
 ///
 /// Implements the same connection interface as `TokioConnector` so it can be
 /// passed to `Nfs3ConnectionBuilder`.  `connect_with_port` ignores the source

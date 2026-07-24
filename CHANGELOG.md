@@ -4,6 +4,19 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (internal)** -- the NFS wire protocol is now owned in-tree. The repository is a Cargo workspace with two new crates: `crates/nfs_xdr` (the `#[derive(XdrCodec)]` proc macro) and `crates/nfs_proto` (XDR codec, ONC RPC v2, NFSv2/v3/v4, MOUNT, portmapper, async transport). The `nfs3_client` and `nfs3_types` dependencies are gone, as is the `vendor/nfs3_client/` patch tree and the `[patch.crates-io]` block that pointed at it. `nfs3_server` remains a dev-dependency for the mock server used in integration tests. The absorbed code comes from [Vaiz/nfs3](https://github.com/Vaiz/nfs3), which is released into the public domain under the Unlicense; `crates/nfs_proto/NOTICE` records the file-level mapping.
+- The four upstream workarounds this removes: the vendor patch that made `RpcClient`'s credential public for mid-session UID spraying, the `RawIoRef` borrow adapter that existed because `RpcClient` would not release its IO stream, the hand-rolled RPC prober in `src/proto/rpc_probe.rs` that recovered `PROG_MISMATCH` version ranges upstream discarded, and the per-call timeout wrapper compensating for a receive path with no deadline. Credential swapping and version-range preservation are now simply how the code is written.
+- `src/proto/nfs2/types.rs` and `src/proto/nfs4/types.rs` moved into `crates/nfs_proto`; both modules re-export them under the `types` name, so call sites are unchanged. The layer boundary is now explicit: `nfs_proto` holds wire format only, and all policy (pooling, retries, circuit breaking, stealth delays, credential escalation) stays in `src/proto/`.
+- The smol runtime backend that upstream offered was dropped during absorption; nfswolf is tokio-only.
+- `make lint`, `check`, `test`, `test-matrix`, and `doc` now pass `--workspace` so the protocol crates are covered by the gate rather than silently skipped.
+
+### Fixed
+
+- `AsyncRead::async_read_exact` looped forever when the peer closed the connection mid-message, because a `read` returning `Ok(0)` left the remaining-bytes slice unchanged. It now returns `UnexpectedEof`. `async_write_all` gained the matching `WriteZero` guard.
+- `RpcClient::send_call` panicked rather than erroring on a message too large for a single RPC fragment: `u32::try_from` on the length would panic above 4 GiB, and `fragment_header::new` asserted above 2 GiB. Both now return `RpcError::WrongLength`.
+
 ## [0.5.0] - 2026-06-29
 
 ### Added

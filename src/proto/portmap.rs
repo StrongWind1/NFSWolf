@@ -1,4 +1,4 @@
-//! Portmapper client  --  wraps nfs3_client::PortmapperClient for service enumeration.
+//! Portmapper client  --  wraps nfs_proto::PortmapperClient for service enumeration.
 //!
 //! Exposes PMAPPROC_DUMP (all registered RPC services) and PMAPPROC_GETPORT
 //! (port resolution for NFS/mountd). Also measures UDP amplification factor
@@ -9,10 +9,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use nfs3_client::PortmapperClient;
-use nfs3_client::net::Connector as _;
-use nfs3_client::tokio::{TokioConnector, TokioIo};
-use nfs3_types::portmap::{self, IPPROTO_TCP, IPPROTO_UDP};
+use nfs_proto::PortmapperClient;
+use nfs_proto::portmap::{self, IPPROTO_TCP, IPPROTO_UDP};
+use nfs_proto::transport::net::Connector as _;
+use nfs_proto::transport::tokio::{TokioConnector, TokioIo};
 
 /// RPC program numbers relevant to NFS infrastructure.
 /// NFSv2/v3/v4 server (program 100003, RFC 1057 S9).
@@ -181,7 +181,7 @@ impl PortmapClient {
     /// Fallback for environments where TCP/111 is firewalled but UDP/111 is open
     /// (RFC 1057 S10: portmapper MUST be available on both transports).
     pub(crate) async fn dump_udp(&self, addr: SocketAddr, probe_timeout: Duration) -> anyhow::Result<Vec<PortmapEntry>> {
-        use nfs3_types::xdr_codec::Void;
+        use nfs_proto::xdr::Void;
 
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let list: portmap::pmaplist = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 4, &Void, probe_timeout).await.context("PMAPPROC_DUMP over UDP")?;

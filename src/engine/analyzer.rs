@@ -232,8 +232,8 @@ pub(crate) struct PortmapBypassResult {
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use nfs3_types::nfs3::{CREATE3args, FSSTAT3args, GETATTR3args, READDIRPLUS3args, REMOVE3args, cookieverf3, createhow3, diropargs3, filename3, sattr3};
-use nfs3_types::xdr_codec::Opaque;
+use nfs_proto::nfs3::{CREATE3args, FSSTAT3args, GETATTR3args, READDIRPLUS3args, REMOVE3args, cookieverf3, createhow3, diropargs3, filename3, sattr3};
+use nfs_proto::xdr::Opaque;
 
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus};
 use crate::proto::auth::{AuthSys, Credential};
@@ -724,7 +724,7 @@ async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &s
 async fn count_readdirplus(nfs3: &Nfs3Client, fh: &FileHandle) -> Option<u32> {
     let args = READDIRPLUS3args { dir: fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
     let res = nfs3.readdirplus(&args).await.ok()?;
-    if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res {
+    if let nfs_proto::nfs3::Nfs3Result::Ok(ok) = res {
         let count = u32::try_from(ok.reply.entries.0.len()).unwrap_or(u32::MAX);
         Some(count)
     } else {
@@ -872,12 +872,12 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
     };
 
     // Attempt READ of up to 128 bytes.
-    let read_args = nfs3_types::nfs3::READ3args { file: target_fh.to_nfs_fh3(), offset: 0, count: 128 };
+    let read_args = nfs_proto::nfs3::READ3args { file: target_fh.to_nfs_fh3(), offset: 0, count: 128 };
     let Ok(read_res) = test_client.read(&read_args).await else {
         return result;
     };
 
-    if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = read_res {
+    if let nfs_proto::nfs3::Nfs3Result::Ok(ok) = read_res {
         result.readable = true;
         let bytes = ok.data.as_ref();
         result.preview = Some(String::from_utf8_lossy(bytes).chars().take(64).collect());
@@ -891,9 +891,9 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
 async fn walk_path(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str) -> Option<FileHandle> {
     let mut current = root_fh.clone();
     for component in path.split('/').filter(|c| !c.is_empty()) {
-        let args = nfs3_types::nfs3::LOOKUP3args { what: diropargs3 { dir: current.to_nfs_fh3(), name: filename3(Opaque::owned(component.as_bytes().to_vec())) } };
+        let args = nfs_proto::nfs3::LOOKUP3args { what: diropargs3 { dir: current.to_nfs_fh3(), name: filename3(Opaque::owned(component.as_bytes().to_vec())) } };
         let res = nfs3.lookup(&args).await.ok()?;
-        if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res {
+        if let nfs_proto::nfs3::Nfs3Result::Ok(ok) = res {
             current = FileHandle::from_nfs_fh3(&ok.object);
         } else {
             return None;
@@ -969,16 +969,16 @@ async fn check_btrfs_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_pa
 async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
     let rdp_args = READDIRPLUS3args { dir: root_fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
     let Ok(res) = nfs3.readdirplus(&rdp_args).await else { return };
-    let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res else { return };
+    let nfs_proto::nfs3::Nfs3Result::Ok(ok) = res else { return };
 
     // FSSTAT on the export root to get its fsid.
     let root_stat = nfs3.fsstat(&FSSTAT3args { fsroot: root_fh.to_nfs_fh3() }).await.ok();
     let root_fsid = root_stat
         .and_then(|r| {
-            if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = r {
+            if let nfs_proto::nfs3::Nfs3Result::Ok(ok) = r {
                 match ok.obj_attributes {
-                    nfs3_types::nfs3::Nfs3Option::Some(ref a) => Some(a.fsid),
-                    nfs3_types::nfs3::Nfs3Option::None => None,
+                    nfs_proto::nfs3::Nfs3Option::Some(ref a) => Some(a.fsid),
+                    nfs_proto::nfs3::Nfs3Option::None => None,
                 }
             } else {
                 None
@@ -990,14 +990,14 @@ async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str
     for entry in &ok.reply.entries.0 {
         // name_handle is Nfs3Option<nfs_fh3>  --  use match, not Some().
         let entry_fh = match &entry.name_handle {
-            nfs3_types::nfs3::Nfs3Option::Some(fh_raw) => FileHandle::from_nfs_fh3(fh_raw),
-            nfs3_types::nfs3::Nfs3Option::None => continue,
+            nfs_proto::nfs3::Nfs3Option::Some(fh_raw) => FileHandle::from_nfs_fh3(fh_raw),
+            nfs_proto::nfs3::Nfs3Option::None => continue,
         };
         let stat_res = nfs3.fsstat(&FSSTAT3args { fsroot: entry_fh.to_nfs_fh3() }).await.ok();
-        if let Some(nfs3_types::nfs3::Nfs3Result::Ok(st)) = stat_res {
+        if let Some(nfs_proto::nfs3::Nfs3Result::Ok(st)) = stat_res {
             let entry_fsid = match st.obj_attributes {
-                nfs3_types::nfs3::Nfs3Option::Some(ref a) => a.fsid,
-                nfs3_types::nfs3::Nfs3Option::None => continue,
+                nfs_proto::nfs3::Nfs3Option::Some(ref a) => a.fsid,
+                nfs_proto::nfs3::Nfs3Option::None => continue,
             };
             if root_fsid != 0 && entry_fsid != root_fsid {
                 let name = String::from_utf8_lossy(entry.name.0.as_ref()).to_string();
@@ -1032,13 +1032,13 @@ async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str
 async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
     let args = READDIRPLUS3args { dir: root_fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
     let Ok(res) = nfs3.readdirplus(&args).await else { return };
-    let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res else { return };
+    let nfs_proto::nfs3::Nfs3Result::Ok(ok) = res else { return };
 
     for entry in &ok.reply.entries.0 {
         // name_attributes is Nfs3Option<fattr3>  --  use match, not Some().
         let attrs = match &entry.name_attributes {
-            nfs3_types::nfs3::Nfs3Option::Some(a) => a,
-            nfs3_types::nfs3::Nfs3Option::None => continue,
+            nfs_proto::nfs3::Nfs3Option::Some(a) => a,
+            nfs_proto::nfs3::Nfs3Option::None => continue,
         };
         // Flag ANY world-writable directory (mode & 0o002) regardless of owner. The
         // canonical symlink-escape target is a root-owned, world-writable, sticky dir
@@ -1046,7 +1046,7 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
         // and AUTH_SYS lets the attacker assume any UID anyway. The F-4.4 precondition
         // is simply "writable directory" (docs/FINDINGS.md F-4.4); owner UID is
         // evidence, not a gate.
-        let is_dir = attrs.type_ == nfs3_types::nfs3::ftype3::NF3DIR;
+        let is_dir = attrs.type_ == nfs_proto::nfs3::ftype3::NF3DIR;
         let world_writable = (attrs.mode & 0o002) != 0;
         if is_dir && world_writable {
             let name = String::from_utf8_lossy(entry.name.0.as_ref()).to_string();
@@ -1085,13 +1085,13 @@ async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_pat
 
     let create_args = CREATE3args { where_: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) }, how: createhow3::UNCHECKED(sattr3::default()) };
     let Ok(create_res) = root_client.create(&create_args).await else { return };
-    let nfs3_types::nfs3::Nfs3Result::Ok(created) = create_res else { return };
+    let nfs_proto::nfs3::Nfs3Result::Ok(created) = create_res else { return };
 
     // GETATTR to check the resulting ownership.
-    let file_uid = if let nfs3_types::nfs3::Nfs3Option::Some(ref fh) = created.obj {
+    let file_uid = if let nfs_proto::nfs3::Nfs3Option::Some(ref fh) = created.obj {
         let fh = FileHandle::from_nfs_fh3(fh);
         let ga_args = GETATTR3args { object: fh.to_nfs_fh3() };
-        nfs3.getattr(&ga_args).await.ok().and_then(|r| if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = r { Some(ok.obj_attributes.uid) } else { None })
+        nfs3.getattr(&ga_args).await.ok().and_then(|r| if let nfs_proto::nfs3::Nfs3Result::Ok(ok) = r { Some(ok.obj_attributes.uid) } else { None })
     } else {
         None
     };
@@ -1143,12 +1143,12 @@ async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path
 
     let create_args = CREATE3args { where_: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) }, how: createhow3::UNCHECKED(sattr3::default()) };
     let Ok(create_res) = probe_client.create(&create_args).await else { return None };
-    let nfs3_types::nfs3::Nfs3Result::Ok(created) = create_res else { return None };
+    let nfs_proto::nfs3::Nfs3Result::Ok(created) = create_res else { return None };
 
-    let observed_uid = if let nfs3_types::nfs3::Nfs3Option::Some(ref fh) = created.obj {
+    let observed_uid = if let nfs_proto::nfs3::Nfs3Option::Some(ref fh) = created.obj {
         let fh = FileHandle::from_nfs_fh3(fh);
         let ga_args = GETATTR3args { object: fh.to_nfs_fh3() };
-        nfs3.getattr(&ga_args).await.ok().and_then(|r| if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = r { Some(ok.obj_attributes.uid) } else { None })
+        nfs3.getattr(&ga_args).await.ok().and_then(|r| if let nfs_proto::nfs3::Nfs3Result::Ok(ok) = r { Some(ok.obj_attributes.uid) } else { None })
     } else {
         None
     };

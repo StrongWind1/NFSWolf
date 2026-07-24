@@ -195,7 +195,7 @@ make check-all    # full gate: fmt, lint, audit, check, test-matrix, doc, hygien
 
 ## Credits
 
-- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz - the NFSv3 / MOUNT / portmapper / XDR foundation.
+- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz - the NFSv3 / MOUNT / portmapper / XDR foundation that `crates/nfs_proto` grew out of, released into the public domain under the Unlicense.
 - Authors of RFC 1057, RFC 1094, RFC 1813, RFC 5531, RFC 7530, RFC 2623, RFC 9289.
 - Prior-art tools that inspired this consolidation: `nfsspy`, `nfsshell`, `showmount`, Metasploit NFS modules.
 

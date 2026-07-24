@@ -35,11 +35,11 @@ use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle as FuseFileHandle, FileType as FuseFileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow, WriteFlags,
 };
-use nfs3_types::nfs3::{
+use nfs_proto::nfs3::{
     ACCESS3args, COMMIT3args, CREATE3args, FSSTAT3args, GETATTR3args, LINK3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3, createhow3,
     devicedata3, diropargs3, filename3, mknoddata3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime, specdata3, stable_how, symlinkdata3,
 };
-use nfs3_types::xdr_codec::Opaque;
+use nfs_proto::xdr::Opaque;
 
 use crate::engine::credential::escalation_list;
 use crate::proto::auth::{AuthSys, Credential};
@@ -817,7 +817,6 @@ impl Filesystem for NfsFuse {
 
         let result = self.block(self.try_with_ladder(ino.0, |c| {
             let fh = fh.clone();
-            let new_attrs = new_attrs.clone();
             async move {
                 let args = SETATTR3args { object: fh.to_nfs_fh3(), new_attributes: new_attrs, guard: Nfs3Option::None };
                 c.setattr(&args).await
@@ -996,7 +995,6 @@ impl Filesystem for NfsFuse {
         let result = self.block(self.try_with_ladder(parent.0, |c| {
             let parent_fh = parent_fh.clone();
             let name_bytes = name_bytes.clone();
-            let attrs = attrs.clone();
             async move {
                 let args = MKDIR3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, attributes: attrs };
                 c.mkdir(&args).await
@@ -1078,7 +1076,6 @@ impl Filesystem for NfsFuse {
         let result = self.block(self.try_with_ladder(parent.0, |c| {
             let parent_fh = parent_fh.clone();
             let name_bytes = name_bytes.clone();
-            let attrs = attrs.clone();
             async move {
                 let args = CREATE3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, how: createhow3::UNCHECKED(attrs) };
                 c.create(&args).await
@@ -1540,7 +1537,7 @@ const fn sattr3_for_perms(perms: u32) -> sattr3 {
 
 /// Convert the optional post-op file handle returned by CREATE / MKNOD /
 /// MKDIR / SYMLINK responses (RFC 1813 §3.3.8 etc.) to our `FileHandle`.
-fn post_op_fh3_to_handle(opt: Nfs3Option<nfs3_types::nfs3::nfs_fh3>) -> Option<FileHandle> {
+fn post_op_fh3_to_handle(opt: Nfs3Option<nfs_proto::nfs3::nfs_fh3>) -> Option<FileHandle> {
     match opt {
         Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
         Nfs3Option::None => None,
@@ -1549,7 +1546,7 @@ fn post_op_fh3_to_handle(opt: Nfs3Option<nfs3_types::nfs3::nfs_fh3>) -> Option<F
 
 /// Convert an optional post-op attribute reply into our `FileAttrs`.
 #[expect(clippy::missing_const_for_fn, reason = "FileAttrs::from_fattr3 is not const")]
-fn post_op_attr_to_attrs(opt: nfs3_types::nfs3::post_op_attr) -> Option<FileAttrs> {
+fn post_op_attr_to_attrs(opt: nfs_proto::nfs3::post_op_attr) -> Option<FileAttrs> {
     match opt {
         Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
         Nfs3Option::None => None,

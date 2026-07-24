@@ -1,0 +1,45 @@
+Provenance of the NFSWolf protocol stack
+========================================
+
+This crate (nfs_proto) and its sibling nfs_xdr contain code derived from the
+Vaiz/nfs3 project <https://github.com/Vaiz/nfs3>, which is released into the
+public domain under the Unlicense.
+
+The Unlicense places no conditions on copying, modification, or relicensing.
+This NOTICE records the origin as a matter of good practice, not obligation.
+
+Code absorbed from Vaiz/nfs3 (Unlicense):
+
+  From crate nfs3_macros:
+    src/lib.rs                  -> crates/nfs_xdr/src/lib.rs
+
+  From crate nfs3_types:
+    src/xdr_codec/*.rs          -> crates/nfs_proto/src/xdr/*.rs
+    src/rpc.rs                  -> crates/nfs_proto/src/rpc/types.rs
+    src/nfs3.rs                 -> crates/nfs_proto/src/nfs3/types.rs
+    src/mount.rs                -> crates/nfs_proto/src/mount/types.rs
+    src/portmap.rs              -> crates/nfs_proto/src/portmap/types.rs
+
+  From crate nfs3_client:
+    src/rpc.rs                  -> crates/nfs_proto/src/rpc/client.rs
+    src/nfs.rs                  -> crates/nfs_proto/src/nfs3/client.rs
+    src/mount.rs                -> crates/nfs_proto/src/mount/client.rs
+    src/portmapper.rs           -> crates/nfs_proto/src/portmap/client.rs
+    src/connect.rs              -> crates/nfs_proto/src/connect.rs
+    src/io.rs, net.rs, tokio.rs -> crates/nfs_proto/src/transport/*.rs
+    src/error/*.rs              -> crates/nfs_proto/src/error/*.rs
+
+Written by the NFSWolf authors (Apache-2.0, no upstream origin):
+
+    crates/nfs_proto/src/nfs2/*.rs   -- NFSv2 wire types (RFC 1094)
+    crates/nfs_proto/src/nfs4/*.rs   -- NFSv4 COMPOUND types (RFC 7530)
+
+Deviations from upstream:
+
+  * The smol runtime backend was dropped; only tokio is supported.
+  * RpcClient exposes its credential and verifier so AUTH_SYS credentials can
+    be swapped on an established connection (needed for UID/GID spraying).
+  * PROG_MISMATCH replies preserve the server's supported (low, high) version
+    range instead of collapsing to an opaque error.
+  * The NFSv3 server implementation was not absorbed; NFSWolf depends on the
+    published nfs3_server crate as a dev-dependency for integration tests.

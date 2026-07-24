@@ -33,14 +33,14 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use nfs3_client::MountClient;
-use nfs3_client::Nfs3Client;
-use nfs3_client::tokio::TokioIo;
+use nfs_proto::MountClient;
+use nfs_proto::Nfs3Client;
+use nfs_proto::mount::dirpath;
+use nfs_proto::nfs3::{GETATTR3args, LOOKUP3args, Nfs3Result, READ3args, READDIRPLUS3args, cookieverf3, diropargs3, filename3, nfs_fh3};
+use nfs_proto::transport::tokio::TokioIo;
+use nfs_proto::xdr::Opaque;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfs3_types::mount::dirpath;
-use nfs3_types::nfs3::{GETATTR3args, LOOKUP3args, Nfs3Result, READ3args, READDIRPLUS3args, cookieverf3, diropargs3, filename3, nfs_fh3};
-use nfs3_types::xdr_codec::Opaque;
 use tokio::net::TcpStream;
 
 // --- Server helpers ---
@@ -324,7 +324,7 @@ async fn memfs_getattr_file_type_is_regular() {
 
     match nfs.getattr(&GETATTR3args { object: fh }).await.expect("GETATTR must succeed") {
         Nfs3Result::Ok(ok) => {
-            assert_eq!(ok.obj_attributes.type_, nfs3_types::nfs3::ftype3::NF3REG, "file must have type NF3REG");
+            assert_eq!(ok.obj_attributes.type_, nfs_proto::nfs3::ftype3::NF3REG, "file must have type NF3REG");
         },
         Nfs3Result::Err((stat, _)) => panic!("GETATTR: {stat:?}"),
     }
