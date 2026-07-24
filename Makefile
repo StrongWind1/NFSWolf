@@ -403,11 +403,11 @@ check-all: fmt lint audit check test-matrix doc hygiene machete
 cut-release:
 	@test -n "$(VERSION)" || { echo "usage: make cut-release VERSION=X.Y.Z"; exit 1; }
 	@command -v cargo-set-version > /dev/null 2>&1 || cargo install cargo-edit --locked
-	cargo set-version -p nfswolf "$(VERSION)"
+	cargo set-version --workspace "$(VERSION)"
 	cargo upgrade --incompatible
 	cargo update
 	$(MAKE) check-all
-	git add Cargo.toml Cargo.lock
+	git add Cargo.toml Cargo.lock crates/*/Cargo.toml
 	@git diff --cached --quiet || git commit -S -m "chore(release): v$(VERSION)"
 	git tag -s "v$(VERSION)" -m "v$(VERSION)"
 	git push origin HEAD
