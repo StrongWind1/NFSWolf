@@ -13,6 +13,11 @@
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use serde::{Deserialize, Serialize};
 
+/// Name of the temporary file the squash probes create and remove.
+///
+/// Dot-prefixed so it is inconspicuous in a listing if cleanup fails.
+const PROBE_NAME: &str = ".nfswolf_squash_probe";
+
 /// Well-known shadow group GIDs per distro family.
 /// Provided as defaults for `--test-read-gids` when no explicit GIDs given.
 pub(crate) const SHADOW_GID_DEBIAN: u32 = 42;
@@ -723,14 +728,8 @@ async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &s
 
 /// Count READDIRPLUS entries for a file handle; returns None on any error.
 async fn count_readdirplus(nfs3: &Nfs3Client, fh: &FileHandle) -> Option<u32> {
-    let args = READDIRPLUS3args { dir: fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
-    let res = nfs3.readdirplus(&args).await.ok()?;
-    if let nfswolf_nfs3::wire::Nfs3Result::Ok(ok) = res {
-        let count = u32::try_from(ok.reply.entries.0.len()).unwrap_or(u32::MAX);
-        Some(count)
-    } else {
-        None
-    }
+    let page = nfs3.list_dir_page(fh, 0, cookieverf3([0u8; 8])).await.ok()?;
+    Some(u32::try_from(page.entries.len()).unwrap_or(u32::MAX))
 }
 
 /// Check for NFSv2 downgrade risk: v2 registered alongside v3/v4.
@@ -873,15 +872,10 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
     };
 
     // Attempt READ of up to 128 bytes.
-    let read_args = nfswolf_nfs3::wire::READ3args { file: target_fh.to_nfs_fh3(), offset: 0, count: 128 };
-    let Ok(read_res) = test_client.read(&read_args).await else {
-        return result;
-    };
 
-    if let nfswolf_nfs3::wire::Nfs3Result::Ok(ok) = read_res {
+    if let Ok(chunk) = test_client.read_at(&target_fh, 0, 128).await {
         result.readable = true;
-        let bytes = ok.data.as_ref();
-        result.preview = Some(String::from_utf8_lossy(bytes).chars().take(64).collect());
+        result.preview = Some(String::from_utf8_lossy(&chunk.data).chars().take(64).collect());
     }
 
     result
@@ -892,13 +886,7 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
 async fn walk_path(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str) -> Option<FileHandle> {
     let mut current = root_fh.clone();
     for component in path.split('/').filter(|c| !c.is_empty()) {
-        let args = nfswolf_nfs3::wire::LOOKUP3args { what: diropargs3 { dir: current.to_nfs_fh3(), name: filename3(Opaque::owned(component.as_bytes().to_vec())) } };
-        let res = nfs3.lookup(&args).await.ok()?;
-        if let nfswolf_nfs3::wire::Nfs3Result::Ok(ok) = res {
-            current = FileHandle::from_nfs_fh3(&ok.object);
-        } else {
-            return None;
-        }
+        current = nfs3.resolve(&current, component).await.ok()?.0;
     }
     Some(current)
 }
@@ -968,42 +956,18 @@ async fn check_btrfs_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_pa
 /// (nohide/crossmnt is active). Per RFC 1813 S3.3.3, servers should not
 /// allow LOOKUP to cross mount points by default.
 async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
-    let rdp_args = READDIRPLUS3args { dir: root_fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
-    let Ok(res) = nfs3.readdirplus(&rdp_args).await else { return };
-    let nfswolf_nfs3::wire::Nfs3Result::Ok(ok) = res else { return };
+    let Ok(page) = nfs3.list_dir_page(root_fh, 0, cookieverf3([0u8; 8])).await else { return };
 
-    // FSSTAT on the export root to get its fsid.
-    let root_stat = nfs3.fsstat(&FSSTAT3args { fsroot: root_fh.to_nfs_fh3() }).await.ok();
-    let root_fsid = root_stat
-        .and_then(|r| {
-            if let nfswolf_nfs3::wire::Nfs3Result::Ok(ok) = r {
-                match ok.obj_attributes {
-                    nfswolf_nfs3::wire::Nfs3Option::Some(ref a) => Some(a.fsid),
-                    nfswolf_nfs3::wire::Nfs3Option::None => None,
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0);
+    // The export root's own fsid is the baseline every entry is compared to.
+    let root_fsid = nfs3.attrs(root_fh).await.map_or(0, |a| a.fsid);
 
     let mut submounts: Vec<String> = Vec::new();
-    for entry in &ok.reply.entries.0 {
-        // name_handle is Nfs3Option<nfs_fh3>  --  use match, not Some().
-        let entry_fh = match &entry.name_handle {
-            nfswolf_nfs3::wire::Nfs3Option::Some(fh_raw) => FileHandle::from_nfs_fh3(fh_raw),
-            nfswolf_nfs3::wire::Nfs3Option::None => continue,
-        };
-        let stat_res = nfs3.fsstat(&FSSTAT3args { fsroot: entry_fh.to_nfs_fh3() }).await.ok();
-        if let Some(nfswolf_nfs3::wire::Nfs3Result::Ok(st)) = stat_res {
-            let entry_fsid = match st.obj_attributes {
-                nfswolf_nfs3::wire::Nfs3Option::Some(ref a) => a.fsid,
-                nfswolf_nfs3::wire::Nfs3Option::None => continue,
-            };
-            if root_fsid != 0 && entry_fsid != root_fsid {
-                let name = String::from_utf8_lossy(entry.name.0.as_ref()).to_string();
-                submounts.push(name);
-            }
+    for entry in &page.entries {
+        // A server may omit the handle; without it the entry cannot be probed.
+        let Some(ref entry_fh) = entry.handle else { continue };
+        let Ok(a) = nfs3.attrs(entry_fh).await else { continue };
+        if root_fsid != 0 && a.fsid != root_fsid {
+            submounts.push(entry.name.clone());
         }
     }
 
@@ -1031,26 +995,21 @@ async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str
 /// The attacker can replace a directory entry with a symlink pointing to a
 /// privileged path.
 async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
-    let args = READDIRPLUS3args { dir: root_fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
-    let Ok(res) = nfs3.readdirplus(&args).await else { return };
-    let nfswolf_nfs3::wire::Nfs3Result::Ok(ok) = res else { return };
+    let Ok(page) = nfs3.list_dir_page(root_fh, 0, cookieverf3([0u8; 8])).await else { return };
 
-    for entry in &ok.reply.entries.0 {
-        // name_attributes is Nfs3Option<fattr3>  --  use match, not Some().
-        let attrs = match &entry.name_attributes {
-            nfswolf_nfs3::wire::Nfs3Option::Some(a) => a,
-            nfswolf_nfs3::wire::Nfs3Option::None => continue,
-        };
+    for entry in &page.entries {
+        // A server may answer READDIRPLUS without attributes; nothing to judge.
+        let Some(ref attrs) = entry.attrs else { continue };
         // Flag ANY world-writable directory (mode & 0o002) regardless of owner. The
         // canonical symlink-escape target is a root-owned, world-writable, sticky dir
         // (/tmp, /var/tmp): any client can drop a symlink there no matter who owns it,
         // and AUTH_SYS lets the attacker assume any UID anyway. The F-4.4 precondition
         // is simply "writable directory" (docs/FINDINGS.md F-4.4); owner UID is
         // evidence, not a gate.
-        let is_dir = attrs.type_ == nfswolf_nfs3::wire::ftype3::NF3DIR;
+        let is_dir = attrs.file_type == nfswolf_nfs3::FileType::Directory;
         let world_writable = (attrs.mode & 0o002) != 0;
         if is_dir && world_writable {
-            let name = String::from_utf8_lossy(entry.name.0.as_ref()).to_string();
+            let name = entry.name.clone();
             findings.push(make_finding(
                 &FindingSpec {
                     id: "F-4.4",
@@ -1081,24 +1040,18 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
 /// F-7.5). F-4.1 is therefore emitted only when uid=0 lands as root AND the
 /// non-root probe did NOT also land as root.
 async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path: &str, squash_anon_uid: Option<u32>, findings: &mut Vec<Finding>) {
-    let probe_name = b".nfswolf_root_probe";
     let root_client = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(0, 0, &[], "nfswolf")), 0, 0);
 
-    let create_args = CREATE3args { where_: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) }, how: createhow3::UNCHECKED(sattr3::default()) };
-    let Ok(create_res) = root_client.create(&create_args).await else { return };
-    let nfswolf_nfs3::wire::Nfs3Result::Ok(created) = create_res else { return };
+    let Ok(created) = root_client.create_file(dir_fh, PROBE_NAME, sattr3::default()).await else { return };
 
     // GETATTR to check the resulting ownership.
-    let file_uid = if let nfswolf_nfs3::wire::Nfs3Option::Some(ref fh) = created.obj {
-        let fh = FileHandle::from_nfs_fh3(fh);
-        let ga_args = GETATTR3args { object: fh.to_nfs_fh3() };
-        nfs3.getattr(&ga_args).await.ok().and_then(|r| if let nfswolf_nfs3::wire::Nfs3Result::Ok(ok) = r { Some(ok.obj_attributes.uid) } else { None })
-    } else {
-        None
+    let file_uid = match created {
+        Some(ref fh) => nfs3.attrs(fh).await.ok().map(|a| a.uid),
+        None => None,
     };
 
     // Always attempt cleanup regardless of getattr result.
-    drop(root_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await);
+    drop(root_client.unlink(dir_fh, PROBE_NAME).await);
 
     // If the uid=99999 probe ALSO landed as uid 0, every client UID is squashed
     // to root (all_squash + anonuid=0) -- that is F-7.5, not no_root_squash, so
@@ -1139,23 +1092,17 @@ async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_pat
 ///     the previous code computed but never reported.
 async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) -> Option<u32> {
     const PROBE_UID: u32 = 99_999;
-    let probe_name = b".nfswolf_squash_probe";
     let probe_client = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(PROBE_UID, PROBE_UID, &[], "nfswolf")), PROBE_UID, PROBE_UID);
 
-    let create_args = CREATE3args { where_: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) }, how: createhow3::UNCHECKED(sattr3::default()) };
-    let Ok(create_res) = probe_client.create(&create_args).await else { return None };
-    let nfswolf_nfs3::wire::Nfs3Result::Ok(created) = create_res else { return None };
+    let Ok(created) = probe_client.create_file(dir_fh, PROBE_NAME, sattr3::default()).await else { return None };
 
-    let observed_uid = if let nfswolf_nfs3::wire::Nfs3Option::Some(ref fh) = created.obj {
-        let fh = FileHandle::from_nfs_fh3(fh);
-        let ga_args = GETATTR3args { object: fh.to_nfs_fh3() };
-        nfs3.getattr(&ga_args).await.ok().and_then(|r| if let nfswolf_nfs3::wire::Nfs3Result::Ok(ok) = r { Some(ok.obj_attributes.uid) } else { None })
-    } else {
-        None
+    let observed_uid = match created {
+        Some(ref fh) => nfs3.attrs(fh).await.ok().map(|a| a.uid),
+        None => None,
     };
 
     // Cleanup probe file before reporting.
-    drop(probe_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await);
+    drop(probe_client.unlink(dir_fh, PROBE_NAME).await);
 
     let uid = observed_uid?;
     let result = infer_squash_mode(uid, PROBE_UID);
