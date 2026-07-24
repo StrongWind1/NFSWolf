@@ -69,8 +69,9 @@ serde_json = "1"
 # NFS protocol (NFSv2/v3/v4 + MOUNT + portmapper  --  local, pure Rust, no C deps)
 nfs_proto = { workspace = true }
 
-# Networking
-socket2 = { version = "0.6", features = ["all"] }
+# Concurrent maps for the connection pool and circuit breaker.
+# Privileged source-port binding lives in nfs_proto (tokio TcpSocket), so the
+# binary needs no socket crate of its own.
 dashmap = "6"
 
 # FUSE
