@@ -108,13 +108,24 @@ impl AuthSys {
         Self::new(0, 0, hostname)
     }
 
-    /// Create a credential with an explicit supplementary group list.
+    /// Create a credential with supplementary groups.
     ///
-    /// The list is truncated to [`MAX_AUX_GIDS`] at encode time.
+    /// `gid` is included in the group list whether or not `gids` already
+    /// contains it. A server checking group ownership reads the list rather
+    /// than the `gid` field, so a credential whose list omits its own primary
+    /// group silently loses group access -- and callers passing an empty slice
+    /// to mean "just my primary group" would get no groups at all. Two call
+    /// sites in this workspace had grown their own prepend to work around
+    /// that; the invariant belongs here instead.
+    ///
+    /// The list is truncated to [`MAX_AUX_GIDS`] (RFC 5531 sec. 14).
     #[must_use]
     pub fn with_groups(uid: u32, gid: u32, gids: &[u32], hostname: &str) -> Self {
-        let truncated = gids.get(..MAX_AUX_GIDS).unwrap_or(gids);
-        Self { machinename: hostname.to_owned(), uid, gid, gids: truncated.to_vec() }
+        let mut list = Vec::with_capacity(gids.len() + 1);
+        list.push(gid);
+        list.extend(gids.iter().copied().filter(|g| *g != gid));
+        list.truncate(MAX_AUX_GIDS);
+        Self { machinename: hostname.to_owned(), uid, gid, gids: list }
     }
 
     /// Encode as an [`opaque_auth`] carrying the given stamp.
@@ -153,7 +164,7 @@ mod tests {
 
     #[test]
     fn with_groups_truncates_to_the_rfc_limit() {
-        let many: Vec<u32> = (0..40).collect();
+        let many: Vec<u32> = (100..140).collect();
         let cred = AuthSys::with_groups(1000, 1000, &many, "host");
         assert_eq!(cred.gids.len(), MAX_AUX_GIDS);
     }
@@ -176,7 +187,20 @@ mod tests {
     #[test]
     fn with_groups_preserves_the_supplied_list() {
         let cred = AuthSys::with_groups(1000, 100, &[100, 42, 27], "host");
-        assert_eq!(cred.gids, vec![100, 42, 27]);
+        assert_eq!(cred.gids, vec![100, 42, 27], "primary gid first, no duplicate");
+    }
+
+    #[test]
+    fn with_groups_always_includes_the_primary_gid() {
+        // An empty slice must not produce an empty group list: a server
+        // resolving group access from the list would deny access the caller
+        // legitimately has.
+        let cred = AuthSys::with_groups(1000, 500, &[], "host");
+        assert_eq!(cred.gids, vec![500]);
+
+        // And it must appear even when the caller supplied other groups.
+        let cred = AuthSys::with_groups(1000, 500, &[42], "host");
+        assert!(cred.gids.contains(&500), "primary gid missing: {:?}", cred.gids);
     }
 
     #[test]

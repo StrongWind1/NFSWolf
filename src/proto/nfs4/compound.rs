@@ -46,20 +46,6 @@ pub(crate) struct Nfs4DirectClient {
     aux_gids: Vec<u32>,
 }
 
-/// Build the AUTH_SYS GID list: primary `gid` first, then `aux_gids` (deduped).
-///
-/// Mirrors `cli::probe::build_gid_list`; duplicated here to keep the proto layer
-/// free of a dependency on the CLI layer.
-fn merge_gids(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
-    let mut gids = vec![gid];
-    for &g in aux_gids {
-        if !gids.contains(&g) {
-            gids.push(g);
-        }
-    }
-    gids
-}
-
 impl std::fmt::Debug for Nfs4DirectClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Nfs4DirectClient").field("addr", &self.addr).finish_non_exhaustive()
@@ -121,7 +107,7 @@ impl Nfs4DirectClient {
     /// `gid` is prepended automatically and the set is retained for reconnects.
     pub(crate) async fn connect_with_groups_proxy(addr: SocketAddr, uid: u32, gid: u32, aux_gids: &[u32], hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
-        let gids = merge_gids(gid, aux_gids);
+        let gids = aux_gids.to_vec();
         let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
@@ -148,8 +134,7 @@ impl Nfs4DirectClient {
     /// `gid`) so the shadow-GID trick survives a mid-session identity change.
     pub(crate) async fn reconnect_with_auth(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         use crate::proto::auth::AuthSys;
-        let gids = merge_gids(gid, &self.aux_gids);
-        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
+        let opaque = AuthSys::with_groups(uid, gid, &self.aux_gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(self.addr, self.proxy.as_deref()).await?;
         self.rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
         Ok(())

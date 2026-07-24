@@ -141,18 +141,24 @@ impl RpcError {
     /// Returns `true` if the connection that produced this error is still in
     /// a clean state and may be reused for the next call.
     ///
-    /// Returns `false` only for [`Io`](Self::Io) (transport is dead) and
-    /// [`FragmentedReply`](Self::FragmentedReply) (unread fragment data left
-    /// in the socket).
+    /// Returns `false` for the three errors that leave the stream unusable:
+    ///
+    /// * [`Io`](Self::Io) -- the transport is dead.
+    /// * [`FragmentedReply`](Self::FragmentedReply) -- unread fragment data is
+    ///   still in the socket.
+    /// * [`UnexpectedXid`](Self::UnexpectedXid) -- the reply belonged to an
+    ///   earlier call, so the stream is off by one reply and every subsequent
+    ///   read returns the wrong one. Reusing such a connection wedges it
+    ///   permanently: each checkout fails the XID check, and if that were
+    ///   judged reusable it would be requeued to fail the same way forever.
     ///
     /// All other errors -- including [`Xdr`](Self::Xdr),
-    /// [`WrongLength`](Self::WrongLength), [`NotFullyParsed`](Self::NotFullyParsed),
-    /// and [`UnexpectedXid`](Self::UnexpectedXid) -- are produced while
-    /// operating on in-memory buffers after the full fragment has already been
-    /// consumed from the wire, so the transport remains at a clean message
-    /// boundary.
+    /// [`WrongLength`](Self::WrongLength), and
+    /// [`NotFullyParsed`](Self::NotFullyParsed) -- are produced while operating
+    /// on in-memory buffers after the full fragment has already been consumed
+    /// from the wire, so the transport remains at a clean message boundary.
     #[must_use]
     pub const fn is_connection_reusable(&self) -> bool {
-        !matches!(self, Self::Io(_) | Self::FragmentedReply)
+        !matches!(self, Self::Io(_) | Self::FragmentedReply | Self::UnexpectedXid)
     }
 }

@@ -161,13 +161,14 @@ impl UidSprayer {
                 }
                 self.stealth.wait().await;
 
-                let mut aux = config.auxiliary_gids.clone();
-                if !aux.contains(&gid) {
-                    aux.insert(0, gid);
-                }
-
                 match conn
-                    .call_as::<_, nfswolf_nfs3::wire::ACCESS3res>(crate::proto::auth::AuthSys::with_groups(uid, gid, &aux, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()), nfswolf_nfs3::PROGRAM, nfswolf_nfs3::VERSION, nfswolf_nfs3::wire::NFS_PROGRAM::NFSPROC3_ACCESS as u32, &args)
+                    .call_as::<_, nfswolf_nfs3::wire::ACCESS3res>(
+                        crate::proto::auth::AuthSys::with_groups(uid, gid, &config.auxiliary_gids, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()),
+                        nfswolf_nfs3::PROGRAM,
+                        nfswolf_nfs3::VERSION,
+                        nfswolf_nfs3::wire::NFS_PROGRAM::NFSPROC3_ACCESS as u32,
+                        &args,
+                    )
                     .await
                 {
                     Ok(res) => match res {

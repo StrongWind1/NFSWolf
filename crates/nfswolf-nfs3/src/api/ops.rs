@@ -223,7 +223,7 @@ impl<T: RpcTransport> Nfs3Client<T> {
     /// Create a symbolic link pointing at `target`.
     pub async fn create_symlink(&self, dir: &FileHandle, name: &str, target: &str, attrs: sattr3) -> Result<(), Nfs3Fault<T::Error>> {
         let data = symlinkdata3 { symlink_attributes: attrs, symlink_data: nfspath3(Opaque::owned(target.as_bytes().to_vec())) };
-        let _ = flatten(self.symlink(&SYMLINK3args { where_: dirop(dir, name), symlink: data }).await)?;
+        drop(flatten(self.symlink(&SYMLINK3args { where_: dirop(dir, name), symlink: data }).await)?);
         Ok(())
     }
 

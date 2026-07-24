@@ -706,6 +706,7 @@ dependencies = [
  "nfswolf-rpc",
  "nfswolf-xdr",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

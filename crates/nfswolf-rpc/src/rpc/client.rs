@@ -8,6 +8,12 @@ use nfswolf_xdr::{Pack, Unpack};
 use crate::error::RpcError;
 use crate::transport::io::{AsyncRead, AsyncWrite};
 
+/// Largest RPC reply this client will accept in one fragment.
+///
+/// Generous against real servers -- Linux knfsd's default `rtmax` is 1 MiB --
+/// and small enough that a forged fragment header cannot exhaust memory.
+const MAX_REPLY_BYTES: u32 = 8 * 1024 * 1024;
+
 /// Generic ONC RPC v2 client over a single connection.
 ///
 /// Not tied to any one RPC program: [`call`](Self::call) takes the program,
@@ -111,6 +117,18 @@ where
         }
 
         let total_len = fragment_header.fragment_length();
+        // A fragment header can declare up to 2 GiB, and the peer chooses the
+        // value. Allocating from it directly lets four bytes from a hostile or
+        // simply non-RPC listener cost 2 GiB of zeroed memory before a single
+        // payload byte arrives -- fatal during a concurrent scan, where one bad
+        // host on port 2049 would take the whole sweep down (CWE-789).
+        //
+        // Real NFS replies are bounded by the server's advertised rtmax, which
+        // is at most a few MiB in practice, so anything past this ceiling is
+        // not a reply we could have used.
+        if total_len > MAX_REPLY_BYTES {
+            return Err(RpcError::WrongLength);
+        }
         let mut buf = vec![0u8; total_len as usize];
         io.async_read_exact(&mut buf).await?;
 
