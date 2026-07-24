@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nfs_proto::nfs3::ACCESS3args;
+use nfswolf_nfs3::wire::ACCESS3args;
 use tracing::{debug, warn};
 
 use crate::proto::circuit::CircuitBreaker;
@@ -166,16 +166,16 @@ impl UidSprayer {
                     aux.insert(0, gid);
                 }
 
-                match conn.call_as::<_, nfs_proto::nfs3::ACCESS3res>(crate::proto::auth::AuthSys::with_groups(uid, gid, &aux, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()), 100_003, 3, nfs_proto::nfs3::NFS_PROGRAM::NFSPROC3_ACCESS as u32, &args).await {
+                match conn.call_as::<_, nfswolf_nfs3::wire::ACCESS3res>(crate::proto::auth::AuthSys::with_groups(uid, gid, &aux, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()), 100_003, 3, nfswolf_nfs3::wire::NFS_PROGRAM::NFSPROC3_ACCESS as u32, &args).await {
                     Ok(res) => match res {
-                        nfs_proto::nfs3::Nfs3Result::Ok(ok) => {
+                        nfswolf_nfs3::wire::Nfs3Result::Ok(ok) => {
                             let granted = ok.access;
                             debug!(uid, gid, access = granted, "spray: access granted");
                             if granted & config.required_access != 0 {
                                 results.push(SprayResult { uid, gid, access: granted });
                             }
                         },
-                        nfs_proto::nfs3::Nfs3Result::Err((stat, _)) => {
+                        nfswolf_nfs3::wire::Nfs3Result::Err((stat, _)) => {
                             debug!(uid, gid, ?stat, "spray: access denied");
                         },
                     },

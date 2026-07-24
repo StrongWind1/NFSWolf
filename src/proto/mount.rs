@@ -1,7 +1,7 @@
-//! MOUNT protocol client  --  wraps `nfs_proto::MountClient`
+//! MOUNT protocol client  --  wraps `nfswolf_nfs3::MountClient`
 //! (RFC 1813 Appendix I).
 //!
-//! `nfs_proto` provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
+//! `nfswolf-nfs3` provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
 //! This module adds:
 //! - Auth flavor extraction from MNT response (F-1.1)
 //! - Export ACL parsing (wildcards, subnets) (F-7.1)
@@ -9,13 +9,13 @@
 //! - Stealth unmount after handle acquisition (F-2.5)
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
-use nfs_proto::transport::DirectTransport;
+use nfswolf_rpc::transport::DirectTransport;
 use std::net::SocketAddr;
 
 use anyhow::Context as _;
-use nfs_proto::MountClient;
-use nfs_proto::mount::{dirpath, export_node};
-use nfs_proto::xdr::Opaque;
+use nfswolf_nfs3::MountClient;
+use nfswolf_nfs3::wire::mount::{dirpath, export_node};
+use nfswolf_xdr::Opaque;
 
 use crate::proto::auth::AuthFlavor;
 use crate::proto::nfs3::types::FileHandle;
@@ -161,9 +161,9 @@ impl NfsMountClient {
     /// MOUNT v1 EXPORT returns the NFSv2 export list; MOUNT v3 EXPORT returns
     /// the NFSv3 export list.  These are usually identical but CAN differ.
     pub(crate) async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
-        use nfs_proto::mount::exports;
-        use nfs_proto::rpc::RpcClient;
-        use nfs_proto::xdr::Void;
+        use nfswolf_nfs3::wire::mount::exports;
+        use nfswolf_rpc::rpc::RpcClient;
+        use nfswolf_xdr::Void;
 
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
@@ -180,7 +180,7 @@ impl NfsMountClient {
         let io = if let Some(ref p) = self.proxy {
             let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
             let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            nfs_proto::transport::tokio::TokioIo::new(stream)
+            nfswolf_rpc::transport::tokio::TokioIo::new(stream)
         } else if self.privileged_required {
             connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
         } else {
@@ -231,7 +231,7 @@ impl NfsMountClient {
         let io = if let Some(ref p) = self.proxy {
             let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
             let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd at {mount_addr} via {p}"))?;
-            nfs_proto::transport::tokio::TokioIo::new(stream)
+            nfswolf_rpc::transport::tokio::TokioIo::new(stream)
         } else if self.privileged_required {
             connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} (privileged-only)"))?
         } else {
@@ -252,10 +252,10 @@ impl NfsMountClient {
             let mount_addr = SocketAddr::new(addr.ip(), port);
             let io_result = if let Some(ref p) = self.proxy {
                 let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-                crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.map(nfs_proto::transport::tokio::TokioIo::new)
+                crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.map(nfswolf_rpc::transport::tokio::TokioIo::new)
             } else {
-                use nfs_proto::transport::net::Connector as _;
-                nfs_proto::transport::tokio::TokioConnector.connect(mount_addr).await
+                use nfswolf_rpc::transport::net::Connector as _;
+                nfswolf_rpc::transport::tokio::TokioConnector.connect(mount_addr).await
             };
             let Ok(io) = io_result else { continue };
             let mut mc = MountClient::new(DirectTransport::new(io));
@@ -278,11 +278,11 @@ impl Default for NfsMountClient {
 ///
 /// Used to decide whether to retry with a privileged source port.
 /// We walk the anyhow source chain because `mount_once` wraps the raw
-/// `nfs_proto::MountError` with a `with_context`.
+/// `nfswolf_nfs3::MountError` with a `with_context`.
 fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
-    use nfs_proto::MountError;
-    use nfs_proto::mount::mountstat3;
-    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError<nfs_proto::RpcError>>(), Some(MountError::Denied(mountstat3::MNT3ERR_ACCES))))
+    use nfswolf_nfs3::MountError;
+    use nfswolf_nfs3::wire::mount::mountstat3;
+    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError<nfswolf_rpc::RpcError>>(), Some(MountError::Denied(mountstat3::MNT3ERR_ACCES))))
 }
 
 /// Connect to `addr` from a privileged source port (300-1023), falling back to ephemeral.
@@ -293,8 +293,8 @@ fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
 /// against TIME_WAIT pile-up on busy hosts that would otherwise eat the
 /// privileged range and silently slide us onto an ephemeral port.
 async fn connect_privileged_or_fallback(addr: SocketAddr) -> std::io::Result<crate::proto::conn::NfsIo> {
-    use nfs_proto::transport::net::Connector as _;
-    use nfs_proto::transport::tokio::TokioConnector;
+    use nfswolf_rpc::transport::net::Connector as _;
+    use nfswolf_rpc::transport::tokio::TokioConnector;
 
     for local_port in 300_u16..1024 {
         match TokioConnector.connect_with_port(addr, local_port).await {
@@ -318,8 +318,8 @@ async fn connect_privileged_or_fallback(addr: SocketAddr) -> std::io::Result<cra
 /// `MNT3ERR_ACCES`. Returns the last error if every port in 300-1023
 /// fails to bind/connect.
 async fn connect_privileged_only(addr: SocketAddr) -> std::io::Result<crate::proto::conn::NfsIo> {
-    use nfs_proto::transport::net::Connector as _;
-    use nfs_proto::transport::tokio::TokioConnector;
+    use nfswolf_rpc::transport::net::Connector as _;
+    use nfswolf_rpc::transport::tokio::TokioConnector;
 
     let mut last_err: Option<std::io::Error> = None;
     for local_port in 300_u16..1024 {

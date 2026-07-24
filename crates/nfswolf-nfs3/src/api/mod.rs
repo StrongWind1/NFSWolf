@@ -81,13 +81,13 @@ impl FileHandle {
         self.0.is_empty()
     }
 
-    /// Convert to `nfs_proto` wire type.
+    /// Convert to the wire type.
     #[must_use]
     pub fn to_nfs_fh3(&self) -> nfs_fh3 {
         nfs_fh3 { data: Opaque::owned(self.0.clone()) }
     }
 
-    /// Convert from `nfs_proto` wire type.
+    /// Convert from the wire type.
     #[must_use]
     pub fn from_nfs_fh3(fh: &nfs_fh3) -> Self {
         Self(fh.data.as_ref().to_vec())
@@ -115,7 +115,7 @@ pub enum FileType {
 }
 
 impl FileType {
-    /// Convert from `nfs_proto` ftype3.
+    /// Convert from the wire `ftype3`.
     #[must_use]
     pub const fn from_ftype3(ft: ftype3) -> Self {
         match ft {
@@ -166,7 +166,7 @@ pub struct FileAttrs {
 }
 
 impl FileAttrs {
-    /// Convert from `nfs_proto` fattr3.
+    /// Convert from the wire `fattr3`.
     #[must_use]
     pub const fn from_fattr3(a: &fattr3) -> Self {
         Self {

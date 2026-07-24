@@ -1,7 +1,7 @@
 //! NfsConnection  --  one pooled RPC session to an NFS server.
 //!
 //! Adds AUTH_SYS stamp injection, reconnection strategy, and health tracking.
-//! Each connection wraps a single `nfs_proto` TCP connection to one (host, export).
+//! Each connection wraps a single TCP connection to one (host, export).
 //! A second TCP connection to the NFS port is kept for raw RPC calls (NFSv2).
 //! When a SOCKS5 proxy is configured, both connections are tunneled through it.
 
@@ -10,12 +10,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use nfs_proto::nfs3::{GETATTR3args, Nfs3Result, nfs_fh3, nfsstat3};
-use nfs_proto::rpc::RpcClient;
-use nfs_proto::transport::io::{AsyncRead, AsyncWrite};
-use nfs_proto::transport::net::Connector;
-use nfs_proto::transport::tokio::{TokioConnector, TokioIo};
-use nfs_proto::xdr::{Pack, Unpack, Void};
+use nfswolf_nfs3::wire::{GETATTR3args, Nfs3Result, nfs_fh3, nfsstat3};
+use nfswolf_rpc::rpc::RpcClient;
+use nfswolf_rpc::transport::io::{AsyncRead, AsyncWrite};
+use nfswolf_rpc::transport::net::Connector;
+use nfswolf_rpc::transport::tokio::{TokioConnector, TokioIo};
+use nfswolf_xdr::{Pack, Unpack, Void};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -112,7 +112,7 @@ impl NfsConnection {
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
 
         let io = Self::open(nfs_addr, proxy).await.with_context(|| format!("NFS connect to {nfs_addr}"))?;
-        let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), nfs_proto::rpc::opaque_auth::default());
+        let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default());
 
         Ok(Self { rpc, root: Some(mounted.handle.as_bytes().to_vec()), auth_flavors: mounted.auth_flavors, addr, export: export.to_owned(), credential, reconnect, health: ConnectionHealth::new() })
     }
@@ -126,7 +126,7 @@ impl NfsConnection {
     pub(crate) async fn connect_direct(addr: SocketAddr, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
         let io = Self::open(nfs_addr, proxy).await.with_context(|| format!("direct NFS connect to {nfs_addr}"))?;
-        let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), nfs_proto::rpc::opaque_auth::default());
+        let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default());
 
         // Nothing was advertised; assume AUTH_SYS, which is what a raw handle is
         // being used with in the first place.
@@ -149,7 +149,7 @@ impl NfsConnection {
     /// Re-encodes the credential per call so each carries a fresh AUTH_SYS
     /// stamp (RFC 1057 sec. 9.2); a repeated stamp lets a server answer from its
     /// duplicate-request cache, which silently corrupts a UID sweep.
-    pub(crate) async fn call<C, R>(&mut self, program: u32, version: u32, proc: u32, args: &C) -> Result<R, nfs_proto::RpcError>
+    pub(crate) async fn call<C, R>(&mut self, program: u32, version: u32, proc: u32, args: &C) -> Result<R, nfswolf_rpc::RpcError>
     where
         C: Pack + Send + Sync,
         R: Unpack,
@@ -162,7 +162,7 @@ impl NfsConnection {
 
     /// Issue one call under `cred`, restoring this connection's own credential
     /// afterwards so the next pool user is not left carrying a borrowed identity.
-    pub(crate) async fn call_as<C, R>(&mut self, cred: nfs_proto::rpc::opaque_auth<'static>, program: u32, version: u32, proc: u32, args: &C) -> Result<R, nfs_proto::RpcError>
+    pub(crate) async fn call_as<C, R>(&mut self, cred: nfswolf_rpc::rpc::opaque_auth<'static>, program: u32, version: u32, proc: u32, args: &C) -> Result<R, nfswolf_rpc::RpcError>
     where
         C: Pack + Send + Sync,
         R: Unpack,
@@ -268,7 +268,7 @@ pub(crate) fn parse_proxy_addr(proxy: &str) -> anyhow::Result<SocketAddr> {
     stripped.parse::<SocketAddr>().with_context(|| format!("invalid proxy address '{proxy}' (expected host:port or socks5://host:port)"))
 }
 
-/// `nfs_proto` `Connector` implementation that tunnels through a SOCKS5 proxy.
+/// A `Connector` implementation that tunnels through a SOCKS5 proxy.
 ///
 /// Implements the same connection interface as `TokioConnector` so it can be
 /// passed wherever a `Connector` is expected.  `connect_with_port` ignores the source

@@ -20,7 +20,6 @@ members = [
   "crates/nfswolf-nfs2",
   "crates/nfswolf-nfs3",
   "crates/nfswolf-nfs4",
-  "crates/nfs_proto",
 ]
 resolver = "3"
 
@@ -38,7 +37,6 @@ nfswolf-rpc = { version = "0.6.0", path = "crates/nfswolf-rpc" }
 nfswolf-nfs2 = { version = "0.6.0", path = "crates/nfswolf-nfs2" }
 nfswolf-nfs3 = { version = "0.6.0", path = "crates/nfswolf-nfs3" }
 nfswolf-nfs4 = { version = "0.6.0", path = "crates/nfswolf-nfs4" }
-nfs_proto = { version = "0.6.0", path = "crates/nfs_proto" }
 
 [package]
 name = "nfswolf"
@@ -80,14 +78,15 @@ clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# NFS protocol (NFSv2/v3/v4 + MOUNT + portmapper  --  local, pure Rust, no C deps)
-nfs_proto = { workspace = true }
+# NFS protocol stack -- local crates, pure Rust, no C dependencies.
+nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
 nfswolf-nfs3 = { workspace = true }
+nfswolf-nfs4 = { workspace = true }
 
 # Concurrent maps for the connection pool and circuit breaker.
-# Privileged source-port binding lives in nfs_proto (tokio TcpSocket), so the
-# binary needs no socket crate of its own.
+# Privileged source-port binding lives in nfswolf-rpc (tokio TcpSocket), so
+# the binary needs no socket crate of its own.
 dashmap = "6"
 
 # FUSE

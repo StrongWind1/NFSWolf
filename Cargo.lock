@@ -660,17 +660,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nfs_proto"
-version = "0.6.0"
-dependencies = [
- "nfswolf-nfs2",
- "nfswolf-nfs3",
- "nfswolf-nfs4",
- "nfswolf-rpc",
- "nfswolf-xdr",
-]
-
-[[package]]
 name = "nfswolf"
 version = "0.6.0"
 dependencies = [
@@ -685,9 +674,10 @@ dependencies = [
  "ipnet",
  "libc",
  "nfs3_server",
- "nfs_proto",
  "nfswolf-nfs3",
+ "nfswolf-nfs4",
  "nfswolf-rpc",
+ "nfswolf-xdr",
  "predicates",
  "proptest",
  "rand 0.10.2",

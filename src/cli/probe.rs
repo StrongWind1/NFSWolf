@@ -146,7 +146,7 @@ pub(crate) fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
 /// (RFC 1094 S2.3.3), so every successful escalation produces a handle
 /// the caller can use with any later credential.
 pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &str) -> anyhow::Result<FileHandle> {
-    use nfs_proto::nfs3::{LOOKUP3args, Nfs3Result, diropargs3, filename3, nfsstat3};
+    use nfswolf_nfs3::wire::{LOOKUP3args, Nfs3Result, diropargs3, filename3, nfsstat3};
 
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let mut current = root.clone();
@@ -192,7 +192,7 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
 /// Get the owner (uid, gid) of a file/directory handle via GETATTR.
 /// Returns `None` on any error (best-effort).
 async fn get_owner_uid(client: &Nfs3Client, fh: &FileHandle) -> Option<(u32, u32)> {
-    use nfs_proto::nfs3::{GETATTR3args, Nfs3Result};
+    use nfswolf_nfs3::wire::{GETATTR3args, Nfs3Result};
     let args = GETATTR3args { object: fh.to_nfs_fh3() };
     match client.getattr(&args).await {
         Ok(Nfs3Result::Ok(ok)) => Some((ok.obj_attributes.uid, ok.obj_attributes.gid)),

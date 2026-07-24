@@ -13,11 +13,11 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
 use colored::Colorize as _;
-use nfs_proto::nfs3::{
+use nfswolf_nfs3::wire::{
     CREATE3args, GETATTR3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3, createhow3, devicedata3, diropargs3, filename3, mknoddata3, nfspath3,
     nfsstat3, sattr3, set_atime, set_mtime, specdata3, stable_how, symlinkdata3,
 };
-use nfs_proto::xdr::Opaque;
+use nfswolf_xdr::Opaque;
 
 use crate::engine::credential::escalation_list;
 use crate::engine::file_handle::FileHandleAnalyzer;

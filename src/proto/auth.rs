@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use nfs_proto::rpc::opaque_auth;
+use nfswolf_rpc::rpc::opaque_auth;
 
 pub(crate) use nfswolf_rpc::auth::{AuthFlavor, AuthSys};
 
@@ -80,13 +80,13 @@ mod tests {
 
     #[test]
     fn credential_none_encodes_as_auth_none() {
-        use nfs_proto::rpc::auth_flavor;
+        use nfswolf_rpc::rpc::auth_flavor;
         assert_eq!(Credential::None.to_opaque_auth().flavor, auth_flavor::AUTH_NULL);
     }
 
     #[test]
     fn credential_sys_encodes_as_auth_unix() {
-        use nfs_proto::rpc::auth_flavor;
+        use nfswolf_rpc::rpc::auth_flavor;
         let cred = Credential::Sys(AuthSys::new(1000, 1000, "host"));
         assert_eq!(cred.to_opaque_auth().flavor, auth_flavor::AUTH_UNIX);
     }
