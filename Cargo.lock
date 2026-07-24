@@ -664,6 +664,7 @@ name = "nfs_proto"
 version = "0.6.0"
 dependencies = [
  "fastrand",
+ "nfswolf-nfs3",
  "nfswolf-rpc",
  "nfswolf-xdr",
 ]
@@ -684,6 +685,7 @@ dependencies = [
  "libc",
  "nfs3_server",
  "nfs_proto",
+ "nfswolf-nfs3",
  "nfswolf-rpc",
  "predicates",
  "proptest",
@@ -693,10 +695,18 @@ dependencies = [
  "serde_json",
  "sha2",
  "tabled",
- "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nfswolf-nfs3"
+version = "0.6.0"
+dependencies = [
+ "nfswolf-rpc",
+ "nfswolf-xdr",
+ "thiserror",
 ]
 
 [[package]]

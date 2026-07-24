@@ -7,14 +7,14 @@
 //!
 //! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
 
-use crate::nfs3::{
+use crate::wire::{
     ACCESS3args, ACCESS3res, COMMIT3args, COMMIT3res, CREATE3args, CREATE3res, FSINFO3args, FSINFO3res, FSSTAT3args, FSSTAT3res, GETATTR3args, GETATTR3res, LINK3args, LINK3res, LOOKUP3args, LOOKUP3res, MKDIR3args, MKDIR3res, MKNOD3args, MKNOD3res, NFS_PROGRAM, PATHCONF3args, PATHCONF3res, PROGRAM,
     READ3args, READ3res, READDIR3args, READDIR3res, READDIRPLUS3args, READDIRPLUS3res, READLINK3args, READLINK3res, REMOVE3args, REMOVE3res, RENAME3args, RENAME3res, RMDIR3args, RMDIR3res, SETATTR3args, SETATTR3res, SYMLINK3args, SYMLINK3res, VERSION, WRITE3args, WRITE3res,
 };
 use nfswolf_rpc::rpc::opaque_auth;
 use nfswolf_xdr::{Pack, Unpack, Void};
 
-use crate::RpcError;
+use nfswolf_rpc::RpcError;
 use nfswolf_rpc::rpc::RpcClient;
 use nfswolf_rpc::transport::io::{AsyncRead, AsyncWrite};
 

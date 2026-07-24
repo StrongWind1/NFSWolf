@@ -159,6 +159,37 @@ mod tests {
     }
 
     #[test]
+    fn root_has_uid_and_gid_zero() {
+        let cred = AuthSys::root("host");
+        assert_eq!(cred.uid, 0);
+        assert_eq!(cred.gid, 0);
+    }
+
+    #[test]
+    fn new_includes_the_primary_gid_in_the_group_list() {
+        // A server checking group ownership reads the gids list, not just gid,
+        // so omitting the primary group would silently lose group access.
+        let cred = AuthSys::new(1000, 500, "host");
+        assert!(cred.gids.contains(&500), "primary gid missing from gids: {:?}", cred.gids);
+    }
+
+    #[test]
+    fn with_groups_preserves_the_supplied_list() {
+        let cred = AuthSys::with_groups(1000, 100, &[100, 42, 27], "host");
+        assert_eq!(cred.gids, vec![100, 42, 27]);
+    }
+
+    #[test]
+    fn encoded_body_is_non_empty_and_carries_the_identity() {
+        use nfswolf_xdr::Pack as _;
+        let mut buf = Vec::new();
+        let _ = AuthSys::new(1000, 1000, "host").to_opaque_auth(42).pack(&mut buf).expect("pack");
+        assert!(!buf.is_empty(), "an empty credential body would authenticate as nobody");
+        // uid 1000 == 0x3E8 must appear big-endian in the encoded body.
+        assert!(buf.windows(4).any(|w| w == 1000_u32.to_be_bytes()), "uid not found in encoded credential");
+    }
+
+    #[test]
     fn encoding_is_deterministic_for_a_given_stamp() {
         use nfswolf_xdr::Pack as _;
         let cred = AuthSys::new(0, 0, "host");

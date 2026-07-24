@@ -17,6 +17,7 @@ members = [
   "crates/nfswolf-xdr-derive",
   "crates/nfswolf-xdr",
   "crates/nfswolf-rpc",
+  "crates/nfswolf-nfs3",
   "crates/nfs_proto",
 ]
 resolver = "3"
@@ -32,6 +33,7 @@ repository = "https://github.com/StrongWind1/NFSWolf"
 nfswolf-xdr-derive = { version = "0.6.0", path = "crates/nfswolf-xdr-derive" }
 nfswolf-xdr = { version = "0.6.0", path = "crates/nfswolf-xdr" }
 nfswolf-rpc = { version = "0.6.0", path = "crates/nfswolf-rpc" }
+nfswolf-nfs3 = { version = "0.6.0", path = "crates/nfswolf-nfs3" }
 nfs_proto = { version = "0.6.0", path = "crates/nfs_proto" }
 
 [package]
@@ -77,6 +79,7 @@ serde_json = "1"
 # NFS protocol (NFSv2/v3/v4 + MOUNT + portmapper  --  local, pure Rust, no C deps)
 nfs_proto = { workspace = true }
 nfswolf-rpc = { workspace = true }
+nfswolf-nfs3 = { workspace = true }
 
 # Concurrent maps for the connection pool and circuit breaker.
 # Privileged source-port binding lives in nfs_proto (tokio TcpSocket), so the
@@ -99,7 +102,6 @@ sha2 = "0.11"
 
 # Utilities
 rand = "0.10"
-thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
