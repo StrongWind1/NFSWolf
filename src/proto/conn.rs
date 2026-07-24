@@ -1,9 +1,10 @@
 //! NfsConnection  --  one pooled RPC session to an NFS server.
 //!
-//! Adds AUTH_SYS stamp injection, reconnection strategy, and health tracking.
-//! Each connection wraps a single TCP connection to one (host, export).
-//! A second TCP connection to the NFS port is kept for raw RPC calls (NFSv2).
-//! When a SOCKS5 proxy is configured, both connections are tunneled through it.
+//! One TCP session per (host, export, identity), carrying every NFS version's
+//! calls. Adds AUTH_SYS stamp injection and health tracking on top of the
+//! protocol crates, which have neither.
+//!
+//! When a SOCKS5 proxy is configured the session is tunnelled through it.
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::net::{IpAddr, SocketAddr};
@@ -24,6 +25,9 @@ use crate::proto::auth::{AuthSys, Credential, next_stamp};
 /// NFS RPC program number and NFSv3 version, from the protocol crate rather
 /// than restated here (RFC 1813 sec. 3).
 use nfswolf_nfs3::{PROGRAM as NFS_PROGRAM, VERSION as NFS_VERSION_3};
+
+/// `NFSPROC3_GETATTR` -- procedure 1 (RFC 1813 sec. 3.3.1).
+const NFSPROC3_GETATTR: u32 = 1;
 
 /// `NFSPROC3_NULL` -- procedure 0 (RFC 1813 sec. 3.3.0).
 ///
@@ -108,14 +112,23 @@ impl NfsConnection {
     /// `secure` export option and refuse calls from ports above 1023. A proxy
     /// controls its own outbound port, so that step is skipped when tunnelling.
     pub(crate) async fn connect(addr: SocketAddr, export: &str, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
-        let mut mount = crate::proto::mount::NfsMountClient::default();
+        let mut mount = crate::proto::mount::NfsMountClient::default().with_credential(credential.clone());
         let mut portmap = crate::proto::portmap::PortmapClient::default_port();
         if let Some(p) = proxy {
             mount = mount.with_proxy(p.to_owned());
             portmap = portmap.with_proxy(p.to_owned());
         }
         let mounted = mount.mount(addr, export).await.with_context(|| format!("mount {export} on {addr}"))?;
-        let nfs_port = portmap.query_port(addr, NFS_PROGRAM, NFS_VERSION_3).await.unwrap_or(NFS_DEFAULT_PORT);
+        // A filtered portmapper is common and not a reason to give up, but
+        // falling back silently means a server running nfsd off 2049 produces a
+        // bare connect error with the real cause discarded. Say so.
+        let nfs_port = match portmap.query_port(addr, NFS_PROGRAM, NFS_VERSION_3).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(%addr, err = %e, port = NFS_DEFAULT_PORT, "portmapper did not answer for NFSv3; assuming the conventional port");
+                NFS_DEFAULT_PORT
+            },
+        };
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
 
         let io = Self::open(nfs_addr, proxy).await.with_context(|| format!("NFS connect to {nfs_addr}"))?;
@@ -184,10 +197,27 @@ impl NfsConnection {
 
     /// Probe whether this connection is still usable.
     ///
-    /// `NULL` touches no filesystem state and needs no handle, so it works
-    /// whether or not the connection went through MOUNT.
+    /// Where a root handle is available, `GETATTR` against it is used rather
+    /// than `NULL`. `NULL` is answered before any export check, so it stays
+    /// healthy across an `exportfs` reload that has invalidated the mount --
+    /// the connection would be handed back and the next real call would fail
+    /// with `NFS3ERR_STALE`, which arrives inside a successful RPC and so never
+    /// reaches the pool's health logic. `GETATTR` catches that here instead.
+    ///
+    /// A permission denial still means alive: the server processed the call.
+    ///
+    /// Connections that bypassed MOUNT have no root handle, so they fall back
+    /// to `NULL`.
     pub(crate) async fn health_check(&mut self) -> bool {
-        self.call::<Void, Void>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_NULL, &Void).await.is_ok()
+        let Some(root) = self.root.clone() else {
+            return self.call::<Void, Void>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_NULL, &Void).await.is_ok();
+        };
+        let args = GETATTR3args { object: nfs_fh3 { data: nfswolf_xdr::Opaque::owned(root) } };
+        match self.call::<_, nfswolf_nfs3::wire::GETATTR3res>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_GETATTR, &args).await {
+            Ok(Nfs3Result::Ok(_)) => true,
+            Ok(Nfs3Result::Err((status, _))) => matches!(status, nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM),
+            Err(_) => false,
+        }
     }
 
     /// Mark this connection unusable so the pool discards rather than requeues it.
@@ -273,50 +303,6 @@ pub(crate) async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -
 pub(crate) fn parse_proxy_addr(proxy: &str) -> anyhow::Result<SocketAddr> {
     let stripped = proxy.strip_prefix("socks5://").unwrap_or(proxy);
     stripped.parse::<SocketAddr>().with_context(|| format!("invalid proxy address '{proxy}' (expected host:port or socks5://host:port)"))
-}
-
-/// A `Connector` implementation that tunnels through a SOCKS5 proxy.
-///
-/// Implements the same connection interface as `TokioConnector` so it can be
-/// passed wherever a `Connector` is expected.  `connect_with_port` ignores the source
-/// port request because the proxy controls the outbound port.
-struct Socks5Connector {
-    proxy_addr: SocketAddr,
-}
-
-impl Connector for Socks5Connector {
-    type Connection = TokioIo<TcpStream>;
-
-    async fn connect(&self, addr: SocketAddr) -> std::io::Result<Self::Connection> {
-        let stream = socks5_connect(self.proxy_addr, addr).await?;
-        Ok(TokioIo::new(stream))
-    }
-
-    async fn connect_with_port(&self, addr: SocketAddr, _local_port: u16) -> std::io::Result<Self::Connection> {
-        // Source port control is not possible via SOCKS5; fall back to plain connect.
-        tracing::debug!(%addr, "SOCKS5 proxy: ignoring privileged port request");
-        self.connect(addr).await
-    }
-}
-
-/// Borrows the persistent raw-RPC stream so a freshly-credentialed `RpcClient`
-/// can be built per call (see `NfsConnection::call_raw`) without taking
-/// ownership of the stream -- `RpcClient` never returns its IO, so an owned
-/// client could not hand the stream back for the next call.
-///
-/// Forwards directly to the wrapped `NfsIo`'s `AsyncRead`/`AsyncWrite`.
-struct RawIoRef<'a>(&'a mut NfsIo);
-
-impl AsyncRead for RawIoRef<'_> {
-    async fn async_read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.async_read(buf).await
-    }
-}
-
-impl AsyncWrite for RawIoRef<'_> {
-    async fn async_write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.async_write(buf).await
-    }
 }
 
 /// Connect to `addr` from a privileged source port (300-1023), falling back to ephemeral.

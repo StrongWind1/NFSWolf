@@ -104,10 +104,21 @@ impl PooledTransport {
         match self.pool.checkout_for(self.pool_key.clone(), self.credential.clone(), self.reconnect, self.direct_nfs_port).await {
             Ok(conn) => Ok(conn),
             Err(e) => {
-                // A connection that could not be established is exactly the
-                // outage the breaker exists to notice; without this a dead host
-                // is retried at full rate forever.
-                self.circuit.record_failure(addr);
+                // A connection that could not be established is usually the
+                // outage the breaker exists to notice -- without this a dead
+                // host is retried at full rate forever.
+                //
+                // But checkout also performs the MOUNT exchange, and a MOUNT
+                // denial is an authorization decision, not an outage. Counting
+                // it would violate the same rule the RPC path is careful about:
+                // probe an export we are not on the host list for, and ten
+                // denials open a breaker keyed on the address alone, which then
+                // refuses every *other* export on that host -- including the
+                // ones we can reach. That is the tool giving up exactly when it
+                // started learning something.
+                if !is_authorization_denial(&e) {
+                    self.circuit.record_failure(addr);
+                }
                 Err(e)
             },
         }
@@ -179,6 +190,26 @@ impl PooledTransport {
     }
 }
 
+/// Whether a checkout failure was the server refusing us rather than failing.
+///
+/// MOUNT answers a denial with a status code, so the exchange completed and the
+/// host is demonstrably alive. Only a genuine transport fault should feed the
+/// breaker.
+fn is_authorization_denial(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.downcast_ref::<nfswolf_nfs3::MountError<RpcError>>().is_some_and(nfswolf_nfs3::MountError::is_denial))
+}
+
+/// Flatten a checkout failure into the transport's error type.
+///
+/// `anyhow::Error`'s `Display` prints only the outermost context, so the
+/// alternate form is used to keep the whole chain. That chain is the diagnosis:
+/// a checkout failure is usually `MNT3ERR_ACCES` three levels down, which is
+/// what tells an operator to retry from a privileged port rather than that the
+/// host is unreachable.
+fn checkout_error(e: &anyhow::Error) -> RpcError {
+    RpcError::Io(std::io::Error::other(format!("{e:#}")))
+}
+
 impl RpcTransport for PooledTransport {
     type Error = RpcError;
 
@@ -188,7 +219,7 @@ impl RpcTransport for PooledTransport {
         C: Pack + Send + Sync,
         R: Unpack,
     {
-        let mut conn = self.checkout().await.map_err(|e| RpcError::Io(std::io::Error::other(e.to_string())))?;
+        let mut conn = self.checkout().await.map_err(|e| checkout_error(&e))?;
         let timed = tokio::time::timeout(RPC_TIMEOUT, conn.call::<C, R>(prog, vers, proc, args)).await;
         self.finish(conn, timed)
     }
@@ -199,7 +230,7 @@ impl RpcTransport for PooledTransport {
         C: Pack + Send + Sync,
         R: Unpack,
     {
-        let mut conn = self.checkout().await.map_err(|e| RpcError::Io(std::io::Error::other(e.to_string())))?;
+        let mut conn = self.checkout().await.map_err(|e| checkout_error(&e))?;
         let timed = tokio::time::timeout(RPC_TIMEOUT, conn.call_as::<C, R>(cred, prog, vers, proc, args)).await;
         self.finish(conn, timed)
     }

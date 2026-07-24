@@ -18,6 +18,11 @@ pub(crate) mod errors {
 /// An NFSv3 client issuing calls through nfswolf's pooled transport.
 pub(crate) type Nfs3Client = nfswolf_nfs3::Nfs3Client<crate::proto::transport::PooledTransport>;
 
+/// Hostname presented when no AUTH_SYS credential is configured.
+///
+/// Advisory on Linux knfsd, which logs it without using it for access control.
+pub(crate) const DEFAULT_MACHINENAME: &str = "nfswolf";
+
 /// Accessors the binary needs on a pooled NFSv3 client.
 ///
 /// `Nfs3Client` lives in the protocol crate and knows nothing about pools, so
@@ -55,7 +60,11 @@ impl PooledNfs3 for Nfs3Client {
     fn machinename(&self) -> &str {
         match self.transport().credential() {
             crate::proto::auth::Credential::Sys(a) => &a.machinename,
-            crate::proto::auth::Credential::None => "",
+            // Callers feed this straight back into an AUTH_SYS credential, so an
+            // empty string would put a blank machinename on the wire -- a
+            // distinctive artifact in the server's logs, and inconsistent with
+            // the default `fuse.rs` uses for the same purpose.
+            crate::proto::auth::Credential::None => DEFAULT_MACHINENAME,
         }
     }
 

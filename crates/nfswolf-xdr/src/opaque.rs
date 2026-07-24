@@ -92,8 +92,12 @@ impl Unpack for Opaque<'static> {
         let (len, mut bytes_read) = u32::unpack(input)?;
         let len = len as usize;
 
-        let mut buf = vec![0u8; len];
-        input.read_exact(&mut buf).map_err(Error::Io)?;
+        // Never size the allocation from the declared length. This decoder
+        // handles every filename, symlink target, READ payload and file handle
+        // on the wire, so a four-byte header claiming 4 GiB would otherwise
+        // allocate and zero 4 GiB before read_exact discovers the reply is
+        // short (CWE-789). read_bytes grows only as real bytes arrive.
+        let buf = crate::util::read_bytes(input, len)?;
         bytes_read += len;
 
         let len = get_padding(len);

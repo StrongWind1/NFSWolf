@@ -17,7 +17,7 @@ use nfswolf_nfs3::MountClient;
 use nfswolf_nfs3::wire::mount::{dirpath, export_node};
 use nfswolf_xdr::Opaque;
 
-use crate::proto::auth::AuthFlavor;
+use crate::proto::auth::{AuthFlavor, Credential};
 use crate::proto::nfs3::types::FileHandle;
 
 /// Result of a successful MNT call.
@@ -64,19 +64,26 @@ pub(crate) struct NfsMountClient {
     privileged_required: bool,
     /// Optional SOCKS5 proxy for all TCP connections.
     proxy: Option<String>,
+    /// Credential presented on MNT.
+    ///
+    /// Not decorative: a mountd configured `sec=sys` answers `MNT3ERR_ACCES`
+    /// to an AUTH_NONE request, so an unauthenticated MNT fails against
+    /// exports that would otherwise mount. It is also what puts the spoofed
+    /// `--hostname` into the server's rmtab and logs.
+    credential: Credential,
 }
 
 impl NfsMountClient {
     /// Create a mount client that resolves the mount port via portmapper.
     #[must_use]
     pub(crate) const fn new() -> Self {
-        Self { mount_port: None, privileged_required: false, proxy: None }
+        Self { mount_port: None, privileged_required: false, proxy: None, credential: Credential::None }
     }
 
     /// Create a mount client with a fixed mount port (bypasses portmapper).
     #[must_use]
     pub(crate) const fn with_port(port: u16) -> Self {
-        Self { mount_port: Some(port), privileged_required: false, proxy: None }
+        Self { mount_port: Some(port), privileged_required: false, proxy: None, credential: Credential::None }
     }
 
     /// Force this client to bind a privileged source port (<1024) only.
@@ -89,6 +96,13 @@ impl NfsMountClient {
 
     /// Attach a SOCKS5 proxy to this client.
     #[must_use]
+    /// Present `credential` on MNT rather than mounting anonymously.
+    #[must_use]
+    pub(crate) fn with_credential(mut self, credential: Credential) -> Self {
+        self.credential = credential;
+        self
+    }
+
     pub(crate) fn with_proxy(mut self, proxy: String) -> Self {
         self.proxy = Some(proxy);
         self
@@ -115,7 +129,7 @@ impl NfsMountClient {
             Err(e) => {
                 if downcast_mnt_acces(&e) {
                     tracing::warn!(%addr, %export, "MNT returned ACCES from ephemeral source port; retrying with privileged-only");
-                    let priv_client = Self { mount_port: self.mount_port, privileged_required: true, proxy: self.proxy.clone() };
+                    let priv_client = Self { mount_port: self.mount_port, privileged_required: true, proxy: self.proxy.clone(), credential: self.credential.clone() };
                     priv_client.mount_once(addr, export).await.with_context(|| format!("MNT {export} (privileged retry)"))
                 } else {
                     Err(e)
@@ -237,7 +251,7 @@ impl NfsMountClient {
         } else {
             connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))?
         };
-        Ok(MountClient::new(DirectTransport::new(io)))
+        Ok(MountClient::new(DirectTransport::with_auth(io, self.credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default())))
     }
 
     /// Try well-known mountd ports when portmapper is unavailable.
