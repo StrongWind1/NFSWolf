@@ -35,11 +35,11 @@ use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle as FuseFileHandle, FileType as FuseFileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow, WriteFlags,
 };
-use nfs_proto::nfs3::{
+use nfswolf_nfs3::wire::{
     ACCESS3args, COMMIT3args, CREATE3args, FSSTAT3args, GETATTR3args, LINK3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3, createhow3,
     devicedata3, diropargs3, filename3, mknoddata3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime, specdata3, stable_how, symlinkdata3,
 };
-use nfs_proto::xdr::Opaque;
+use nfswolf_xdr::Opaque;
 
 use crate::engine::credential::escalation_list;
 use crate::proto::auth::{AuthSys, Credential};
@@ -446,10 +446,10 @@ impl NfsFuse {
     /// `op` is invoked with a fresh `Nfs3Client` that carries the credential
     /// for the rung being tried; the closure builds the args and calls the
     /// matching NFS3 procedure.
-    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> Result<Nfs3Result<T, U>, nfs_proto::RpcError>
+    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>
     where
         F: Fn(Nfs3Client) -> Fut,
-        Fut: Future<Output = Result<Nfs3Result<T, U>, nfs_proto::RpcError>>,
+        Fut: Future<Output = Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>>,
     {
         // Primary credentials: any per-inode cached winner, then the default.
         // We only fall back to the escalation ladder -- which costs an
@@ -467,7 +467,7 @@ impl NfsFuse {
         }
 
         let mut tried: Vec<(u32, u32)> = Vec::new();
-        let mut last: Option<Result<Nfs3Result<T, U>, nfs_proto::RpcError>> = None;
+        let mut last: Option<Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>> = None;
         for (u, g) in primary {
             tried.push((u, g));
             let c = self.client_for(u, g);
@@ -511,7 +511,7 @@ impl NfsFuse {
             // Unreachable in practice: the ladder always has at least the
             // default rung. Reported as an error rather than a panic so a
             // FUSE callback cannot take the mount down.
-            Err(nfs_proto::RpcError::Io(std::io::Error::other(format!("no credential rungs to try for inode {subject_ino}"))))
+            Err(nfswolf_rpc::RpcError::Io(std::io::Error::other(format!("no credential rungs to try for inode {subject_ino}"))))
         })
     }
 
@@ -1542,7 +1542,7 @@ const fn sattr3_for_perms(perms: u32) -> sattr3 {
 
 /// Convert the optional post-op file handle returned by CREATE / MKNOD /
 /// MKDIR / SYMLINK responses (RFC 1813 §3.3.8 etc.) to our `FileHandle`.
-fn post_op_fh3_to_handle(opt: Nfs3Option<nfs_proto::nfs3::nfs_fh3>) -> Option<FileHandle> {
+fn post_op_fh3_to_handle(opt: Nfs3Option<nfswolf_nfs3::wire::nfs_fh3>) -> Option<FileHandle> {
     match opt {
         Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
         Nfs3Option::None => None,
@@ -1551,7 +1551,7 @@ fn post_op_fh3_to_handle(opt: Nfs3Option<nfs_proto::nfs3::nfs_fh3>) -> Option<Fi
 
 /// Convert an optional post-op attribute reply into our `FileAttrs`.
 #[expect(clippy::missing_const_for_fn, reason = "FileAttrs::from_fattr3 is not const")]
-fn post_op_attr_to_attrs(opt: nfs_proto::nfs3::post_op_attr) -> Option<FileAttrs> {
+fn post_op_attr_to_attrs(opt: nfswolf_nfs3::wire::post_op_attr) -> Option<FileAttrs> {
     match opt {
         Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
         Nfs3Option::None => None,
@@ -1560,7 +1560,7 @@ fn post_op_attr_to_attrs(opt: nfs_proto::nfs3::post_op_attr) -> Option<FileAttrs
 
 /// Reply to a no-data NFS3 callback (REMOVE / RMDIR / RENAME / COMMIT)
 /// based on the server's status code.
-fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, nfs_proto::RpcError>, reply: ReplyEmpty) {
+fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>, reply: ReplyEmpty) {
     match result {
         Ok(Nfs3Result::Ok(_)) => reply.ok(),
         Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),

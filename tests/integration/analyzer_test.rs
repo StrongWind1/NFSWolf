@@ -35,17 +35,17 @@
     clippy::cast_sign_loss,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use nfs_proto::transport::DirectTransport;
+use nfswolf_rpc::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use nfs_proto::MountClient;
-use nfs_proto::PortmapperClient;
-use nfs_proto::mount::dirpath;
-use nfs_proto::transport::tokio::TokioIo;
-use nfs_proto::xdr::Opaque;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
+use nfswolf_nfs3::MountClient;
+use nfswolf_nfs3::wire::mount::dirpath;
+use nfswolf_rpc::PortmapperClient;
+use nfswolf_rpc::transport::tokio::TokioIo;
+use nfswolf_xdr::Opaque;
 use tokio::net::TcpStream;
 
 // --- Helpers ---
@@ -154,6 +154,6 @@ async fn memfs_portmapper_responds_to_nfs_getport() {
 
     let mut pm = portmap_client(port).await;
     // PMAPPROC_GETPORT for NFS v3 -- MemFs serves NFS on the same port it was bound to.
-    let nfs_port = pm.getport(100_003, 3, nfs_proto::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
+    let nfs_port = pm.getport(100_003, 3, nfswolf_rpc::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
     assert_eq!(nfs_port, port, "portmapper must report NFS v3 port matching server bind port");
 }

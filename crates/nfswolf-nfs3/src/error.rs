@@ -118,7 +118,7 @@ pub enum Nfs3Error {
 }
 
 impl Nfs3Error {
-    /// Convert from `nfs_proto` nfsstat3.
+    /// Convert from the wire `nfsstat3` status code.
     #[must_use]
     pub const fn from_nfsstat3(stat: nfsstat3) -> Option<Self> {
         match stat {

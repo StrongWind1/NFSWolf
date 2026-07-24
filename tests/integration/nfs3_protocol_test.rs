@@ -30,18 +30,18 @@
     clippy::cast_sign_loss,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use nfs_proto::transport::DirectTransport;
+use nfswolf_rpc::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use nfs_proto::MountClient;
-use nfs_proto::Nfs3Client;
-use nfs_proto::mount::dirpath;
-use nfs_proto::nfs3::{GETATTR3args, LOOKUP3args, Nfs3Result, READ3args, READDIRPLUS3args, cookieverf3, diropargs3, filename3, nfs_fh3};
-use nfs_proto::transport::tokio::TokioIo;
-use nfs_proto::xdr::Opaque;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
+use nfswolf_nfs3::MountClient;
+use nfswolf_nfs3::Nfs3Client;
+use nfswolf_nfs3::wire::mount::dirpath;
+use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, READ3args, READDIRPLUS3args, cookieverf3, diropargs3, filename3, nfs_fh3};
+use nfswolf_rpc::transport::tokio::TokioIo;
+use nfswolf_xdr::Opaque;
 use tokio::net::TcpStream;
 
 // --- Server helpers ---
@@ -325,7 +325,7 @@ async fn memfs_getattr_file_type_is_regular() {
 
     match nfs.getattr(&GETATTR3args { object: fh }).await.expect("GETATTR must succeed") {
         Nfs3Result::Ok(ok) => {
-            assert_eq!(ok.obj_attributes.type_, nfs_proto::nfs3::ftype3::NF3REG, "file must have type NF3REG");
+            assert_eq!(ok.obj_attributes.type_, nfswolf_nfs3::wire::ftype3::NF3REG, "file must have type NF3REG");
         },
         Nfs3Result::Err((stat, _)) => panic!("GETATTR: {stat:?}"),
     }

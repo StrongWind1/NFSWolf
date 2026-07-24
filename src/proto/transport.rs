@@ -10,10 +10,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nfs_proto::RpcError;
-use nfs_proto::rpc::opaque_auth;
-use nfs_proto::xdr::{Pack, Unpack};
+use nfswolf_rpc::RpcError;
 use nfswolf_rpc::RpcTransport;
+use nfswolf_rpc::rpc::opaque_auth;
+use nfswolf_xdr::{Pack, Unpack};
 
 use crate::proto::auth::Credential;
 use crate::proto::circuit::CircuitBreaker;

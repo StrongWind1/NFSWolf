@@ -12,8 +12,8 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use nfs_proto::rpc::{RPC_VERSION_2, accept_stat_data, call_body, fragment_header, msg_body, opaque_auth, reply_body, rpc_msg};
-use nfs_proto::xdr::{Pack, Unpack, Void};
+use nfswolf_rpc::rpc::{RPC_VERSION_2, accept_stat_data, call_body, fragment_header, msg_body, opaque_auth, reply_body, rpc_msg};
+use nfswolf_xdr::{Pack, Unpack, Void};
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpStream;
 
