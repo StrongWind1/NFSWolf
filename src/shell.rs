@@ -17,6 +17,7 @@ use nfswolf_nfs3::wire::{
     CREATE3args, GETATTR3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3, createhow3, devicedata3, diropargs3, filename3, mknoddata3, nfspath3,
     nfsstat3, sattr3, set_atime, set_mtime, specdata3, stable_how, symlinkdata3,
 };
+use nfswolf_nfs3::{Nfs3Error, Nfs3Fault};
 use nfswolf_xdr::Opaque;
 
 use crate::engine::credential::escalation_list;
@@ -733,11 +734,9 @@ impl NfsShell {
                 return;
             },
         };
-        let args = REMOVE3args { object: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(filename.into_bytes())) } };
-        match self.nfs3.remove(&args).await {
-            Ok(Nfs3Result::Ok(_)) => println!("{}", format!("removed {path}").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("rm", stat),
-            Err(e) => eprintln!("{}", format!("rm: {e}").red()),
+        match self.nfs3.unlink(&parent_fh, &filename).await {
+            Ok(()) => println!("{}", format!("removed {path}").green()),
+            Err(e) => report_write_stat("rm", &e),
         }
     }
 
@@ -759,11 +758,9 @@ impl NfsShell {
                 return;
             },
         };
-        let args = MKDIR3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(dirname.into_bytes())) }, attributes: sattr3::default() };
-        match self.nfs3.mkdir(&args).await {
-            Ok(Nfs3Result::Ok(_)) => println!("{}", format!("created {path}").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("mkdir", stat),
-            Err(e) => eprintln!("{}", format!("mkdir: {e}").red()),
+        match self.nfs3.create_dir(&parent_fh, &dirname, sattr3::default()).await {
+            Ok(_) => println!("{}", format!("created {path}").green()),
+            Err(e) => report_write_stat("mkdir", &e),
         }
     }
 
@@ -785,11 +782,9 @@ impl NfsShell {
                 return;
             },
         };
-        let args = RMDIR3args { object: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(dirname.into_bytes())) } };
-        match self.nfs3.rmdir(&args).await {
-            Ok(Nfs3Result::Ok(_)) => println!("{}", format!("removed {path}").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("rmdir", stat),
-            Err(e) => eprintln!("{}", format!("rmdir: {e}").red()),
+        match self.nfs3.remove_dir(&parent_fh, &dirname).await {
+            Ok(()) => println!("{}", format!("removed {path}").green()),
+            Err(e) => report_write_stat("rmdir", &e),
         }
     }
 
@@ -813,11 +808,9 @@ impl NfsShell {
             },
         };
 
-        let args = RENAME3args { from: diropargs3 { dir: from_fh.to_nfs_fh3(), name: filename3(Opaque::owned(from_name.into_bytes())) }, to: diropargs3 { dir: to_fh.to_nfs_fh3(), name: filename3(Opaque::owned(to_name.into_bytes())) } };
-        match self.nfs3.rename(&args).await {
-            Ok(Nfs3Result::Ok(_)) => println!("{}", format!("{src} -> {dst}").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("mv", stat),
-            Err(e) => eprintln!("{}", format!("mv: {e}").red()),
+        match self.nfs3.rename_entry(&from_fh, &from_name, &to_fh, &to_name).await {
+            Ok(()) => println!("{}", format!("{src} -> {dst}").green()),
+            Err(e) => report_write_stat("mv", &e),
         }
     }
 
@@ -909,11 +902,9 @@ impl NfsShell {
         };
 
         let attrs = sattr3 { mode: Nfs3Option::Some(mode), uid: Nfs3Option::None, gid: Nfs3Option::None, size: Nfs3Option::None, atime: set_atime::DONT_CHANGE, mtime: set_mtime::DONT_CHANGE };
-        let args = SETATTR3args { object: fh.to_nfs_fh3(), new_attributes: attrs, guard: Nfs3Option::None };
-        match self.nfs3.setattr(&args).await {
-            Ok(Nfs3Result::Ok(_)) => println!("{}", format!("mode set to {mode_str} on {path}").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("chmod", stat),
-            Err(e) => eprintln!("{}", format!("chmod: {e}").red()),
+        match self.nfs3.set_attrs(&fh, attrs).await {
+            Ok(()) => println!("{}", format!("mode set to {mode_str} on {path}").green()),
+            Err(e) => report_write_stat("chmod", &e),
         }
     }
 
@@ -944,11 +935,9 @@ impl NfsShell {
         };
 
         let attrs = sattr3 { mode: Nfs3Option::None, uid: uid_opt.map_or(Nfs3Option::None, Nfs3Option::Some), gid: gid_opt.map_or(Nfs3Option::None, Nfs3Option::Some), size: Nfs3Option::None, atime: set_atime::DONT_CHANGE, mtime: set_mtime::DONT_CHANGE };
-        let args = SETATTR3args { object: fh.to_nfs_fh3(), new_attributes: attrs, guard: Nfs3Option::None };
-        match self.nfs3.setattr(&args).await {
-            Ok(Nfs3Result::Ok(_)) => println!("{}", format!("ownership set on {path}").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("chown", stat),
-            Err(e) => eprintln!("{}", format!("chown: {e}").red()),
+        match self.nfs3.set_attrs(&fh, attrs).await {
+            Ok(()) => println!("{}", format!("ownership set on {path}").green()),
+            Err(e) => report_write_stat("chown", &e),
         }
     }
 
@@ -1010,11 +999,9 @@ impl NfsShell {
             },
         };
 
-        let args = SYMLINK3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(link_filename.into_bytes())) }, symlink: symlinkdata3 { symlink_attributes: sattr3::default(), symlink_data: nfspath3(Opaque::owned(target.as_bytes().to_vec())) } };
-        match self.nfs3.symlink(&args).await {
-            Ok(Nfs3Result::Ok(_)) => println!("{}", format!("{linkname} -> {target}").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("symlink", stat),
-            Err(e) => eprintln!("{}", format!("symlink: {e}").red()),
+        match self.nfs3.create_symlink(&parent_fh, &link_filename, target, sattr3::default()).await {
+            Ok(()) => println!("{}", format!("{linkname} -> {target}").green()),
+            Err(e) => report_write_stat("symlink", &e),
         }
     }
 
@@ -1132,8 +1119,8 @@ impl NfsShell {
         let args = MKNOD3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(node_name.into_bytes())) }, what };
         match self.nfs3.mknod(&args).await {
             Ok(Nfs3Result::Ok(_)) => println!("{}", format!("mknod: created {name} ({dev_type} {major}:{minor})").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("mknod", stat),
-            Err(e) => eprintln!("{}", format!("mknod: {e}").red()),
+            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("mknod", &Nfs3Fault::Status(Nfs3Error::from_nfsstat3(stat).unwrap_or(Nfs3Error::ServerFault))),
+            Err(e) => report_write_stat("mknod", &Nfs3Fault::Rpc(e)),
         }
     }
 
@@ -1517,74 +1504,32 @@ async fn list_dir(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<Vec<
 /// RFC 1813 sec. 3.3.17 makes name_attributes optional. After collecting all entries
 /// we issue GETATTR for any that came back without inline attributes.
 async fn try_readdirplus(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<Vec<DirEntryPlus>> {
-    // Page through the directory: READDIRPLUS returns at most `maxcount` bytes
-    // per call, so we loop on the server-supplied cookie + cookieverf until eof
-    // (RFC 1813 sec. 3.3.17). Without this, large directories (e.g. /etc) are
-    // silently truncated to the first ~64 KiB of entries, so `ls` / `tree` /
-    // `find` / scans miss everything past the first page.
-    let mut out: Vec<DirEntryPlus> = Vec::new();
-    let mut cookie: u64 = 0;
-    let mut cookieverf: [u8; 8] = [0u8; 8];
-    loop {
-        let args = READDIRPLUS3args { dir: dir_fh.to_nfs_fh3(), cookie, cookieverf: cookieverf3(cookieverf), dircount: 4096, maxcount: 65_536 };
-        let ok = match nfs3.readdirplus(&args).await? {
-            Nfs3Result::Ok(ok) => ok,
-            Nfs3Result::Err((stat, _)) => anyhow::bail!("READDIRPLUS: {stat:?}"),
-        };
-        cookieverf = ok.cookieverf.0;
-        let eof = ok.reply.eof;
-        let entries = ok.reply.entries.into_inner();
-        let last_cookie = entries.last().map(|e| e.cookie);
-        for e in entries {
-            let name = String::from_utf8_lossy(e.name.as_ref()).into_owned();
-            let attrs: Option<FileAttrs> = match e.name_attributes {
-                Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-                Nfs3Option::None => None,
-            };
-            let handle: Option<FileHandle> = match e.name_handle {
-                Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
-                Nfs3Option::None => None,
-            };
-            out.push(DirEntryPlus { fileid: e.fileid, name, cookie: e.cookie, attrs, handle });
-        }
-        // Stop at eof, on an empty page, at the entry cap (hostile-server guard),
-        // or if the cookie fails to advance (defensive: a buggy server must not
-        // spin us forever).
-        if out.len() >= MAX_DIR_ENTRIES {
-            tracing::warn!(entries = out.len(), "READDIRPLUS hit entry cap; listing truncated (possible hostile server)");
-            break;
-        }
-        match last_cookie {
-            Some(c) if !eof && c != cookie => cookie = c,
-            _ => break,
-        }
+    // The library pages to eof and echoes the server's cookieverf between
+    // pages; MAX_DIR_ENTRIES is the hostile-server bound, since the server
+    // chooses both the page size and the end-of-file flag.
+    let mut out = nfs3.list_dir(dir_fh, MAX_DIR_ENTRIES).await.map_err(|e| anyhow::anyhow!("READDIRPLUS: {e}"))?;
+    if out.len() >= MAX_DIR_ENTRIES {
+        tracing::warn!(entries = out.len(), "READDIRPLUS hit entry cap; listing truncated (possible hostile server)");
     }
 
-    // Fill-in pass: GETATTR any entry without inline attributes (skip . and ..).
+    // Fill-in pass: RFC 1813 sec. 3.3.17 makes both the handle and the
+    // attributes optional, and some servers omit them for entries crossing a
+    // mount boundary. Resolve what is missing so callers see a uniform listing.
     for entry in &mut out {
         if entry.attrs.is_some() || entry.name == "." || entry.name == ".." {
             continue;
         }
-
-        if let Some(ref fh) = entry.handle.clone() {
-            let ga = GETATTR3args { object: fh.to_nfs_fh3() };
-            if let Ok(Nfs3Result::Ok(ok)) = nfs3.getattr(&ga).await {
-                entry.attrs = Some(FileAttrs::from_fattr3(&ok.obj_attributes));
-            }
-        } else {
-            let la = LOOKUP3args { what: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::owned(entry.name.as_bytes().to_vec())) } };
-            if let Ok(Nfs3Result::Ok(ok)) = nfs3.lookup(&la).await {
-                let fh = FileHandle::from_nfs_fh3(&ok.object);
-                let attrs = match ok.obj_attributes {
-                    Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-                    Nfs3Option::None => {
-                        let ga = GETATTR3args { object: fh.to_nfs_fh3() };
-                        if let Ok(Nfs3Result::Ok(ok2)) = nfs3.getattr(&ga).await { Some(FileAttrs::from_fattr3(&ok2.obj_attributes)) } else { None }
-                    },
-                };
-                entry.handle = Some(fh);
-                entry.attrs = attrs;
-            }
+        match entry.handle.clone() {
+            Some(fh) => entry.attrs = nfs3.attrs(&fh).await.ok(),
+            None => {
+                if let Ok((fh, attrs)) = nfs3.resolve(dir_fh, &entry.name).await {
+                    entry.attrs = match attrs {
+                        Some(a) => Some(a),
+                        None => nfs3.attrs(&fh).await.ok(),
+                    };
+                    entry.handle = Some(fh);
+                }
+            },
         }
     }
     Ok(out)
@@ -1686,21 +1631,19 @@ async fn try_read_print(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()
             break;
         }
         let count = remaining.min(CHUNK_SIZE);
-        let args = READ3args { file: fh.to_nfs_fh3(), offset, count };
-        match nfs3.read(&args).await? {
-            Nfs3Result::Ok(ok) => {
-                let data = ok.data.as_ref();
-                if data.is_empty() {
+        match nfs3.read_at(fh, offset, count).await {
+            Ok(chunk) => {
+                if chunk.data.is_empty() {
                     break;
                 }
-                drop(stdout.write_all(data));
-                last_byte = data.last().copied();
-                offset = offset.saturating_add(data.len() as u64);
-                if ok.eof {
+                drop(stdout.write_all(&chunk.data));
+                last_byte = chunk.data.last().copied();
+                offset = offset.saturating_add(chunk.data.len() as u64);
+                if chunk.eof {
                     break;
                 }
             },
-            Nfs3Result::Err((stat, _)) => anyhow::bail!("READ: {stat:?}"),
+            Err(e) => anyhow::bail!("READ: {e}"),
         }
     }
     if last_byte.is_some_and(|b| b != b'\n') {
@@ -1719,24 +1662,13 @@ const READ_ALL_MAX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
 /// Read the entire content of `fh` into a buffer (for cp / download).
 async fn read_all(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    let mut offset = 0u64;
-    loop {
-        let args = READ3args { file: fh.to_nfs_fh3(), offset, count: CHUNK_SIZE };
-        match nfs3.read(&args).await? {
-            Nfs3Result::Ok(ok) => {
-                let data = ok.data.as_ref();
-                buf.extend_from_slice(data);
-                offset = offset.saturating_add(data.len() as u64);
-                if ok.eof || data.is_empty() {
-                    break;
-                }
-                if offset > READ_ALL_MAX_BYTES {
-                    anyhow::bail!("READ aborted at {offset} bytes: exceeds {READ_ALL_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
-                }
-            },
-            Nfs3Result::Err((stat, _)) => anyhow::bail!("READ at {offset}: {stat:?}"),
-        }
+    // The cap is the point: a hostile or buggy server can return endless
+    // non-EOF chunks, and the library loop honours the bound rather than
+    // growing until OOM.
+    let cap = usize::try_from(READ_ALL_MAX_BYTES).unwrap_or(usize::MAX);
+    let buf = nfs3.read_all(fh, cap).await.map_err(|e| anyhow::anyhow!("READ: {e}"))?;
+    if buf.len() >= cap {
+        anyhow::bail!("READ aborted at {cap} bytes: exceeds the {READ_ALL_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
     }
     Ok(buf)
 }
@@ -2497,9 +2429,9 @@ fn is_nfs_rofs(e: &anyhow::Error) -> bool {
 ///
 /// Used by every write command (mkdir, rm, mv, chmod, ...) so a read-only
 /// export gives one consistent explanation instead of a bare status code.
-fn report_write_stat(op: &str, stat: nfsstat3) {
-    eprintln!("{}", format!("{op}: {stat:?}").red());
-    if matches!(stat, nfsstat3::NFS3ERR_ROFS) {
+fn report_write_stat(op: &str, fault: &Nfs3Fault<nfswolf_rpc::RpcError>) {
+    eprintln!("{}", format!("{op}: {fault}").red());
+    if matches!(fault.status(), Some(Nfs3Error::Rofs)) {
         print_rofs_hint();
     }
 }
