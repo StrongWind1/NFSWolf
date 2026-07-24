@@ -8,6 +8,11 @@
 //! Only a tokio backend ships here.  Upstream also offered smol; NFSWolf has
 //! no smol code path, so that backend was dropped during absorption.
 
+pub mod call;
+pub mod direct;
 pub mod io;
 pub mod net;
 pub mod tokio;
+
+pub use call::RpcTransport;
+pub use direct::DirectTransport;

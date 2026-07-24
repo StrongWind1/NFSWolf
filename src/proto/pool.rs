@@ -198,7 +198,7 @@ impl ConnectionPool {
 fn restamp_credential(conn: &mut NfsConnection, credential: Credential) {
     let opaque = match &credential {
         Credential::None => nfs_proto::rpc::opaque_auth::default(),
-        Credential::Sys(auth) => auth.to_opaque_auth(),
+        Credential::Sys(auth) => auth.to_opaque_auth(crate::proto::auth::next_stamp()),
     };
     conn.inner_mut().nfs3_client.set_credential(opaque);
     conn.update_credential(credential);
