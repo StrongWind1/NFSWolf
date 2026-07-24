@@ -7,6 +7,10 @@
 // Struct fields and enum variants are wire-protocol values; individual
 // field docs would be redundant with the module-level RFC citations.
 // Toolkit API  --  not all items are used in currently-implemented phases.
+mod ops;
+
+pub use ops::{DirPage, Nfs3Fault, ReadChunk, WriteAck};
+
 use crate::wire::{fattr3, ftype3, nfs_fh3};
 use nfswolf_xdr::Opaque;
 
