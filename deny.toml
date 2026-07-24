@@ -33,6 +33,7 @@ highlight = "all"
 skip = [
     { crate = "hashbrown@0.14", reason = "dashmap 6.x has not upgraded to hashbrown 0.17" },
     { crate = "nix@0.30", reason = "fuser has not upgraded to nix 0.31" },
+    { crate = "syn@2", reason = "proc-macro crates have not all upgraded to syn 3" },
 ]
 
 [[bans.deny]]
