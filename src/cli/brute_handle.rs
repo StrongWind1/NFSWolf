@@ -24,6 +24,7 @@
 
 use anyhow::{Context as _, bail};
 use clap::Parser;
+use nfswolf_nfs3::Nfs3Error;
 use nfswolf_nfs3::wire::{ACCESS3args, GETATTR3args, Nfs3Result, ftype3, nfsstat3};
 
 use crate::cli::probe::{make_client_with_hostname, make_mount_client, parse_addr_with_port};
@@ -157,14 +158,34 @@ enum Probe {
 }
 
 /// Probe a candidate handle with GETATTR (as uid=0) and classify the result.
+///
+/// The classification is the whole point of the search. `Nfs3Error` already
+/// draws the distinction the oracle depends on, so this reads it from there
+/// rather than re-deriving it from raw status codes: `is_handle_oracle_hit`
+/// means the server parsed the handle and looked it up (right format, wrong
+/// object -- keep varying the inode), `is_handle_oracle_miss` means it rejected
+/// the structure outright (wrong format -- varying the inode is wasted work).
 async fn probe(client: &Nfs3Client, fh: &FileHandle) -> Probe {
     let args = GETATTR3args { object: fh.to_nfs_fh3() };
     match client.getattr(&args).await {
         Ok(Nfs3Result::Ok(ok)) if ok.obj_attributes.type_ == ftype3::NF3DIR => Probe::Dir,
         Ok(Nfs3Result::Ok(_)) => Probe::NonDir,
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => Probe::Denied,
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_STALE, _))) => Probe::Stale,
-        _ => Probe::Miss,
+        Ok(Nfs3Result::Err((status, _))) => {
+            // from_nfsstat3 yields None only for NFS3_OK, which cannot appear
+            // in the Err arm; treat the impossible case as a miss rather than
+            // panicking on a hostile server's malformed reply.
+            let Some(err) = Nfs3Error::from_nfsstat3(status) else { return Probe::Miss };
+            if err.is_permission_denied() {
+                // The server resolved the handle and then refused the caller,
+                // which still confirms the handle is real.
+                Probe::Denied
+            } else if err.is_handle_oracle_hit() {
+                Probe::Stale
+            } else {
+                Probe::Miss
+            }
+        },
+        Err(_) => Probe::Miss,
     }
 }
 
