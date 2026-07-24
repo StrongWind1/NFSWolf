@@ -54,6 +54,24 @@ impl<T: RpcTransport> Nfs2Client<T> {
         Ok(res.attrs)
     }
 
+    /// `NFSPROC_ROOT` (proc 3) -- obsolete, retained for completeness.
+    ///
+    /// RFC 1094 sec. 2.2.3 marks it obsolete: the root handle comes from the
+    /// MOUNT protocol instead. Servers answer `NFSERR_STALE` or drop it. It
+    /// exists here so the crate covers all 18 procedure numbers and so a caller
+    /// probing a server's behaviour can send it deliberately.
+    pub async fn root(&self) -> Result<(), Nfs2Error<T::Error>> {
+        self.raw_call::<Void, Void>(proc::NFSPROC_ROOT, &Void).await.map(|_| ())
+    }
+
+    /// `NFSPROC_WRITECACHE` (proc 7) -- reserved and unused.
+    ///
+    /// RFC 1094 sec. 2.2.7 defines the number and no semantics; no server
+    /// implements it. Present for the same reason as [`root`](Self::root).
+    pub async fn writecache(&self) -> Result<(), Nfs2Error<T::Error>> {
+        self.raw_call::<Void, Void>(proc::NFSPROC_WRITECACHE, &Void).await.map(|_| ())
+    }
+
     /// NFSPROC_LOOKUP (proc 4)  --  look up filename in directory.
     pub async fn lookup(&self, dir: &Nfs2FileHandle, name: &str) -> Result<(Nfs2FileHandle, Nfs2FileAttr), Nfs2Error<T::Error>> {
         let args = DirOpArgs { dir: *dir, name: name.to_owned() };

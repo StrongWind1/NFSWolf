@@ -250,10 +250,16 @@ impl AutoUidResolver {
         // v2 has zero security negotiation (RFC 2623 S2.7); some servers
         // skip root_squash for v2 clients.
         if self.has_v2 {
-            debug!("step 1: trying NFSv2 downgrade credential");
-            // We can't actually call NFSv2 here (we hold an NFSv3 client), but
-            // we record that the path exists for the report. Downgrade is handled
-            // at the scanner level; here we skip to step 2.
+            // NOT IMPLEMENTED. This resolver holds an NFSv3 client and cannot
+            // issue v2 calls, so the downgrade never happens -- the ladder falls
+            // straight through to step 2. Wiring it needs an
+            // `nfswolf_nfs2::Nfs2Client` alongside the v3 one and a v2 probe
+            // that mirrors `try_access`.
+            //
+            // Recorded here rather than silently skipped because DESIGN.md
+            // decision 4 and CLAUDE.md rule 7 both describe v2-first behaviour
+            // that this code does not perform.
+            debug!("step 1: NFSv2 downgrade is not implemented; falling through");
         }
 
         // Step 2: current credential (--uid/--gid or default).
