@@ -21,11 +21,18 @@ use tokio::net::TcpStream;
 
 use crate::proto::auth::{AuthSys, Credential, next_stamp};
 
-/// NFS RPC program number (RFC 1813 sec. 3).
-const NFS_PROGRAM: u32 = 100_003;
-/// NFSv3 program version.
-const NFS_VERSION_3: u32 = 3;
-/// Conventional NFS port, used when the portmapper cannot be reached.
+/// NFS RPC program number and NFSv3 version, from the protocol crate rather
+/// than restated here (RFC 1813 sec. 3).
+use nfswolf_nfs3::{PROGRAM as NFS_PROGRAM, VERSION as NFS_VERSION_3};
+
+/// `NFSPROC3_NULL` -- procedure 0 (RFC 1813 sec. 3.3.0).
+///
+/// Used for health checks because it touches no filesystem state and needs no
+/// file handle, so it works whether or not the connection went through MOUNT.
+const NFSPROC3_NULL: u32 = 0;
+
+/// Conventional NFS port (IANA `nfsd`), used when the portmapper is
+/// unreachable -- a filtered portmapper is common and not a reason to give up.
 const NFS_DEFAULT_PORT: u16 = 2049;
 
 /// Concrete IO type used for all NFS connections.
@@ -180,7 +187,7 @@ impl NfsConnection {
     /// `NULL` touches no filesystem state and needs no handle, so it works
     /// whether or not the connection went through MOUNT.
     pub(crate) async fn health_check(&mut self) -> bool {
-        self.call::<Void, Void>(NFS_PROGRAM, NFS_VERSION_3, 0, &Void).await.is_ok()
+        self.call::<Void, Void>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_NULL, &Void).await.is_ok()
     }
 
     /// Mark this connection unusable so the pool discards rather than requeues it.

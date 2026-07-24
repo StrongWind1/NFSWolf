@@ -166,7 +166,10 @@ impl UidSprayer {
                     aux.insert(0, gid);
                 }
 
-                match conn.call_as::<_, nfswolf_nfs3::wire::ACCESS3res>(crate::proto::auth::AuthSys::with_groups(uid, gid, &aux, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()), 100_003, 3, nfswolf_nfs3::wire::NFS_PROGRAM::NFSPROC3_ACCESS as u32, &args).await {
+                match conn
+                    .call_as::<_, nfswolf_nfs3::wire::ACCESS3res>(crate::proto::auth::AuthSys::with_groups(uid, gid, &aux, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()), nfswolf_nfs3::PROGRAM, nfswolf_nfs3::VERSION, nfswolf_nfs3::wire::NFS_PROGRAM::NFSPROC3_ACCESS as u32, &args)
+                    .await
+                {
                     Ok(res) => match res {
                         nfswolf_nfs3::wire::Nfs3Result::Ok(ok) => {
                             let granted = ok.access;
