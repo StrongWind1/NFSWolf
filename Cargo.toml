@@ -17,6 +17,7 @@ members = [
   "crates/nfswolf-xdr-derive",
   "crates/nfswolf-xdr",
   "crates/nfswolf-rpc",
+  "crates/nfswolf-nfs2",
   "crates/nfswolf-nfs3",
   "crates/nfs_proto",
 ]
@@ -33,6 +34,7 @@ repository = "https://github.com/StrongWind1/NFSWolf"
 nfswolf-xdr-derive = { version = "0.6.0", path = "crates/nfswolf-xdr-derive" }
 nfswolf-xdr = { version = "0.6.0", path = "crates/nfswolf-xdr" }
 nfswolf-rpc = { version = "0.6.0", path = "crates/nfswolf-rpc" }
+nfswolf-nfs2 = { version = "0.6.0", path = "crates/nfswolf-nfs2" }
 nfswolf-nfs3 = { version = "0.6.0", path = "crates/nfswolf-nfs3" }
 nfs_proto = { version = "0.6.0", path = "crates/nfs_proto" }
 

@@ -10,7 +10,6 @@ pub(crate) mod auto_uid;
 pub(crate) mod circuit;
 pub(crate) mod conn;
 pub(crate) mod mount;
-pub(crate) mod nfs2;
 pub(crate) mod nfs3;
 pub(crate) mod nfs4;
 pub(crate) mod pool;

@@ -13,6 +13,7 @@ readme = "README.md"
 [dependencies]
 nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
+nfswolf-nfs2 = { workspace = true }
 nfswolf-nfs3 = { workspace = true }
 
 

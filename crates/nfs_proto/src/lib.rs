@@ -44,8 +44,10 @@
 // `transport`, and `portmap` modules below re-export them under their previous
 // paths so the binary does not churn while the per-version crates are carved
 // out.  This facade is removed once that work lands.
-pub mod nfs2;
 pub mod nfs4;
+
+/// NFSv2 wire types -- re-exported from [`nfswolf_nfs2`].
+pub use nfswolf_nfs2::wire as nfs2;
 
 /// NFSv3 wire types and client -- re-exported from [`nfswolf_nfs3`].
 pub use nfswolf_nfs3::wire as nfs3;
