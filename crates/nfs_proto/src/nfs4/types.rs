@@ -51,97 +51,6 @@ const OP_READ: u32 = 25;
 
 // --- XDR helpers ---
 
-/// Upper bound on bytes/elements pre-reserved from a single wire-supplied
-/// length or count before any payload is read.
-///
-/// The NFS server is untrusted (CLAUDE.md threat model): a tiny malicious
-/// COMPOUND reply can declare a multi-gigabyte opaque length or array count
-/// and drive `Vec::with_capacity` into an OOM-abort (CWE-789 / CWE-770). We
-/// never reserve more than this regardless of the declared size and grow the
-/// buffer only as real bytes arrive, so a forged length cannot amplify a small
-/// reply into a huge allocation. The parsed result for honest inputs is
-/// unchanged; this only bounds the speculative reservation.
-const XDR_PREALLOC_CAP: usize = 1 << 20; // 1 MiB / ~1M elements
-
-/// Read exactly `len` bytes of XDR opaque payload without trusting `len` for
-/// pre-allocation (untrusted-server hardening; see `XDR_PREALLOC_CAP`).
-///
-/// The buffer is reserved only up to `XDR_PREALLOC_CAP` and grown as bytes
-/// actually arrive, bounded by the remaining bytes in the RPC record, so a
-/// forged length cannot force a gigabyte allocation. Returns an `UnexpectedEof`
-/// error when fewer than `len` bytes are available, matching the previous
-/// `read_exact` contract for honest inputs.
-fn read_xdr_bytes(input: &mut impl Read, len: usize) -> crate::xdr::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(len.min(XDR_PREALLOC_CAP));
-    let read = input.take(len as u64).read_to_end(&mut buf).map_err(crate::xdr::Error::Io)?;
-    if read != len {
-        return Err(crate::xdr::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
-    }
-    Ok(buf)
-}
-
-/// Write 1, 2, or 3 zero-padding bytes to reach a 4-byte XDR boundary.
-fn write_xdr_pad(out: &mut impl Write, pad: usize) -> crate::xdr::Result<()> {
-    match pad {
-        1 => out.write_all(&[0u8]).map_err(crate::xdr::Error::Io),
-        2 => out.write_all(&[0u8; 2]).map_err(crate::xdr::Error::Io),
-        3 => out.write_all(&[0u8; 3]).map_err(crate::xdr::Error::Io),
-        _ => Ok(()),
-    }
-}
-
-/// Read and discard 1, 2, or 3 XDR padding bytes.
-fn skip_xdr_pad(input: &mut impl Read, pad: usize) -> crate::xdr::Result<()> {
-    match pad {
-        1 => {
-            let mut b = [0u8; 1];
-            input.read_exact(&mut b).map_err(crate::xdr::Error::Io)
-        },
-        2 => {
-            let mut b = [0u8; 2];
-            input.read_exact(&mut b).map_err(crate::xdr::Error::Io)
-        },
-        3 => {
-            let mut b = [0u8; 3];
-            input.read_exact(&mut b).map_err(crate::xdr::Error::Io)
-        },
-        _ => Ok(()),
-    }
-}
-
-/// Pack an XDR string: 4-byte length, data bytes, zero-pad to 4-byte boundary.
-pub fn pack_xdr_string(s: &str, out: &mut impl Write) -> crate::xdr::Result<usize> {
-    let bytes = s.as_bytes();
-    let len = u32::try_from(bytes.len()).map_err(|_| crate::xdr::Error::ObjectTooLarge(bytes.len()))?;
-    let mut n = len.pack(out)?;
-    out.write_all(bytes).map_err(crate::xdr::Error::Io)?;
-    n += bytes.len();
-    let pad = (4 - (bytes.len() % 4)) % 4;
-    write_xdr_pad(out, pad)?;
-    n += pad;
-    Ok(n)
-}
-
-/// Unpack an XDR string: read 4-byte length, data bytes, skip padding.
-pub fn unpack_xdr_string(input: &mut impl Read) -> crate::xdr::Result<(String, usize)> {
-    let (len, mut n) = u32::unpack(input)?;
-    let len = len as usize;
-    // Do not pre-size from the untrusted length; read bounded by real bytes.
-    let buf = read_xdr_bytes(input, len)?;
-    n += len;
-    let pad = (4 - (len % 4)) % 4;
-    skip_xdr_pad(input, pad)?;
-    n += pad;
-    Ok((String::from_utf8_lossy(&buf).into_owned(), n))
-}
-
-/// Compute packed size for an XDR string.
-#[must_use]
-pub const fn xdr_string_size(s: &str) -> usize {
-    let len = s.len();
-    4 + len + (4 - (len % 4)) % 4
-}
-
 /// Pack XDR opaque<> (variable-length): 4-byte length + bytes + padding.
 fn pack_opaque(data: &[u8], out: &mut impl Write) -> crate::xdr::Result<usize> {
     let len = u32::try_from(data.len()).map_err(|_| crate::xdr::Error::ObjectTooLarge(data.len()))?;
@@ -149,7 +58,7 @@ fn pack_opaque(data: &[u8], out: &mut impl Write) -> crate::xdr::Result<usize> {
     out.write_all(data).map_err(crate::xdr::Error::Io)?;
     n += data.len();
     let pad = (4 - (data.len() % 4)) % 4;
-    write_xdr_pad(out, pad)?;
+    crate::xdr::write_pad(out, pad)?;
     n += pad;
     Ok(n)
 }
@@ -206,7 +115,7 @@ impl Unpack for AttrRequest {
     fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
         let (count, mut n) = u32::unpack(input)?;
         // Clamp the speculative reservation: `count` is attacker-controlled.
-        let mut words = Vec::with_capacity((count as usize).min(XDR_PREALLOC_CAP));
+        let mut words = crate::xdr::vec_with_capacity(count as usize);
         for _ in 0..count {
             let (w, wn) = u32::unpack(input)?;
             words.push(w);
@@ -268,7 +177,7 @@ impl Pack for ArgOp {
         match self {
             Self::Putrootfh | Self::Getfh => 4, // only the opcode (4 bytes), no arguments
             Self::Putfh(fh) => 4 + opaque_packed_size(fh),
-            Self::Lookup(name) | Self::Secinfo(name) => 4 + xdr_string_size(name),
+            Self::Lookup(name) | Self::Secinfo(name) => 4 + crate::xdr::string_packed_size(name),
             Self::Getattr(attrs) => 4 + attrs.packed_size(),
             Self::Readdir { attr_request, .. } => 4 + 8 + 8 + 4 + 4 + attr_request.packed_size(),
             // 4 (opcode) + 16 (stateid) + 8 (offset) + 4 (count)
@@ -286,7 +195,7 @@ impl Pack for ArgOp {
             },
             Self::Lookup(name) => {
                 let mut n = OP_LOOKUP.pack(out)?;
-                n += pack_xdr_string(name, out)?;
+                n += crate::xdr::pack_string(name, out)?;
                 Ok(n)
             },
             Self::Getattr(attrs) => {
@@ -297,7 +206,7 @@ impl Pack for ArgOp {
             Self::Getfh => OP_GETFH.pack(out),
             Self::Secinfo(name) => {
                 let mut n = OP_SECINFO.pack(out)?;
-                n += pack_xdr_string(name, out)?;
+                n += crate::xdr::pack_string(name, out)?;
                 Ok(n)
             },
             Self::Readdir { cookie, cookieverf, dircount, maxcount, attr_request } => {
@@ -340,11 +249,11 @@ pub struct CompoundArgs {
 
 impl Pack for CompoundArgs {
     fn packed_size(&self) -> usize {
-        xdr_string_size(&self.tag) + 4 + 4 + self.ops.iter().map(Pack::packed_size).sum::<usize>()
+        crate::xdr::string_packed_size(&self.tag) + 4 + 4 + self.ops.iter().map(Pack::packed_size).sum::<usize>()
     }
 
     fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
-        let mut n = pack_xdr_string(&self.tag, out)?;
+        let mut n = crate::xdr::pack_string(&self.tag, out)?;
         n += self.minorversion.pack(out)?;
         let count = u32::try_from(self.ops.len()).map_err(|_| crate::xdr::Error::ObjectTooLarge(self.ops.len()))?;
         n += count.pack(out)?;
@@ -434,11 +343,11 @@ pub struct CompoundRes {
 impl Unpack for CompoundRes {
     fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
         let (status, n0) = u32::unpack(input)?;
-        let (tag, n1) = unpack_xdr_string(input)?;
+        let (tag, n1) = crate::xdr::unpack_string(input)?;
         let (count, n2) = u32::unpack(input)?;
         let mut n = n0 + n1 + n2;
         // Clamp the speculative reservation: `count` is attacker-controlled.
-        let mut results = Vec::with_capacity((count as usize).min(XDR_PREALLOC_CAP));
+        let mut results = crate::xdr::vec_with_capacity(count as usize);
         for _ in 0..count {
             let (op_code, on) = u32::unpack(input)?;
             let (op_status, sn) = u32::unpack(input)?;
@@ -485,10 +394,10 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
             let (len, mut n) = u32::unpack(input)?;
             let len = len as usize;
             // Do not pre-size from the untrusted length; read bounded by real bytes.
-            let fh = read_xdr_bytes(input, len)?;
+            let fh = crate::xdr::read_bytes(input, len)?;
             n += len;
             let pad = (4 - (len % 4)) % 4;
-            skip_xdr_pad(input, pad)?;
+            crate::xdr::skip_pad(input, pad)?;
             n += pad;
             Ok((ResOpData::Fh(fh), n))
         },
@@ -512,10 +421,10 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
             let (attrval_len, ln) = u32::unpack(input)?;
             n += ln;
             let attrval_len = attrval_len as usize;
-            let attrvals = read_xdr_bytes(input, attrval_len)?;
+            let attrvals = crate::xdr::read_bytes(input, attrval_len)?;
             n += attrval_len;
             let pad = (4 - (attrval_len % 4)) % 4;
-            skip_xdr_pad(input, pad)?;
+            crate::xdr::skip_pad(input, pad)?;
             n += pad;
             // FATTR4_FSID is bit 8 of word 0; fsid4 = { major u64, minor u64 }.
             // Only safe to read at offset 0 when no lower-numbered word-0
@@ -537,7 +446,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
         OP_SECINFO => {
             let (arr_count, mut n) = u32::unpack(input)?;
             // Clamp the speculative reservation: `arr_count` is attacker-controlled.
-            let mut flavors = Vec::with_capacity((arr_count as usize).min(XDR_PREALLOC_CAP));
+            let mut flavors = crate::xdr::vec_with_capacity(arr_count as usize);
             for _ in 0..arr_count {
                 let (flavor, fn_) = u32::unpack(input)?;
                 n += fn_;
@@ -561,10 +470,10 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
             n += dn;
             let data_len = data_len as usize;
             // Do not pre-size from the untrusted length; read bounded by real bytes.
-            let data = read_xdr_bytes(input, data_len)?;
+            let data = crate::xdr::read_bytes(input, data_len)?;
             n += data_len;
             let pad = (4 - (data_len % 4)) % 4;
-            skip_xdr_pad(input, pad)?;
+            crate::xdr::skip_pad(input, pad)?;
             n += pad;
             Ok((ResOpData::Read { eof: eof_raw != 0, data }, n))
         },
@@ -586,7 +495,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> crate::xdr::Res
                 }
                 let (cookie, cn) = u64::unpack(input)?;
                 n += cn;
-                let (name, nn) = unpack_xdr_string(input)?;
+                let (name, nn) = crate::xdr::unpack_string(input)?;
                 n += nn;
                 // Skip fattr4: bitmap (u32 count + N u32 words) + opaque<> attrvals.
                 let (bitmap_count, bn) = u32::unpack(input)?;
@@ -615,10 +524,10 @@ fn skip_opaque(input: &mut impl Read) -> crate::xdr::Result<usize> {
     let len = len as usize;
     if len > 0 {
         // Read and discard the data bytes, bounded by real bytes (untrusted len).
-        let _discarded = read_xdr_bytes(input, len)?;
+        let _discarded = crate::xdr::read_bytes(input, len)?;
         n += len;
         let pad = (4 - (len % 4)) % 4;
-        skip_xdr_pad(input, pad)?;
+        crate::xdr::skip_pad(input, pad)?;
         n += pad;
     }
     Ok(n)
