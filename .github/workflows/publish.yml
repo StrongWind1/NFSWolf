@@ -79,4 +79,29 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
-          cargo publish --locked
+          # Publish in dependency order: crates.io resolves each new crate's
+          # deps against the registry rather than the workspace, so a crate
+          # cannot go up before everything it depends on is already there. The
+          # binary is last because it depends on all six libraries. Modern
+          # cargo blocks until each upload is visible in the index, so no
+          # sleep between steps is needed.
+          for crate in nfswolf-xdr-derive nfswolf-xdr nfswolf-rpc \
+                       nfswolf-nfs2 nfswolf-nfs3 nfswolf-nfs4 nfswolf; do
+            echo "::group::publish ${crate}"
+            # A release that fails part-way down this list must be resumable,
+            # so a crate that already landed at this version is not an error.
+            # Matching cargo's own message is more precise than querying the
+            # registry, which can lag or rate-limit.
+            if out="$(cargo publish --locked -p "${crate}" 2>&1)"; then
+              echo "${out}"
+              echo "published ${crate}"
+            elif grep -qiE "already (been )?(uploaded|published)|already exists" <<< "${out}"; then
+              echo "${out}"
+              echo "${crate} is already on crates.io at this version, skipping"
+            else
+              echo "${out}" >&2
+              echo "failed to publish ${crate}" >&2
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
