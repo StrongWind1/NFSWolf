@@ -11,8 +11,8 @@ use nfs_proto::nfs3::ACCESS3args;
 use tracing::{debug, warn};
 
 use crate::proto::circuit::CircuitBreaker;
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::stealth::StealthConfig;
 
 /// NFS ACCESS procedure bits (RFC 1813 S3.3.4)  --  re-exported from the
@@ -140,7 +140,7 @@ impl UidSprayer {
 
         // Check out a single connection for the entire spray.  All credential
         // changes are applied inline; no additional MOUNT calls are made.
-        let mut conn = match self.nfs3.checkout_one().await {
+        let mut conn = match self.nfs3.transport().checkout().await {
             Ok(c) => c,
             Err(e) => {
                 warn!(err = %e, "spray: failed to check out connection");
@@ -166,7 +166,7 @@ impl UidSprayer {
                     aux.insert(0, gid);
                 }
 
-                match conn.access_as(&args, uid, gid, &aux, "nfswolf").await {
+                match conn.call_as::<_, nfs_proto::nfs3::ACCESS3res>(crate::proto::auth::AuthSys::with_groups(uid, gid, &aux, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()), 100_003, 3, nfs_proto::nfs3::NFS_PROGRAM::NFSPROC3_ACCESS as u32, &args).await {
                     Ok(res) => match res {
                         nfs_proto::nfs3::Nfs3Result::Ok(ok) => {
                             let granted = ok.access;

@@ -28,6 +28,7 @@
     clippy::indexing_slicing,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
+use nfs_proto::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -50,16 +51,16 @@ async fn start_server(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16)
     (task, port)
 }
 
-async fn mount_client(port: u16) -> MountClient<TokioIo<TcpStream>> {
+async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::new(TokioIo::new(stream))
+    MountClient::new(DirectTransport::new(TokioIo::new(stream)))
 }
 
-async fn nfs3_client(port: u16) -> Nfs3Client<TokioIo<TcpStream>> {
+async fn nfs3_client(port: u16) -> Nfs3Client<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    Nfs3Client::new(TokioIo::new(stream))
+    Nfs3Client::new(DirectTransport::new(TokioIo::new(stream)))
 }
 
 // --- File handle byte-level helpers ---
@@ -166,11 +167,11 @@ async fn memfs_consecutive_mounts_return_same_root_handle() {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
 
     let stream1 = TcpStream::connect(addr).await.expect("connect 1");
-    let mut mc1 = MountClient::new(TokioIo::new(stream1));
+    let mut mc1 = MountClient::new(DirectTransport::new(TokioIo::new(stream1)));
     let mnt1 = mc1.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT 1 must succeed");
 
     let stream2 = TcpStream::connect(addr).await.expect("connect 2");
-    let mut mc2 = MountClient::new(TokioIo::new(stream2));
+    let mut mc2 = MountClient::new(DirectTransport::new(TokioIo::new(stream2)));
     let mnt2 = mc2.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT 2 must succeed");
 
     assert_eq!(mnt1.fhandle.0.as_ref(), mnt2.fhandle.0.as_ref(), "root handle must be stable across mounts (bearer token property)");

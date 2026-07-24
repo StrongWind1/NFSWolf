@@ -16,4 +16,5 @@ pub(crate) mod nfs4;
 pub(crate) mod pool;
 pub(crate) mod portmap;
 pub(crate) mod rpc_probe;
+pub(crate) mod transport;
 pub(crate) mod udp;

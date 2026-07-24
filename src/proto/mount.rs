@@ -9,6 +9,7 @@
 //! - Stealth unmount after handle acquisition (F-2.5)
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
+use nfs_proto::transport::DirectTransport;
 use std::net::SocketAddr;
 
 use anyhow::Context as _;
@@ -211,7 +212,7 @@ impl NfsMountClient {
     /// most NFS servers require `secure` (source port < 1024). Falls back to
     /// an ephemeral port if privileged binding fails AND `privileged_required`
     /// is unset (e.g., not running as root).
-    async fn connect(&self, addr: SocketAddr) -> anyhow::Result<MountClient<crate::proto::conn::NfsIo>> {
+    async fn connect(&self, addr: SocketAddr) -> anyhow::Result<MountClient<DirectTransport<crate::proto::conn::NfsIo>>> {
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
             None => crate::proto::portmap::PortmapClient::default_port(),
@@ -236,7 +237,7 @@ impl NfsMountClient {
         } else {
             connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))?
         };
-        Ok(MountClient::new(io))
+        Ok(MountClient::new(DirectTransport::new(io)))
     }
 
     /// Try well-known mountd ports when portmapper is unavailable.
@@ -257,7 +258,7 @@ impl NfsMountClient {
                 nfs_proto::transport::tokio::TokioConnector.connect(mount_addr).await
             };
             let Ok(io) = io_result else { continue };
-            let mut mc = MountClient::new(io);
+            let mut mc = MountClient::new(DirectTransport::new(io));
             if mc.export().await.is_ok() {
                 tracing::info!(%addr, port, "mountd found on fallback port");
                 return Ok(port);
@@ -281,7 +282,7 @@ impl Default for NfsMountClient {
 fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
     use nfs_proto::MountError;
     use nfs_proto::mount::mountstat3;
-    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError>(), Some(MountError::Denied(mountstat3::MNT3ERR_ACCES))))
+    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError<nfs_proto::RpcError>>(), Some(MountError::Denied(mountstat3::MNT3ERR_ACCES))))
 }
 
 /// Connect to `addr` from a privileged source port (300-1023), falling back to ephemeral.

@@ -43,8 +43,8 @@ use nfs_proto::xdr::Opaque;
 
 use crate::engine::credential::escalation_list;
 use crate::proto::auth::{AuthSys, Credential};
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::{FileAttrs, FileHandle, FileType};
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 
 /// One directory entry paged from READDIRPLUS, owned so it outlives the
 /// per-page response buffer and can be cached across readdir callbacks:
@@ -446,10 +446,10 @@ impl NfsFuse {
     /// `op` is invoked with a fresh `Nfs3Client` that carries the credential
     /// for the rung being tried; the closure builds the args and calls the
     /// matching NFS3 procedure.
-    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> anyhow::Result<Nfs3Result<T, U>>
+    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> Result<Nfs3Result<T, U>, nfs_proto::RpcError>
     where
         F: Fn(Nfs3Client) -> Fut,
-        Fut: Future<Output = anyhow::Result<Nfs3Result<T, U>>>,
+        Fut: Future<Output = Result<Nfs3Result<T, U>, nfs_proto::RpcError>>,
     {
         // Primary credentials: any per-inode cached winner, then the default.
         // We only fall back to the escalation ladder -- which costs an
@@ -467,7 +467,7 @@ impl NfsFuse {
         }
 
         let mut tried: Vec<(u32, u32)> = Vec::new();
-        let mut last: Option<anyhow::Result<Nfs3Result<T, U>>> = None;
+        let mut last: Option<Result<Nfs3Result<T, U>, nfs_proto::RpcError>> = None;
         for (u, g) in primary {
             tried.push((u, g));
             let c = self.client_for(u, g);
@@ -507,7 +507,12 @@ impl NfsFuse {
                 Err(_) => return r,
             }
         }
-        last.unwrap_or_else(|| Err(anyhow::anyhow!("no credential rungs to try for inode {subject_ino}")))
+        last.unwrap_or_else(|| {
+            // Unreachable in practice: the ladder always has at least the
+            // default rung. Reported as an error rather than a panic so a
+            // FUSE callback cannot take the mount down.
+            Err(nfs_proto::RpcError::Io(std::io::Error::other(format!("no credential rungs to try for inode {subject_ino}"))))
+        })
     }
 
     /// LOOKUP with the credential-escalation ladder, with server-side
@@ -1555,7 +1560,7 @@ fn post_op_attr_to_attrs(opt: nfs_proto::nfs3::post_op_attr) -> Option<FileAttrs
 
 /// Reply to a no-data NFS3 callback (REMOVE / RMDIR / RENAME / COMMIT)
 /// based on the server's status code.
-fn reply_empty<T, U>(result: &anyhow::Result<Nfs3Result<T, U>>, reply: ReplyEmpty) {
+fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, nfs_proto::RpcError>, reply: ReplyEmpty) {
     match result {
         Ok(Nfs3Result::Ok(_)) => reply.ok(),
         Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),

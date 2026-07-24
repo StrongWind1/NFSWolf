@@ -109,9 +109,10 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     use crate::proto::auth::{AuthSys, Credential};
     use crate::proto::circuit::CircuitBreaker;
     use crate::proto::conn::ReconnectStrategy;
-    use crate::proto::nfs3::client::Nfs3Client;
     use crate::proto::nfs3::types::FileHandle;
+    use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
     use crate::proto::pool::{ConnectionPool, PoolKey};
+    use crate::proto::transport::PooledTransport;
     use crate::util::stealth::StealthConfig;
 
     tracing::info!(target = %args.target, mountpoint = %args.mountpoint, "mounting NFS export via FUSE");
@@ -185,9 +186,9 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     let pool_key = PoolKey { host: addr, export: export.to_owned(), uid: globals.uid, gid: globals.gid };
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let nfs3 = Arc::new(if let Some(nfs_port) = direct_nfs_port {
-        Nfs3Client::new_direct(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred.clone(), ReconnectStrategy::Persistent, nfs_port)
+        Nfs3Client::new(PooledTransport::new_direct(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred.clone(), ReconnectStrategy::Persistent, nfs_port))
     } else {
-        Nfs3Client::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred.clone(), ReconnectStrategy::Persistent)
+        Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred.clone(), ReconnectStrategy::Persistent))
     });
 
     // Assemble FUSE mount options. This is a security toolkit, so the

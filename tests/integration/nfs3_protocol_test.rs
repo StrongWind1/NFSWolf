@@ -30,6 +30,7 @@
     clippy::cast_sign_loss,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
+use nfs_proto::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -54,16 +55,16 @@ async fn start_server(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16)
     (task, port)
 }
 
-async fn mount_client(port: u16) -> MountClient<TokioIo<TcpStream>> {
+async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::new(TokioIo::new(stream))
+    MountClient::new(DirectTransport::new(TokioIo::new(stream)))
 }
 
-async fn nfs3_client(port: u16) -> Nfs3Client<TokioIo<TcpStream>> {
+async fn nfs3_client(port: u16) -> Nfs3Client<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    Nfs3Client::new(TokioIo::new(stream))
+    Nfs3Client::new(DirectTransport::new(TokioIo::new(stream)))
 }
 
 // --- READDIRPLUS tests ---

@@ -61,10 +61,5 @@ pub use nfswolf_rpc::transport;
 /// XDR codec -- re-exported from [`nfswolf_xdr`].
 pub use nfswolf_xdr as xdr;
 
-mod connect;
-mod error;
-
-pub use connect::{Nfs3Connection, Nfs3ConnectionBuilder};
-pub use error::ConnectError;
 pub use nfswolf_nfs3::{MountClient, MountError, Nfs3Client};
 pub use nfswolf_rpc::{PortmapError, PortmapperClient, RpcClient, RpcError};

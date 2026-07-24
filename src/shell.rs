@@ -22,8 +22,8 @@ use nfs_proto::xdr::Opaque;
 use crate::engine::credential::escalation_list;
 use crate::engine::file_handle::FileHandleAnalyzer;
 use crate::proto::auth::{AuthSys, Credential};
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::utmp::{LastlogRecord, UTMP_RECORD_SIZE, UtType, UtmpRecord, parse_lastlog, parse_passwd, parse_utmp};
 
 /// Maximum bytes to read in a single `cat` command.

@@ -31,8 +31,8 @@ use crate::cli::target::{self, Source};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
 use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer, FsType};
 use crate::proto::auth::{AuthSys, Credential};
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::{FileHandle, access};
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::stealth::StealthConfig;
 
 /// Brute-force NFS file handles.
