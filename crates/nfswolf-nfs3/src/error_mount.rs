@@ -11,7 +11,7 @@ pub enum MountError {
     /// The RPC call failed.
     Rpc(RpcError),
     /// The mount server denied the request with the given status code.
-    Denied(crate::mount::mountstat3),
+    Denied(crate::wire::mount::mountstat3),
 }
 
 impl fmt::Display for MountError {

@@ -13,6 +13,7 @@ readme = "README.md"
 [dependencies]
 nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
+nfswolf-nfs3 = { workspace = true }
 
 # Randomised starting point for the privileged source-port scan, so repeated
 # connections from one host do not always begin at the same port.

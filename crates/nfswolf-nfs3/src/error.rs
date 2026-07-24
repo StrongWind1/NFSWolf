@@ -1,81 +1,126 @@
-//! NFSv3 error codes  --  maps nfs_proto::nfs3::nfsstat3 to domain errors.
+//! NFSv3 status codes, classified.
 //!
 //! The critical distinction for nfswolf is NFS3ERR_STALE (70) vs
 //! NFS3ERR_BADHANDLE (10001)  --  this oracle enables targeted handle
 //! brute-force (F-2.2, RFC 1813 S2.6).
 
-// Enum variants mirror RFC 1813 SAppendix A status codes; individual docs
-// would repeat the error name verbatim.
 // Toolkit API  --  not all items are used in currently-implemented phases.
-use nfs_proto::nfs3::nfsstat3;
+use crate::wire::nfsstat3;
 use thiserror::Error;
 
-/// NFSv3 status codes  --  wraps nfs_proto::nfs3::nfsstat3 with Display.
+/// An NFSv3 protocol status other than `NFS3_OK`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub(crate) enum Nfs3Error {
+pub enum Nfs3Error {
+    /// `NFS3ERR_PERM` (1) -- caller is not the owner.
+    ///
+    /// Like [`Acces`](Self::Acces), a decision rather than a failure.
     #[error("NFS3ERR_PERM: not owner")]
     Perm,
+    /// `NFS3ERR_NOENT` -- no such file or directory.
     #[error("NFS3ERR_NOENT: no such file or directory")]
     NoEnt,
+    /// `NFS3ERR_IO` -- I/O error.
     #[error("NFS3ERR_IO: I/O error")]
     Io,
+    /// `NFS3ERR_NXIO` -- no such device.
     #[error("NFS3ERR_NXIO: no such device")]
     Nxio,
+    /// `NFS3ERR_ACCES` (13) -- permission denied.
+    ///
+    /// Expected, not exceptional, when probing identities: it means the
+    /// server processed the call and refused it. Never treat this as a
+    /// transport fault.
     #[error("NFS3ERR_ACCES: permission denied")]
     Acces,
+    /// `NFS3ERR_EXIST` -- file exists.
     #[error("NFS3ERR_EXIST: file exists")]
     Exist,
+    /// `NFS3ERR_XDEV` -- cross-device link.
     #[error("NFS3ERR_XDEV: cross-device link")]
     Xdev,
+    /// `NFS3ERR_NODEV` -- no such device.
     #[error("NFS3ERR_NODEV: no such device")]
     Nodev,
+    /// `NFS3ERR_NOTDIR` -- not a directory.
     #[error("NFS3ERR_NOTDIR: not a directory")]
     NotDir,
+    /// `NFS3ERR_ISDIR` -- is a directory.
     #[error("NFS3ERR_ISDIR: is a directory")]
     IsDir,
+    /// `NFS3ERR_INVAL` -- invalid argument.
     #[error("NFS3ERR_INVAL: invalid argument")]
     Inval,
+    /// `NFS3ERR_FBIG` -- file too large.
     #[error("NFS3ERR_FBIG: file too large")]
     Fbig,
+    /// `NFS3ERR_NOSPC` -- no space left on device.
     #[error("NFS3ERR_NOSPC: no space left on device")]
     Nospc,
+    /// `NFS3ERR_ROFS` -- read-only filesystem.
     #[error("NFS3ERR_ROFS: read-only filesystem")]
     Rofs,
+    /// `NFS3ERR_MLINK` -- too many hard links.
     #[error("NFS3ERR_MLINK: too many hard links")]
     Mlink,
+    /// `NFS3ERR_NAMETOOLONG` -- name too long.
     #[error("NFS3ERR_NAMETOOLONG: name too long")]
     NameTooLong,
+    /// `NFS3ERR_NOTEMPTY` -- directory not empty.
     #[error("NFS3ERR_NOTEMPTY: directory not empty")]
     NotEmpty,
+    /// `NFS3ERR_DQUOT` -- disk quota exceeded.
     #[error("NFS3ERR_DQUOT: disk quota exceeded")]
     Dquot,
+    /// `NFS3ERR_STALE` (70) -- the handle is well-formed but names
+    /// nothing that currently exists.
+    ///
+    /// Half of the handle oracle: the server understood the handle's
+    /// layout and looked it up, so the format is right and only the
+    /// inode or generation number is wrong. Contrast
+    /// [`BadHandle`](Self::BadHandle).
     #[error("NFS3ERR_STALE: stale file handle")]
     Stale,
+    /// `NFS3ERR_REMOTE` -- too many levels of remote.
     #[error("NFS3ERR_REMOTE: too many levels of remote")]
     Remote,
+    /// `NFS3ERR_BADHANDLE` (10001) -- the handle is not well-formed.
+    ///
+    /// The other half of the oracle: the server rejected the handle's
+    /// structure outright, so the format itself is wrong and varying the
+    /// inode within it will not help.
     #[error("NFS3ERR_BADHANDLE: illegal NFS file handle")]
     BadHandle,
+    /// `NFS3ERR_NOT_SYNC` -- update synchronization mismatch.
     #[error("NFS3ERR_NOT_SYNC: update synchronization mismatch")]
     NotSync,
+    /// `NFS3ERR_BAD_COOKIE` -- stale cookie.
     #[error("NFS3ERR_BAD_COOKIE: stale cookie")]
     BadCookie,
+    /// `NFS3ERR_NOTSUPP` -- operation not supported.
     #[error("NFS3ERR_NOTSUPP: operation not supported")]
     NotSupp,
+    /// `NFS3ERR_TOOSMALL` -- buffer or request too small.
     #[error("NFS3ERR_TOOSMALL: buffer or request too small")]
     TooSmall,
+    /// `NFS3ERR_SERVERFAULT` -- server fault.
     #[error("NFS3ERR_SERVERFAULT: server fault")]
     ServerFault,
+    /// `NFS3ERR_BADTYPE` -- bad type.
     #[error("NFS3ERR_BADTYPE: bad type")]
     BadType,
+    /// `NFS3ERR_JUKEBOX` (10008) -- the request is queued behind slow
+    /// media and should be retried.
     #[error("NFS3ERR_JUKEBOX: resource temporarily unavailable")]
     Jukebox,
+    /// `Unknown NFS3 error code` -- {0}.
     #[error("Unknown NFS3 error code: {0}")]
     Unknown(u32),
 }
 
 impl Nfs3Error {
     /// Convert from `nfs_proto` nfsstat3.
-    pub(crate) const fn from_nfsstat3(stat: nfsstat3) -> Option<Self> {
+    #[must_use]
+    pub const fn from_nfsstat3(stat: nfsstat3) -> Option<Self> {
         match stat {
             nfsstat3::NFS3_OK => None, // not an error
             nfsstat3::NFS3ERR_PERM => Some(Self::Perm),
@@ -112,25 +157,25 @@ impl Nfs3Error {
     /// Is this a transient error (for circuit breaker)?
     /// Permission denials are NOT transient  --  they're expected during UID spraying.
     #[must_use]
-    pub(crate) const fn is_transient(self) -> bool {
+    pub const fn is_transient(self) -> bool {
         matches!(self, Self::Io | Self::Jukebox | Self::ServerFault)
     }
 
     /// Is this a permission error (expected during auto-uid)?
     #[must_use]
-    pub(crate) const fn is_permission_denied(self) -> bool {
+    pub const fn is_permission_denied(self) -> bool {
         matches!(self, Self::Perm | Self::Acces)
     }
 
     /// Handle oracle: BADHANDLE = wrong format, STALE = right format wrong inode/gen.
     #[must_use]
-    pub(crate) const fn is_handle_oracle_hit(self) -> bool {
+    pub const fn is_handle_oracle_hit(self) -> bool {
         matches!(self, Self::Stale)
     }
 
     /// Handle oracle: BADHANDLE = wrong format entirely.
     #[must_use]
-    pub(crate) const fn is_handle_oracle_miss(self) -> bool {
+    pub const fn is_handle_oracle_miss(self) -> bool {
         matches!(self, Self::BadHandle)
     }
 }

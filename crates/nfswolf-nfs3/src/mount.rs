@@ -2,11 +2,11 @@
 //!
 //! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
 
-use crate::mount::{MOUNT_PROGRAM, PROGRAM, VERSION, dirpath, exports, mountlist, mountres3, mountres3_ok};
+use crate::wire::mount::{MOUNT_PROGRAM, PROGRAM, VERSION, dirpath, exports, mountlist, mountres3, mountres3_ok};
 use nfswolf_rpc::rpc::opaque_auth;
 use nfswolf_xdr::{Pack, Unpack, Void};
 
-use crate::error::MountError;
+use crate::MountError;
 use nfswolf_rpc::RpcError;
 use nfswolf_rpc::rpc::RpcClient;
 use nfswolf_rpc::transport::io::{AsyncRead, AsyncWrite};
