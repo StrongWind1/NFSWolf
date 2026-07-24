@@ -322,10 +322,10 @@ struct SymlinkArgs {
 
 impl Pack for SymlinkArgs {
     fn packed_size(&self) -> usize {
-        self.from.packed_size() + string_packed_size(&self.target) + self.attrs.packed_size()
+        self.from.packed_size() + nfs_proto::xdr::string_packed_size(&self.target) + self.attrs.packed_size()
     }
     fn pack(&self, out: &mut impl Write) -> nfs_proto::xdr::Result<usize> {
-        Ok(self.from.pack(out)? + pack_string(&self.target, out)? + self.attrs.pack(out)?)
+        Ok(self.from.pack(out)? + nfs_proto::xdr::pack_string(&self.target, out)? + self.attrs.pack(out)?)
     }
 }
 
@@ -343,7 +343,7 @@ impl Unpack for ReadlinkRes {
         if status != NfsStat::Ok {
             return Ok((Self { status, data: String::new() }, n0));
         }
-        let (data, n1) = unpack_string(input)?;
+        let (data, n1) = nfs_proto::xdr::unpack_string(input)?;
         Ok((Self { status, data }, n0 + n1))
     }
 }
@@ -378,91 +378,6 @@ impl Unpack for ReaddirRes {
         n += dn;
         Ok((Self { status, entries }, n))
     }
-}
-
-// String helpers (duplicated from types.rs to avoid pub exports)
-
-/// Upper bound on bytes pre-reserved from a single wire-supplied length before
-/// any payload is read (untrusted-server hardening; mirrors the NFSv4 decoder).
-///
-/// The NFS server is untrusted (CLAUDE.md threat model): a tiny malicious reply
-/// can declare a multi-gigabyte string length (e.g. a READLINK target or a
-/// READDIR entry name) and drive `Vec` allocation into an OOM-abort
-/// (CWE-789 / CWE-770). We never reserve more than this regardless of the
-/// declared length and grow the buffer only as real bytes arrive, so a forged
-/// length cannot amplify a small reply into a huge allocation.
-const XDR_PREALLOC_CAP: usize = 1 << 20; // 1 MiB
-
-/// Read exactly `len` bytes of XDR payload without trusting `len` for
-/// pre-allocation (see `XDR_PREALLOC_CAP`).
-///
-/// Reserves at most `XDR_PREALLOC_CAP` and grows as bytes actually arrive,
-/// returning `UnexpectedEof` when fewer than `len` bytes are present.
-fn read_xdr_bytes(input: &mut impl Read, len: usize) -> nfs_proto::xdr::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(len.min(XDR_PREALLOC_CAP));
-    let read = input.take(len as u64).read_to_end(&mut buf).map_err(nfs_proto::xdr::Error::Io)?;
-    if read != len {
-        return Err(nfs_proto::xdr::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
-    }
-    Ok(buf)
-}
-
-/// Write 1, 2, or 3 zero-padding bytes to reach a 4-byte XDR boundary.
-fn write_xdr_pad(out: &mut impl Write, pad: usize) -> nfs_proto::xdr::Result<()> {
-    match pad {
-        1 => out.write_all(&[0u8]).map_err(nfs_proto::xdr::Error::Io),
-        2 => out.write_all(&[0u8; 2]).map_err(nfs_proto::xdr::Error::Io),
-        3 => out.write_all(&[0u8; 3]).map_err(nfs_proto::xdr::Error::Io),
-        _ => Ok(()),
-    }
-}
-
-/// Read and discard 1, 2, or 3 XDR padding bytes.
-fn skip_xdr_pad(input: &mut impl Read, pad: usize) -> nfs_proto::xdr::Result<()> {
-    match pad {
-        1 => {
-            let mut b = [0u8; 1];
-            input.read_exact(&mut b).map_err(nfs_proto::xdr::Error::Io)
-        },
-        2 => {
-            let mut b = [0u8; 2];
-            input.read_exact(&mut b).map_err(nfs_proto::xdr::Error::Io)
-        },
-        3 => {
-            let mut b = [0u8; 3];
-            input.read_exact(&mut b).map_err(nfs_proto::xdr::Error::Io)
-        },
-        _ => Ok(()),
-    }
-}
-
-fn pack_string(s: &str, out: &mut impl Write) -> nfs_proto::xdr::Result<usize> {
-    let bytes = s.as_bytes();
-    let len = u32::try_from(bytes.len()).map_err(|_| nfs_proto::xdr::Error::ObjectTooLarge(bytes.len()))?;
-    let mut n = len.pack(out)?;
-    out.write_all(bytes).map_err(nfs_proto::xdr::Error::Io)?;
-    n += bytes.len();
-    let pad = (4 - (bytes.len() % 4)) % 4;
-    write_xdr_pad(out, pad)?;
-    n += pad;
-    Ok(n)
-}
-
-fn unpack_string(input: &mut impl Read) -> nfs_proto::xdr::Result<(String, usize)> {
-    let (len, mut n) = u32::unpack(input)?;
-    let len = len as usize;
-    // Do not pre-size from the untrusted length; read bounded by real bytes.
-    let buf = read_xdr_bytes(input, len)?;
-    n += len;
-    let pad = (4 - (len % 4)) % 4;
-    skip_xdr_pad(input, pad)?;
-    n += pad;
-    Ok((String::from_utf8_lossy(&buf).into_owned(), n))
-}
-
-const fn string_packed_size(s: &str) -> usize {
-    let len = s.len();
-    4 + len + (4 - (len % 4)) % 4
 }
 
 /// Map a non-OK NfsStat to an error.

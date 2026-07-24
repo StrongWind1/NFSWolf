@@ -206,95 +206,6 @@ impl Unpack for FType {
     }
 }
 
-// --- XDR helper for NFS strings (4-byte len + data + padding) ---
-
-/// Write 1, 2, or 3 zero-padding bytes to reach a 4-byte XDR boundary.
-fn write_xdr_pad(out: &mut impl Write, pad: usize) -> crate::xdr::Result<()> {
-    match pad {
-        1 => out.write_all(&[0u8]).map_err(crate::xdr::Error::Io),
-        2 => out.write_all(&[0u8; 2]).map_err(crate::xdr::Error::Io),
-        3 => out.write_all(&[0u8; 3]).map_err(crate::xdr::Error::Io),
-        _ => Ok(()),
-    }
-}
-
-/// Read and discard 1, 2, or 3 XDR padding bytes.
-fn skip_xdr_pad(input: &mut impl Read, pad: usize) -> crate::xdr::Result<()> {
-    match pad {
-        1 => {
-            let mut b = [0u8; 1];
-            input.read_exact(&mut b).map_err(crate::xdr::Error::Io)
-        },
-        2 => {
-            let mut b = [0u8; 2];
-            input.read_exact(&mut b).map_err(crate::xdr::Error::Io)
-        },
-        3 => {
-            let mut b = [0u8; 3];
-            input.read_exact(&mut b).map_err(crate::xdr::Error::Io)
-        },
-        _ => Ok(()),
-    }
-}
-
-/// Upper bound on bytes pre-reserved from a single wire-supplied length before
-/// any payload is read (untrusted-server hardening; mirrors the NFSv4 decoder).
-///
-/// The NFS server is untrusted (CLAUDE.md threat model): a tiny malicious reply
-/// can declare a multi-gigabyte opaque/string length and drive `Vec` allocation
-/// into an OOM-abort (CWE-789 / CWE-770). We never reserve more than this
-/// regardless of the declared length and grow the buffer only as real bytes
-/// arrive, so a forged length cannot amplify a small reply into a huge
-/// allocation. The parsed result for honest inputs is unchanged.
-const XDR_PREALLOC_CAP: usize = 1 << 20; // 1 MiB
-
-/// Read exactly `len` bytes of XDR payload without trusting `len` for
-/// pre-allocation (see `XDR_PREALLOC_CAP`).
-///
-/// Reserves at most `XDR_PREALLOC_CAP` and grows as bytes actually arrive,
-/// bounded by the remaining bytes in the RPC record, so a forged length cannot
-/// force a gigabyte allocation. Returns `UnexpectedEof` when fewer than `len`
-/// bytes are present, matching the previous `read_exact` contract for honest
-/// inputs.
-fn read_xdr_bytes(input: &mut impl Read, len: usize) -> crate::xdr::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(len.min(XDR_PREALLOC_CAP));
-    let read = input.take(len as u64).read_to_end(&mut buf).map_err(crate::xdr::Error::Io)?;
-    if read != len {
-        return Err(crate::xdr::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
-    }
-    Ok(buf)
-}
-
-fn pack_string(s: &str, out: &mut impl Write) -> crate::xdr::Result<usize> {
-    let bytes = s.as_bytes();
-    let len = u32::try_from(bytes.len()).map_err(|_| crate::xdr::Error::ObjectTooLarge(bytes.len()))?;
-    let mut n = len.pack(out)?;
-    out.write_all(bytes).map_err(crate::xdr::Error::Io)?;
-    n += bytes.len();
-    let pad = (4 - (bytes.len() % 4)) % 4;
-    write_xdr_pad(out, pad)?;
-    n += pad;
-    Ok(n)
-}
-
-fn unpack_string(input: &mut impl Read) -> crate::xdr::Result<(String, usize)> {
-    let (len, mut n) = u32::unpack(input)?;
-    let len = len as usize;
-    // Do not pre-size from the untrusted length; read bounded by real bytes.
-    let buf = read_xdr_bytes(input, len)?;
-    n += len;
-    let pad = (4 - (len % 4)) % 4;
-    skip_xdr_pad(input, pad)?;
-    n += pad;
-    let s = String::from_utf8_lossy(&buf).into_owned();
-    Ok((s, n))
-}
-
-const fn string_packed_size(s: &str) -> usize {
-    let len = s.len();
-    4 + len + (4 - (len % 4)) % 4
-}
-
 // --- Fixed 32-byte file handle ---
 
 /// NFSv2 fixed-size file handle (32 bytes, no length prefix).
@@ -511,17 +422,17 @@ pub struct DirOpArgs {
 
 impl Pack for DirOpArgs {
     fn packed_size(&self) -> usize {
-        FHSIZE + string_packed_size(&self.name)
+        FHSIZE + crate::xdr::string_packed_size(&self.name)
     }
     fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
-        Ok(self.dir.pack(out)? + pack_string(&self.name, out)?)
+        Ok(self.dir.pack(out)? + crate::xdr::pack_string(&self.name, out)?)
     }
 }
 
 impl Unpack for DirOpArgs {
     fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
         let (dir, n0) = Nfs2FileHandle::unpack(input)?;
-        let (name, n1) = unpack_string(input)?;
+        let (name, n1) = crate::xdr::unpack_string(input)?;
         Ok((Self { dir, name }, n0 + n1))
     }
 }
@@ -644,9 +555,9 @@ impl Unpack for ReadRes {
         let (data_len, n2) = u32::unpack(input)?;
         let data_len = data_len as usize;
         // Do not pre-size from the untrusted length; read bounded by real bytes.
-        let data = read_xdr_bytes(input, data_len)?;
+        let data = crate::xdr::read_bytes(input, data_len)?;
         let pad = (4 - (data_len % 4)) % 4;
-        skip_xdr_pad(input, pad)?;
+        crate::xdr::skip_pad(input, pad)?;
         Ok((Self { status, attrs, data }, n0 + n1 + n2 + data_len + pad))
     }
 }
@@ -683,7 +594,7 @@ impl Pack for WriteArgs {
         out.write_all(&self.data).map_err(crate::xdr::Error::Io)?;
         n += self.data.len();
         let pad = (4 - (self.data.len() % 4)) % 4;
-        write_xdr_pad(out, pad)?;
+        crate::xdr::write_pad(out, pad)?;
         n += pad;
         Ok(n)
     }
@@ -961,7 +872,7 @@ pub struct ReaddirEntry {
 impl Unpack for ReaddirEntry {
     fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
         let (fileid, n0) = u32::unpack(input)?;
-        let (name, n1) = unpack_string(input)?;
+        let (name, n1) = crate::xdr::unpack_string(input)?;
         let (cookie, n2) = u32::unpack(input)?;
         Ok((Self { fileid, name, cookie }, n0 + n1 + n2))
     }

@@ -22,10 +22,12 @@ pub(crate) mod list;
 pub(crate) mod opaque;
 pub(crate) mod primitives;
 pub(crate) mod traits;
-pub(crate) mod util;
+pub mod util;
 pub(crate) mod void;
 
 pub use nfs_xdr::XdrCodec;
+
+pub use self::util::{PREALLOC_CAP, pack_string, read_bytes, skip_pad, string_packed_size, unpack_string, vec_with_capacity, write_pad};
 
 pub use self::error::Error;
 pub use self::list::{BoundedList, List};
