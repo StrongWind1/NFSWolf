@@ -8,6 +8,7 @@
 //! - Strings: 4-byte length + data + zero-padding to 4-byte boundary
 //! - All integers: big-endian u32
 
+#![allow(non_camel_case_types, reason = "identifiers are transcribed verbatim from RFC 1094's XDR definitions; renaming them to Rust conventions would break the correspondence a reader needs when checking this module against the spec")]
 #![allow(missing_docs, reason = "these are mechanical transcriptions of the RFC's XDR type table -- per-field prose would restate the field name and nothing more. The module doc cites the defining RFC section, which is the real documentation")]
 #![allow(
     missing_copy_implementations,
@@ -911,5 +912,146 @@ impl Unpack for StatFsRes {
         let (bfree, n4) = u32::unpack(input)?;
         let (bavail, n5) = u32::unpack(input)?;
         Ok((Self { status, tsize, bsize, blocks, bfree, bavail }, n0 + n1 + n2 + n3 + n4 + n5))
+    }
+}
+
+// --- Compound argument and result types (RFC 1094) ---
+//
+// Several NFSv2 procedures take two or three concatenated structures with no
+// enclosing tag, so each combination needs its own type. They live here with
+// the rest of the wire format rather than beside the client that happens to
+// use them.
+
+/// Wire-encodes fhandle followed by sattr (for SETATTR).
+#[derive(Debug)]
+pub struct sattrargs {
+    pub fh: Nfs2FileHandle,
+    pub attrs: Nfs2SetAttr,
+}
+
+impl Pack for sattrargs {
+    fn packed_size(&self) -> usize {
+        self.fh.packed_size() + self.attrs.packed_size()
+    }
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        Ok(self.fh.pack(out)? + self.attrs.pack(out)?)
+    }
+}
+
+/// Wire-encodes diropargs followed by sattr (for CREATE/MKDIR).
+#[derive(Debug)]
+pub struct createargs {
+    pub args: DirOpArgs,
+    pub attrs: Nfs2SetAttr,
+}
+
+impl Pack for createargs {
+    fn packed_size(&self) -> usize {
+        self.args.packed_size() + self.attrs.packed_size()
+    }
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        Ok(self.args.pack(out)? + self.attrs.pack(out)?)
+    }
+}
+
+/// Wire-encodes two diropargs (for RENAME).
+#[derive(Debug)]
+pub struct renameargs {
+    pub from: DirOpArgs,
+    pub to: DirOpArgs,
+}
+
+impl Pack for renameargs {
+    fn packed_size(&self) -> usize {
+        self.from.packed_size() + self.to.packed_size()
+    }
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        Ok(self.from.pack(out)? + self.to.pack(out)?)
+    }
+}
+
+/// Wire-encodes fhandle followed by diropargs (for LINK).
+#[derive(Debug)]
+pub struct linkargs {
+    pub fh: Nfs2FileHandle,
+    pub to: DirOpArgs,
+}
+
+impl Pack for linkargs {
+    fn packed_size(&self) -> usize {
+        self.fh.packed_size() + self.to.packed_size()
+    }
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        Ok(self.fh.pack(out)? + self.to.pack(out)?)
+    }
+}
+
+/// Wire-encodes diropargs + target string + sattr (for SYMLINK).
+#[derive(Debug)]
+pub struct symlinkargs {
+    pub from: DirOpArgs,
+    pub target: String,
+    pub attrs: Nfs2SetAttr,
+}
+
+impl Pack for symlinkargs {
+    fn packed_size(&self) -> usize {
+        self.from.packed_size() + nfswolf_xdr::string_packed_size(&self.target) + self.attrs.packed_size()
+    }
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
+        Ok(self.from.pack(out)? + nfswolf_xdr::pack_string(&self.target, out)? + self.attrs.pack(out)?)
+    }
+}
+
+/// READLINK result: status + path string.
+#[derive(Debug)]
+pub struct readlinkres {
+    pub status: NfsStat,
+    pub data: String,
+}
+
+impl Unpack for readlinkres {
+    /// RFC 1094  --  readlinkres is an XDR union: on error status, only the
+    /// status discriminant is present (no path string follows).
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
+        let (status, n0) = NfsStat::unpack(input)?;
+        if status != NfsStat::Ok {
+            return Ok((Self { status, data: String::new() }, n0));
+        }
+        let (data, n1) = nfswolf_xdr::unpack_string(input)?;
+        Ok((Self { status, data }, n0 + n1))
+    }
+}
+
+/// READDIR result: status + entry list + eof flag.
+#[derive(Debug)]
+pub struct readdirres {
+    pub status: NfsStat,
+    pub entries: Vec<ReaddirEntry>,
+}
+
+impl Unpack for readdirres {
+    /// RFC 1094  --  readdirres is an XDR union: on error status, only the
+    /// status discriminant is present (no entry list or EOF flag follows).
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
+        let (status, mut n) = NfsStat::unpack(input)?;
+        if status != NfsStat::Ok {
+            return Ok((Self { status, entries: Vec::new() }, n));
+        }
+        let mut entries = Vec::new();
+        loop {
+            let (has_entry, dn) = u32::unpack(input)?;
+            n += dn;
+            if has_entry == 0 {
+                break;
+            }
+            let (entry, en) = ReaddirEntry::unpack(input)?;
+            n += en;
+            entries.push(entry);
+        }
+        // EOF flag
+        let (_, dn) = u32::unpack(input)?;
+        n += dn;
+        Ok((Self { status, entries }, n))
     }
 }

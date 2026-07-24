@@ -663,6 +663,7 @@ dependencies = [
 name = "nfs_proto"
 version = "0.6.0"
 dependencies = [
+ "nfswolf-nfs2",
  "nfswolf-nfs3",
  "nfswolf-rpc",
  "nfswolf-xdr",
@@ -697,6 +698,14 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nfswolf-nfs2"
+version = "0.6.0"
+dependencies = [
+ "nfswolf-rpc",
+ "nfswolf-xdr",
 ]
 
 [[package]]
