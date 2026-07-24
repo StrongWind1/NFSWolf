@@ -83,8 +83,14 @@ impl SprayResult {
 pub(crate) struct SprayConfig {
     /// Inclusive UID range to iterate.
     pub uid_range: std::ops::RangeInclusive<u32>,
-    /// Inclusive GID range to iterate.
+    /// Inclusive GID range to iterate, when sweeping the cross product.
     pub gid_range: std::ops::RangeInclusive<u32>,
+    /// Try each UID with the matching GID instead of the full cross product.
+    ///
+    /// The Linux per-user-group convention makes this the useful default: uid
+    /// 1000 almost always has gid 1000, so pairing finds the same access in
+    /// `n` probes that the cross product needs `n * 65536` to find.
+    pub paired_gid: bool,
     /// Auxiliary GIDs to permute per UID attempt (injected into AUTH_SYS).
     pub auxiliary_gids: Vec<u32>,
     /// Remote path string (informational, used in log output).
@@ -155,7 +161,8 @@ impl UidSprayer {
         };
 
         'outer: for uid in config.uid_range.clone() {
-            for gid in config.gid_range.clone() {
+            let gids: Vec<u32> = if config.paired_gid { vec![uid] } else { config.gid_range.clone().collect() };
+            for gid in gids {
                 // Check circuit breaker before every attempt.
                 if let Err(e) = self.check_circuit() {
                     warn!(?e, "circuit breaker open, stopping spray");
