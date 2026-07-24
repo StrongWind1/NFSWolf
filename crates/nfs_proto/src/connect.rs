@@ -5,11 +5,12 @@ use std::sync::atomic::AtomicU16;
 
 use crate::mount::{dirpath, mountres3_ok};
 use crate::nfs3::nfs_fh3;
-use crate::rpc::opaque_auth;
-use crate::xdr::Opaque;
+use nfswolf_rpc::rpc::opaque_auth;
+use nfswolf_xdr::Opaque;
 
-use crate::transport::io::{AsyncRead, AsyncWrite};
-use crate::{ConnectError, MountClient, Nfs3Client, RpcError, mount, portmap};
+use crate::{ConnectError, MountClient, Nfs3Client, mount};
+use nfswolf_rpc::transport::io::{AsyncRead, AsyncWrite};
+use nfswolf_rpc::{RpcError, portmap};
 
 /// Contains the connection to the NFS server.
 #[derive(Debug)]
@@ -86,7 +87,7 @@ pub struct Nfs3ConnectionBuilder<C> {
 
 impl<C, S> Nfs3ConnectionBuilder<C>
 where
-    C: crate::transport::net::Connector<Connection = S>,
+    C: nfswolf_rpc::transport::net::Connector<Connection = S>,
     S: AsyncRead + AsyncWrite + Send,
 {
     /// Creates a new `NFSv3` connection builder.
@@ -187,7 +188,7 @@ where
 
 async fn connect_from_privileged_port<C, S>(connector: &C, addr: SocketAddr) -> std::io::Result<S>
 where
-    C: crate::transport::net::Connector<Connection = S>,
+    C: nfswolf_rpc::transport::net::Connector<Connection = S>,
     S: AsyncRead + AsyncWrite + Send,
 {
     use std::io::{Error as IoError, ErrorKind as IoErrorKind};

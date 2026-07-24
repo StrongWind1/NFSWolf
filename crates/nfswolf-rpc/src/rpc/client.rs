@@ -3,9 +3,9 @@
 use std::fmt::Debug;
 
 use crate::rpc::{RPC_VERSION_2, accept_stat_data, call_body, fragment_header, msg_body, opaque_auth, reply_body, rpc_msg};
-use crate::xdr::{Pack, Unpack};
+use nfswolf_xdr::{Pack, Unpack};
 
-use crate::RpcError;
+use crate::error::RpcError;
 use crate::transport::io::{AsyncRead, AsyncWrite};
 
 /// Generic ONC RPC v2 client over a single connection.

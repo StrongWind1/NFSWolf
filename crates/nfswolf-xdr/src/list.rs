@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 
-use crate::xdr::{Pack, Unpack};
+use crate::{Pack, Unpack};
 
 /// Represents a sequence of optional values in NFS3.
 ///
@@ -43,7 +43,7 @@ where
         len
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> crate::Result<usize> {
         let mut len = 0;
         for item in &self.0 {
             len += true.pack(out)?;
@@ -58,7 +58,7 @@ impl<T> Unpack for List<T>
 where
     T: Unpack,
 {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> crate::Result<(Self, usize)> {
         let mut items = Vec::new();
         let mut len = 0;
         loop {

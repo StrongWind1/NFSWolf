@@ -1,8 +1,8 @@
 use crate::portmap::{PMAP_PROG, PROGRAM, VERSION, mapping, pmaplist};
-use crate::xdr::{Pack, Unpack, Void};
+use nfswolf_xdr::{Pack, Unpack, Void};
 
-use crate::RpcError;
 use crate::error::PortmapError;
+use crate::error::RpcError;
 use crate::rpc::RpcClient;
 use crate::transport::io::{AsyncRead, AsyncWrite};
 

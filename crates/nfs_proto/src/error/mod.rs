@@ -1,11 +1,10 @@
-//! Error types
+//! Error types owned by this crate.
+//!
+//! RPC and portmapper errors live in `nfswolf_rpc` and are re-exported from the
+//! crate root for compatibility.
 
 mod connect;
 mod mount;
-mod portmap;
-mod rpc;
 
 pub use connect::ConnectError;
 pub use mount::MountError;
-pub use portmap::PortmapError;
-pub use rpc::RpcError;

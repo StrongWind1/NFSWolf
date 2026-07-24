@@ -3,12 +3,13 @@
 //! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
 
 use crate::mount::{MOUNT_PROGRAM, PROGRAM, VERSION, dirpath, exports, mountlist, mountres3, mountres3_ok};
-use crate::rpc::opaque_auth;
-use crate::xdr::{Pack, Unpack, Void};
+use nfswolf_rpc::rpc::opaque_auth;
+use nfswolf_xdr::{Pack, Unpack, Void};
 
-use crate::error::{MountError, RpcError};
-use crate::rpc::RpcClient;
-use crate::transport::io::{AsyncRead, AsyncWrite};
+use crate::error::MountError;
+use nfswolf_rpc::RpcError;
+use nfswolf_rpc::rpc::RpcClient;
+use nfswolf_rpc::transport::io::{AsyncRead, AsyncWrite};
 
 /// Client for the MOUNT service (program 100005, version 3).
 #[derive(Debug)]

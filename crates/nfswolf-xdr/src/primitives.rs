@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 
-use crate::xdr::util::{add_padding, get_padding, zero_padding};
-use crate::xdr::{Error, Pack, Result, Unpack};
+use crate::util::{add_padding, get_padding, zero_padding};
+use crate::{Error, Pack, Result, Unpack};
 
 impl Pack for Vec<u32> {
     fn packed_size(&self) -> usize {

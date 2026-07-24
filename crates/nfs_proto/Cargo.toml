@@ -11,17 +11,12 @@ categories = ["network-programming", "encoding", "filesystem"]
 readme = "README.md"
 
 [dependencies]
-nfs_xdr = { workspace = true }
+nfswolf-xdr = { workspace = true }
+nfswolf-rpc = { workspace = true }
 
-# XID generation for RPC calls (RFC 5531 sec. 9).  fastrand is a tiny
-# dependency-free PRNG -- no cryptographic strength is needed here.
+# Randomised starting point for the privileged source-port scan, so repeated
+# connections from one host do not always begin at the same port.
 fastrand = "2"
-
-# Async runtime.  Only the tokio adapter is provided; NFSWolf has no smol
-# code path, so the upstream smol backend was dropped during absorption.
-# Privileged source-port binding (the `secure` export option, RFC 2623
-# sec. 2.3.1) goes through tokio's TcpSocket, so socket2 is not needed here.
-tokio = { version = "1", features = ["net", "io-util", "time"] }
 
 [lints]
 workspace = true

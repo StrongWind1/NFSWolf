@@ -11,9 +11,9 @@
 
 use std::io::{Read, Write};
 
-use nfs_xdr::XdrCodec;
+use nfswolf_xdr::XdrCodec;
 
-use crate::xdr::{List, Opaque, Pack, Unpack, Void};
+use nfswolf_xdr::{List, Opaque, Pack, Unpack, Void};
 
 pub const PROGRAM: u32 = 100_003;
 pub const VERSION: u32 = 3;
@@ -81,7 +81,7 @@ where
         }
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         let len = match self {
             Self::Ok(v) => nfsstat3::NFS3_OK.pack(out)? + v.pack(out)?,
             Self::Err((code, err)) => code.pack(out)? + err.pack(out)?,
@@ -95,7 +95,7 @@ where
     T: Unpack,
     E: Unpack,
 {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let mut sz = 0;
         let (code, dsz): (nfsstat3, usize) = Unpack::unpack(input)?;
         sz += dsz;
@@ -998,19 +998,19 @@ impl Pack for mknoddata3 {
         }
     }
 
-    fn pack(&self, out: &mut impl Write) -> crate::xdr::Result<usize> {
+    fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         Ok(match self {
             Self::NF3CHR(val) => ftype3::NF3CHR.pack(out)? + val.pack(out)?,
             Self::NF3BLK(val) => ftype3::NF3BLK.pack(out)? + val.pack(out)?,
             Self::NF3SOCK(val) => ftype3::NF3SOCK.pack(out)? + val.pack(out)?,
             Self::NF3FIFO(val) => ftype3::NF3FIFO.pack(out)? + val.pack(out)?,
-            &Self::default => return Err(crate::xdr::Error::InvalidEnumValue(u32::MAX)),
+            &Self::default => return Err(nfswolf_xdr::Error::InvalidEnumValue(u32::MAX)),
         })
     }
 }
 
 impl Unpack for mknoddata3 {
-    fn unpack(input: &mut impl Read) -> crate::xdr::Result<(Self, usize)> {
+    fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let mut sz = 0;
         let (v, dsz): (u32, _) = Unpack::unpack(input)?;
         sz += dsz;
@@ -1071,7 +1071,7 @@ pub enum NFS_PROGRAM {
 }
 
 impl TryFrom<u32> for NFS_PROGRAM {
-    type Error = crate::xdr::Error;
+    type Error = nfswolf_xdr::Error;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
@@ -1097,7 +1097,7 @@ impl TryFrom<u32> for NFS_PROGRAM {
             19 => Ok(Self::NFSPROC3_FSINFO),
             20 => Ok(Self::NFSPROC3_PATHCONF),
             21 => Ok(Self::NFSPROC3_COMMIT),
-            _ => Err(crate::xdr::Error::InvalidEnumValue(value)),
+            _ => Err(nfswolf_xdr::Error::InvalidEnumValue(value)),
         }
     }
 }
