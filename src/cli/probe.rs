@@ -17,9 +17,10 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
 use crate::proto::mount::NfsMountClient;
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::proto::pool::{ConnectionPool, PoolKey};
+use crate::proto::transport::PooledTransport;
 use crate::util::stealth::StealthConfig;
 
 /// Build a MOUNT client honouring the global `--mount-port`,
@@ -116,8 +117,8 @@ pub(crate) fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32
     let cred = Credential::Sys(auth);
     let key = PoolKey { host: addr, export: export.to_owned(), uid, gid };
     let client = match nfs_port {
-        Some(p) => Nfs3Client::new_direct(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, p),
-        None => Nfs3Client::new(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent),
+        Some(p) => Nfs3Client::new(PooledTransport::new_direct(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, p)),
+        None => Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent)),
     };
     (pool, circuit, client)
 }

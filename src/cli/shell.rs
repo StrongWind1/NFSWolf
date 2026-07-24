@@ -18,9 +18,10 @@ use crate::cli::{GlobalOpts, H_BEHAVIOR, H_PERMISSIONS, H_TARGET};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::proto::pool::{ConnectionPool, PoolKey};
+use crate::proto::transport::PooledTransport;
 use crate::shell::{NfsCompleter, NfsShell};
 use crate::util::stealth::StealthConfig;
 
@@ -127,9 +128,9 @@ pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let nfs3 = if let Some(nfs_port) = direct_nfs_port {
-        Arc::new(Nfs3Client::new_direct(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, nfs_port))
+        Arc::new(Nfs3Client::new(PooledTransport::new_direct(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, nfs_port)))
     } else {
-        Arc::new(Nfs3Client::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent))
+        Arc::new(Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent)))
     };
 
     let mut shell = NfsShell::new(Arc::clone(&nfs3), root_fh, args.allow_write, globals.hostname.clone());

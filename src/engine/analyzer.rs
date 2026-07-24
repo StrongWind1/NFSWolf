@@ -240,10 +240,11 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
 use crate::proto::mount::{ExportEntry, NfsMountClient};
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::proto::portmap::PortmapClient;
+use crate::proto::transport::PooledTransport;
 use crate::util::stealth::StealthConfig;
 
 /// Configuration for a full analysis run against one host.
@@ -383,7 +384,7 @@ impl Analyzer {
             // Inherit the configured stealth pacing so every per-export probe RPC
             // (escape, btrfs, nohide, symlink, squash writes, file-access reads)
             // honours --delay/--jitter (Critical Design Rule 10).
-            Arc::new(Nfs3Client::new(pool, key, circuit, self.stealth.clone(), cred, ReconnectStrategy::Persistent))
+            Arc::new(Nfs3Client::new(PooledTransport::new(pool, key, circuit, self.stealth.clone(), cred, ReconnectStrategy::Persistent)))
         };
 
         let fh = mount_res.handle;

@@ -30,8 +30,8 @@ use tracing::{debug, warn};
 
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::{DirEntryPlus, FileHandle};
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::stealth::StealthConfig;
 
 /// Default maximum brute-force attempts per file.

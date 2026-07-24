@@ -22,9 +22,10 @@ use crate::engine::analyzer::{AnalysisResult, AnalyzeConfig, Analyzer};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
-use crate::proto::nfs3::client::Nfs3Client;
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::proto::portmap::PortmapClient;
+use crate::proto::transport::PooledTransport;
 use crate::util::stealth::StealthConfig;
 
 /// Deep security audit of one or more NFS servers.
@@ -202,7 +203,7 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
     let cred = Credential::Sys(AuthSys::new(globals.uid, globals.gid, &globals.hostname));
     let pool_key = PoolKey { host: addr, export: "/".to_owned(), uid: globals.uid, gid: globals.gid };
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
-    let nfs3 = Arc::new(Nfs3Client::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent));
+    let nfs3 = Arc::new(Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent)));
 
     let mount_client = crate::cli::probe::make_mount_client(globals);
     let portmap_client = match &globals.proxy {

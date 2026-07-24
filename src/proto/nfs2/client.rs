@@ -223,7 +223,7 @@ impl Nfs2Client {
         self.circuit.check_or_wait(addr)?;
         let mut conn = self.pool.checkout(self.pool_key.clone(), self.credential.clone(), ReconnectStrategy::Persistent).await.context("pool checkout")?;
         self.stealth.wait().await;
-        let res = conn.call_raw::<C, R>(NFS_PROGRAM, NFS_VERSION, proc, args).await;
+        let res = conn.call::<C, R>(NFS_PROGRAM, NFS_VERSION, proc, args).await;
         // Release the pooled connection (and its admission permit) before
         // recording the result; the breaker reads `res`, not `conn`.
         drop(conn);
@@ -238,7 +238,7 @@ impl Nfs2Client {
         match &res {
             Ok(_) => self.circuit.record_success(addr),
             Err(e) => {
-                let is_outage = e.downcast_ref::<nfs_proto::RpcError>().is_some_and(|rpc| matches!(rpc, nfs_proto::RpcError::Io(_)));
+                let is_outage = matches!(e, nfs_proto::RpcError::Io(_));
                 if is_outage {
                     self.circuit.record_failure(addr);
                 }
