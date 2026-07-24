@@ -41,7 +41,7 @@ use nfswolf_nfs3::wire::{
 };
 use nfswolf_xdr::Opaque;
 
-use crate::engine::credential::credential_ladder;
+use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::{FileAttrs, FileHandle, FileType};
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
@@ -321,17 +321,11 @@ impl NfsFuse {
         let owner = {
             let fh_opt = self.state.lock().expect("inode map lock").fh_for(subject_ino).cloned();
             match fh_opt {
-                Some(fh) => {
-                    let args = GETATTR3args { object: fh.to_nfs_fh3() };
-                    match self.nfs3.getattr(&args).await {
-                        Ok(Nfs3Result::Ok(ok)) => Some((ok.obj_attributes.uid, ok.obj_attributes.gid)),
-                        _ => None,
-                    }
-                },
+                Some(fh) => self.nfs3.attrs(&fh).await.ok().map(|a| ((a.uid, a.gid), a.mode)),
                 None => None,
             }
         };
-        credential_ladder(caller, owner)
+        credential_ladder_with(caller, owner.map(|f| f.0), owner.map(|f| f.1), &[])
     }
 
     /// Retrieve the file handle for inode `ino` from the inode map.

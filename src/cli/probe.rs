@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 
 use crate::cli::GlobalOpts;
-use crate::engine::credential::credential_ladder;
+use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
@@ -152,8 +152,8 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
         match client.resolve(&current, component).await {
             Ok((fh, _)) => current = fh,
             Err(e) if e.is_permission_denied() => {
-                let owner_uid = get_owner_uid(client, &current).await;
-                let try_uids = credential_ladder((client.uid(), client.gid()), owner_uid);
+                let facts = get_owner_uid(client, &current).await;
+                let try_uids = credential_ladder_with((client.uid(), client.gid()), facts.map(|f| f.0), facts.map(|f| f.1), &[]);
 
                 let mut resolved = false;
                 for (uid, gid) in &try_uids {
@@ -181,8 +181,8 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
 
 /// Get the owner (uid, gid) of a file/directory handle via GETATTR.
 /// Returns `None` on any error (best-effort).
-async fn get_owner_uid(client: &Nfs3Client, fh: &FileHandle) -> Option<(u32, u32)> {
-    client.attrs(fh).await.ok().map(|a| (a.uid, a.gid))
+async fn get_owner_uid(client: &Nfs3Client, fh: &FileHandle) -> Option<((u32, u32), u32)> {
+    client.attrs(fh).await.ok().map(|a| ((a.uid, a.gid), a.mode))
 }
 
 #[cfg(test)]

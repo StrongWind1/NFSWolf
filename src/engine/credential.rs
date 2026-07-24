@@ -40,14 +40,53 @@
 /// NFSv2 downgrade -- some servers apply `root_squash` on their v3 path but not
 /// their v2 one -- is not implemented; see the backlog.
 pub(crate) fn credential_ladder(caller: (u32, u32), owner: Option<(u32, u32)>) -> Vec<(u32, u32)> {
-    let mut list = Vec::with_capacity(14);
+    credential_ladder_with(caller, owner, None, &[])
+}
+
+/// The credential ladder, shortened by whatever the caller already knows.
+///
+/// `mode` is the target's permission bits and `observed` is any identity seen
+/// owning files on this export. Both come free with calls already made -- the
+/// GETATTR that produced the refusal carries the mode, and every READDIRPLUS
+/// carries per-entry ownership -- so using them costs nothing and removes
+/// guesswork.
+///
+/// # Why the mode bits can shorten the ladder
+///
+/// POSIX grants access through exactly one triad: owner if the UID matches,
+/// else group if a GID matches, else other. So when `mode & 0o007 == 0`, an
+/// identity that is neither the owner nor in the owning group has no path to
+/// the file at all, and every service-account rung below is provably wasted
+/// RPC. Root still gets its rung, because a `no_root_squash` export bypasses
+/// the check entirely.
+///
+/// This is deterministic, not a guess: it follows from the mode the server
+/// itself reported.
+pub(crate) fn credential_ladder_with(caller: (u32, u32), owner: Option<(u32, u32)>, mode: Option<u32>, observed: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut list = Vec::with_capacity(16);
     if let Some((file_uid, file_group)) = owner {
         list.push((file_uid, file_group));
         if file_group != caller.1 {
             list.push((caller.0, file_group));
         }
     }
+    // Root bypasses the permission check outright where the export allows it,
+    // so it is worth trying whatever the mode says.
     list.push((0, 0));
+
+    // With no "other" access, nothing outside the owner and the owning group
+    // can reach the file. Stop rather than probe identities that cannot work.
+    let other_has_access = mode.is_none_or(|m| m & 0o007 != 0);
+    if !other_has_access {
+        let mut seen = std::collections::HashSet::new();
+        list.retain(|pair| seen.insert(*pair));
+        return list;
+    }
+
+    // Identities actually seen owning files here beat guesses about which
+    // service accounts might exist.
+    list.extend_from_slice(observed);
+
     list.push((65534, 65534));
     list.push((1000, 1000));
     list.push((33, 33)); // www-data
@@ -64,6 +103,31 @@ pub(crate) fn credential_ladder(caller: (u32, u32), owner: Option<(u32, u32)>) -
     let mut seen = std::collections::HashSet::new();
     list.retain(|pair| seen.insert(*pair));
     list
+}
+
+/// Identities seen owning entries in a directory listing, most common first.
+///
+/// Every READDIRPLUS reply carries `uid`/`gid` per entry, so after one listing
+/// the identities that actually exist on this export are known. Ranking those
+/// beats guessing at service accounts: an export owned by uid 5000 will never
+/// be reached by trying www-data.
+///
+/// The caller's own identity is excluded -- it has already been refused.
+pub(crate) fn observed_identities(entries: &[crate::proto::nfs3::types::DirEntryPlus], caller: (u32, u32)) -> Vec<(u32, u32)> {
+    let mut counts: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    for e in entries {
+        if let Some(ref a) = e.attrs {
+            let pair = (a.uid, a.gid);
+            if pair != caller {
+                *counts.entry(pair).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut ranked: Vec<((u32, u32), usize)> = counts.into_iter().collect();
+    // Frequency first; the pair itself breaks ties so the order is stable
+    // across runs rather than dependent on HashMap iteration.
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.into_iter().map(|(pair, _)| pair).collect()
 }
 
 #[cfg(test)]
@@ -100,6 +164,61 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for pair in &list {
             assert!(seen.insert(*pair), "duplicate credential {pair:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+
+    /// The whole point of the mode check: with no "other" bits, an identity
+    /// that is neither the owner nor in the owning group cannot reach the file,
+    /// so probing service accounts is provably wasted RPC.
+    #[test]
+    fn no_other_access_prunes_the_guess_rungs() {
+        let full = credential_ladder_with((1000, 1000), Some((0, 42)), None, &[]);
+        let pruned = credential_ladder_with((1000, 1000), Some((0, 42)), Some(0o640), &[]);
+        assert!(pruned.len() < full.len(), "mode 0640 must shorten the ladder");
+        assert!(!pruned.contains(&(33, 33)), "www-data cannot read a 0640 file it does not own");
+        assert!(!pruned.contains(&(65534, 65534)), "nobody cannot either");
+    }
+
+    #[test]
+    fn owner_and_group_rungs_survive_pruning() {
+        let pruned = credential_ladder_with((1000, 1000), Some((0, 42)), Some(0o640), &[]);
+        assert!(pruned.contains(&(0, 42)), "the owner must always be tried");
+        assert!(pruned.contains(&(1000, 42)), "caller claiming the file's group must be tried");
+    }
+
+    #[test]
+    fn root_survives_pruning_because_no_root_squash_bypasses_mode() {
+        let pruned = credential_ladder_with((1000, 1000), Some((5000, 5000)), Some(0o600), &[]);
+        assert!(pruned.contains(&(0, 0)), "root bypasses the permission check where the export allows it");
+    }
+
+    #[test]
+    fn world_readable_keeps_the_full_ladder() {
+        let full = credential_ladder_with((1000, 1000), Some((0, 42)), None, &[]);
+        let with_mode = credential_ladder_with((1000, 1000), Some((0, 42)), Some(0o644), &[]);
+        assert_eq!(full.len(), with_mode.len(), "0644 grants other-read, so nothing can be ruled out");
+    }
+
+    #[test]
+    fn observed_identities_outrank_the_guesses() {
+        let ladder = credential_ladder_with((1000, 1000), None, Some(0o644), &[(5000, 5000)]);
+        let observed_at = ladder.iter().position(|p| *p == (5000, 5000)).expect("observed pair present");
+        let guess_at = ladder.iter().position(|p| *p == (33, 33)).expect("guess present");
+        assert!(observed_at < guess_at, "an identity seen owning files beats a guess at www-data");
+    }
+
+    #[test]
+    fn ladder_never_repeats_a_credential() {
+        // The owner colliding with root is the common case worth guarding.
+        let ladder = credential_ladder_with((0, 0), Some((0, 0)), None, &[(0, 0), (1000, 1000)]);
+        let mut seen = std::collections::HashSet::new();
+        for pair in &ladder {
+            assert!(seen.insert(*pair), "credential {pair:?} tried twice");
         }
     }
 }

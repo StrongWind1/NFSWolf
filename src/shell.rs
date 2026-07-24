@@ -20,7 +20,7 @@ use nfswolf_nfs3::wire::{
 use nfswolf_nfs3::{Nfs3Error, Nfs3Fault};
 use nfswolf_xdr::Opaque;
 
-use crate::engine::credential::credential_ladder;
+use crate::engine::credential::{credential_ladder_with, observed_identities};
 use crate::engine::file_handle::FileHandleAnalyzer;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
@@ -1483,9 +1483,9 @@ async fn list_dir(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<Vec<
         Err(e) if !is_nfs_acces(&e) => return Err(e),
         Err(_) => {},
     }
-    let owner = getattr_owner(nfs3, dir_fh).await;
+    let facts = getattr_owner(nfs3, dir_fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder(caller, owner) {
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
         let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match try_readdirplus(&esc, dir_fh).await {
             Ok(v) => {
@@ -1542,9 +1542,9 @@ async fn lookup_one(nfs3: &Nfs3Client, dir: &FileHandle, name: &str) -> anyhow::
         Err(e) if !is_nfs_acces(&e) => return Err(e),
         Err(_) => {},
     }
-    let owner = getattr_owner(nfs3, dir).await;
+    let facts = getattr_owner(nfs3, dir).await;
     let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder(caller, owner) {
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
         let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match try_lookup_one(&esc, dir, name).await {
             Ok(r) => {
@@ -1584,9 +1584,8 @@ async fn getattr_fh(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<FileAt
 }
 
 /// Fetch the owner (uid, gid) of a handle via GETATTR. Returns None on error.
-async fn getattr_owner(nfs3: &Nfs3Client, fh: &FileHandle) -> Option<(u32, u32)> {
-    let args = GETATTR3args { object: fh.to_nfs_fh3() };
-    if let Ok(Nfs3Result::Ok(ok)) = nfs3.getattr(&args).await { Some((ok.obj_attributes.uid, ok.obj_attributes.gid)) } else { None }
+async fn getattr_owner(nfs3: &Nfs3Client, fh: &FileHandle) -> Option<((u32, u32), u32)> {
+    nfs3.attrs(fh).await.ok().map(|a| ((a.uid, a.gid), a.mode))
 }
 
 /// Read file and print to stdout with credential escalation on ACCES.
@@ -1596,9 +1595,9 @@ async fn read_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()
         Err(e) if !is_nfs_acces(&e) => return Err(e),
         Err(_) => {},
     }
-    let owner = getattr_owner(nfs3, fh).await;
+    let facts = getattr_owner(nfs3, fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder(caller, owner) {
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
         let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match try_read_print(&esc, fh).await {
             Ok(()) => {
@@ -1725,9 +1724,9 @@ async fn download_file_escalated(nfs3: &Nfs3Client, fh: &FileHandle, dest_path: 
         Err(e) if !is_nfs_acces(&e) => return Err(e),
         Err(_) => {},
     }
-    let owner = getattr_owner(nfs3, fh).await;
+    let facts = getattr_owner(nfs3, fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder(caller, owner) {
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
         let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match download_file(&esc, fh, dest_path, total_size).await {
             Ok(r) => {
@@ -1751,9 +1750,9 @@ async fn getattr_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result
         Err(e) if !is_nfs_acces(&e) => return Err(e),
         Err(_) => {},
     }
-    let owner = getattr_owner(nfs3, fh).await;
+    let facts = getattr_owner(nfs3, fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder(caller, owner) {
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
         let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         if let Ok(a) = getattr_fh(&esc, fh).await {
             return Ok(a);
@@ -2464,9 +2463,9 @@ async fn read_all_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Resul
         Err(e) if !is_nfs_acces(&e) => return Err(e),
         Err(_) => {},
     }
-    let owner = getattr_owner(nfs3, fh).await;
+    let facts = getattr_owner(nfs3, fh).await;
     let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder(caller, owner) {
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
         let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
         match read_all(&esc, fh).await {
             Ok(buf) => {
