@@ -27,6 +27,7 @@
 // The XdrCodec derive macro expands to `::nfswolf_xdr::` paths so that it works
 // for downstream crates.  This alias lets those same paths resolve when the
 // macro is used inside this crate.
+#[expect(unused_extern_crates, reason = "required for derive macro path resolution")]
 extern crate self as nfswolf_xdr;
 
 mod error;

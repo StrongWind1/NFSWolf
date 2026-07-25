@@ -22,7 +22,7 @@ use crate::engine::analyzer::{AnalysisResult, AnalyzeConfig, Analyzer};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
-use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
+use crate::proto::nfs3::Nfs3Client;
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::proto::portmap::PortmapClient;
 use crate::proto::transport::PooledTransport;

@@ -1,4 +1,5 @@
 //! NFSv2 backend for the unified shell.
+#![allow(dead_code, reason = "V2Ops -- used by cli::shell but lint cannot trace through generic code")]
 
 use nfswolf_nfs2::Nfs2Client;
 use nfswolf_nfs2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};

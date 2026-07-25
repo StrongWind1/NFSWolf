@@ -237,8 +237,7 @@ pub(crate) struct PortmapBypassResult {
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use nfswolf_nfs3::wire::{CREATE3args, FSSTAT3args, GETATTR3args, READDIRPLUS3args, REMOVE3args, cookieverf3, createhow3, diropargs3, filename3, sattr3};
-use nfswolf_xdr::Opaque;
+use nfswolf_nfs3::wire::{cookieverf3, sattr3};
 
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus};
 use crate::proto::auth::{AuthSys, Credential};

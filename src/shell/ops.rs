@@ -1,4 +1,5 @@
 //! Version-neutral types and the `ShellOps` trait.
+#![allow(dead_code, reason = "ShellOps infrastructure -- not yet wired into the v3 shell")]
 //!
 //! Every shell command is written against `ShellOps` rather than a specific
 //! NFS version. `V3Ops` and `V2Ops` implement the trait, so the shell gets

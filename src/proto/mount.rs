@@ -94,8 +94,6 @@ impl NfsMountClient {
         self
     }
 
-    /// Attach a SOCKS5 proxy to this client.
-    #[must_use]
     /// Present `credential` on MNT rather than mounting anonymously.
     #[must_use]
     pub(crate) fn with_credential(mut self, credential: Credential) -> Self {
@@ -140,7 +138,7 @@ impl NfsMountClient {
 
     /// Single MNT attempt without the auto-retry wrapper.
     async fn mount_once(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
-        let mut client = self.connect(addr).await?;
+        let client = self.connect(addr).await?;
         let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
         let res = client.mnt(path).await.with_context(|| format!("MNT {export}"))?;
         let handle = FileHandle::from_bytes(res.fhandle.0.as_ref());
@@ -207,7 +205,7 @@ impl NfsMountClient {
 
     /// Unmount an export (MNTPROC_UMNT) for stealth cleanup (F-2.5).
     pub(crate) async fn unmount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
-        let mut client = self.connect(addr).await?;
+        let client = self.connect(addr).await?;
         let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
         client.umnt(path).await.with_context(|| format!("UMNT {export}"))
     }
@@ -217,7 +215,7 @@ impl NfsMountClient {
     /// A wildcard or empty `allowed_hosts` list means the export is world-accessible (F-7.1).
     /// This queries MOUNT version 3 -- for NFSv2 exports, use `list_exports_v1()`.
     pub(crate) async fn list_exports(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
-        let mut client = self.connect(addr).await?;
+        let client = self.connect(addr).await?;
         let exports = client.export().await.context("MNTPROC_EXPORT v3")?;
         Ok(exports.into_inner().into_iter().map(export_entry_from).collect())
     }
@@ -267,7 +265,7 @@ impl NfsMountClient {
     ///
     /// Returns hosts that currently have an export mounted.
     pub(crate) async fn dump_clients(&self, addr: SocketAddr) -> anyhow::Result<Vec<MountedClient>> {
-        let mut client = self.connect(addr).await?;
+        let client = self.connect(addr).await?;
         let dump = client.dump().await.context("MNTPROC_DUMP")?;
         Ok(dump.into_inner().into_iter().map(|b| MountedClient { hostname: bytes_to_string(b.ml_hostname.0.as_ref()), directory: bytes_to_string(b.ml_directory.0.as_ref()) }).collect())
     }
@@ -329,7 +327,7 @@ impl NfsMountClient {
                 nfswolf_rpc::transport::tokio::TokioConnector.connect(mount_addr).await
             };
             let Ok(io) = io_result else { continue };
-            let mut mc = MountClient::new(DirectTransport::new(io));
+            let mc = MountClient::new(DirectTransport::new(io));
             if mc.export().await.is_ok() {
                 tracing::info!(%addr, port, "mountd found on fallback port");
                 return Ok(port);

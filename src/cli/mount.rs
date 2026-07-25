@@ -109,8 +109,8 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     use crate::proto::auth::{AuthSys, Credential};
     use crate::proto::circuit::CircuitBreaker;
     use crate::proto::conn::ReconnectStrategy;
+    use crate::proto::nfs3::Nfs3Client;
     use crate::proto::nfs3::types::FileHandle;
-    use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
     use crate::proto::pool::{ConnectionPool, PoolKey};
     use crate::proto::transport::PooledTransport;
     use crate::util::stealth::StealthConfig;
