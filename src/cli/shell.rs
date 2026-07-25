@@ -64,11 +64,7 @@ pub(crate) struct ShellArgs {
     #[arg(long, value_name = "HEX", help_heading = H_TARGET)]
     pub handle: Option<String>,
 
-    /// NFS protocol version (3 or 4).
-    ///
-    /// Version 2 is not implemented in the shell: obtaining a v2 root handle
-    /// needs a MOUNT v1 MNT call, which this binary does not make. `scan` and
-    /// `analyze` still detect and report a v2-capable server (F-1.6).
+    /// NFS protocol version (2, 3, or 4).
     #[arg(long, default_value = "3", value_name = "VER", help_heading = H_BEHAVIOR)]
     pub nfs_version: u32,
 }
@@ -82,18 +78,13 @@ pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
         return run_nfs4_shell(args, globals).await;
     }
 
-    // Reject rather than silently fall through to v3. Answering a v2 request
-    // with a v3 session would be worse than refusing: an operator probing for
-    // a v2 downgrade would read the v3 result as proof the server allows v2,
-    // which is a wrong finding rather than a missing feature.
+    // NFSv2 mode: MOUNT v1 for the 32-byte handle, then Nfs2Client.
+    if args.nfs_version == 2 {
+        return run_nfs2_shell(args, globals).await;
+    }
+
     if args.nfs_version != 3 {
-        anyhow::bail!(
-            "--nfs-version {} is not supported by the shell (use 3 or 4).\n\
-             NFSv2 wire support exists in the nfswolf-nfs2 crate, but the shell cannot obtain a\n\
-             v2 root handle without a MOUNT v1 MNT call, which is not implemented.\n\
-             `scan` and `analyze` do detect a v2-capable server and report it as F-1.6.",
-            args.nfs_version
-        );
+        anyhow::bail!("--nfs-version {} is not supported (use 2, 3, or 4)", args.nfs_version);
     }
 
     // Parse `<TARGET>` + --export + --handle into the unified form. The
@@ -497,4 +488,261 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
         }
     }
     components
+}
+
+// =============================================================================
+// NFSv2 shell  --  MOUNT v1 + Nfs2Client
+// =============================================================================
+
+#[expect(clippy::cognitive_complexity, reason = "shell dispatch loop")]
+async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
+    use colored::Colorize as _;
+    use nfswolf_nfs2::{Nfs2Client, wire::Nfs2FileHandle};
+    use nfswolf_rpc::{rpc::opaque_auth, transport::direct::DirectTransport, transport::tokio::TokioIo};
+
+    use crate::cli::target::{Source, parse as parse_target};
+    use crate::proto::auth::next_stamp;
+    use crate::proto::mount::NfsMountClient;
+    use crate::proto::portmap::PortmapClient;
+
+    let target = parse_target(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
+    let host = target.host;
+    let export = match &target.source {
+        Source::Export(p) => p.clone(),
+        _ => anyhow::bail!("--nfs-version 2 requires an export path (not a raw handle)"),
+    };
+    let addr = SocketAddr::new(host, 111);
+
+    let uid = globals.uid;
+    let gid = globals.gid;
+    let hostname = globals.hostname.clone();
+
+    let mount_client = NfsMountClient::new().with_credential(Credential::Sys(AuthSys::new(uid, gid, &hostname)));
+    let mount_result = mount_client.mount_v1(addr, &export).await?;
+    let root_fh: Nfs2FileHandle = {
+        let b = mount_result.handle.as_bytes();
+        let mut arr = [0u8; 32];
+        let len = b.len().min(32);
+        #[expect(clippy::indexing_slicing, reason = "len = min(b.len(), 32) <= 32 = arr.len()")]
+        {
+            arr[..len].copy_from_slice(&b[..len]);
+        }
+        Nfs2FileHandle(arr)
+    };
+
+    let nfs_port = if let Some(p) = globals.nfs_port {
+        p
+    } else {
+        let portmap = PortmapClient::default_port();
+        portmap.query_port(addr, 100_003, 2).await.unwrap_or(2049)
+    };
+
+    let nfs_addr = SocketAddr::new(host, nfs_port);
+    let stream = tokio::net::TcpStream::connect(nfs_addr).await?;
+    let io = TokioIo::new(stream);
+    let cred = AuthSys::with_groups(uid, gid, &[gid], &hostname);
+    let opaque = cred.to_opaque_auth(next_stamp());
+    let transport = DirectTransport::with_auth(io, opaque, opaque_auth::default());
+    let client = Nfs2Client::new(transport);
+
+    println!("{}", format!("[+] Connected to {host} as uid={uid} gid={gid} (NFSv2 shell  --  type 'help' for commands)").green());
+    println!("# rerun: nfswolf shell {host}:{export} --nfs-version 2 --uid {uid} --gid {gid}");
+
+    let mut cwd_fh = root_fh;
+    let mut cwd_path = String::from("/");
+
+    let mut rl = rustyline::DefaultEditor::new()?;
+    loop {
+        let prompt = format!("nfsv2:{cwd_path}> ");
+        let input = match rl.readline(&prompt) {
+            Ok(l) => l,
+            Err(ReadlineError::Eof | ReadlineError::Interrupted) => break,
+            Err(e) => {
+                eprintln!("readline: {e}");
+                break;
+            },
+        };
+        let line = input.trim();
+        if line.is_empty() {
+            continue;
+        }
+        drop(rl.add_history_entry(line));
+
+        let (cmd, arg) = line.split_once(' ').map_or((line, ""), |(c, a)| (c, a.trim()));
+
+        match cmd {
+            "ls" => {
+                let dir = if arg.is_empty() {
+                    cwd_fh
+                } else {
+                    match client.lookup_path(&cwd_fh, arg).await {
+                        Ok((fh, _)) => fh,
+                        Err(e) => {
+                            eprintln!("{}", format!("ls: {arg}: {e}").red());
+                            continue;
+                        },
+                    }
+                };
+                match v2_readdir_all(&client, &dir).await {
+                    Ok(entries) => {
+                        println!("{:<12} {:>8} {:>8} {:>10}  name", "mode", "uid", "gid", "size");
+                        println!("{}", "-".repeat(60));
+                        for e in &entries {
+                            match client.lookup(&dir, &e.name).await {
+                                Ok((_, a)) => println!("{:<12} {:>8} {:>8} {:>10}  {}", v2_mode_str(&a), a.uid, a.gid, a.size, e.name),
+                                Err(_) => println!("{:<12} {:>8} {:>8} {:>10}  {}", "??????????", "?", "?", "?", e.name),
+                            }
+                        }
+                    },
+                    Err(e) => eprintln!("{}", format!("ls: {e}").red()),
+                }
+            },
+            "cd" => {
+                if arg.is_empty() {
+                    cwd_fh = root_fh;
+                    "/".clone_into(&mut cwd_path);
+                    continue;
+                }
+                match client.lookup_path(&cwd_fh, arg).await {
+                    Ok((fh, _)) => {
+                        cwd_fh = fh;
+                        if arg.starts_with('/') {
+                            cwd_path = format!("/{}", arg.trim_start_matches('/'));
+                        } else {
+                            cwd_path = format!("{}/{}", cwd_path.trim_end_matches('/'), arg);
+                        }
+                    },
+                    Err(e) => eprintln!("{}", format!("cd: {arg}: {e}").red()),
+                }
+            },
+            "pwd" => println!("{cwd_path}"),
+            "cat" => {
+                if arg.is_empty() {
+                    eprintln!("{}", "usage: cat <file>".yellow());
+                    continue;
+                }
+                match client.lookup_path(&cwd_fh, arg).await {
+                    Ok((fh, _)) => match client.read_file(&fh).await {
+                        Ok(data) => {
+                            drop(std::io::Write::write_all(&mut std::io::stdout(), &data));
+                        },
+                        Err(e) => eprintln!("{}", format!("cat: {arg}: {e}").red()),
+                    },
+                    Err(e) => eprintln!("{}", format!("cat: {arg}: {e}").red()),
+                }
+            },
+            "stat" => {
+                if arg.is_empty() {
+                    eprintln!("{}", "usage: stat <path>".yellow());
+                    continue;
+                }
+                match client.lookup_path(&cwd_fh, arg).await {
+                    Ok((fh, a)) => {
+                        println!("  File: {arg}");
+                        println!("  Handle: {}", v2_handle_hex(&fh));
+                        println!("  Mode: {:#o}  Type: {}", a.mode, v2_type_str(a.ftype));
+                        println!("  Uid: {}  Gid: {}  Nlink: {}", a.uid, a.gid, a.nlink);
+                        println!("  Size: {}  Blocks: {}", a.size, a.blocks);
+                    },
+                    Err(e) => eprintln!("{}", format!("stat: {arg}: {e}").red()),
+                }
+            },
+            "get" => {
+                let (remote, local) = arg.split_once(' ').unwrap_or((arg, ""));
+                if remote.is_empty() {
+                    eprintln!("{}", "usage: get <remote> [local]".yellow());
+                    continue;
+                }
+                let dest = if local.is_empty() { remote.rsplit('/').next().unwrap_or(remote) } else { local };
+                match client.lookup_path(&cwd_fh, remote).await {
+                    Ok((fh, _)) => match client.read_file(&fh).await {
+                        Ok(data) => match std::fs::write(dest, &data) {
+                            Ok(()) => println!("{}", format!("get: {} bytes -> {dest}", data.len()).green()),
+                            Err(e) => eprintln!("{}", format!("get: write {dest}: {e}").red()),
+                        },
+                        Err(e) => eprintln!("{}", format!("get: read {remote}: {e}").red()),
+                    },
+                    Err(e) => eprintln!("{}", format!("get: {remote}: {e}").red()),
+                }
+            },
+            "whoami" => println!("uid={uid}  gid={gid}  hostname={hostname}  (NFSv2)"),
+            "handle" => println!("{}", v2_handle_hex(&cwd_fh)),
+            "help" => {
+                println!("NFSv2 shell commands:");
+                println!("  ls [path]       List directory");
+                println!("  cd [path]       Change directory");
+                println!("  pwd             Print working directory");
+                println!("  cat <file>      Print file contents");
+                println!("  get <r> [l]     Download file");
+                println!("  stat <path>     File attributes");
+                println!("  whoami          Current identity");
+                println!("  handle          Print current directory handle");
+                println!("  help            This message");
+                println!("  quit / exit     Exit shell");
+            },
+            "quit" | "exit" => break,
+            _ => eprintln!("{}", format!("unknown command: {cmd}  (type 'help')").red()),
+        }
+    }
+    Ok(())
+}
+
+/// Read all directory entries via paginated NFSv2 READDIR.
+async fn v2_readdir_all<T: nfswolf_rpc::RpcTransport>(client: &nfswolf_nfs2::Nfs2Client<T>, dir: &nfswolf_nfs2::wire::Nfs2FileHandle) -> Result<Vec<nfswolf_nfs2::wire::ReaddirEntry>, nfswolf_nfs2::Nfs2Error<T::Error>> {
+    let mut all = Vec::new();
+    let mut cookie = 0u32;
+    loop {
+        let entries = client.readdir(dir, cookie, 4096).await?;
+        if entries.is_empty() {
+            break;
+        }
+        cookie = entries.last().map_or(0, |e| e.cookie);
+        let was_empty = entries.is_empty();
+        all.extend(entries);
+        if was_empty || all.len() > 100_000 {
+            break;
+        }
+    }
+    Ok(all)
+}
+
+fn v2_mode_str(a: &nfswolf_nfs2::wire::Nfs2FileAttr) -> String {
+    use nfswolf_nfs2::wire::FType;
+    let t = match a.ftype {
+        FType::Regular => '-',
+        FType::Directory => 'd',
+        FType::Block => 'b',
+        FType::Character => 'c',
+        FType::Symlink => 'l',
+        FType::NonFile => '?',
+    };
+    let m = a.mode;
+    let mut s = String::with_capacity(10);
+    s.push(t);
+    for shift in (0..9).rev() {
+        let ch = *b"xwr".get(shift % 3).unwrap_or(&b'?');
+        s.push(if m & (1 << shift) != 0 { ch as char } else { '-' });
+    }
+    s
+}
+
+fn v2_type_str(ftype: nfswolf_nfs2::wire::FType) -> &'static str {
+    use nfswolf_nfs2::wire::FType;
+    match ftype {
+        FType::NonFile => "NON",
+        FType::Regular => "REG",
+        FType::Directory => "DIR",
+        FType::Block => "BLK",
+        FType::Character => "CHR",
+        FType::Symlink => "LNK",
+    }
+}
+
+fn v2_handle_hex(fh: &nfswolf_nfs2::wire::Nfs2FileHandle) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(64);
+    for b in &fh.0 {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }

@@ -148,6 +148,63 @@ impl NfsMountClient {
         Ok(MountResult { handle, auth_flavors: res.auth_flavors, parsed_flavors })
     }
 
+    /// Mount an NFSv2 export via MOUNT v1 MNT (program 100005, version 1, proc 1).
+    ///
+    /// Returns a fixed 32-byte file handle (RFC 1094 Appendix A). MOUNT v1 has
+    /// no auth flavors in the response, so we return AUTH_SYS as the assumed
+    /// flavor (v2 servers predate auth flavor negotiation).
+    pub(crate) async fn mount_v1(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        match self.mount_v1_once(addr, export).await {
+            Ok(r) => Ok(r),
+            Err(e) if self.privileged_required => Err(e),
+            Err(e) => {
+                if downcast_mnt_acces(&e) {
+                    tracing::warn!(%addr, %export, "MNT v1 returned ACCES; retrying with privileged-only");
+                    let priv_client = Self { mount_port: self.mount_port, privileged_required: true, proxy: self.proxy.clone(), credential: self.credential.clone() };
+                    priv_client.mount_v1_once(addr, export).await.with_context(|| format!("MNT v1 {export} (privileged retry)"))
+                } else {
+                    Err(e)
+                }
+            },
+        }
+    }
+
+    /// Single v1 MNT attempt.
+    async fn mount_v1_once(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        use nfswolf_rpc::rpc::RpcClient;
+
+        let portmap = match &self.proxy {
+            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
+            None => crate::proto::portmap::PortmapClient::default_port(),
+        };
+        let port = match self.mount_port {
+            Some(p) => p,
+            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1")?,
+        };
+        let mount_addr = SocketAddr::new(addr.ip(), port);
+        let io = if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
+            nfswolf_rpc::transport::tokio::TokioIo::new(stream)
+        } else if self.privileged_required {
+            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
+        } else {
+            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
+        };
+        let opaque = self.credential.to_opaque_auth();
+        let mut rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
+
+        // MOUNT v1 MNT: program=100005, version=1, proc=1
+        // args = dirpath (XDR string), result = fhstatus (u32 status + opaque[32])
+        let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
+        let result: FhStatus = rpc.call(100_005, 1, 1, &path).await.with_context(|| format!("MNT v1 {export}"))?;
+        if result.status != 0 {
+            anyhow::bail!("MNT v1 {export}: status {}", result.status);
+        }
+        let handle = FileHandle::from_bytes(&result.fhandle);
+        Ok(MountResult { handle, auth_flavors: vec![1], parsed_flavors: vec![AuthFlavor::Sys] })
+    }
+
     /// Unmount an export (MNTPROC_UMNT) for stealth cleanup (F-2.5).
     pub(crate) async fn unmount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
         let mut client = self.connect(addr).await?;
@@ -371,4 +428,34 @@ fn export_entry_from(node: export_node<'_, '_>) -> ExportEntry {
 /// Decode XDR bytes to a UTF-8 string, replacing invalid bytes with `?`.
 fn bytes_to_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// MOUNT v1 MNT response (RFC 1094 Appendix A).
+///
+/// ```text
+/// union fhstatus switch (unsigned status) {
+///     case 0: fhandle directory;   /* opaque[FHSIZE=32] */
+///     default: void;
+/// };
+/// ```
+///
+/// Hand-implemented because FHSIZE=32 is a fixed-length opaque (no length
+/// prefix), and the status is not a standard NFS3 discriminant.
+struct FhStatus {
+    status: u32,
+    fhandle: [u8; 32],
+}
+
+impl nfswolf_xdr::Unpack for FhStatus {
+    fn unpack(input: &mut impl std::io::Read) -> nfswolf_xdr::Result<(Self, usize)> {
+        let (status, n1) = u32::unpack(input)?;
+        let mut fhandle = [0u8; 32];
+        let n2 = if status == 0 {
+            std::io::Read::read_exact(input, &mut fhandle).map_err(nfswolf_xdr::Error::Io)?;
+            32
+        } else {
+            0
+        };
+        Ok((Self { status, fhandle }, n1 + n2))
+    }
 }
