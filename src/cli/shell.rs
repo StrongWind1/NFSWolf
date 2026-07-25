@@ -497,8 +497,13 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
 #[expect(clippy::cognitive_complexity, reason = "shell dispatch loop")]
 async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     use colored::Colorize as _;
-    use nfswolf_nfs2::{Nfs2Client, wire::Nfs2FileHandle};
+    use nfswolf_nfs2::{
+        Nfs2Client,
+        wire::{Nfs2FileHandle, Nfs2SetAttr},
+    };
     use nfswolf_rpc::{rpc::opaque_auth, transport::direct::DirectTransport, transport::tokio::TokioIo};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     use crate::cli::target::{Source, parse as parse_target};
     use crate::proto::auth::next_stamp;
@@ -683,21 +688,277 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                     Err(e) => eprintln!("{}", format!("NFSPROC_ROOT: {e}").yellow()),
                 }
             },
+            "put" => {
+                if !args.allow_write {
+                    eprintln!("{}", "write disabled -- rerun with --allow-write".red());
+                    continue;
+                }
+                let (local, remote) = v2_split2(arg);
+                if local.is_empty() || remote.is_empty() {
+                    eprintln!("{}", "usage: put <local> <remote>".yellow());
+                    continue;
+                }
+                let data = match std::fs::read(local) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("{}", format!("put: cannot read {local}: {e}").red());
+                        continue;
+                    },
+                };
+                let (parent, name) = v2_resolve_parent(&client, &cwd_fh, &root_fh, remote).await;
+                let parent = match parent {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{}", format!("put: {e}").red());
+                        continue;
+                    },
+                };
+                #[cfg(unix)]
+                let mode = std::fs::metadata(local).map_or(0o644, |m| m.permissions().mode() & 0o7777);
+                #[cfg(not(unix))]
+                let mode = 0o644;
+                let sattr = v2_sattr_mode(mode);
+                match client.create(&parent, &name, &sattr).await {
+                    Ok((fh, _)) => match v2_upload_data(&client, &fh, &data).await {
+                        Ok(n) => println!("{}", format!("put: {n} bytes -> {remote}").green()),
+                        Err(e) => eprintln!("{}", format!("put: write error: {e}").red()),
+                    },
+                    Err(e) => eprintln!("{}", format!("put: create {remote}: {e}").red()),
+                }
+            },
+            "rm" => {
+                if !args.allow_write {
+                    eprintln!("{}", "write disabled -- rerun with --allow-write".red());
+                    continue;
+                }
+                if arg.is_empty() {
+                    eprintln!("{}", "usage: rm <file>".yellow());
+                    continue;
+                }
+                let (parent, name) = v2_resolve_parent(&client, &cwd_fh, &root_fh, arg).await;
+                match parent {
+                    Ok(p) => match client.remove(&p, &name).await {
+                        Ok(()) => println!("{}", format!("removed {arg}").green()),
+                        Err(e) => eprintln!("{}", format!("rm: {arg}: {e}").red()),
+                    },
+                    Err(e) => eprintln!("{}", format!("rm: {e}").red()),
+                }
+            },
+            "mkdir" => {
+                if !args.allow_write {
+                    eprintln!("{}", "write disabled -- rerun with --allow-write".red());
+                    continue;
+                }
+                if arg.is_empty() {
+                    eprintln!("{}", "usage: mkdir <dir>".yellow());
+                    continue;
+                }
+                let (parent, name) = v2_resolve_parent(&client, &cwd_fh, &root_fh, arg).await;
+                match parent {
+                    Ok(p) => {
+                        let sattr = v2_sattr_mode(0o755);
+                        match client.mkdir(&p, &name, &sattr).await {
+                            Ok(_) => println!("{}", format!("created {arg}").green()),
+                            Err(e) => eprintln!("{}", format!("mkdir: {arg}: {e}").red()),
+                        }
+                    },
+                    Err(e) => eprintln!("{}", format!("mkdir: {e}").red()),
+                }
+            },
+            "rmdir" => {
+                if !args.allow_write {
+                    eprintln!("{}", "write disabled -- rerun with --allow-write".red());
+                    continue;
+                }
+                if arg.is_empty() {
+                    eprintln!("{}", "usage: rmdir <dir>".yellow());
+                    continue;
+                }
+                let (parent, name) = v2_resolve_parent(&client, &cwd_fh, &root_fh, arg).await;
+                match parent {
+                    Ok(p) => match client.rmdir(&p, &name).await {
+                        Ok(()) => println!("{}", format!("removed {arg}").green()),
+                        Err(e) => eprintln!("{}", format!("rmdir: {arg}: {e}").red()),
+                    },
+                    Err(e) => eprintln!("{}", format!("rmdir: {e}").red()),
+                }
+            },
+            "mv" => {
+                if !args.allow_write {
+                    eprintln!("{}", "write disabled -- rerun with --allow-write".red());
+                    continue;
+                }
+                let (src, dst) = v2_split2(arg);
+                if src.is_empty() || dst.is_empty() {
+                    eprintln!("{}", "usage: mv <src> <dst>".yellow());
+                    continue;
+                }
+                let (sp, sn) = v2_resolve_parent(&client, &cwd_fh, &root_fh, src).await;
+                let (dp, dn) = v2_resolve_parent(&client, &cwd_fh, &root_fh, dst).await;
+                match (sp, dp) {
+                    (Ok(sp), Ok(dp)) => match client.rename(&sp, &sn, &dp, &dn).await {
+                        Ok(()) => println!("{}", format!("renamed {src} -> {dst}").green()),
+                        Err(e) => eprintln!("{}", format!("mv: {e}").red()),
+                    },
+                    (Err(e), _) | (_, Err(e)) => eprintln!("{}", format!("mv: {e}").red()),
+                }
+            },
+            "chmod" => {
+                if !args.allow_write {
+                    eprintln!("{}", "write disabled -- rerun with --allow-write".red());
+                    continue;
+                }
+                let (mode_s, path) = v2_split2(arg);
+                if mode_s.is_empty() || path.is_empty() {
+                    eprintln!("{}", "usage: chmod <mode> <path>".yellow());
+                    continue;
+                }
+                let Ok(mode) = u32::from_str_radix(mode_s, 8) else {
+                    eprintln!("{}", format!("chmod: invalid mode: {mode_s}").red());
+                    continue;
+                };
+                match client.lookup_path(&cwd_fh, path).await {
+                    Ok((fh, _)) => {
+                        let sattr = v2_sattr_mode(mode);
+                        match client.setattr(&fh, &sattr).await {
+                            Ok(_) => println!("{}", format!("chmod {mode_s} {path}").green()),
+                            Err(e) => eprintln!("{}", format!("chmod: {e}").red()),
+                        }
+                    },
+                    Err(e) => eprintln!("{}", format!("chmod: {path}: {e}").red()),
+                }
+            },
+            "chown" => {
+                if !args.allow_write {
+                    eprintln!("{}", "write disabled -- rerun with --allow-write".red());
+                    continue;
+                }
+                let (owner_s, path) = v2_split2(arg);
+                if owner_s.is_empty() || path.is_empty() {
+                    eprintln!("{}", "usage: chown <uid[:gid]> <path>".yellow());
+                    continue;
+                }
+                let (u, g) = if let Some((us, gs)) = owner_s.split_once(':') { (us.parse::<u32>().ok(), gs.parse::<u32>().ok()) } else { (owner_s.parse::<u32>().ok(), None) };
+                match client.lookup_path(&cwd_fh, path).await {
+                    Ok((fh, _)) => {
+                        use nfswolf_nfs2::wire::{SATTR_UNCHANGED, Timeval};
+                        let ut = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
+                        let sattr = Nfs2SetAttr { mode: SATTR_UNCHANGED, uid: u.unwrap_or(SATTR_UNCHANGED), gid: g.unwrap_or(SATTR_UNCHANGED), size: SATTR_UNCHANGED, atime: ut, mtime: ut };
+                        match client.setattr(&fh, &sattr).await {
+                            Ok(_) => println!("{}", format!("chown {owner_s} {path}").green()),
+                            Err(e) => eprintln!("{}", format!("chown: {e}").red()),
+                        }
+                    },
+                    Err(e) => eprintln!("{}", format!("chown: {path}: {e}").red()),
+                }
+            },
+            "readlink" => {
+                if arg.is_empty() {
+                    eprintln!("{}", "usage: readlink <path>".yellow());
+                    continue;
+                }
+                match client.lookup_path(&cwd_fh, arg).await {
+                    Ok((fh, _)) => match client.readlink(&fh).await {
+                        Ok(target) => println!("{target}"),
+                        Err(e) => eprintln!("{}", format!("readlink: {e}").red()),
+                    },
+                    Err(e) => eprintln!("{}", format!("readlink: {arg}: {e}").red()),
+                }
+            },
+            "symlink" => {
+                if !args.allow_write {
+                    eprintln!("{}", "write disabled -- rerun with --allow-write".red());
+                    continue;
+                }
+                let (name, target) = v2_split2(arg);
+                if name.is_empty() || target.is_empty() {
+                    eprintln!("{}", "usage: symlink <name> <target>".yellow());
+                    continue;
+                }
+                let (parent, link_name) = v2_resolve_parent(&client, &cwd_fh, &root_fh, name).await;
+                match parent {
+                    Ok(p) => {
+                        let sattr = v2_sattr_mode(0o777);
+                        match client.symlink(&p, &link_name, target, &sattr).await {
+                            Ok(()) => println!("{}", format!("created symlink {name} -> {target}").green()),
+                            Err(e) => eprintln!("{}", format!("symlink: {e}").red()),
+                        }
+                    },
+                    Err(e) => eprintln!("{}", format!("symlink: {e}").red()),
+                }
+            },
+            "lcd" => {
+                if arg.is_empty() {
+                    eprintln!("{}", "usage: lcd <dir>".yellow());
+                    continue;
+                }
+                if let Err(e) = std::env::set_current_dir(arg) {
+                    eprintln!("{}", format!("lcd: {e}").red());
+                }
+            },
+            "lls" => {
+                let dir = if arg.is_empty() { "." } else { arg };
+                match std::fs::read_dir(dir) {
+                    Ok(rd) => {
+                        for e in rd.flatten() {
+                            println!("{}", e.file_name().to_string_lossy());
+                        }
+                    },
+                    Err(e) => eprintln!("{}", format!("lls: {e}").red()),
+                }
+            },
+            "lpwd" => match std::env::current_dir() {
+                Ok(p) => println!("{}", p.display()),
+                Err(e) => eprintln!("{}", format!("lpwd: {e}").red()),
+            },
+            "lmkdir" => {
+                if arg.is_empty() {
+                    eprintln!("{}", "usage: lmkdir <dir>".yellow());
+                    continue;
+                }
+                if let Err(e) = std::fs::create_dir_all(arg) {
+                    eprintln!("{}", format!("lmkdir: {e}").red());
+                }
+            },
             "whoami" => println!("uid={uid}  gid={gid}  hostname={hostname}  (NFSv2)"),
             "handle" => println!("{}", v2_handle_hex(&cwd_fh)),
-            "help" => {
+            "help" | "?" => {
                 println!("NFSv2 shell commands:");
-                println!("  ls [path]       List directory");
-                println!("  cd [path]       Change directory");
-                println!("  pwd             Print working directory");
-                println!("  cat <file>      Print file contents");
-                println!("  get <r> [l]     Download file");
-                println!("  stat <path>     File attributes");
-                println!("  root            Probe NFSPROC_ROOT (obsolete -- MOUNT bypass check)");
-                println!("  whoami          Current identity");
-                println!("  handle          Print current directory handle");
-                println!("  help            This message");
-                println!("  quit / exit     Exit shell");
+                println!();
+                println!("Navigation:");
+                println!("  ls [path]           List directory");
+                println!("  cd [path]           Change directory (no arg = root)");
+                println!("  pwd                 Print working directory");
+                println!();
+                println!("File operations:");
+                println!("  cat <file>          Print file contents");
+                println!("  get <remote> [local]  Download file");
+                println!("  put <local> <remote>  Upload file (--allow-write)");
+                println!("  rm <file>           Remove file (--allow-write)");
+                println!("  mkdir <dir>         Create directory (--allow-write)");
+                println!("  rmdir <dir>         Remove directory (--allow-write)");
+                println!("  mv <src> <dst>      Rename/move (--allow-write)");
+                println!("  readlink <path>     Read symlink target");
+                println!("  symlink <name> <t>  Create symlink (--allow-write)");
+                println!();
+                println!("Permissions:");
+                println!("  chmod <mode> <path> Change mode (--allow-write)");
+                println!("  chown <uid[:gid]> <path>  Change owner (--allow-write)");
+                println!("  stat <path>         File attributes");
+                println!();
+                println!("Identity:");
+                println!("  whoami              Current AUTH_SYS identity");
+                println!("  handle              Print current directory handle");
+                println!();
+                println!("Probes:");
+                println!("  root                NFSPROC_ROOT bypass check (RFC 1094)");
+                println!();
+                println!("Local:");
+                println!("  lcd / lls / lpwd / lmkdir");
+                println!();
+                println!("Session:");
+                println!("  help                This message");
+                println!("  quit / exit         Exit shell");
             },
             "quit" | "exit" => break,
             _ => eprintln!("{}", format!("unknown command: {cmd}  (type 'help')").red()),
@@ -755,6 +1016,43 @@ fn v2_type_str(ftype: nfswolf_nfs2::wire::FType) -> &'static str {
         FType::Character => "CHR",
         FType::Symlink => "LNK",
     }
+}
+
+/// Split `arg` into two space-separated tokens.
+fn v2_split2(s: &str) -> (&str, &str) {
+    s.split_once(' ').map_or((s, ""), |(a, b)| (a.trim(), b.trim()))
+}
+
+/// Resolve the parent directory and filename from a path.
+async fn v2_resolve_parent<T: nfswolf_rpc::RpcTransport>(client: &nfswolf_nfs2::Nfs2Client<T>, cwd: &nfswolf_nfs2::wire::Nfs2FileHandle, root: &nfswolf_nfs2::wire::Nfs2FileHandle, path: &str) -> (anyhow::Result<nfswolf_nfs2::wire::Nfs2FileHandle>, String) {
+    let path = path.trim_end_matches('/');
+    let (parent_path, name) = if let Some(slash) = path.rfind('/') { (&path[..slash], &path[slash + 1..]) } else { ("", path) };
+    let start = if path.starts_with('/') { *root } else { *cwd };
+    if parent_path.is_empty() || parent_path == "/" {
+        return (Ok(start), name.to_owned());
+    }
+    let parent_rel = parent_path.trim_start_matches('/');
+    match client.lookup_path(&start, parent_rel).await {
+        Ok((fh, _)) => (Ok(fh), name.to_owned()),
+        Err(e) => (Err(anyhow::anyhow!("{e}")), name.to_owned()),
+    }
+}
+
+/// Write data to a v2 file handle in 8KB chunks (NFSv2 MAXDATA).
+async fn v2_upload_data<T: nfswolf_rpc::RpcTransport>(client: &nfswolf_nfs2::Nfs2Client<T>, fh: &nfswolf_nfs2::wire::Nfs2FileHandle, data: &[u8]) -> anyhow::Result<u64> {
+    const CHUNK: usize = 8192;
+    let mut offset = 0u32;
+    for chunk in data.chunks(CHUNK) {
+        let _ = client.write(fh, offset, chunk.to_vec()).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        offset = offset.saturating_add(u32::try_from(chunk.len()).unwrap_or(u32::MAX));
+    }
+    Ok(u64::from(offset))
+}
+
+fn v2_sattr_mode(mode: u32) -> nfswolf_nfs2::wire::Nfs2SetAttr {
+    use nfswolf_nfs2::wire::{SATTR_UNCHANGED, Timeval};
+    let ut = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
+    nfswolf_nfs2::wire::Nfs2SetAttr { mode, uid: SATTR_UNCHANGED, gid: SATTR_UNCHANGED, size: SATTR_UNCHANGED, atime: ut, mtime: ut }
 }
 
 fn v2_handle_hex(fh: &nfswolf_nfs2::wire::Nfs2FileHandle) -> String {
