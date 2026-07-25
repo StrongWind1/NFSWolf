@@ -339,6 +339,7 @@ impl Analyzer {
         check_v2_downgrade(&nfs_versions, &mut findings);
         run_nis_check(&self.portmap, addr, &mut findings).await;
         run_amplification_check(&self.portmap, addr, &mut findings).await;
+        check_webnfs_public_handle(addr, &nfs_versions, &mut findings, self.proxy.as_deref(), &self.stealth).await;
 
         // Per-export checks.
         let exports = self.mount.list_exports(addr).await.unwrap_or_default();
@@ -803,6 +804,76 @@ async fn run_amplification_check(portmap: &PortmapClient, addr: SocketAddr, find
             },
             Severity::Medium,
         ));
+    }
+}
+
+/// Probe the WebNFS public file handle (XNFS Appendix E).
+///
+/// WebNFS defines a well-known handle (all-zero for v2, zero-length for v3)
+/// that any client can use without going through MOUNT. If the server answers
+/// a GETATTR or LOOKUP on this handle, MOUNT's export ACLs are bypassed
+/// entirely -- no privileged port needed, no hostname check, no auth flavor
+/// negotiation. Typical on Solaris, some NetApp configurations, and embedded
+/// RTOS NFS servers (VxWorks).
+async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], findings: &mut Vec<Finding>, _proxy: Option<&str>, stealth: &StealthConfig) {
+    use nfswolf_rpc::rpc::opaque_auth;
+    use nfswolf_rpc::transport::direct::DirectTransport;
+    use nfswolf_rpc::transport::tokio::TokioIo;
+
+    stealth.wait().await;
+
+    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+
+    // NFSv3 public handle: zero-length (send a GETATTR with an empty fh).
+    if nfs_versions.contains(&3)
+        && let Some(stream) = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(nfs_addr)).await.ok().and_then(Result::ok)
+    {
+        let transport = DirectTransport::new(TokioIo::new(stream));
+        let empty_fh = FileHandle::from_bytes(&[]);
+        if let Ok(attrs) = nfswolf_nfs3::Nfs3Client::new(transport).attrs(&empty_fh).await {
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-2.9",
+                    title: "WebNFS public file handle accepted (MOUNT bypass)",
+                    desc: "The server responds to requests using the WebNFS public file handle \
+                               (zero-length for NFSv3, per XNFS Appendix E). This gives any client \
+                               access to the public export without going through the MOUNT protocol, \
+                               bypassing export ACLs, hostname restrictions, and privileged-port checks.",
+                    evidence: &format!("NFSv3 public handle (zero-length) returned attrs: uid={}, gid={}, mode={:#o}", attrs.uid, attrs.gid, attrs.mode),
+                    remediation: "Disable WebNFS on the server. On Solaris: remove the 'public' share option. On NetApp: nfs.webnfs.enable off.",
+                    export: None,
+                },
+                Severity::Critical,
+            ));
+            return;
+        }
+    }
+
+    // NFSv2 public handle: all-zero 32 bytes.
+    if nfs_versions.contains(&2)
+        && let Some(stream2) = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(nfs_addr)).await.ok().and_then(Result::ok)
+    {
+        let cred = AuthSys::new(0, 0, "localhost");
+        let opaque = cred.to_opaque_auth(crate::proto::auth::next_stamp());
+        let transport2 = DirectTransport::with_auth(TokioIo::new(stream2), opaque, opaque_auth::default());
+        let client = nfswolf_nfs2::Nfs2Client::new(transport2);
+        let zero_fh = nfswolf_nfs2::wire::Nfs2FileHandle([0u8; 32]);
+        if let Ok(attrs) = client.getattr(&zero_fh).await {
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-2.9",
+                    title: "WebNFS public file handle accepted (MOUNT bypass)",
+                    desc: "The server responds to requests using the WebNFS public file handle \
+                               (all-zero 32 bytes for NFSv2, per XNFS Appendix E). This gives any \
+                               client access to the public export without going through the MOUNT \
+                               protocol, bypassing export ACLs and hostname restrictions.",
+                    evidence: &format!("NFSv2 public handle (all-zero) returned attrs: uid={}, gid={}, mode={:#o}, size={}", attrs.uid, attrs.gid, attrs.mode, attrs.size),
+                    remediation: "Disable WebNFS on the server.",
+                    export: None,
+                },
+                Severity::Critical,
+            ));
+        }
     }
 }
 
