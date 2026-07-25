@@ -674,6 +674,7 @@ dependencies = [
  "ipnet",
  "libc",
  "nfs3_server",
+ "nfswolf-nfs2",
  "nfswolf-nfs3",
  "nfswolf-nfs4",
  "nfswolf-rpc",

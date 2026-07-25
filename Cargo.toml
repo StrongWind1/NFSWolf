@@ -85,6 +85,7 @@ serde_json = "1"
 # NFS protocol stack -- local crates, pure Rust, no C dependencies.
 nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
+nfswolf-nfs2 = { workspace = true }
 nfswolf-nfs3 = { workspace = true }
 nfswolf-nfs4 = { workspace = true }
 
