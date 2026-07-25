@@ -215,6 +215,11 @@ pub(crate) struct NfsShell {
     /// The Mutex is std (not tokio) so the sync completer can lock it without
     /// block_in_place overhead.
     tab_cache: Arc<Mutex<TabCache>>,
+    /// Credential winners from prior escalation walks. Keyed by file handle
+    /// bytes so a repeat access to the same inode skips straight to the
+    /// identity that worked last time. Flushed when the user changes identity
+    /// via `uid`, `gid`, `hostname`, or `impersonate`.
+    cred_cache: Mutex<std::collections::HashMap<Vec<u8>, (u32, u32)>>,
 }
 
 impl NfsShell {
@@ -222,7 +227,7 @@ impl NfsShell {
     #[must_use]
     pub(crate) fn new(nfs3: Arc<Nfs3Client>, root_fh: FileHandle, allow_write: bool, hostname: String) -> Self {
         let tab_cache = Arc::new(Mutex::new(TabCache { cwd: root_fh.clone(), entries: Vec::new() }));
-        Self { nfs3, export_root: root_fh.clone(), cwd: root_fh, cwd_path: "/".to_owned(), allow_write, hostname, history: Vec::new(), tab_cache }
+        Self { nfs3, export_root: root_fh.clone(), cwd: root_fh, cwd_path: "/".to_owned(), allow_write, hostname, history: Vec::new(), tab_cache, cred_cache: Mutex::new(std::collections::HashMap::new()) }
     }
 
     /// Return the current directory path for use in the prompt.
@@ -242,6 +247,65 @@ impl NfsShell {
     #[must_use]
     pub(crate) fn current_gid(&self) -> u32 {
         self.nfs3.gid()
+    }
+
+    /// If a prior escalation walk found a winner for this handle, return a
+    /// client configured with that identity. Lets callers skip the full ladder
+    /// on repeat access to the same inode.
+    fn cached_client(&self, fh: &FileHandle) -> Option<Nfs3Client> {
+        let lock = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (uid, gid) = *lock.get(fh.as_bytes())?;
+        drop(lock);
+        Some(self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid))
+    }
+
+    /// Record the (uid, gid) that succeeded for `fh` so future accesses can
+    /// skip directly to this identity.
+    fn cache_winner(&self, fh: &FileHandle, uid: u32, gid: u32) {
+        let mut lock = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = lock.insert(fh.as_bytes().to_vec(), (uid, gid));
+    }
+
+    /// READDIRPLUS with credential cache: try the cached winner first, then
+    /// fall back to the full ladder. Records the winner on success.
+    async fn list_dir_cached(&self, dir_fh: &FileHandle) -> anyhow::Result<Vec<DirEntryPlus>> {
+        if let Some(client) = self.cached_client(dir_fh) {
+            match try_readdirplus(&client, dir_fh).await {
+                Ok(v) => return Ok(v),
+                Err(e) if !is_nfs_acces(&e) => return Err(e),
+                Err(_) => {},
+            }
+        }
+        match list_dir_with_winner(&self.nfs3, dir_fh).await {
+            Ok((entries, winner)) => {
+                if let Some((uid, gid)) = winner {
+                    self.cache_winner(dir_fh, uid, gid);
+                }
+                Ok(entries)
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Read file with credential cache: try the cached winner first, then
+    /// fall back to the full ladder. Records the winner on success.
+    async fn read_all_cached(&self, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
+        if let Some(client) = self.cached_client(fh) {
+            match read_all(&client, fh).await {
+                Ok(buf) => return Ok(buf),
+                Err(e) if !is_nfs_acces(&e) => return Err(e),
+                Err(_) => {},
+            }
+        }
+        match read_all_escalated_with_winner(&self.nfs3, fh).await {
+            Ok((buf, winner)) => {
+                if let Some((uid, gid)) = winner {
+                    self.cache_winner(fh, uid, gid);
+                }
+                Ok(buf)
+            },
+            Err(e) => Err(e),
+        }
     }
 
     /// Build a Tab completer that shares the directory cache with this shell.
@@ -361,7 +425,7 @@ impl NfsShell {
         // shows just that one entry (real `ls` semantics) instead of failing
         // with NFS3ERR_NOTDIR from a READDIRPLUS on a non-directory handle.
         let all_entries: Vec<DirEntryPlus> = match target {
-            None => match list_dir(&self.nfs3, &self.cwd).await {
+            None => match self.list_dir_cached(&self.cwd.clone()).await {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("{}", format!("ls: {e}").red());
@@ -377,7 +441,7 @@ impl NfsShell {
                     },
                 };
                 if attrs.file_type == FileType::Directory {
-                    match list_dir(&self.nfs3, &fh).await {
+                    match self.list_dir_cached(&fh).await {
                         Ok(v) => v,
                         Err(e) => {
                             eprintln!("{}", format!("ls: {p}: {e}").red());
@@ -1035,6 +1099,7 @@ impl NfsShell {
                 let gid = self.nfs3.gid();
                 let cred = Credential::Sys(AuthSys::new(uid, gid, &self.hostname));
                 self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
+                self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
                 println!("{}", format!("uid={uid} gid={gid} hostname={}", self.hostname).green());
             },
             Err(_) => eprintln!("{}", format!("uid: invalid number: {arg}").red()),
@@ -1048,6 +1113,7 @@ impl NfsShell {
                 let uid = self.nfs3.uid();
                 let cred = Credential::Sys(AuthSys::new(uid, gid, &self.hostname));
                 self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
+                self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
                 println!("{}", format!("uid={uid} gid={gid} hostname={}", self.hostname).green());
             },
             Err(_) => eprintln!("{}", format!("gid: invalid number: {arg}").red()),
@@ -1069,6 +1135,7 @@ impl NfsShell {
         let gid = self.nfs3.gid();
         let cred = Credential::Sys(AuthSys::new(uid, gid, &self.hostname));
         self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
+        self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
         println!("{}", format!("hostname={}", self.hostname).green());
     }
 
@@ -1084,6 +1151,7 @@ impl NfsShell {
             (Some(uid), Some(gid)) => {
                 let cred = Credential::Sys(AuthSys::new(uid, gid, &self.hostname));
                 self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
+                self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
                 println!("{}", format!("impersonating uid={uid} gid={gid}").green());
             },
             _ => eprintln!("{}", format!("impersonate: expected uid:gid  (got {arg:?})").red()),
@@ -1193,7 +1261,7 @@ impl NfsShell {
             println!("{}", format!("{path} is empty -- no records to show").yellow());
             return;
         }
-        let bytes = match read_all_escalated(&self.nfs3, &fh).await {
+        let bytes = match self.read_all_cached(&fh).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("{}", format!("{label}: read {path}: {e}").red());
@@ -1236,7 +1304,7 @@ impl NfsShell {
             self.lastlog_hint_lastlog2().await;
             return;
         }
-        let bytes = match read_all_escalated(&self.nfs3, &fh).await {
+        let bytes = match self.read_all_cached(&fh).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("{}", format!("lastlog: read {lastlog_path}: {e}").red());
@@ -1248,7 +1316,7 @@ impl NfsShell {
         // Map UIDs to usernames via /etc/passwd if reachable; missing entries
         // render as "uid=N" rather than failing the whole command.
         let uid_to_user: Vec<(u32, String)> = match self.lookup_path("/etc/passwd").await {
-            Ok((pfh, _)) => match read_all_escalated(&self.nfs3, &pfh).await {
+            Ok((pfh, _)) => match self.read_all_cached(&pfh).await {
                 Ok(b) => parse_passwd(&b),
                 Err(e) => {
                     eprintln!("{}", format!("lastlog: /etc/passwd unreadable ({e}); rendering UIDs numerically").yellow());
@@ -1509,6 +1577,29 @@ async fn list_dir(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<Vec<
             Ok(v) => {
                 tracing::debug!(uid, gid, "READDIRPLUS escalated");
                 return Ok(v);
+            },
+            Err(e) if !is_nfs_acces(&e) => return Err(e),
+            Err(_) => {},
+        }
+    }
+    anyhow::bail!("NFS3ERR_ACCES: cannot list directory (exhausted AUTH_SYS UID/GID escalation ladder)")
+}
+
+/// Like `list_dir`, but also returns the winning (uid, gid) if escalation was needed.
+async fn list_dir_with_winner(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<(Vec<DirEntryPlus>, Option<(u32, u32)>)> {
+    match try_readdirplus(nfs3, dir_fh).await {
+        Ok(v) => return Ok((v, None)),
+        Err(e) if !is_nfs_acces(&e) => return Err(e),
+        Err(_) => {},
+    }
+    let facts = getattr_owner(nfs3, dir_fh).await;
+    let caller = (nfs3.uid(), nfs3.gid());
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
+        match try_readdirplus(&esc, dir_fh).await {
+            Ok(v) => {
+                tracing::debug!(uid, gid, "READDIRPLUS escalated (cached)");
+                return Ok((v, Some((uid, gid))));
             },
             Err(e) if !is_nfs_acces(&e) => return Err(e),
             Err(_) => {},
@@ -2496,6 +2587,29 @@ async fn read_all_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Resul
             Ok(buf) => {
                 tracing::debug!(uid, gid, "read_all escalated");
                 return Ok(buf);
+            },
+            Err(e) if !is_nfs_acces(&e) => return Err(e),
+            Err(_) => {},
+        }
+    }
+    anyhow::bail!("NFS3ERR_ACCES: permission denied reading file (no credential in escalation ladder worked)")
+}
+
+/// Like `read_all_escalated`, but also returns the winning (uid, gid) if escalation was needed.
+async fn read_all_escalated_with_winner(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<(Vec<u8>, Option<(u32, u32)>)> {
+    match read_all(nfs3, fh).await {
+        Ok(buf) => return Ok((buf, None)),
+        Err(e) if !is_nfs_acces(&e) => return Err(e),
+        Err(_) => {},
+    }
+    let facts = getattr_owner(nfs3, fh).await;
+    let caller = (nfs3.uid(), nfs3.gid());
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
+        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
+        match read_all(&esc, fh).await {
+            Ok(buf) => {
+                tracing::debug!(uid, gid, "read_all escalated (cached)");
+                return Ok((buf, Some((uid, gid))));
             },
             Err(e) if !is_nfs_acces(&e) => return Err(e),
             Err(_) => {},
