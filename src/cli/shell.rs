@@ -665,6 +665,24 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                     Err(e) => eprintln!("{}", format!("get: {remote}: {e}").red()),
                 }
             },
+            "root" => {
+                // RFC 1094 sec. 2.2.3: NFSPROC_ROOT is obsolete. If a server
+                // responds with a handle, that bypasses MOUNT entirely -- a
+                // significant finding since it means any client can obtain the
+                // root handle without going through mountd's export ACLs.
+                match client.root().await {
+                    Ok(Some(fh)) => {
+                        println!("{}", "[!] Server returned a root handle via NFSPROC_ROOT -- MOUNT bypass!".red().bold());
+                        println!("    handle: {}", v2_handle_hex(&fh));
+                        println!("    This is obsolete per RFC 1094 sec. 2.2.3. A server that");
+                        println!("    responds to it gives any client the root handle without");
+                        println!("    going through MOUNT's export ACL checks.");
+                        cwd_fh = fh;
+                    },
+                    Ok(None) => println!("{}", "NFSPROC_ROOT: server did not return a handle (expected -- procedure is obsolete since RFC 1094)".yellow()),
+                    Err(e) => eprintln!("{}", format!("NFSPROC_ROOT: {e}").yellow()),
+                }
+            },
             "whoami" => println!("uid={uid}  gid={gid}  hostname={hostname}  (NFSv2)"),
             "handle" => println!("{}", v2_handle_hex(&cwd_fh)),
             "help" => {
@@ -675,6 +693,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                 println!("  cat <file>      Print file contents");
                 println!("  get <r> [l]     Download file");
                 println!("  stat <path>     File attributes");
+                println!("  root            Probe NFSPROC_ROOT (obsolete -- MOUNT bypass check)");
                 println!("  whoami          Current identity");
                 println!("  handle          Print current directory handle");
                 println!("  help            This message");
