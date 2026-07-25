@@ -56,24 +56,31 @@ impl<T: RpcTransport> Nfs2Client<T> {
 
     /// `NFSPROC_ROOT` (proc 3) -- obsolete probe.
     ///
-    /// RFC 1094 sec. 2.2.3: "This procedure is no longer used because finding
-    /// the root file handle of a filesystem requires moving pathnames between
-    /// client and server. To do this, the MNTPROC_MNT procedure must be used."
+    /// RFC 1094 sec. 2.2.3 specifies void -> void. Most servers return an
+    /// empty reply body (the spec-compliant response) or an NFS error status.
     ///
-    /// Returns `Ok(Some(handle))` if the server responds with 32 bytes (a
-    /// handle -- this would bypass MOUNT entirely and is a significant finding).
-    /// Returns `Ok(None)` if the call succeeds but carries no handle payload.
-    /// Returns `Err` on RPC failure or timeout.
+    /// This method first sends a void -> void call. If that succeeds (the
+    /// server accepted the procedure), it sends a second call attempting to
+    /// decode a 32-byte handle from the response. A non-compliant server
+    /// (e.g. VxWorks) that actually returns a handle would bypass MOUNT.
+    ///
+    /// Returns `Ok(Some(handle))` if the server returns a non-zero handle.
+    /// Returns `Ok(None)` if the server returns void or an error status.
+    /// Returns `Err` only on RPC transport failure (timeout, connection reset).
     pub async fn root(&self) -> Result<Option<Nfs2FileHandle>, Nfs2Error<T::Error>> {
+        // First try: spec-compliant void -> void. If this fails with an RPC
+        // error, the procedure genuinely isn't reachable.
+        match self.raw_call::<Void, Void>(proc::NFSPROC_ROOT, &Void).await {
+            Ok(Void) => {},
+            Err(Nfs2Error::Rpc(e)) => return Err(Nfs2Error::Rpc(e)),
+            Err(Nfs2Error::Status(_)) => return Ok(None),
+        }
+        // The server accepted the procedure. Try again, this time attempting
+        // to decode a handle from the reply. If the server returns void (empty
+        // body), the Unpack will fail and we return None.
         match self.raw_call::<Void, Nfs2FileHandle>(proc::NFSPROC_ROOT, &Void).await {
-            Ok(fh) => {
-                if fh.0 == [0u8; 32] {
-                    Ok(None)
-                } else {
-                    Ok(Some(fh))
-                }
-            },
-            Err(_) => Ok(None),
+            Ok(fh) if fh.0 != [0u8; 32] => Ok(Some(fh)),
+            _ => Ok(None),
         }
     }
 

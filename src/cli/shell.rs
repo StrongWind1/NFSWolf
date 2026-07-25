@@ -994,7 +994,9 @@ fn v2_mode_str(a: &nfswolf_nfs2::wire::Nfs2FileAttr) -> String {
         FType::Block => 'b',
         FType::Character => 'c',
         FType::Symlink => 'l',
-        FType::NonFile => '?',
+        FType::Socket => 's',
+        FType::Fifo => 'p',
+        FType::NonFile | FType::Bad => '?',
     };
     let m = a.mode;
     let mut s = String::with_capacity(10);
@@ -1015,6 +1017,9 @@ fn v2_type_str(ftype: nfswolf_nfs2::wire::FType) -> &'static str {
         FType::Block => "BLK",
         FType::Character => "CHR",
         FType::Symlink => "LNK",
+        FType::Socket => "SOCK",
+        FType::Bad => "BAD",
+        FType::Fifo => "FIFO",
     }
 }
 

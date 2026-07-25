@@ -158,22 +158,32 @@ impl Unpack for NfsStat {
     }
 }
 
-/// NFSv2 file type (RFC 1094 S2.3.3).
+/// NFSv2 file type.
+///
+/// RFC 1094 S2.3.3 defines values 0-5. The Linux kernel header (nfs2.h)
+/// extends these with NF2SOCK (6), NF2BAD (7), and NF2FIFO (8), which a
+/// real Linux knfsd v2 server returns for socket and FIFO inodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum FType {
-    /// Non-file (used for error cases).
+    /// Non-file (used for error cases). NFNON = 0.
     NonFile = 0,
-    /// Regular file.
+    /// Regular file. NFREG = 1.
     Regular = 1,
-    /// Directory.
+    /// Directory. NFDIR = 2.
     Directory = 2,
-    /// Block device.
+    /// Block device. NFBLK = 3.
     Block = 3,
-    /// Character device.
+    /// Character device. NFCHR = 4.
     Character = 4,
-    /// Symbolic link.
+    /// Symbolic link. NFLNK = 5.
     Symlink = 5,
+    /// Unix domain socket. NF2SOCK = 6 (Linux extension, not in RFC 1094).
+    Socket = 6,
+    /// Bad file type. NF2BAD = 7 (Linux extension).
+    Bad = 7,
+    /// Named pipe (FIFO). NF2FIFO = 8 (Linux extension).
+    Fifo = 8,
 }
 
 impl FType {
@@ -186,6 +196,9 @@ impl FType {
             3 => Self::Block,
             4 => Self::Character,
             5 => Self::Symlink,
+            6 => Self::Socket,
+            7 => Self::Bad,
+            8 => Self::Fifo,
             _ => Self::NonFile,
         }
     }
