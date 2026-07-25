@@ -54,14 +54,27 @@ impl<T: RpcTransport> Nfs2Client<T> {
         Ok(res.attrs)
     }
 
-    /// `NFSPROC_ROOT` (proc 3) -- obsolete, retained for completeness.
+    /// `NFSPROC_ROOT` (proc 3) -- obsolete probe.
     ///
-    /// RFC 1094 sec. 2.2.3 marks it obsolete: the root handle comes from the
-    /// MOUNT protocol instead. Servers answer `NFSERR_STALE` or drop it. It
-    /// exists here so the crate covers all 18 procedure numbers and so a caller
-    /// probing a server's behaviour can send it deliberately.
-    pub async fn root(&self) -> Result<(), Nfs2Error<T::Error>> {
-        self.raw_call::<Void, Void>(proc::NFSPROC_ROOT, &Void).await.map(|_| ())
+    /// RFC 1094 sec. 2.2.3: "This procedure is no longer used because finding
+    /// the root file handle of a filesystem requires moving pathnames between
+    /// client and server. To do this, the MNTPROC_MNT procedure must be used."
+    ///
+    /// Returns `Ok(Some(handle))` if the server responds with 32 bytes (a
+    /// handle -- this would bypass MOUNT entirely and is a significant finding).
+    /// Returns `Ok(None)` if the call succeeds but carries no handle payload.
+    /// Returns `Err` on RPC failure or timeout.
+    pub async fn root(&self) -> Result<Option<Nfs2FileHandle>, Nfs2Error<T::Error>> {
+        match self.raw_call::<Void, Nfs2FileHandle>(proc::NFSPROC_ROOT, &Void).await {
+            Ok(fh) => {
+                if fh.0 == [0u8; 32] {
+                    Ok(None)
+                } else {
+                    Ok(Some(fh))
+                }
+            },
+            Err(_) => Ok(None),
+        }
     }
 
     /// `NFSPROC_WRITECACHE` (proc 7) -- reserved and unused.
