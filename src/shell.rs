@@ -5,6 +5,8 @@
 //! researchers can explore exports without mounting them via the kernel NFS client.
 
 use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -663,7 +665,11 @@ impl NfsShell {
                     return;
                 },
             };
-            let dir_fh = match create_remote_dir(&self.nfs3, &remote_parent_fh, &remote_dir_name).await {
+            #[cfg(unix)]
+            let dir_mode = std::fs::metadata(local_path).map_or(0o755, |m| m.permissions().mode() & 0o7777);
+            #[cfg(not(unix))]
+            let dir_mode = 0o755;
+            let dir_fh = match create_remote_dir(&self.nfs3, &remote_parent_fh, &remote_dir_name, dir_mode).await {
                 Ok(fh) => fh,
                 Err(e) => {
                     eprintln!("{}", format!("put -r: create dir {remote}: {e}").red());
@@ -678,6 +684,13 @@ impl NfsShell {
             return;
         }
 
+        let local_meta = match std::fs::metadata(local) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{}", format!("put: cannot stat {local}: {e}").red());
+                return;
+            },
+        };
         let data = match std::fs::read(local) {
             Ok(d) => d,
             Err(e) => {
@@ -694,7 +707,11 @@ impl NfsShell {
             },
         };
 
-        let file_fh = match create_remote(&self.nfs3, &parent_fh, &filename).await {
+        #[cfg(unix)]
+        let mode = local_meta.permissions().mode() & 0o7777;
+        #[cfg(not(unix))]
+        let mode = if local_meta.permissions().readonly() { 0o444 } else { 0o644 };
+        let file_fh = match create_remote(&self.nfs3, &parent_fh, &filename, mode).await {
             Ok(fh) => fh,
             Err(e) => {
                 eprintln!("{}", format!("put: create {remote}: {e}").red());
@@ -758,7 +775,7 @@ impl NfsShell {
                 return;
             },
         };
-        match self.nfs3.create_dir(&parent_fh, &dirname, sattr3::default()).await {
+        match self.nfs3.create_dir(&parent_fh, &dirname, sattr3_with_mode(0o755)).await {
             Ok(_) => println!("{}", format!("created {path}").green()),
             Err(e) => report_write_stat("mkdir", &e),
         }
@@ -826,7 +843,7 @@ impl NfsShell {
             return;
         }
 
-        let (src_fh, _) = match self.lookup_path(src).await {
+        let (src_fh, src_attrs) = match self.lookup_path(src).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{}", format!("cp: {src}: {e}").red());
@@ -850,7 +867,8 @@ impl NfsShell {
             },
         };
 
-        let dst_fh = match create_remote(&self.nfs3, &parent_fh, &filename).await {
+        let src_mode = src_attrs.mode;
+        let dst_fh = match create_remote(&self.nfs3, &parent_fh, &filename, src_mode).await {
             Ok(fh) => fh,
             Err(e) => {
                 eprintln!("{}", format!("cp: create {dst}: {e}").red());
@@ -999,7 +1017,7 @@ impl NfsShell {
             },
         };
 
-        match self.nfs3.create_symlink(&parent_fh, &link_filename, target, sattr3::default()).await {
+        match self.nfs3.create_symlink(&parent_fh, &link_filename, target, sattr3_with_mode(0o777)).await {
             Ok(()) => println!("{}", format!("{linkname} -> {target}").green()),
             Err(e) => report_write_stat("symlink", &e),
         }
@@ -1106,7 +1124,7 @@ impl NfsShell {
             },
         };
 
-        let devdata = devicedata3 { dev_attributes: sattr3::default(), spec: specdata3 { specdata1: major, specdata2: minor } };
+        let devdata = devicedata3 { dev_attributes: sattr3_with_mode(0o666), spec: specdata3 { specdata1: major, specdata2: minor } };
         let what = match dev_type {
             "c" => mknoddata3::NF3CHR(devdata),
             "b" => mknoddata3::NF3BLK(devdata),
@@ -1857,7 +1875,11 @@ fn upload_tree<'a>(nfs3: &'a Nfs3Client, local_dir: &'a Path, remote_fh: &'a Fil
             bar.set_message(name_str.as_ref().to_owned());
 
             if local_path.is_dir() {
-                let sub_fh = match create_remote_dir(nfs3, remote_fh, name_str.as_ref()).await {
+                #[cfg(unix)]
+                let dir_mode = entry.metadata().map_or(0o755, |m| m.permissions().mode() & 0o7777);
+                #[cfg(not(unix))]
+                let dir_mode = 0o755;
+                let sub_fh = match create_remote_dir(nfs3, remote_fh, name_str.as_ref(), dir_mode).await {
                     Ok(fh) => fh,
                     Err(e) => {
                         tracing::warn!("mkdir {name_str}: {e}");
@@ -1866,6 +1888,10 @@ fn upload_tree<'a>(nfs3: &'a Nfs3Client, local_dir: &'a Path, remote_fh: &'a Fil
                 };
                 total += upload_tree(nfs3, &local_path, &sub_fh, mp).await?;
             } else {
+                #[cfg(unix)]
+                let file_mode = entry.metadata().map_or(0o644, |m| m.permissions().mode() & 0o7777);
+                #[cfg(not(unix))]
+                let file_mode = 0o644;
                 let data = match std::fs::read(&local_path) {
                     Ok(d) => d,
                     Err(e) => {
@@ -1873,7 +1899,7 @@ fn upload_tree<'a>(nfs3: &'a Nfs3Client, local_dir: &'a Path, remote_fh: &'a Fil
                         continue;
                     },
                 };
-                let file_fh = match create_remote(nfs3, remote_fh, name_str.as_ref()).await {
+                let file_fh = match create_remote(nfs3, remote_fh, name_str.as_ref(), file_mode).await {
                     Ok(fh) => fh,
                     Err(e) => {
                         tracing::warn!("create {name_str}: {e}");
@@ -1895,9 +1921,13 @@ fn upload_tree<'a>(nfs3: &'a Nfs3Client, local_dir: &'a Path, remote_fh: &'a Fil
     })
 }
 
+fn sattr3_with_mode(mode: u32) -> sattr3 {
+    sattr3 { mode: Nfs3Option::Some(mode), uid: Nfs3Option::None, gid: Nfs3Option::None, size: Nfs3Option::None, atime: set_atime::DONT_CHANGE, mtime: set_mtime::DONT_CHANGE }
+}
+
 /// MKDIR a directory in `parent_fh`, return the new directory handle.
-async fn create_remote_dir(nfs3: &Nfs3Client, parent_fh: &FileHandle, dirname: &str) -> anyhow::Result<FileHandle> {
-    let args = MKDIR3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(dirname.as_bytes().to_vec())) }, attributes: sattr3::default() };
+async fn create_remote_dir(nfs3: &Nfs3Client, parent_fh: &FileHandle, dirname: &str, mode: u32) -> anyhow::Result<FileHandle> {
+    let args = MKDIR3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(dirname.as_bytes().to_vec())) }, attributes: sattr3_with_mode(mode) };
     match nfs3.mkdir(&args).await? {
         Nfs3Result::Ok(ok) => match ok.obj {
             Nfs3Option::Some(fh) => Ok(FileHandle::from_nfs_fh3(&fh)),
@@ -1908,17 +1938,12 @@ async fn create_remote_dir(nfs3: &Nfs3Client, parent_fh: &FileHandle, dirname: &
 }
 
 /// CREATE a file in `parent_fh` with `filename`, return the new file handle.
-async fn create_remote(nfs3: &Nfs3Client, parent_fh: &FileHandle, filename: &str) -> anyhow::Result<FileHandle> {
-    let args = CREATE3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(filename.as_bytes().to_vec())) }, how: createhow3::UNCHECKED(sattr3::default()) };
+async fn create_remote(nfs3: &Nfs3Client, parent_fh: &FileHandle, filename: &str, mode: u32) -> anyhow::Result<FileHandle> {
+    let args = CREATE3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(filename.as_bytes().to_vec())) }, how: createhow3::UNCHECKED(sattr3_with_mode(mode)) };
     match nfs3.create(&args).await? {
-        Nfs3Result::Ok(ok) => {
-            match ok.obj {
-                Nfs3Option::Some(fh) => Ok(FileHandle::from_nfs_fh3(&fh)),
-                Nfs3Option::None => {
-                    // Server didn't return a handle; LOOKUP to get it.
-                    lookup_one(nfs3, parent_fh, filename).await.map(|(fh, _)| fh)
-                },
-            }
+        Nfs3Result::Ok(ok) => match ok.obj {
+            Nfs3Option::Some(fh) => Ok(FileHandle::from_nfs_fh3(&fh)),
+            Nfs3Option::None => lookup_one(nfs3, parent_fh, filename).await.map(|(fh, _)| fh),
         },
         Nfs3Result::Err((stat, _)) => anyhow::bail!("CREATE {filename}: {stat:?}"),
     }
