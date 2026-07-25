@@ -830,7 +830,16 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
     {
         let transport = DirectTransport::new(TokioIo::new(stream));
         let empty_fh = FileHandle::from_bytes(&[]);
-        if let Ok(attrs) = nfswolf_nfs3::Nfs3Client::new(transport).attrs(&empty_fh).await {
+        let client = nfswolf_nfs3::Nfs3Client::new(transport);
+        if let Ok(attrs) = client.attrs(&empty_fh).await {
+            // Public handle accepted -- try multi-component LOOKUP to prove
+            // the full bypass (XNFS Appendix E: "A LOOKUP request that uses
+            // the public filehandle can provide a pathname containing multiple
+            // components").
+            let mut evidence = format!("NFSv3 public handle (zero-length) returned attrs: uid={}, gid={}, mode={:#o}", attrs.uid, attrs.gid, attrs.mode);
+            if let Ok((_, Some(shadow_attrs))) = client.resolve(&empty_fh, "etc/shadow").await {
+                evidence = format!("{evidence}; multi-component LOOKUP 'etc/shadow' succeeded: uid={}, gid={}, mode={:#o}, size={}", shadow_attrs.uid, shadow_attrs.gid, shadow_attrs.mode, shadow_attrs.size);
+            }
             findings.push(make_finding(
                 &FindingSpec {
                     id: "F-2.9",
@@ -838,8 +847,10 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
                     desc: "The server responds to requests using the WebNFS public file handle \
                                (zero-length for NFSv3, per XNFS Appendix E). This gives any client \
                                access to the public export without going through the MOUNT protocol, \
-                               bypassing export ACLs, hostname restrictions, and privileged-port checks.",
-                    evidence: &format!("NFSv3 public handle (zero-length) returned attrs: uid={}, gid={}, mode={:#o}", attrs.uid, attrs.gid, attrs.mode),
+                               bypassing export ACLs, hostname restrictions, and privileged-port checks. \
+                               A multi-component LOOKUP on the public handle can reach any file in \
+                               a single RPC without walking the directory tree.",
+                    evidence: &evidence,
                     remediation: "Disable WebNFS on the server. On Solaris: remove the 'public' share option. On NetApp: nfs.webnfs.enable off.",
                     export: None,
                 },
@@ -859,6 +870,11 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
         let client = nfswolf_nfs2::Nfs2Client::new(transport2);
         let zero_fh = nfswolf_nfs2::wire::Nfs2FileHandle([0u8; 32]);
         if let Ok(attrs) = client.getattr(&zero_fh).await {
+            let mut evidence = format!("NFSv2 public handle (all-zero) returned attrs: uid={}, gid={}, mode={:#o}, size={}", attrs.uid, attrs.gid, attrs.mode, attrs.size);
+            // Multi-component LOOKUP: try to reach /etc/shadow in one call.
+            if let Ok((_, shadow_attrs)) = client.lookup_path(&zero_fh, "etc/shadow").await {
+                evidence = format!("{evidence}; multi-component path 'etc/shadow' succeeded: uid={}, gid={}, mode={:#o}, size={}", shadow_attrs.uid, shadow_attrs.gid, shadow_attrs.mode, shadow_attrs.size);
+            }
             findings.push(make_finding(
                 &FindingSpec {
                     id: "F-2.9",
@@ -867,7 +883,7 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
                                (all-zero 32 bytes for NFSv2, per XNFS Appendix E). This gives any \
                                client access to the public export without going through the MOUNT \
                                protocol, bypassing export ACLs and hostname restrictions.",
-                    evidence: &format!("NFSv2 public handle (all-zero) returned attrs: uid={}, gid={}, mode={:#o}, size={}", attrs.uid, attrs.gid, attrs.mode, attrs.size),
+                    evidence: &evidence,
                     remediation: "Disable WebNFS on the server.",
                     export: None,
                 },
