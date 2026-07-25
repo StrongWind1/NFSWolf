@@ -11,9 +11,7 @@
 pub(crate) use nfswolf_nfs3::api as types;
 
 /// Protocol status codes live in the protocol crate.
-pub(crate) mod errors {
-    pub(crate) use nfswolf_nfs3::Nfs3Error;
-}
+pub(crate) mod errors {}
 
 /// An NFSv3 client issuing calls through nfswolf's pooled transport.
 pub(crate) type Nfs3Client = nfswolf_nfs3::Nfs3Client<crate::proto::transport::PooledTransport>;

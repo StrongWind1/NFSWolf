@@ -149,7 +149,6 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
 /// set. Bulk callers (`scan --auto-escape`) pass `false` and print their own
 /// one-line-per-export summary instead.
 pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<(Nfs3Client, EscapeOutcome)> {
-    use nfswolf_nfs3::wire::nfsstat3;
     let addr = parse_addr_with_port(host, globals.nfs_port)?;
     let mount = make_mount_client(globals);
     let mnt = mount.mount(addr, export).await?;
@@ -341,9 +340,6 @@ async fn scan_hit_is_root(client: &Nfs3Client, handle: &FileHandle, self_fileid:
 /// LOOKUP of a customary top-level entry (etc/bin/usr/...), which only the filesystem root
 /// carries -- gives the positive signal a bare ACCES lacks.
 async fn confirm_root_dir(client: &Nfs3Client, candidate: &EscapeResult) -> bool {
-    use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, diropargs3, filename3, ftype3};
-    use nfswolf_xdr::Opaque;
-
     // root_squash conventionally maps root -> anonuid 65534 (nobody); claim it directly so
     // perms on the root dir (0755) are evaluated against an ordinary unprivileged uid.
     let cred = Credential::Sys(AuthSys::with_groups(65534, 65534, &[65534], client.machinename()));
@@ -382,9 +378,6 @@ fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
 /// On SUSE, shadow GID is 15. Reading succeeds even without no_root_squash
 /// because we can claim GID 42/15 via AUTH_SYS.
 async fn try_read_shadow_post_escape(client: &Nfs3Client, root_fh: &FileHandle) {
-    use nfswolf_nfs3::wire::{LOOKUP3args, READ3args, diropargs3, filename3};
-    use nfswolf_xdr::Opaque;
-
     // Shadow GIDs: 42 = Debian/Ubuntu, 15 = SUSE/openSUSE
     const SHADOW_GIDS: &[(u32, &str)] = &[(42, "Debian/Ubuntu shadow"), (15, "SUSE shadow")];
 

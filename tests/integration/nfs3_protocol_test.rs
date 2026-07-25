@@ -79,11 +79,11 @@ async fn readdirplus_lists_all_entries() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let args = READDIRPLUS3args { dir: root_fh, cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
     let result = nfs.readdirplus(&args).await.expect("READDIRPLUS RPC must succeed");
 
@@ -109,11 +109,11 @@ async fn readdirplus_entries_carry_attributes() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let args = READDIRPLUS3args { dir: root_fh, cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
 
     match nfs.readdirplus(&args).await.expect("READDIRPLUS RPC must succeed") {
@@ -141,11 +141,11 @@ async fn each_rpc_call_produces_a_different_xid() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let args = GETATTR3args { object: root_fh.clone() };
 
     // Both calls must succeed  --  uniqueness is verified by the fact that the
@@ -168,11 +168,11 @@ async fn lookup_then_read_reproduces_content() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
 
     let lookup = nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"fox.txt")) } }).await.expect("LOOKUP RPC must succeed");
 
@@ -202,11 +202,11 @@ async fn memfs_getattr_root_nlink_is_nonzero() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     match nfs.getattr(&GETATTR3args { object: root_fh }).await.expect("GETATTR must succeed") {
         Nfs3Result::Ok(ok) => {
             assert!(ok.obj_attributes.nlink >= 1, "root dir nlink must be >= 1, got {}", ok.obj_attributes.nlink);
@@ -226,11 +226,11 @@ async fn memfs_read_at_offset_returns_partial() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"partial.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
@@ -255,11 +255,11 @@ async fn memfs_read_past_eof_returns_empty() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"short.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
@@ -283,11 +283,11 @@ async fn memfs_readdirplus_empty_dir() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let args = READDIRPLUS3args { dir: root_fh, cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
     match nfs.readdirplus(&args).await.expect("READDIRPLUS must succeed") {
         Nfs3Result::Ok(ok) => {
@@ -313,11 +313,11 @@ async fn memfs_getattr_file_type_is_regular() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"regular.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
@@ -340,11 +340,11 @@ async fn getattr_size_matches_file_content_length() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
 
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"sized.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
@@ -371,11 +371,11 @@ async fn chunked_read_reassembles_full_content() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"chunks.bin")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),

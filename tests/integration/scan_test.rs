@@ -136,7 +136,7 @@ async fn memfs_export_list_shows_root() {
     let (_server, port) = start_memfs_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     // MNTPROC_EXPORT: the scanner calls this to discover exports.
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let export_list = exports.into_inner();
@@ -212,7 +212,7 @@ async fn memfs_mount_returns_root_handle() {
     // Give the server a moment to start accepting.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
 
     // The root file handle must be non-empty.
@@ -228,12 +228,12 @@ async fn memfs_getattr_on_root() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // MOUNT to get the root handle.
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     // GETATTR on the root handle.
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let result = nfs.getattr(&GETATTR3args { object: root_fh.clone() }).await.expect("GETATTR RPC must succeed");
 
     match result {
@@ -256,11 +256,11 @@ async fn memfs_lookup_file_in_root() {
     let (_server, port) = start_memfs_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
 
     // LOOKUP for "secret.txt" in root.
     let lookup_result = nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"secret.txt")) } }).await.expect("LOOKUP RPC must succeed");
@@ -284,11 +284,11 @@ async fn memfs_lookup_missing_file_returns_noent() {
     let (_server, port) = start_memfs_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
     let result = nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"does_not_exist.txt")) } }).await.expect("LOOKUP RPC must succeed (protocol level)");
 
     match result {
@@ -311,11 +311,11 @@ async fn memfs_read_file_content() {
     let (_server, port) = start_memfs_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
 
     // LOOKUP to get the file handle.
     let lookup_ok = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"data.bin")) } }).await.expect("LOOKUP must succeed") {

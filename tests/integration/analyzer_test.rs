@@ -82,7 +82,7 @@ async fn memfs_export_has_wildcard_acl() {
     let (_server, port) = start_memfs(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let export_list = exports.into_inner();
     assert!(!export_list.is_empty(), "MemFs must export at least one path");
@@ -105,7 +105,7 @@ async fn memfs_advertises_auth_sys_no_kerberos() {
     let (_server, port) = start_memfs(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
 
@@ -128,7 +128,7 @@ async fn memfs_root_handle_is_non_empty() {
     let (_server, port) = start_memfs(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
 

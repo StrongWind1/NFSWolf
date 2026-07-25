@@ -13,14 +13,13 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use nfswolf_nfs3::wire::{GETATTR3args, Nfs3Result, nfs_fh3, nfsstat3};
 use nfswolf_rpc::rpc::RpcClient;
-use nfswolf_rpc::transport::io::{AsyncRead, AsyncWrite};
 use nfswolf_rpc::transport::net::Connector;
 use nfswolf_rpc::transport::tokio::{TokioConnector, TokioIo};
 use nfswolf_xdr::{Pack, Unpack, Void};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::proto::auth::{AuthSys, Credential, next_stamp};
+use crate::proto::auth::Credential;
 
 /// NFS RPC program number and NFSv3 version, from the protocol crate rather
 /// than restated here (RFC 1813 sec. 3).

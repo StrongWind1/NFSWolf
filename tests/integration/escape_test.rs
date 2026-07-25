@@ -137,7 +137,7 @@ async fn memfs_root_handle_is_nonempty() {
     let (_srv, port) = start_server(MemFsConfig::default()).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
 
     assert!(!mnt.fhandle.0.as_ref().is_empty(), "server must return a non-empty root file handle");
@@ -148,7 +148,7 @@ async fn memfs_advertises_at_least_one_auth_flavor() {
     let (_srv, port) = start_server(MemFsConfig::default()).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
 
     // AUTH_SYS (flavor 1) must be present  --  the MemFs server must accept it.
@@ -167,11 +167,11 @@ async fn memfs_consecutive_mounts_return_same_root_handle() {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
 
     let stream1 = TcpStream::connect(addr).await.expect("connect 1");
-    let mut mc1 = MountClient::new(DirectTransport::new(TokioIo::new(stream1)));
+    let mc1 = MountClient::new(DirectTransport::new(TokioIo::new(stream1)));
     let mnt1 = mc1.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT 1 must succeed");
 
     let stream2 = TcpStream::connect(addr).await.expect("connect 2");
-    let mut mc2 = MountClient::new(DirectTransport::new(TokioIo::new(stream2)));
+    let mc2 = MountClient::new(DirectTransport::new(TokioIo::new(stream2)));
     let mnt2 = mc2.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT 2 must succeed");
 
     assert_eq!(mnt1.fhandle.0.as_ref(), mnt2.fhandle.0.as_ref(), "root handle must be stable across mounts (bearer token property)");
@@ -187,7 +187,7 @@ async fn memfs_with_files_still_returns_root_handle() {
     let (_srv, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut mc = mount_client(port).await;
+    let mc = mount_client(port).await;
     let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
 
     assert!(!mnt.fhandle.0.as_ref().is_empty(), "root handle must be non-empty even with files present");
@@ -207,7 +207,7 @@ async fn memfs_escape_attempt_fails_gracefully() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // No MOUNT needed -- we only test GETATTR with a crafted handle directly.
-    let mut nfs = nfs3_client(port).await;
+    let nfs = nfs3_client(port).await;
 
     // Construct a Linux ext4-style escape handle (fsid=0, inode=2, gen=0).
     // format: type(1) + fhtype(1) + len(2) + fsid(16) + inode(8) + gen(4) = 32 bytes
