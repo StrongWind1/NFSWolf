@@ -2,8 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use nfswolf_nfs3::wire::{Nfs3Option, sattr3, set_atime, set_mtime, stable_how};
 use nfswolf_nfs3::Nfs3Fault;
+use nfswolf_nfs3::wire::{Nfs3Option, sattr3, set_atime, set_mtime, stable_how};
 
 use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
@@ -91,6 +91,7 @@ fn is_nfs_acces(e: &anyhow::Error) -> bool {
     msg.contains("NFS3ERR_ACCES") || msg.contains("NFS3ERR_PERM")
 }
 
+#[expect(clippy::needless_pass_by_value, reason = "map_err requires FnOnce(E) -> F")]
 fn fault_to_anyhow<E: std::fmt::Display>(e: Nfs3Fault<E>) -> anyhow::Error {
     anyhow::anyhow!("{e}")
 }
@@ -192,25 +193,19 @@ impl ShellOps for V3Ops {
     }
 
     async fn create_file(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<ShellHandle> {
-        let fh_opt = self.nfs3.create_file(&to_v3_fh(dir), name, sattr3_with_mode(mode)).await.map_err(fault_to_anyhow)?;
-        match fh_opt {
-            Some(fh) => Ok(from_v3_fh(&fh)),
-            None => {
-                let (fh, _) = self.nfs3.resolve(&to_v3_fh(dir), name).await.map_err(fault_to_anyhow)?;
-                Ok(from_v3_fh(&fh))
-            },
+        if let Some(fh) = self.nfs3.create_file(&to_v3_fh(dir), name, sattr3_with_mode(mode)).await.map_err(fault_to_anyhow)? {
+            return Ok(from_v3_fh(&fh));
         }
+        let (fh, _) = self.nfs3.resolve(&to_v3_fh(dir), name).await.map_err(fault_to_anyhow)?;
+        Ok(from_v3_fh(&fh))
     }
 
     async fn mkdir(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<ShellHandle> {
-        let fh_opt = self.nfs3.create_dir(&to_v3_fh(dir), name, sattr3_with_mode(mode)).await.map_err(fault_to_anyhow)?;
-        match fh_opt {
-            Some(fh) => Ok(from_v3_fh(&fh)),
-            None => {
-                let (fh, _) = self.nfs3.resolve(&to_v3_fh(dir), name).await.map_err(fault_to_anyhow)?;
-                Ok(from_v3_fh(&fh))
-            },
+        if let Some(fh) = self.nfs3.create_dir(&to_v3_fh(dir), name, sattr3_with_mode(mode)).await.map_err(fault_to_anyhow)? {
+            return Ok(from_v3_fh(&fh));
         }
+        let (fh, _) = self.nfs3.resolve(&to_v3_fh(dir), name).await.map_err(fault_to_anyhow)?;
+        Ok(from_v3_fh(&fh))
     }
 
     async fn remove(&self, dir: &ShellHandle, name: &str) -> anyhow::Result<()> {
@@ -242,9 +237,15 @@ impl ShellOps for V3Ops {
         self.nfs3.set_attrs(&to_v3_fh(fh), attrs).await.map_err(fault_to_anyhow)
     }
 
-    fn uid(&self) -> u32 { self.nfs3.uid() }
-    fn gid(&self) -> u32 { self.nfs3.gid() }
-    fn machinename(&self) -> &str { self.nfs3.machinename() }
+    fn uid(&self) -> u32 {
+        self.nfs3.uid()
+    }
+    fn gid(&self) -> u32 {
+        self.nfs3.gid()
+    }
+    fn machinename(&self) -> &str {
+        self.nfs3.machinename()
+    }
 
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         let cred = Credential::Sys(AuthSys::new(uid, gid, hostname));
@@ -253,8 +254,12 @@ impl ShellOps for V3Ops {
         Ok(())
     }
 
-    fn version_name(&self) -> &'static str { "NFSv3" }
-    fn supports_mknod(&self) -> bool { true }
+    fn version_name(&self) -> &'static str {
+        "NFSv3"
+    }
+    fn supports_mknod(&self) -> bool {
+        true
+    }
 }
 
 fn to_shell_entries(entries: Vec<DirEntryPlus>) -> Vec<ShellEntry> {
@@ -273,7 +278,9 @@ async fn list_dir_v3(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<V
         tracing::warn!(entries = out.len(), "READDIRPLUS hit entry cap; listing truncated");
     }
     for entry in &mut out {
-        if entry.attrs.is_some() || entry.name == "." || entry.name == ".." { continue; }
+        if entry.attrs.is_some() || entry.name == "." || entry.name == ".." {
+            continue;
+        }
         if let Ok((_, Some(attrs))) = nfs3.resolve(dir_fh, &entry.name).await {
             entry.attrs = Some(attrs);
         }
@@ -288,13 +295,17 @@ async fn read_all_v3(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u
     let mut offset = 0u64;
     loop {
         let chunk = nfs3.read_at(fh, offset, 65_536).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        if chunk.data.is_empty() { break; }
+        if chunk.data.is_empty() {
+            break;
+        }
         buf.extend_from_slice(&chunk.data);
         if buf.len() as u64 > READ_ALL_MAX {
             anyhow::bail!("file exceeds 256 MiB read cap");
         }
         offset += chunk.data.len() as u64;
-        if chunk.eof { break; }
+        if chunk.eof {
+            break;
+        }
     }
     Ok(buf)
 }

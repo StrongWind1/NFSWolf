@@ -1,7 +1,7 @@
 //! NFSv2 backend for the unified shell.
 
-use nfswolf_nfs2::wire::{FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr, FHSIZE};
 use nfswolf_nfs2::Nfs2Client;
+use nfswolf_nfs2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};
 use nfswolf_rpc::transport::direct::DirectTransport;
 use nfswolf_rpc::transport::tokio::TokioIo;
 
@@ -90,10 +90,14 @@ impl ShellOps for V2Ops {
         let mut cookie = 0u32;
         loop {
             let entries = self.client.readdir(&v2dir, cookie, 4096).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-            if entries.is_empty() { break; }
+            if entries.is_empty() {
+                break;
+            }
             cookie = entries.last().map_or(0, |e| e.cookie);
             all_entries.extend(entries);
-            if all_entries.len() > 100_000 { break; }
+            if all_entries.len() > 100_000 {
+                break;
+            }
         }
         let mut result = Vec::with_capacity(all_entries.len());
         for e in &all_entries {
@@ -165,16 +169,26 @@ impl ShellOps for V2Ops {
         Ok(())
     }
 
-    fn uid(&self) -> u32 { self.uid }
-    fn gid(&self) -> u32 { self.gid }
-    fn machinename(&self) -> &str { &self.hostname }
+    fn uid(&self) -> u32 {
+        self.uid
+    }
+    fn gid(&self) -> u32 {
+        self.gid
+    }
+    fn machinename(&self) -> &str {
+        &self.hostname
+    }
 
     fn change_identity(&mut self, _uid: u32, _gid: u32, _hostname: &str) -> anyhow::Result<()> {
         anyhow::bail!("identity changes require reconnection on NFSv2 (DirectTransport credential is fixed at connect time)")
     }
 
-    fn version_name(&self) -> &'static str { "NFSv2" }
-    fn supports_mknod(&self) -> bool { false }
+    fn version_name(&self) -> &'static str {
+        "NFSv2"
+    }
+    fn supports_mknod(&self) -> bool {
+        false
+    }
 
     async fn probe_root(&self) -> anyhow::Result<Option<ShellHandle>> {
         self.probe_root().await

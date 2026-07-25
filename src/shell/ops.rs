@@ -4,7 +4,6 @@
 //! NFS version. `V3Ops` and `V2Ops` implement the trait, so the shell gets
 //! both versions for free.
 
-
 // ---------------------------------------------------------------------------
 // Version-neutral types
 // ---------------------------------------------------------------------------
