@@ -298,13 +298,27 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     }
 
     // Mountd port discovery.
-    let mount_client = if let Some(ref p) = job.proxy { NfsMountClient::new().with_proxy(p.clone()) } else { NfsMountClient::new() };
-    let mount_client = if let Some(port) = job.mount_port { NfsMountClient::with_port(port) } else { mount_client };
-
     let mut mountd_ports: HashSet<u16> = HashSet::new();
     for &(_, _, port) in mount_from_dump.iter().chain(mount_from_getport.iter()) {
         _ = mountd_ports.insert(port);
     }
+
+    // Build the MOUNT client. When TCP/111 is down but we discovered the
+    // mountd port via UDP DUMP/GETPORT, pin the client to that port so
+    // EXPORT and DUMP calls connect directly instead of trying GETPORT
+    // through the unreachable TCP portmapper.
+    let explicit_mount_port = job.mount_port.or_else(|| {
+        if !portmap_reachability.has_tcp() { mountd_ports.iter().next().copied() } else { None }
+    });
+    let mount_client = match explicit_mount_port {
+        Some(port) => {
+            let mc = NfsMountClient::with_port(port);
+            if let Some(ref p) = job.proxy { mc.with_proxy(p.clone()) } else { mc }
+        }
+        None => {
+            if let Some(ref p) = job.proxy { NfsMountClient::new().with_proxy(p.clone()) } else { NfsMountClient::new() }
+        }
+    };
 
     if mountd_ports.is_empty() {
         if let Some(mp) = job.mount_port {
