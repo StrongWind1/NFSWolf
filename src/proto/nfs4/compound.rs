@@ -200,13 +200,6 @@ impl Nfs4DirectClient {
     /// never sets `eof` cannot spin or exhaust memory -- the same defence the v3
     /// shell's `try_readdirplus` paging uses.
     ///
-    /// Known limitation: RFC 7530 S16.24 also requires echoing the server's
-    /// `cookieverf` on each continuation, but the READDIR decoder currently
-    /// discards the verifier (`ResOpData::Readdir` carries no cookieverf), so this
-    /// resumes with `cookieverf=0`. Servers that strictly validate the verifier
-    /// (returning NFS4ERR_NOT_SAME / NFS4ERR_BAD_COOKIE) will error on continuation
-    /// rather than truncate; fully correct pagination requires surfacing the
-    /// cookieverf from the decoder in `proto::nfs4::types` (cross-module change).
     pub(crate) async fn list_dir(&mut self, dir_fh: &[u8]) -> anyhow::Result<Vec<String>> {
         // Hard cap against a server that never signals eof (untrusted-server
         // hardening; mirrors the v3 shell readdir cap).
@@ -217,16 +210,19 @@ impl Nfs4DirectClient {
         // cycling cookie, which would never grow `names` and never break.
         let mut raw_seen: usize = 0;
         let mut cookie: u64 = 0;
+        // RFC 7530 S16.24: first call sends cookieverf=0; subsequent calls echo
+        // the server's verifier so it can detect directory mutations between pages.
+        let mut cookieverf: u64 = 0;
         loop {
-            // cookieverf=0: the first call requires it, and the decoder does not yet
-            // surface the server's verifier for continuation (see method note).
-            let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() }];
+            let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie, cookieverf, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() }];
             let res = self.compound(ops).await?;
             anyhow::ensure!(res.status == 0, "READDIR failed: NFSv4 status={}", res.status);
-            let (entries, eof) = match res.results.get(1).map(|op| &op.data) {
-                Some(ResOpData::Readdir { entries, eof }) => (entries, *eof),
+            let (server_verf, entries, eof) = match res.results.get(1).map(|op| &op.data) {
+                Some(ResOpData::Readdir { cookieverf, entries, eof }) => (*cookieverf, entries, *eof),
                 _ => anyhow::bail!("READDIR result missing or wrong type"),
             };
+            // Echo the server's verifier on the next continuation call.
+            cookieverf = u64::from_be_bytes(server_verf);
             // An empty page means no forward progress is possible (no cookie to
             // resume from); stop rather than re-issue the same request forever.
             let Some(last_cookie) = entries.last().map(|e| e.cookie) else { break };
