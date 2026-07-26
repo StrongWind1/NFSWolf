@@ -28,7 +28,7 @@ impl Unpack for Vec<u32> {
         let (len, len_bytes) = u32::unpack(input)?;
         bytes_read += len_bytes;
 
-        let mut vec = Self::with_capacity(len as usize);
+        let mut vec = crate::util::vec_with_capacity(len as usize);
 
         for _ in 0..len {
             let (item, item_bytes) = u32::unpack(input)?;
