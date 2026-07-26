@@ -137,3 +137,98 @@ impl<'a> From<&'a [u8]> for Opaque<'a> {
         Opaque(Cow::Borrowed(slice))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_empty_round_trip() {
+        // RFC 4506 sec 4.10: zero-length variable opaque, just the 4-byte length prefix.
+        let op = Opaque::borrowed(b"");
+        let mut buf = Vec::new();
+        let written = op.pack(&mut buf).unwrap();
+        assert_eq!(written, 4); // length prefix only
+        assert_eq!(buf, [0, 0, 0, 0]);
+        let (decoded, read) = Opaque::unpack(&mut buf.as_slice()).unwrap();
+        assert_eq!(decoded.as_ref(), b"");
+        assert_eq!(read, 4);
+    }
+
+    #[test]
+    fn opaque_1_byte_pads_to_4() {
+        // RFC 4506 sec 4.10: 1 data byte + 3 pad bytes.
+        let op = Opaque::borrowed(&[0xAB]);
+        let mut buf = Vec::new();
+        let written = op.pack(&mut buf).unwrap();
+        assert_eq!(written, 8); // 4 len + 1 data + 3 pad
+        assert_eq!(&buf[0..4], [0, 0, 0, 1]); // length = 1
+        assert_eq!(buf[4], 0xAB);
+        assert_eq!(&buf[5..8], [0, 0, 0]); // padding
+        let (decoded, read) = Opaque::unpack(&mut buf.as_slice()).unwrap();
+        assert_eq!(decoded.as_ref(), &[0xAB]);
+        assert_eq!(read, 8);
+    }
+
+    #[test]
+    fn opaque_4_bytes_no_padding() {
+        // RFC 4506 sec 4.10: 4 data bytes, already aligned.
+        let data = [1u8, 2, 3, 4];
+        let op = Opaque::borrowed(&data);
+        let mut buf = Vec::new();
+        let written = op.pack(&mut buf).unwrap();
+        assert_eq!(written, 8); // 4 len + 4 data, no pad
+        let (decoded, read) = Opaque::unpack(&mut buf.as_slice()).unwrap();
+        assert_eq!(decoded.as_ref(), &data);
+        assert_eq!(read, 8);
+    }
+
+    #[test]
+    fn opaque_7_bytes_pads_to_8() {
+        // RFC 4506 sec 4.10: 7 data bytes + 1 pad byte.
+        let data = [10u8, 20, 30, 40, 50, 60, 70];
+        let op = Opaque::borrowed(&data);
+        let mut buf = Vec::new();
+        let written = op.pack(&mut buf).unwrap();
+        assert_eq!(written, 12); // 4 len + 7 data + 1 pad
+        let (decoded, read) = Opaque::unpack(&mut buf.as_slice()).unwrap();
+        assert_eq!(decoded.as_ref(), &data);
+        assert_eq!(read, 12);
+    }
+
+    #[test]
+    fn opaque_packed_size_includes_length_and_padding() {
+        // packed_size = 4 (length prefix) + data_len rounded up to 4-byte boundary.
+        assert_eq!(Opaque::borrowed(b"").packed_size(), 4);
+        assert_eq!(Opaque::borrowed(b"x").packed_size(), 8); // 4 + pad(1)=4
+        assert_eq!(Opaque::borrowed(b"xy").packed_size(), 8); // 4 + pad(2)=4
+        assert_eq!(Opaque::borrowed(b"xyz").packed_size(), 8); // 4 + pad(3)=4
+        assert_eq!(Opaque::borrowed(b"abcd").packed_size(), 8); // 4 + 4
+        assert_eq!(Opaque::borrowed(b"abcde").packed_size(), 12); // 4 + pad(5)=8
+    }
+
+    #[test]
+    fn opaque_borrowed_and_owned_produce_identical_wire_output() {
+        let data = b"test payload";
+        let borrowed = Opaque::borrowed(data);
+        let owned = Opaque::owned(data.to_vec());
+
+        let mut buf_b = Vec::new();
+        let mut buf_o = Vec::new();
+        let _ = borrowed.pack(&mut buf_b).unwrap();
+        let _ = owned.pack(&mut buf_o).unwrap();
+        assert_eq!(buf_b, buf_o);
+    }
+
+    #[test]
+    fn opaque_packed_size_matches_actual_written() {
+        // Verify packed_size agrees with the actual bytes written for various lengths.
+        for len in 0..=17 {
+            let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let op = Opaque::borrowed(&data);
+            let mut buf = Vec::new();
+            let written = op.pack(&mut buf).unwrap();
+            assert_eq!(op.packed_size(), written, "mismatch for data length {len}");
+        }
+    }
+}

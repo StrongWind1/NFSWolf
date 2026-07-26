@@ -188,3 +188,47 @@ impl<T: RpcTransport> Nfs3Client<T> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- All 22 NFSv3 procedure number constants (RFC 1813 sec 3.3) ---
+
+    #[test]
+    fn all_22_procedure_constants_match_rfc_1813() {
+        // RFC 1813 sec 3.3 defines exactly these 22 procedure numbers.
+        assert_eq!(NFS_PROGRAM::NFSPROC3_NULL as u32, 0, "NULL (sec 3.3.0)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_GETATTR as u32, 1, "GETATTR (sec 3.3.1)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_SETATTR as u32, 2, "SETATTR (sec 3.3.2)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_LOOKUP as u32, 3, "LOOKUP (sec 3.3.3)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_ACCESS as u32, 4, "ACCESS (sec 3.3.4)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_READLINK as u32, 5, "READLINK (sec 3.3.5)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_READ as u32, 6, "READ (sec 3.3.6)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_WRITE as u32, 7, "WRITE (sec 3.3.7)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_CREATE as u32, 8, "CREATE (sec 3.3.8)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_MKDIR as u32, 9, "MKDIR (sec 3.3.9)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_SYMLINK as u32, 10, "SYMLINK (sec 3.3.10)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_MKNOD as u32, 11, "MKNOD (sec 3.3.11)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_REMOVE as u32, 12, "REMOVE (sec 3.3.12)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_RMDIR as u32, 13, "RMDIR (sec 3.3.13)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_RENAME as u32, 14, "RENAME (sec 3.3.14)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_LINK as u32, 15, "LINK (sec 3.3.15)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_READDIR as u32, 16, "READDIR (sec 3.3.16)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_READDIRPLUS as u32, 17, "READDIRPLUS (sec 3.3.17)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_FSSTAT as u32, 18, "FSSTAT (sec 3.3.18)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_FSINFO as u32, 19, "FSINFO (sec 3.3.19)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_PATHCONF as u32, 20, "PATHCONF (sec 3.3.20)");
+        assert_eq!(NFS_PROGRAM::NFSPROC3_COMMIT as u32, 21, "COMMIT (sec 3.3.21)");
+    }
+
+    #[test]
+    fn nfs_program_is_100003() {
+        assert_eq!(PROGRAM, 100_003, "NFS program number must be 100003");
+    }
+
+    #[test]
+    fn nfs_version_is_3() {
+        assert_eq!(VERSION, 3, "NFS version must be 3");
+    }
+}

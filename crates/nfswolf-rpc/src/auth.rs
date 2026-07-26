@@ -225,4 +225,108 @@ mod tests {
         let _ = cred.to_opaque_auth(43).pack(&mut c).expect("pack");
         assert_ne!(a, c, "stamp must reach the wire");
     }
+
+    // --- AuthFlavor::from_u32 coverage ---
+
+    /// AUTH_NULL=0, AUTH_SYS=1, AUTH_SHORT=2, AUTH_DH=3 per RFC 5531 sec 8.2.
+    #[test]
+    fn auth_flavor_from_u32_covers_all_base_flavors() {
+        assert_eq!(AuthFlavor::from_u32(0), AuthFlavor::None);
+        assert_eq!(AuthFlavor::from_u32(1), AuthFlavor::Sys);
+        assert_eq!(AuthFlavor::from_u32(2), AuthFlavor::Short);
+        assert_eq!(AuthFlavor::from_u32(3), AuthFlavor::Dh);
+        assert_eq!(AuthFlavor::from_u32(6), AuthFlavor::Gss);
+    }
+
+    /// RFC 2623 sec 2.1.1 defines Kerberos pseudo-flavors 390003-390005
+    /// (krb5, krb5i, krb5p). They must all map to Gss.
+    #[test]
+    fn auth_flavor_kerberos_pseudo_flavors_390003_through_390005() {
+        assert_eq!(AuthFlavor::from_u32(390_003), AuthFlavor::Gss);
+        assert_eq!(AuthFlavor::from_u32(390_004), AuthFlavor::Gss);
+        assert_eq!(AuthFlavor::from_u32(390_005), AuthFlavor::Gss);
+    }
+
+    #[test]
+    fn auth_flavor_unknown_for_unrecognized_values() {
+        for v in [4_u32, 5, 7, 100, 390_002, 390_006, u32::MAX] {
+            assert_eq!(AuthFlavor::from_u32(v), AuthFlavor::Unknown, "flavor {v} should be Unknown");
+        }
+    }
+
+    // --- AuthSys encoding details ---
+
+    /// RFC 1057 sec 9.2: the stamp is the first four bytes of the
+    /// auth_unix body ("unsigned int stamp").
+    #[test]
+    fn auth_sys_stamp_is_first_four_bytes_of_body() {
+        use nfswolf_xdr::{Pack as _, Unpack as _};
+        let cred = AuthSys::new(0, 0, "test");
+        let auth = cred.to_opaque_auth(0xDEAD_BEEF);
+        // Pack the opaque_auth to get the full wire encoding.
+        let mut buf = Vec::new();
+        let _ = auth.pack(&mut buf).expect("pack");
+        // The opaque_auth is: flavor(4) + body_len(4) + body(...)
+        // The body starts at offset 8. The stamp is the first u32 inside.
+        let body_start = 8;
+        let mut cursor = std::io::Cursor::new(&buf[body_start..]);
+        let (stamp, _) = u32::unpack(&mut cursor).expect("unpack stamp");
+        assert_eq!(stamp, 0xDEAD_BEEF);
+    }
+
+    /// The machinename field from AuthSys must appear in the encoded body.
+    #[test]
+    fn auth_sys_machinename_appears_in_encoded_body() {
+        use nfswolf_xdr::Pack as _;
+        let cred = AuthSys::new(0, 0, "myhost.example.com");
+        let auth = cred.to_opaque_auth(1);
+        let mut buf = Vec::new();
+        let _ = auth.pack(&mut buf).expect("pack");
+        // The machinename is XDR-encoded as a length-prefixed opaque.
+        // The string bytes must appear somewhere in the body.
+        assert!(buf.windows(b"myhost.example.com".len()).any(|w| w == b"myhost.example.com"), "machinename not found in encoded credential");
+    }
+
+    /// RFC 5531 sec 14: "The groups array should not exceed 16 in size."
+    #[test]
+    fn max_aux_gids_matches_rfc_5531_sec_14() {
+        assert_eq!(MAX_AUX_GIDS, 16);
+    }
+
+    /// Verify that with_groups deduplicates the primary GID rather than
+    /// double-counting it (which would waste a slot in the 16-entry limit).
+    #[test]
+    fn with_groups_deduplicates_primary_gid() {
+        let cred = AuthSys::with_groups(1000, 42, &[42, 100, 200], "host");
+        // 42 should appear exactly once despite being both the primary GID
+        // and first in the supplied list.
+        assert_eq!(cred.gids.iter().filter(|&&g| g == 42).count(), 1);
+        assert_eq!(cred.gids, vec![42, 100, 200]);
+    }
+
+    /// Verify the encoded auth_unix body round-trips through unpack.
+    #[test]
+    fn auth_sys_to_opaque_auth_body_round_trips() {
+        use crate::rpc::auth_unix;
+        use nfswolf_xdr::{Pack as _, Unpack as _};
+
+        let cred = AuthSys::with_groups(1000, 500, &[500, 42, 27], "scanner");
+        let auth = cred.to_opaque_auth(77);
+
+        // Extract just the body bytes and unpack as auth_unix.
+        let mut full_buf = Vec::new();
+        let _ = auth.pack(&mut full_buf).expect("pack");
+        // opaque_auth: flavor(4) + body_len(4) + body(N)
+        let body_len = u32::from_be_bytes(full_buf[4..8].try_into().unwrap()) as usize;
+        let body_bytes = &full_buf[8..8 + body_len];
+
+        let mut cursor = std::io::Cursor::new(body_bytes);
+        let (decoded, consumed) = auth_unix::unpack(&mut cursor).expect("unpack auth_unix");
+        assert_eq!(consumed, body_len);
+        assert_eq!(decoded.stamp, 77);
+        assert_eq!(decoded.uid, 1000);
+        assert_eq!(decoded.gid, 500);
+        assert_eq!(decoded.machinename.as_ref(), b"scanner");
+        assert_eq!(decoded.gids, vec![500, 42, 27]);
+    }
 }

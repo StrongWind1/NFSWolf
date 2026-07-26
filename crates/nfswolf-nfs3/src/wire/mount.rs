@@ -182,3 +182,121 @@ impl std::fmt::Display for MOUNT_PROGRAM {
         write!(f, "{value}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Pack a value into a fresh buffer.
+    fn pack_to_vec(val: &impl Pack) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let _n = val.pack(&mut buf).expect("pack must succeed");
+        buf
+    }
+
+    // --- mountstat3: all 10 status codes (RFC 1813 appendix I sec 4) ---
+
+    #[test]
+    fn mountstat3_all_10_values_round_trip() {
+        let cases: &[(mountstat3, u32)] = &[
+            (mountstat3::MNT3_OK, 0),
+            (mountstat3::MNT3ERR_PERM, 1),
+            (mountstat3::MNT3ERR_NOENT, 2),
+            (mountstat3::MNT3ERR_IO, 5),
+            (mountstat3::MNT3ERR_ACCES, 13),
+            (mountstat3::MNT3ERR_NOTDIR, 20),
+            (mountstat3::MNT3ERR_INVAL, 22),
+            (mountstat3::MNT3ERR_NAMETOOLONG, 63),
+            (mountstat3::MNT3ERR_NOTSUPP, 10004),
+            (mountstat3::MNT3ERR_SERVERFAULT, 10006),
+        ];
+        for &(variant, expected_disc) in cases {
+            let wire = pack_to_vec(&variant);
+            assert_eq!(wire, expected_disc.to_be_bytes(), "packed {variant:?} must match RFC discriminant {expected_disc}");
+            let (decoded, consumed) = mountstat3::unpack(&mut Cursor::new(&wire)).expect("unpack mountstat3");
+            assert_eq!(consumed, 4);
+            assert_eq!(decoded as u32, expected_disc, "{variant:?} must survive pack/unpack");
+        }
+    }
+
+    // --- MOUNT v3 program and version constants ---
+
+    #[test]
+    fn mount_program_number() {
+        assert_eq!(PROGRAM, 100_005, "MOUNT program number must be 100005 (RFC 1813)");
+    }
+
+    #[test]
+    fn mount_version_number() {
+        assert_eq!(VERSION, 3, "MOUNT version must be 3 (RFC 1813)");
+    }
+
+    // --- MOUNT_PROGRAM procedure numbers (RFC 1813 appendix I sec 4) ---
+
+    #[test]
+    fn mount_procedure_numbers() {
+        assert_eq!(MOUNT_PROGRAM::MOUNTPROC3_NULL as u32, 0);
+        assert_eq!(MOUNT_PROGRAM::MOUNTPROC3_MNT as u32, 1);
+        assert_eq!(MOUNT_PROGRAM::MOUNTPROC3_DUMP as u32, 2);
+        assert_eq!(MOUNT_PROGRAM::MOUNTPROC3_UMNT as u32, 3);
+        assert_eq!(MOUNT_PROGRAM::MOUNTPROC3_UMNTALL as u32, 4);
+        assert_eq!(MOUNT_PROGRAM::MOUNTPROC3_EXPORT as u32, 5);
+    }
+
+    #[test]
+    fn mount_procedure_try_from_u32_covers_all_6() {
+        for n in 0..=5 {
+            let proc = MOUNT_PROGRAM::try_from(n).unwrap_or_else(|_| panic!("procedure {n} must be valid"));
+            assert_eq!(proc as u32, n);
+        }
+        assert!(MOUNT_PROGRAM::try_from(6).is_err());
+    }
+
+    // --- dirpath pack/unpack round-trip ---
+
+    #[test]
+    fn dirpath_round_trip() {
+        let path = dirpath(Opaque::owned(b"/export/data".to_vec()));
+        let wire = pack_to_vec(&path);
+        let (decoded, consumed) = dirpath::unpack(&mut Cursor::new(&wire)).expect("unpack dirpath");
+        assert_eq!(consumed, wire.len());
+        assert_eq!(decoded.0.as_ref(), b"/export/data");
+    }
+
+    // --- mountres3 Ok: carries handle + auth_flavors array ---
+
+    #[test]
+    fn mountres3_ok_carries_handle_and_auth_flavors() {
+        let handle_data: Vec<u8> = (0..28).collect();
+        let ok = mountres3::Ok(mountres3_ok { fhandle: fhandle3(Opaque::owned(handle_data.clone())), auth_flavors: vec![1, 6] });
+        let wire = pack_to_vec(&ok);
+
+        let (decoded, consumed) = mountres3::unpack(&mut Cursor::new(&wire)).expect("unpack mountres3 Ok");
+        assert_eq!(consumed, wire.len());
+        match decoded {
+            mountres3::Ok(res) => {
+                assert_eq!(res.fhandle.0.as_ref(), handle_data.as_slice(), "handle bytes must survive round-trip");
+                assert_eq!(res.auth_flavors, vec![1, 6], "auth flavors must survive round-trip");
+            },
+            mountres3::Err(stat) => panic!("expected Ok, got Err({stat:?})"),
+        }
+    }
+
+    // --- mountres3 error: carries only status ---
+
+    #[test]
+    fn mountres3_error_carries_only_status() {
+        let err = mountres3::Err(mountstat3::MNT3ERR_ACCES);
+        let wire = pack_to_vec(&err);
+        // Error variant is just the status code, 4 bytes.
+        assert_eq!(wire.len(), 4);
+
+        let (decoded, consumed) = mountres3::unpack(&mut Cursor::new(&wire)).expect("unpack mountres3 Err");
+        assert_eq!(consumed, 4);
+        match decoded {
+            mountres3::Err(stat) => assert_eq!(stat as u32, 13),
+            mountres3::Ok(_) => panic!("expected Err, got Ok"),
+        }
+    }
+}
