@@ -215,10 +215,12 @@ unused = { level = "deny", priority = -1 }
 unsafe_code = "deny"
 # --- Deny (deny-by-default) -------------------------------------------------
 ambiguous_associated_items = "deny"
-ambiguous_glob_imports = "deny"
+# Ambiguous glob import is always a latent name collision -- no override needed.
+ambiguous_glob_imports = "forbid"
 binary_asm_labels = "deny"
 bindings_with_variant_name = "deny"
-conflicting_repr_hints = "deny"
+# Conflicting repr hints are always UB-adjacent -- no override needed.
+conflicting_repr_hints = "forbid"
 dangerous_implicit_autorefs = "deny"
 dependency_on_unit_never_type_fallback = "deny"
 duplicate_features = "deny"
@@ -232,7 +234,8 @@ invalid_from_utf8_unchecked = "deny"
 invalid_macro_export_arguments = "deny"
 invalid_type_param_default = "deny"
 legacy_derive_helpers = "deny"
-let_underscore_lock = "deny"
+# Silently dropping a lock guard is always a bug -- no override needed.
+let_underscore_lock = "forbid"
 long_running_const_eval = "deny"
 macro_expanded_macro_exports_accessed_by_absolute_paths = "deny"
 named_asm_labels = "deny"
@@ -388,6 +391,12 @@ unnecessary_safety_doc = "warn"
 unused_result_ok = "warn"
 # No .unwrap() in library code -- force proper error propagation.
 unwrap_used = "warn"
+# --- Restriction lints promoted to deny (style) ------------------------------
+# No glob imports -- explicit names make dependencies visible in diffs.
+wildcard_imports = "deny"
+# --- Pedantic group: promoted to warn ----------------------------------------
+# Prefer Self over the concrete type name inside impl blocks.
+use_self = "warn"
 # --- Cargo group: override to allow -----------------------------------------
 # Transitive dependency version conflicts are not actionable.
 multiple_crate_versions = "allow"
