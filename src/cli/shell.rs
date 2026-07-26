@@ -164,6 +164,7 @@ pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
         let prompt = format!("nfswolf@{host}:{} uid={} gid={}> ", shell.cwd_path(), shell.current_uid(), shell.current_gid());
         match rl.readline(&prompt) {
             Ok(line) => {
+                // History add failure is non-fatal (in-memory only).
                 drop(rl.add_history_entry(&line));
                 let trimmed = line.trim();
                 if trimmed == "exit" || trimmed == "quit" {
@@ -213,7 +214,8 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 
     let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
     let host = target.host;
-    drop(target.source); // NFSv4 path doesn't use MOUNT or raw handle
+    // NFSv4 path doesn't use MOUNT or raw handle; drop the source.
+    drop(target.source);
     let nfs_port = globals.nfs_port.unwrap_or(2049);
     let addr = SocketAddr::new(host, nfs_port);
     let mut uid = globals.uid;
@@ -248,6 +250,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
         let prompt = format!("nfswolf@{host}:{cwd_path} uid={uid} hostname={hostname} [v4]> ");
         match rl.readline(&prompt) {
             Ok(line) => {
+                // History add failure is non-fatal (in-memory only).
                 drop(rl.add_history_entry(&line));
                 let trimmed = line.trim();
                 if trimmed == "exit" || trimmed == "quit" {
@@ -493,6 +496,7 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
         match part {
             "" | "." => {},
             ".." => {
+                // Pop returns None at root -- that's fine, stay at root.
                 drop(components.pop());
             },
             other => components.push(other.to_owned()),
@@ -582,6 +586,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
         if line.is_empty() {
             continue;
         }
+        // History add failure is non-fatal (in-memory only).
         drop(rl.add_history_entry(line));
 
         let (cmd, arg) = line.split_once(' ').map_or((line, ""), |(c, a)| (c, a.trim()));
@@ -640,6 +645,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                 match client.lookup_path(&cwd_fh, arg).await {
                     Ok((fh, _)) => match client.read_file(&fh).await {
                         Ok(data) => {
+                            // Stdout write failure is non-fatal during cat (pipe closed, etc.).
                             drop(std::io::Write::write_all(&mut std::io::stdout(), &data));
                         },
                         Err(e) => eprintln!("{}", format!("cat: {arg}: {e}").red()),
@@ -1059,6 +1065,7 @@ async fn v2_upload_data<T: nfswolf_rpc::RpcTransport>(client: &nfswolf_nfs2::Nfs
     const CHUNK: usize = 8192;
     let mut offset = 0u32;
     for chunk in data.chunks(CHUNK) {
+        // NFSv2 WRITE returns attrs we don't use; errors propagate via ?.
         let _ = client.write(fh, offset, chunk.to_vec()).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         offset = offset.saturating_add(u32::try_from(chunk.len()).unwrap_or(u32::MAX));
     }
@@ -1075,6 +1082,7 @@ fn v2_handle_hex(fh: &nfswolf_nfs2::wire::Nfs2FileHandle) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(64);
     for b in &fh.0 {
+        // Infallible: fmt::Write for String never fails.
         let _ = write!(s, "{b:02x}");
     }
     s

@@ -49,6 +49,7 @@ impl V3Ops {
 
     fn cache_winner(&self, fh: &ShellHandle, uid: u32, gid: u32) {
         let mut lock = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Previous value (if any) from the HashMap is not needed.
         let _ = lock.insert(fh.as_bytes().to_vec(), (uid, gid));
     }
 }
