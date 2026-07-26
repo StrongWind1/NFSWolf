@@ -639,14 +639,20 @@ fn check_plaintext_transport(exports: &[ExportAnalysis], findings: &mut Vec<Find
     ));
 }
 
-/// Flag exports that support only AUTH_SYS (flavor 1) with no Kerberos.
+/// Flag exports that support only AUTH_SYS (F-1.1) or mixed AUTH_SYS + Kerberos (F-1.7).
 ///
 /// AUTH_SYS is trivially spoofable  --  the server cannot verify UID/GID claims.
 /// RFC 2623 S2.1 documents this weakness.
+///
+/// When BOTH AUTH_SYS and Kerberos are advertised on the same export, an attacker
+/// can choose AUTH_SYS and bypass Kerberos entirely  --  there is no negotiation
+/// that forces the stronger mechanism (RFC 2203 S5.2.1, RFC 2623 S5).
 fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Vec<Finding>) {
-    // Flavor 6 = RPCSEC_GSS (Kerberos). If absent, only AUTH_SYS is available.
-    let has_kerberos = auth_flavors.contains(&6);
     let has_auth_sys = auth_flavors.contains(&1);
+    // Kerberos: bare RPCSEC_GSS (6) or krb5 pseudo-flavors (390003-390005, IANA
+    // RPC auth-flavor registry). Real krb5 exports typically advertise the
+    // pseudo-flavors, not bare 6.
+    let has_kerberos = auth_flavors.iter().any(|&f| f == 6 || (390_003..=390_005).contains(&f));
     if has_auth_sys && !has_kerberos {
         findings.push(make_finding(
             &FindingSpec {
@@ -656,6 +662,27 @@ fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Ve
                        verify the client's UID/GID claims (RFC 2623 S2.1).",
                 evidence: &format!("auth_flavors={auth_flavors:?}"),
                 remediation: "Enable sec=krb5p in /etc/exports and configure Kerberos.",
+                export: Some(export_path),
+            },
+            Severity::High,
+        ));
+    } else if has_auth_sys && has_kerberos {
+        // Mixed flavors: Kerberos is deployed but not enforced. An attacker
+        // simply sends AUTH_SYS requests (RFC 2203 S5.2.1: no facility to
+        // negotiate mechanism). A MITM can also strip krb5 entries from the
+        // MOUNT flavor list (RFC 2623 S5) or from SECINFO (RFC 7530 S19).
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-1.7",
+                title: "Mixed auth flavors allow RPCSEC_GSS downgrade to AUTH_SYS",
+                desc: "The export advertises both AUTH_SYS and RPCSEC_GSS (Kerberos). An attacker \
+                       can choose AUTH_SYS and bypass Kerberos entirely  --  there is no negotiation \
+                       that forces the stronger mechanism (RFC 2203 S5.2.1). A MITM can also strip \
+                       the krb5 entries from the MOUNT flavor list to force legitimate clients onto \
+                       AUTH_SYS (RFC 2623 S5).",
+                evidence: &format!("auth_flavors={auth_flavors:?}"),
+                remediation: "Remove AUTH_SYS from exports that require Kerberos authentication: \
+                              use sec=krb5 (or krb5i/krb5p) exclusively in /etc/exports.",
                 export: Some(export_path),
             },
             Severity::High,
@@ -1265,12 +1292,14 @@ pub(crate) fn infer_squash_mode(observed_uid: u32, probe_uid: u32) -> SquashProb
     }
 }
 
-/// Probe NFSv4 SECINFO for an export path to detect AUTH_SYS-only access via NFSv4.
+/// Probe NFSv4 SECINFO for auth-flavor issues (F-3.4 AUTH_SYS-only, F-1.7 mixed).
 ///
 /// SECINFO (RFC 7530 S18.29) returns the actual required auth methods per directory,
 /// independent of the NFSv3 MOUNT auth flavor list.  AUTH_SYS-only NFSv4 means
 /// an attacker can spoof arbitrary UID/GID credentials even when accessing via NFSv4
-/// (F-3.4: TLS downgrade not enforced  --  RPCSEC_GSS not required).
+/// (F-3.4: TLS downgrade not enforced  --  RPCSEC_GSS not required).  Mixed
+/// AUTH_SYS + Kerberos means the attacker can choose AUTH_SYS and bypass Kerberos
+/// entirely (F-1.7, RFC 2203 S5.2.1).
 ///
 /// Best-effort: silently returns on timeout or PROG_MISMATCH (NFSv3-only server).
 async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
@@ -1310,7 +1339,8 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
     let flavors = res.results.last().and_then(|op| if let ResOpData::SecFlavors(f) = &op.data { Some(f.as_slice()) } else { None });
     let Some(flavors) = flavors else { return };
 
-    let has_kerberos = flavors.contains(&6); // 6 = RPCSEC_GSS (RFC 7530 S3.2.1)
+    // Kerberos: bare RPCSEC_GSS (6) or krb5 pseudo-flavors (390003-390005).
+    let has_kerberos = flavors.iter().any(|&f| f == 6 || (390_003..=390_005).contains(&f));
     let has_auth_sys = flavors.contains(&1); // 1 = AUTH_SYS (RFC 5531 S14)
 
     if has_auth_sys && !has_kerberos {
@@ -1326,6 +1356,27 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
                 ),
                 evidence: &format!("SECINFO flavors={flavors:?}"),
                 remediation: "Configure `sec=krb5p` in /etc/exports to require Kerberos authentication.",
+                export: Some(export_path),
+            },
+            Severity::High,
+        ));
+    } else if has_auth_sys && has_kerberos {
+        // Mixed flavors via NFSv4 SECINFO: same downgrade risk as the MOUNT
+        // flavor list (F-1.7). Without integrity protection on the SECINFO
+        // call itself, a MITM can strip krb5 entries (RFC 7530 S19).
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-1.7",
+                title: "NFSv4 SECINFO: mixed auth flavors allow RPCSEC_GSS downgrade to AUTH_SYS",
+                desc: &format!(
+                    "NFSv4 SECINFO for export {export_path} returns both AUTH_SYS and RPCSEC_GSS \
+                     (Kerberos). An attacker can choose AUTH_SYS and bypass Kerberos entirely \
+                     (RFC 2203 S5.2.1). Without integrity protection on the SECINFO call, a MITM \
+                     can also strip the krb5 entries to force clients onto AUTH_SYS (RFC 7530 S19).",
+                ),
+                evidence: &format!("SECINFO flavors={flavors:?}"),
+                remediation: "Remove AUTH_SYS from exports that require Kerberos authentication: \
+                              use sec=krb5 (or krb5i/krb5p) exclusively in /etc/exports.",
                 export: Some(export_path),
             },
             Severity::High,
