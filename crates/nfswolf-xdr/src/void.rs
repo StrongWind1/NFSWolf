@@ -22,3 +22,30 @@ impl Unpack for Void {
         Ok((Self, 0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn void_packed_size_is_zero() {
+        // XDR void occupies zero bytes on the wire.
+        assert_eq!(Void.packed_size(), 0);
+    }
+
+    #[test]
+    fn void_pack_writes_nothing() {
+        let mut buf = Vec::new();
+        let written = Void.pack(&mut buf).unwrap();
+        assert_eq!(written, 0);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn void_unpack_consumes_nothing() {
+        let data: &[u8] = &[0xFF, 0xFF]; // junk -- Void should not touch it
+        let (v, read) = Void::unpack(&mut &data[..]).unwrap();
+        assert_eq!(v, Void);
+        assert_eq!(read, 0);
+    }
+}

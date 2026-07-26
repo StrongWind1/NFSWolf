@@ -81,3 +81,97 @@ impl std::fmt::Display for PMAP_PROG {
         write!(f, "{name}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nfswolf_xdr::{Pack, Unpack};
+    use std::io::Cursor;
+
+    // --- Protocol constants (RFC 1057 appendix A) ---
+
+    /// RFC 1057 appendix A: portmapper uses TCP protocol number 6 and
+    /// UDP protocol number 17.
+    #[test]
+    fn ipproto_constants_match_iana_values() {
+        assert_eq!(IPPROTO_TCP, 6);
+        assert_eq!(IPPROTO_UDP, 17);
+    }
+
+    /// RFC 1057 appendix A: portmapper is program 100000, version 2, port 111.
+    #[test]
+    fn portmapper_program_constants() {
+        assert_eq!(PROGRAM, 100_000);
+        assert_eq!(VERSION, 2);
+        assert_eq!(PMAP_PORT, 111);
+    }
+
+    // --- mapping pack/unpack (RFC 1057 appendix A) ---
+
+    #[test]
+    fn mapping_pack_unpack_round_trip() {
+        let m = mapping { prog: 100_003, vers: 3, prot: IPPROTO_TCP, port: 2049 };
+        let mut buf = Vec::new();
+        let _ = m.pack(&mut buf).expect("pack");
+        // 4 XDR u32 fields = 16 bytes
+        assert_eq!(buf.len(), 16);
+        let mut cursor = Cursor::new(&buf);
+        let (decoded, consumed) = mapping::unpack(&mut cursor).expect("unpack");
+        assert_eq!(consumed, 16);
+        assert_eq!(decoded.prog, 100_003);
+        assert_eq!(decoded.vers, 3);
+        assert_eq!(decoded.prot, IPPROTO_TCP);
+        assert_eq!(decoded.port, 2049);
+    }
+
+    #[test]
+    fn mapping_udp_variant() {
+        let m = mapping { prog: 100_005, vers: 3, prot: IPPROTO_UDP, port: 0 };
+        let mut buf = Vec::new();
+        let _ = m.pack(&mut buf).expect("pack");
+        let mut cursor = Cursor::new(&buf);
+        let (decoded, _) = mapping::unpack(&mut cursor).expect("unpack");
+        assert_eq!(decoded.prog, 100_005);
+        assert_eq!(decoded.prot, IPPROTO_UDP);
+        assert_eq!(decoded.port, 0);
+    }
+
+    // --- PMAP_PROG procedure numbers (RFC 1057 appendix A) ---
+
+    /// RFC 1057 appendix A defines portmapper procedures 0-5.
+    #[test]
+    fn pmap_prog_procedure_numbers() {
+        let variants = [(PMAP_PROG::PMAPPROC_NULL, 0_u32), (PMAP_PROG::PMAPPROC_SET, 1), (PMAP_PROG::PMAPPROC_UNSET, 2), (PMAP_PROG::PMAPPROC_GETPORT, 3), (PMAP_PROG::PMAPPROC_DUMP, 4), (PMAP_PROG::PMAPPROC_CALLIT, 5)];
+        for (variant, expected) in variants {
+            let mut buf = Vec::new();
+            let _ = variant.pack(&mut buf).expect("pack");
+            assert_eq!(buf, expected.to_be_bytes(), "{variant:?}");
+        }
+    }
+
+    #[test]
+    fn pmap_prog_round_trip() {
+        for variant in [PMAP_PROG::PMAPPROC_NULL, PMAP_PROG::PMAPPROC_SET, PMAP_PROG::PMAPPROC_UNSET, PMAP_PROG::PMAPPROC_GETPORT, PMAP_PROG::PMAPPROC_DUMP, PMAP_PROG::PMAPPROC_CALLIT] {
+            let mut buf = Vec::new();
+            let _ = variant.pack(&mut buf).expect("pack");
+            let mut cursor = Cursor::new(&buf);
+            let (decoded, consumed) = PMAP_PROG::unpack(&mut cursor).expect("unpack");
+            assert_eq!(consumed, 4);
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    #[test]
+    fn pmap_prog_try_from_valid() {
+        for v in 0..=5_u32 {
+            assert!(PMAP_PROG::try_from(v).is_ok(), "procedure {v} should be valid");
+        }
+    }
+
+    #[test]
+    fn pmap_prog_try_from_invalid() {
+        for v in [6_u32, 100, u32::MAX] {
+            assert!(PMAP_PROG::try_from(v).is_err(), "procedure {v} should be invalid");
+        }
+    }
+}

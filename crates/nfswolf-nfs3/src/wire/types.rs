@@ -1131,3 +1131,279 @@ impl std::fmt::Display for NFS_PROGRAM {
         write!(f, "{name}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Pack a value into a fresh buffer.
+    fn pack_to_vec(val: &impl Pack) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let _n = val.pack(&mut buf).expect("pack must succeed");
+        buf
+    }
+
+    /// Pack then unpack a value and return the decoded copy.
+    fn round_trip<T: Pack + Unpack>(val: &T) -> T {
+        let buf = pack_to_vec(val);
+        let (decoded, consumed) = T::unpack(&mut Cursor::new(&buf)).expect("unpack must succeed");
+        assert_eq!(consumed, buf.len(), "unpack must consume every packed byte");
+        decoded
+    }
+
+    // --- nfsstat3: all 28 status codes (RFC 1813 sec 2.5) ---
+
+    #[test]
+    fn nfsstat3_all_28_values_round_trip() {
+        // Every status code defined in RFC 1813 sec 2.5, with its u32 discriminant.
+        let cases: &[(nfsstat3, u32)] = &[
+            (nfsstat3::NFS3_OK, 0),
+            (nfsstat3::NFS3ERR_PERM, 1),
+            (nfsstat3::NFS3ERR_NOENT, 2),
+            (nfsstat3::NFS3ERR_IO, 5),
+            (nfsstat3::NFS3ERR_NXIO, 6),
+            (nfsstat3::NFS3ERR_ACCES, 13),
+            (nfsstat3::NFS3ERR_EXIST, 17),
+            (nfsstat3::NFS3ERR_XDEV, 18),
+            (nfsstat3::NFS3ERR_NODEV, 19),
+            (nfsstat3::NFS3ERR_NOTDIR, 20),
+            (nfsstat3::NFS3ERR_ISDIR, 21),
+            (nfsstat3::NFS3ERR_INVAL, 22),
+            (nfsstat3::NFS3ERR_FBIG, 27),
+            (nfsstat3::NFS3ERR_NOSPC, 28),
+            (nfsstat3::NFS3ERR_ROFS, 30),
+            (nfsstat3::NFS3ERR_MLINK, 31),
+            (nfsstat3::NFS3ERR_NAMETOOLONG, 63),
+            (nfsstat3::NFS3ERR_NOTEMPTY, 66),
+            (nfsstat3::NFS3ERR_DQUOT, 69),
+            (nfsstat3::NFS3ERR_STALE, 70),
+            (nfsstat3::NFS3ERR_REMOTE, 71),
+            (nfsstat3::NFS3ERR_BADHANDLE, 10001),
+            (nfsstat3::NFS3ERR_NOT_SYNC, 10002),
+            (nfsstat3::NFS3ERR_BAD_COOKIE, 10003),
+            (nfsstat3::NFS3ERR_NOTSUPP, 10004),
+            (nfsstat3::NFS3ERR_TOOSMALL, 10005),
+            (nfsstat3::NFS3ERR_SERVERFAULT, 10006),
+            (nfsstat3::NFS3ERR_BADTYPE, 10007),
+            (nfsstat3::NFS3ERR_JUKEBOX, 10008),
+        ];
+        assert_eq!(cases.len(), 29, "28 error codes + NFS3_OK = 29 total");
+        for &(variant, expected_disc) in cases {
+            // Pack must produce big-endian u32 of the discriminant.
+            let wire = pack_to_vec(&variant);
+            assert_eq!(wire, expected_disc.to_be_bytes(), "packed {variant:?} must match RFC discriminant {expected_disc}");
+            // Round-trip must preserve identity.
+            let decoded = round_trip(&variant);
+            assert_eq!(decoded, variant, "{variant:?} must survive pack/unpack");
+        }
+    }
+
+    // --- ftype3: all 7 file types (RFC 1813 sec 2.6) ---
+
+    #[test]
+    fn ftype3_all_7_values_round_trip() {
+        let cases: &[(ftype3, u32)] = &[(ftype3::NF3REG, 1), (ftype3::NF3DIR, 2), (ftype3::NF3BLK, 3), (ftype3::NF3CHR, 4), (ftype3::NF3LNK, 5), (ftype3::NF3SOCK, 6), (ftype3::NF3FIFO, 7)];
+        for &(variant, expected_disc) in cases {
+            let wire = pack_to_vec(&variant);
+            assert_eq!(wire, expected_disc.to_be_bytes(), "packed {variant:?} must match RFC discriminant {expected_disc}");
+            let decoded = round_trip(&variant);
+            assert_eq!(decoded, variant, "{variant:?} must survive pack/unpack");
+        }
+    }
+
+    // --- nfs_fh3: variable-length handle (RFC 1813 sec 2.3.1, max 64 bytes) ---
+
+    #[test]
+    fn nfs_fh3_round_trip_typical() {
+        // A typical 28-byte handle (Linux knfsd ext4).
+        let data: Vec<u8> = (0..28).collect();
+        let fh = nfs_fh3 { data: Opaque::owned(data.clone()) };
+        let decoded = round_trip(&fh);
+        assert_eq!(decoded.data.as_ref(), data.as_slice());
+    }
+
+    #[test]
+    fn nfs_fh3_empty_handle() {
+        // Zero-length handle is legal on the wire -- a degenerate edge case.
+        let fh = nfs_fh3 { data: Opaque::owned(vec![]) };
+        let decoded = round_trip(&fh);
+        assert!(decoded.data.as_ref().is_empty());
+    }
+
+    #[test]
+    fn nfs_fh3_max_length_handle() {
+        // 64 bytes is the maximum handle size (NFS3_FHSIZE, RFC 1813 sec 2.3.1).
+        let data: Vec<u8> = (0..64).collect();
+        let fh = nfs_fh3 { data: Opaque::owned(data.clone()) };
+        let wire = pack_to_vec(&fh);
+        // Wire format: 4-byte length prefix (big-endian 64) + 64 bytes of data.
+        assert_eq!(wire.len(), 4 + NFS3_FHSIZE);
+        assert_eq!(&wire[..4], &64_u32.to_be_bytes());
+        let decoded = round_trip(&fh);
+        assert_eq!(decoded.data.as_ref(), data.as_slice());
+    }
+
+    // --- diropargs3 ---
+
+    #[test]
+    fn diropargs3_round_trip() {
+        let handle_bytes: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let name_bytes: Vec<u8> = b"passwd".to_vec();
+        let arg = diropargs3 { dir: nfs_fh3 { data: Opaque::owned(handle_bytes.clone()) }, name: filename3(Opaque::owned(name_bytes.clone())) };
+        let wire = pack_to_vec(&arg);
+        let (decoded, consumed) = diropargs3::unpack(&mut Cursor::new(&wire)).expect("unpack diropargs3");
+        assert_eq!(consumed, wire.len());
+        assert_eq!(decoded.dir, arg.dir);
+        assert_eq!(decoded.name, arg.name);
+    }
+
+    // --- stable_how: all 3 values (RFC 1813 sec 3.3.7) ---
+
+    #[test]
+    fn stable_how_all_3_values_round_trip() {
+        let cases: &[(stable_how, u32)] = &[(stable_how::UNSTABLE, 0), (stable_how::DATA_SYNC, 1), (stable_how::FILE_SYNC, 2)];
+        for &(variant, expected_disc) in cases {
+            let wire = pack_to_vec(&variant);
+            assert_eq!(wire, expected_disc.to_be_bytes(), "stable_how::{variant:?} discriminant mismatch");
+            let decoded = round_trip(&variant);
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    // --- createmode3: all 3 values (RFC 1813 sec 3.3.8) ---
+
+    #[test]
+    fn createmode3_all_3_values_round_trip() {
+        let cases: &[(createmode3, u32)] = &[(createmode3::UNCHECKED, 0), (createmode3::GUARDED, 1), (createmode3::EXCLUSIVE, 2)];
+        for &(variant, expected_disc) in cases {
+            let wire = pack_to_vec(&variant);
+            assert_eq!(wire, expected_disc.to_be_bytes(), "createmode3::{variant:?} discriminant mismatch");
+            let decoded = round_trip(&variant);
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    // --- ACCESS3 bit values (RFC 1813 sec 3.3.4) ---
+
+    #[test]
+    fn access3_bits_are_distinct_powers_of_two() {
+        // RFC 1813 sec 3.3.4: each ACCESS bit is a distinct power of 2.
+        assert_eq!(ACCESS3_READ, 0x0001);
+        assert_eq!(ACCESS3_LOOKUP, 0x0002);
+        assert_eq!(ACCESS3_MODIFY, 0x0004);
+        assert_eq!(ACCESS3_EXTEND, 0x0008);
+        assert_eq!(ACCESS3_DELETE, 0x0010);
+        assert_eq!(ACCESS3_EXECUTE, 0x0020);
+
+        let all = [ACCESS3_READ, ACCESS3_LOOKUP, ACCESS3_MODIFY, ACCESS3_EXTEND, ACCESS3_DELETE, ACCESS3_EXECUTE];
+        for (i, &a) in all.iter().enumerate() {
+            assert_eq!(a.count_ones(), 1, "ACCESS3 bit {i} must be a single power of two");
+            for (j, &b) in all.iter().enumerate() {
+                if i != j {
+                    assert_eq!(a & b, 0, "ACCESS3 bits {i} and {j} must not overlap");
+                }
+            }
+        }
+    }
+
+    // --- Nfs3Option (RFC 1813's optional-data XDR pattern) ---
+
+    #[test]
+    fn nfs3option_none_packs_as_zero() {
+        let none: Nfs3Option<u32> = Nfs3Option::None;
+        let wire = pack_to_vec(&none);
+        // None = discriminant 0, no payload.
+        assert_eq!(wire, 0_u32.to_be_bytes());
+    }
+
+    #[test]
+    fn nfs3option_some_packs_as_one_plus_value() {
+        let some: Nfs3Option<u32> = Nfs3Option::Some(42);
+        let wire = pack_to_vec(&some);
+        // Some = discriminant 1, then the u32 value.
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&42_u32.to_be_bytes());
+        assert_eq!(wire, expected);
+    }
+
+    #[test]
+    fn nfs3option_round_trip() {
+        let none: Nfs3Option<u32> = Nfs3Option::None;
+        let decoded_none = round_trip(&none);
+        assert!(decoded_none.is_none());
+
+        let some: Nfs3Option<u32> = Nfs3Option::Some(0xDEADBEEF);
+        let decoded_some = round_trip(&some);
+        assert!(decoded_some.is_some());
+        assert_eq!(decoded_some.unwrap(), 0xDEADBEEF);
+    }
+
+    // --- wcc_attr (RFC 1813 sec 3.3.2, pre_op_attr carries this) ---
+
+    #[test]
+    fn wcc_attr_round_trip() {
+        let attr = wcc_attr { size: 4096, mtime: nfstime3 { seconds: 1_700_000_000, nseconds: 500_000 }, ctime: nfstime3 { seconds: 1_700_000_001, nseconds: 0 } };
+        let wire = pack_to_vec(&attr);
+        let (decoded, consumed) = wcc_attr::unpack(&mut Cursor::new(&wire)).expect("unpack wcc_attr");
+        assert_eq!(consumed, wire.len());
+        assert_eq!(decoded.size, 4096);
+        assert_eq!(decoded.mtime.seconds, 1_700_000_000);
+        assert_eq!(decoded.mtime.nseconds, 500_000);
+        assert_eq!(decoded.ctime.seconds, 1_700_000_001);
+        assert_eq!(decoded.ctime.nseconds, 0);
+    }
+
+    // --- NFS program and version constants (RFC 1813 sec 3.3) ---
+
+    #[test]
+    fn nfs_program_number() {
+        assert_eq!(PROGRAM, 100_003, "NFS program number must be 100003 (RFC 1813)");
+    }
+
+    #[test]
+    fn nfs_version_number() {
+        assert_eq!(VERSION, 3, "NFS version must be 3 (RFC 1813)");
+    }
+
+    // --- NFS_PROGRAM procedure numbers (RFC 1813 sec 3.3) ---
+
+    #[test]
+    fn nfs_procedure_numbers() {
+        // All 22 NFSv3 procedure numbers as defined in RFC 1813 sec 3.3.
+        assert_eq!(NFS_PROGRAM::NFSPROC3_NULL as u32, 0);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_GETATTR as u32, 1);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_SETATTR as u32, 2);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_LOOKUP as u32, 3);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_ACCESS as u32, 4);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_READLINK as u32, 5);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_READ as u32, 6);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_WRITE as u32, 7);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_CREATE as u32, 8);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_MKDIR as u32, 9);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_SYMLINK as u32, 10);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_MKNOD as u32, 11);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_REMOVE as u32, 12);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_RMDIR as u32, 13);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_RENAME as u32, 14);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_LINK as u32, 15);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_READDIR as u32, 16);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_READDIRPLUS as u32, 17);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_FSSTAT as u32, 18);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_FSINFO as u32, 19);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_PATHCONF as u32, 20);
+        assert_eq!(NFS_PROGRAM::NFSPROC3_COMMIT as u32, 21);
+    }
+
+    #[test]
+    fn nfs_procedure_try_from_u32_covers_all_22() {
+        // Every valid procedure number must round-trip through TryFrom<u32>.
+        for n in 0..=21 {
+            let proc = NFS_PROGRAM::try_from(n).unwrap_or_else(|_| panic!("procedure {n} must be valid"));
+            assert_eq!(proc as u32, n, "TryFrom round-trip failed for procedure {n}");
+        }
+        // 22 is out of range.
+        assert!(NFS_PROGRAM::try_from(22).is_err());
+    }
+}

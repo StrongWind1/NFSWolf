@@ -877,6 +877,234 @@ mod tests {
         let n = args.pack(&mut buf).unwrap();
         assert_eq!(n, FHSIZE + 12);
     }
+
+    // --- RFC 1094 S2.3.1: NfsStat WFlush ---
+
+    #[test]
+    fn nfsstat_wflush_99_maps_correctly() {
+        // RFC 1094 S2.3.1: NFSERR_WFLUSH = 99, server-only advisory status.
+        assert_eq!(NfsStat::from_u32(99), NfsStat::WFlush);
+        assert_eq!(NfsStat::WFlush as u32, 99);
+    }
+
+    #[test]
+    fn nfsstat_round_trips_all_known_values() {
+        // RFC 1094 S2.3.1: pack -> unpack cycle for every defined status code.
+        let all: [(u32, NfsStat); 18] = [
+            (0, NfsStat::Ok),
+            (1, NfsStat::Perm),
+            (2, NfsStat::NoEnt),
+            (5, NfsStat::Io),
+            (6, NfsStat::Nxio),
+            (13, NfsStat::Acces),
+            (17, NfsStat::Exist),
+            (19, NfsStat::NoDev),
+            (20, NfsStat::NotDir),
+            (21, NfsStat::IsDir),
+            (27, NfsStat::Fbig),
+            (28, NfsStat::NoSpc),
+            (30, NfsStat::Rofs),
+            (63, NfsStat::NameTooLong),
+            (66, NfsStat::NotEmpty),
+            (69, NfsStat::Dquot),
+            (70, NfsStat::Stale),
+            (99, NfsStat::WFlush),
+        ];
+        for (wire_val, expected) in &all {
+            let mut buf = Vec::new();
+            _ = expected.pack(&mut buf).unwrap();
+            assert_eq!(buf.len(), 4);
+            // Wire encoding is big-endian u32.
+            let encoded = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            assert_eq!(encoded, *wire_val, "wire encoding mismatch for {expected:?}");
+            let (decoded, n) = NfsStat::unpack(&mut Cursor::new(&buf)).unwrap();
+            assert_eq!(n, 4);
+            assert_eq!(decoded, *expected, "round-trip failed for wire value {wire_val}");
+        }
+    }
+
+    #[test]
+    fn nfsstat_unknown_is_catch_all_io() {
+        // RFC 1094 S2.3.1: "This error is also used as a catch-all"
+        // for any status code not in the defined set.
+        for bogus in [3, 4, 7, 8, 10, 42, 100, 255, 0xDEAD, u32::MAX] {
+            assert_eq!(NfsStat::from_u32(bogus), NfsStat::Io, "unknown status {bogus} must map to Io");
+        }
+    }
+
+    // --- RFC 1094 S2.3.3: FType round-trip ---
+
+    #[test]
+    fn ftype_all_9_variants_round_trip() {
+        // RFC 1094 S2.3.3 values 0-5; Linux kernel extensions 6 (socket),
+        // 7 (bad), 8 (FIFO) from nfs2.h.
+        let all: [(u32, FType); 9] = [
+            (0, FType::NonFile),
+            (1, FType::Regular),
+            (2, FType::Directory),
+            (3, FType::Block),
+            (4, FType::Character),
+            (5, FType::Symlink),
+            (6, FType::Socket),
+            (7, FType::Bad),
+            (8, FType::Fifo),
+        ];
+        for (wire_val, expected) in &all {
+            let mut buf = Vec::new();
+            _ = expected.pack(&mut buf).unwrap();
+            assert_eq!(buf.len(), 4);
+            let encoded = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            assert_eq!(encoded, *wire_val, "wire encoding mismatch for {expected:?}");
+            let (decoded, n) = FType::unpack(&mut Cursor::new(&buf)).unwrap();
+            assert_eq!(n, 4);
+            assert_eq!(decoded, *expected, "round-trip failed for wire value {wire_val}");
+        }
+    }
+
+    // --- RFC 1094 S2.3.3: file handle is fixed 32 bytes, no length prefix ---
+
+    #[test]
+    fn nfs2_file_handle_wire_has_no_length_prefix() {
+        // RFC 1094 S2.3.3: "The file handle is 32 bytes" -- fixed opaque,
+        // no XDR length prefix. First byte on wire must be handle data.
+        let fh = Nfs2FileHandle::from_bytes(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let mut buf = Vec::new();
+        _ = fh.pack(&mut buf).unwrap();
+        assert_eq!(buf.len(), FHSIZE, "must be exactly 32 bytes, not 36");
+        // First 4 bytes are handle data, NOT a length field.
+        assert_eq!(buf[0], 0xDE);
+        assert_eq!(buf[1], 0xAD);
+        assert_eq!(buf[2], 0xBE);
+        assert_eq!(buf[3], 0xEF);
+    }
+
+    // --- RFC 1094 S2.3.4: Timeval round-trip ---
+
+    #[test]
+    fn timeval_round_trip_preserves_values() {
+        // RFC 1094 S2.3.4: timeval = seconds(u32) + useconds(u32).
+        let tv = Timeval { seconds: 1_700_000_000, useconds: 123_456 };
+        let mut buf = Vec::new();
+        _ = tv.pack(&mut buf).unwrap();
+        assert_eq!(buf.len(), 8);
+        let (decoded, n) = Timeval::unpack(&mut Cursor::new(&buf)).unwrap();
+        assert_eq!(n, 8);
+        assert_eq!(decoded.seconds, 1_700_000_000);
+        assert_eq!(decoded.useconds, 123_456);
+    }
+
+    // --- RFC 1094 S2.3.6: SATTR_UNCHANGED sentinel ---
+
+    #[test]
+    fn sattr_unchanged_sentinel_is_minus_one() {
+        // RFC 1094 S2.3.6: fields set to -1 (0xFFFFFFFF as u32) mean "don't change".
+        assert_eq!(SATTR_UNCHANGED, 0xFFFF_FFFF);
+        assert_eq!(SATTR_UNCHANGED, u32::MAX);
+        // Verify the sentinel survives a pack/unpack cycle through Nfs2SetAttr.
+        let sa = Nfs2SetAttr {
+            mode: SATTR_UNCHANGED,
+            uid: SATTR_UNCHANGED,
+            gid: SATTR_UNCHANGED,
+            size: SATTR_UNCHANGED,
+            atime: Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED },
+            mtime: Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED },
+        };
+        let mut buf = Vec::new();
+        _ = sa.pack(&mut buf).unwrap();
+        let (decoded, _) = Nfs2SetAttr::unpack(&mut Cursor::new(&buf)).unwrap();
+        assert_eq!(decoded.mode, SATTR_UNCHANGED);
+        assert_eq!(decoded.uid, SATTR_UNCHANGED);
+        assert_eq!(decoded.gid, SATTR_UNCHANGED);
+        assert_eq!(decoded.size, SATTR_UNCHANGED);
+    }
+
+    // --- XDR union encoding: DirOpRes ---
+
+    #[test]
+    fn diropres_pack_error_writes_only_4_bytes() {
+        // RFC 1094 diropres union: error arm has only the status discriminant.
+        let res = DirOpRes { status: NfsStat::Acces, handle: Nfs2FileHandle([0u8; FHSIZE]), attrs: Nfs2FileAttr::zeroed() };
+        let mut buf = Vec::new();
+        let n = res.pack(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(buf.len(), 4);
+    }
+
+    #[test]
+    fn diropres_pack_ok_writes_104_bytes() {
+        // RFC 1094 diropres union: success arm = status(4) + fhandle(32) + fattr(68) = 104.
+        let res = DirOpRes {
+            status: NfsStat::Ok,
+            handle: Nfs2FileHandle::from_bytes(&[0x42; 32]),
+            attrs: Nfs2FileAttr { ftype: FType::Regular, mode: 0o644, nlink: 1, uid: 1000, gid: 1000, size: 4096, blocksize: 4096, rdev: 0, blocks: 8, fsid: 1, fileid: 42, atime: Timeval { seconds: 0, useconds: 0 }, mtime: Timeval { seconds: 0, useconds: 0 }, ctime: Timeval { seconds: 0, useconds: 0 } },
+        };
+        let mut buf = Vec::new();
+        let n = res.pack(&mut buf).unwrap();
+        assert_eq!(n, 104, "status(4) + fhandle(32) + fattr(68) = 104");
+        assert_eq!(buf.len(), 104);
+    }
+
+    // --- XDR union encoding: AttrStatRes ---
+
+    #[test]
+    fn attrstatres_unpack_error_reads_only_4_bytes() {
+        // RFC 1094 attrstat union: error arm has only the status discriminant.
+        let mut wire: Vec<u8> = Vec::new();
+        _ = NfsStat::NoEnt.pack(&mut wire).unwrap();
+        // Append trailing garbage to prove only 4 bytes are consumed.
+        wire.extend_from_slice(&[0xFF; 100]);
+        let (res, n) = AttrStatRes::unpack(&mut Cursor::new(&wire)).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(res.status, NfsStat::NoEnt);
+        assert_eq!(res.attrs.ftype, FType::NonFile);
+    }
+
+    // --- RFC 1094 S2.2.6: ReadArgs wire size ---
+
+    #[test]
+    fn read_args_pack_is_44_bytes() {
+        // fhandle(32) + offset(4) + count(4) + totalcount(4) = 44 bytes.
+        let args = ReadArgs { file: Nfs2FileHandle::from_bytes(&[0; 32]), offset: 0x1000, count: 8192, totalcount: 0 };
+        let mut buf = Vec::new();
+        let n = args.pack(&mut buf).unwrap();
+        assert_eq!(n, 44, "fhandle(32) + offset(4) + count(4) + totalcount(4) = 44");
+        assert_eq!(buf.len(), 44);
+    }
+
+    // --- RFC 1094 S2.2: procedure number table ---
+
+    #[test]
+    fn procedure_numbers_match_rfc1094() {
+        // RFC 1094 S2.2: the 18 NFS procedures are numbered 0 through 17.
+        use proc::*;
+        let all = [
+            (NFSPROC_NULL, 0),
+            (NFSPROC_GETATTR, 1),
+            (NFSPROC_SETATTR, 2),
+            (NFSPROC_ROOT, 3),
+            (NFSPROC_LOOKUP, 4),
+            (NFSPROC_READLINK, 5),
+            (NFSPROC_READ, 6),
+            (NFSPROC_WRITECACHE, 7),
+            (NFSPROC_WRITE, 8),
+            (NFSPROC_CREATE, 9),
+            (NFSPROC_REMOVE, 10),
+            (NFSPROC_RENAME, 11),
+            (NFSPROC_LINK, 12),
+            (NFSPROC_SYMLINK, 13),
+            (NFSPROC_MKDIR, 14),
+            (NFSPROC_RMDIR, 15),
+            (NFSPROC_READDIR, 16),
+            (NFSPROC_STATFS, 17),
+        ];
+        for (i, &(actual, expected)) in all.iter().enumerate() {
+            assert_eq!(actual, expected, "procedure {i} has wrong number");
+        }
+        // Verify the sequence is contiguous 0..=17.
+        for (i, &(proc_num, _)) in all.iter().enumerate() {
+            assert_eq!(proc_num, i as u32, "procedure sequence broken at index {i}");
+        }
+    }
 }
 
 /// Single READDIR entry.

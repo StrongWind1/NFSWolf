@@ -117,3 +117,80 @@ where
         self.list
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- List (RFC 4506 sec 4.11: optional-data / linked-list encoding) ---
+
+    #[test]
+    fn list_empty_round_trip() {
+        // An empty list is a single FALSE discriminant (4 bytes of zeroes).
+        let list: List<u32> = List(vec![]);
+        let mut buf = Vec::new();
+        let written = list.pack(&mut buf).unwrap();
+        assert_eq!(written, 4); // one bool discriminant = FALSE
+        assert_eq!(buf, [0, 0, 0, 0]);
+        let (decoded, read) = List::<u32>::unpack(&mut buf.as_slice()).unwrap();
+        assert!(decoded.0.is_empty());
+        assert_eq!(read, 4);
+    }
+
+    #[test]
+    fn list_single_element_round_trip() {
+        // TRUE + element + FALSE terminator.
+        let list: List<u32> = List(vec![42]);
+        let mut buf = Vec::new();
+        let written = list.pack(&mut buf).unwrap();
+        // 4 (TRUE) + 4 (element) + 4 (FALSE) = 12
+        assert_eq!(written, 12);
+        let (decoded, read) = List::<u32>::unpack(&mut buf.as_slice()).unwrap();
+        assert_eq!(decoded.0, vec![42]);
+        assert_eq!(read, 12);
+    }
+
+    #[test]
+    fn list_multiple_elements_round_trip() {
+        let list: List<u32> = List(vec![10, 20, 30]);
+        let mut buf = Vec::new();
+        let written = list.pack(&mut buf).unwrap();
+        // 3 * (4 TRUE + 4 element) + 4 FALSE = 28
+        assert_eq!(written, 28);
+        let (decoded, read) = List::<u32>::unpack(&mut buf.as_slice()).unwrap();
+        assert_eq!(decoded.0, vec![10, 20, 30]);
+        assert_eq!(read, 28);
+    }
+
+    #[test]
+    fn list_packed_size_matches_actual_written() {
+        let list: List<u32> = List(vec![1, 2, 3, 4, 5]);
+        let mut buf = Vec::new();
+        let written = list.pack(&mut buf).unwrap();
+        assert_eq!(list.packed_size(), written);
+    }
+
+    // --- BoundedList ---
+
+    #[test]
+    fn bounded_list_rejects_overflow() {
+        // A BoundedList with max_size=12 can fit exactly one u32 element:
+        //   empty list = 4 bytes (FALSE terminator)
+        //   one element = 4 (TRUE) + 4 (u32) = 8 more -> 12 total
+        // A second element would need 8 more bytes -> 20 > 12.
+        let mut bl = BoundedList::<u32>::new(12);
+        assert!(bl.try_push(1).is_ok());
+        let rejected = bl.try_push(2);
+        assert!(rejected.is_err());
+        assert_eq!(rejected.unwrap_err(), 2); // returns the item back
+    }
+
+    #[test]
+    fn bounded_list_converts_to_list() {
+        let mut bl = BoundedList::<u32>::new(1024);
+        bl.try_push(100).unwrap();
+        bl.try_push(200).unwrap();
+        let list = bl.into_inner();
+        assert_eq!(list.0, vec![100, 200]);
+    }
+}
