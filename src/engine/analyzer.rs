@@ -429,18 +429,17 @@ impl Analyzer {
         // BTRFS subvolume escape (F-2.4)  --  if handle fingerprints as BTRFS.
         check_btrfs_escape(&export_nfs3, &fh, &entry.path, findings).await;
 
-        // Bind mount escape (F-2.6): intentionally NOT emitted. The prior heuristic
-        // compared a fixed 8-byte slice (handle bytes 4..12) against the fattr3.fsid
-        // from FSSTAT and flagged a bind mount on any mismatch. That signal is
-        // unsound on two counts: the in-handle fsid is variable-length keyed on
-        // fsid_type (4/8/12/16 bytes -- see file_handle.rs fingerprint_fs), so the
-        // fixed slice is garbage for most handles; and the raw fsid embedded in the
-        // file handle uses a DIFFERENT encoding than the kernel-computed fattr3.fsid,
-        // so the two are essentially never equal on a normal export -- firing a
-        // constant false-positive HIGH finding. A sound F-2.6 oracle needs a
-        // different signal (e.g. building a filesystem-root handle from the handle's
-        // own fsid and confirming it resolves), so the broken check is disabled
-        // rather than emitting from an unsound equality.
+        // Bind mount escape (F-2.6): not separately detectable. A bind mount
+        // export is indistinguishable from a regular subtree export on the NFS
+        // wire: same fsid, same handles, same READDIRPLUS/FSSTAT results. The
+        // mount namespace is a kernel-side abstraction invisible to NFS clients.
+        // F-2.1 already covers the escape vector -- if subtree_check is off and
+        // the filesystem-root handle resolves, the attacker reaches the entire
+        // filesystem regardless of whether the export is a bind mount. The old
+        // heuristic (comparing in-handle fsid bytes against fattr3.fsid) was
+        // unsound because those use different encodings. No client-side oracle
+        // can distinguish "bind mount of /data/project-a" from "direct export
+        // of /data/project-a" without server-side information.
 
         // nohide/crossmnt detection (F-7.3).
         check_nohide(&export_nfs3, &fh, &entry.path, findings).await;
