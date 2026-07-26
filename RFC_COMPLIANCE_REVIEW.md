@@ -29,10 +29,10 @@ All 57 RFCs in `ref/all_rfcs/` classified by implementation tier.
 | 3010 | NFS version 4 Protocol | NFSv4 | D | none | none | Superseded by RFC 3530, then RFC 7530. |
 | 3529 | Using XML-RPC | Other | E | none | none | XML-RPC. Unrelated to NFS wire protocol. |
 | 3530 | Network File System (NFS) version 4 Protocol | NFSv4 | D | none | none | Superseded by RFC 7530. |
-| 4506 | XDR: External Data Representation Standard | XDR | A | nfswolf-xdr, nfswolf-xdr-derive | sec. 3 (block size), 4.2-4.4 (int, bool), 4.5-4.6 (hyper), 4.9-4.11 (opaque, string), 4.14-4.16 (struct, union, void) | Full for NFS-relevant types. Missing: signed int/hyper (i32/i64), float/double (f32/f64) — unused by NFS. |
+| 4506 | XDR: External Data Representation Standard | XDR | A | nfswolf-xdr, nfswolf-xdr-derive | sec. 3 (block size), 4.2-4.4 (int, bool), 4.5-4.6 (hyper), 4.9-4.11 (opaque, string), 4.14-4.16 (struct, union, void) | Full for NFS-relevant types. Missing: signed int/hyper (i32/i64), float/double (f32/f64) -- unused by NFS. |
 | 5403 | RPCSEC_GSS Version 2 | Security | E | none | none | GSS extensions. nfswolf has no GSS implementation. |
 | 5531 | RPC: Remote Procedure Call Protocol Specification Version 2 | RPC | A | nfswolf-rpc | sec. 8.2 (auth flavors), 9 (opaque_auth), 11 (record marking), 13 (PROG_MISMATCH), 14 (AUTH_SYS) | Full: all RPC message types, AUTH_SYS encoding, fragment header, PROG_MISMATCH range. 26 code refs. |
-| 5532 | NFS RDMA Protocol | RDMA | E | none | none | RDMA transport. Out of scope — nfswolf uses TCP/UDP. |
+| 5532 | NFS RDMA Protocol | RDMA | E | none | none | RDMA transport. Out of scope -- nfswolf uses TCP/UDP. |
 | 5661 | NFSv4.1 Protocol | NFSv4.1 | D | nfswolf-nfs4 (mention only) | Referenced to disambiguate sec. 16 vs sec. 18 operation numbering | Superseded by RFC 8881. NFSv4.1 sessions not implemented. |
 | 5662 | NFSv4.1 External Data Representation | NFSv4.1 | E | none | none | XDR for NFSv4.1. Out of scope. |
 | 5663 | pNFS Block/Volume Layout | pNFS | E | none | none | pNFS block layout. Out of scope. |
@@ -74,59 +74,59 @@ All 57 RFCs in `ref/all_rfcs/` classified by implementation tier.
 
 ## Section 2: Protocol Crate Compliance
 
-### nfswolf-xdr + nfswolf-xdr-derive (RFC 4506) — 5 tests
+### nfswolf-xdr + nfswolf-xdr-derive (RFC 4506) -- 5 tests
 
 **Implemented**: u32, u64, bool, fixed-length opaque [u8;N], variable-length opaque (Opaque), string, void, struct (derive), enum (derive), discriminated union (derive), linked list (List/BoundedList). Padding per sec. 3 is correct.
 
-**Missing (intentional)**: i32 (signed int), i64 (signed hyper), f32 (float), f64 (double), f128 (quadruple). None are used by any NFS protocol. Generic `Vec<T>` for T != u32 — handled by hand-written impls or List downstream.
+**Missing (intentional)**: i32 (signed int), i64 (signed hyper), f32 (float), f64 (double), f128 (quadruple). None are used by any NFS protocol. Generic `Vec<T>` for T != u32 -- handled by hand-written impls or List downstream.
 
-**Bug found**: `Vec<u32>::unpack` allocation amplification — `with_capacity(len as usize)` uses unvalidated wire length, bypassing PREALLOC_CAP. Fix: use `vec_with_capacity()` helper.
+**Bug found**: `Vec<u32>::unpack` allocation amplification -- `with_capacity(len as usize)` uses unvalidated wire length, bypassing PREALLOC_CAP. Fix: use `vec_with_capacity()` helper.
 
-**Deviations**: String decoder uses `from_utf8_lossy` (deliberate for security tool). Optional-data (sec. 4.19) not generic in xdr crate — provided as `Nfs3Option<T>` downstream.
+**Deviations**: String decoder uses `from_utf8_lossy` (deliberate for security tool). Optional-data (sec. 4.19) not generic in xdr crate -- provided as `Nfs3Option<T>` downstream.
 
-### nfswolf-rpc (RFC 5531 / RFC 1057 / RFC 1833) — 9 tests
+### nfswolf-rpc (RFC 5531 / RFC 1057 / RFC 1833) -- 9 tests
 
 **Implemented**: All RPC message types (msg_type, reply_stat, accept_stat, reject_stat, auth_stat). AUTH_SYS encoding (stamp, machinename, uid, gid, gids[16]). Fragment header (bit 31 EOF, bits 0-30 length). PROG_MISMATCH with version range. Portmapper v2: NULL, GETPORT, DUMP. Rpcbind: GETTIME (proc 6), GETSTAT (proc 12).
 
-**Missing portmapper**: SET (1), UNSET (2), CALLIT (5) — defined but no client methods. Intentional.
+**Missing portmapper**: SET (1), UNSET (2), CALLIT (5) -- defined but no client methods. Intentional.
 
-**Missing rpcbind**: 10 procedures — SET, UNSET, GETADDR, DUMP, CALLIT, UADDR2TADDR, TADDR2UADDR, GETVERSADDR, INDIRECT, GETADDRLIST. Intentional — security client needs only GETTIME and GETSTAT.
+**Missing rpcbind**: 10 procedures -- SET, UNSET, GETADDR, DUMP, CALLIT, UADDR2TADDR, TADDR2UADDR, GETVERSADDR, INDIRECT, GETADDRLIST. Intentional -- security client needs only GETTIME and GETSTAT.
 
 **Missing status values**: `auth_flavor` XDR enum lacks RPCSEC_GSS=6 (handled by AuthFlavor in auth.rs instead). `auth_stat` lacks values 8-14 (RPCSEC_GSS-specific rejection reasons).
 
 **No bugs found.**
 
-### nfswolf-nfs2 (RFC 1094) — 19 tests
+### nfswolf-nfs2 (RFC 1094) -- 19 tests
 
 **Implemented**: All 18 procedures (NULL through STATFS), all XDR types, fixed 32-byte handle, MOUNT v1 (NULL, MNT, UMNT, EXPORT).
 
 **Bug found**: `DirOpRes::Pack` unconditionally writes fhandle+fattr on error status (100 extra bytes). RFC mandates void on non-OK. Unpack is correct. Impact: only affects encode path (e.g., mock servers), not the client decode path.
 
-**Missing**: NFSERR_WFLUSH=99 — silently maps to Io. MOUNT v1 DUMP (proc 2) and UMNTALL (proc 4) — constants defined, no client methods.
+**Missing**: NFSERR_WFLUSH=99 -- silently maps to Io. MOUNT v1 DUMP (proc 2) and UMNTALL (proc 4) -- constants defined, no client methods.
 
 **Extensions beyond RFC**: FType includes SOCK=6, BAD=7, FIFO=8 (Linux extensions, not in RFC 1094).
 
-### nfswolf-nfs3 (RFC 1813) — 16 tests
+### nfswolf-nfs3 (RFC 1813) -- 16 tests
 
 **Implemented**: All 22 procedures (NULL through COMMIT), all 28 nfsstat3 codes, all 10 mountstat3 codes, all 6 ACCESS bits, all 4 FSF property bits, MOUNT v3 all 6 procedures, WCC data, domain API.
 
 **No bugs found. Fully compliant.** Handle oracle (STALE vs BADHANDLE) correctly classified. mknoddata3 hand-written Pack/Unpack correct for all 5 file type branches.
 
-### nfswolf-nfs4 (RFC 7530) — 15 tests
+### nfswolf-nfs4 (RFC 7530) -- 15 tests
 
 **Implemented**: COMPOUND (sec. 15.2), 8 operations: PUTROOTFH (24), PUTFH (22), LOOKUP (15), GETATTR (9), GETFH (10), SECINFO (33), READDIR (26), READ (25). Anonymous stateid correct per sec. 9.1.4.3. AttrRequest bitmap for FATTR4_FSID (bit 8).
 
-**Missing (intentional)**: 29 operations — ACCESS(3), CLOSE(4), COMMIT(5), CREATE(6), DELEGPURGE(7), DELEGRETURN(8), LINK(11), LOCK(12), LOCKT(13), LOCKU(14), LOOKUPP(16), NVERIFY(17), OPEN(18), OPENATTR(19), OPEN_CONFIRM(20), OPEN_DOWNGRADE(21), PUTPUBFH(23), READLINK(27), REMOVE(28), RENAME(29), RENEW(30), RESTOREFH(31), SAVEFH(32), SETATTR(34), SETCLIENTID(35), SETCLIENTID_CONFIRM(36), VERIFY(37), WRITE(38), RELEASE_LOCKOWNER(39).
+**Missing (intentional)**: 29 operations -- ACCESS(3), CLOSE(4), COMMIT(5), CREATE(6), DELEGPURGE(7), DELEGRETURN(8), LINK(11), LOCK(12), LOCKT(13), LOCKU(14), LOOKUPP(16), NVERIFY(17), OPEN(18), OPENATTR(19), OPEN_CONFIRM(20), OPEN_DOWNGRADE(21), PUTPUBFH(23), READLINK(27), REMOVE(28), RENAME(29), RENEW(30), RESTOREFH(31), SAVEFH(32), SETATTR(34), SETCLIENTID(35), SETCLIENTID_CONFIRM(36), VERIFY(37), WRITE(38), RELEASE_LOCKOWNER(39).
 
-**Missing status codes**: 59 codes have no named variant — all captured by Unknown(u32), so decodable but not ergonomically matchable.
+**Missing status codes**: 59 codes have no named variant -- all captured by Unknown(u32), so decodable but not ergonomically matchable.
 
 **Known limitation**: READDIR cookieverf=0 on continuation calls (documented in code, RFC requires echoing server's verifier).
 
 **No bugs found.** All 8 implemented ops correct.
 
-### src/proto (Application Layer) — 161 tests
+### src/proto (Application Layer) -- 161 tests
 
-**No bugs found.** AUTH_SYS stamp counter, SOCKS5 handshake (RFC 1928), circuit breaker discrimination, PooledTransport policy chain, portmapper DUMP/GETPORT, MOUNT MNT/EXPORT, UDP RPC (no record marking per RFC 1057 sec. 10) — all correct.
+**No bugs found.** AUTH_SYS stamp counter, SOCKS5 handshake (RFC 1928), circuit breaker discrimination, PooledTransport policy chain, portmapper DUMP/GETPORT, MOUNT MNT/EXPORT, UDP RPC (no record marking per RFC 1057 sec. 10) -- all correct.
 
 ---
 
@@ -201,7 +201,7 @@ All 57 RFCs in `ref/all_rfcs/` classified by implementation tier.
 | All file paths in "Do Not Rewrite" table | TRUE | All 40+ listed files exist at stated paths |
 | "RpcTransport is the single seam" | TRUE | Trait defined in `nfswolf-rpc`, all policy goes through it |
 | "AUTH_SYS stamps from global AtomicU32" | TRUE | `src/proto/auth.rs` has `STAMP_COUNTER: AtomicU32` |
-| API: `MountV1Client::mnt("/export")` takes string | **FALSE** | Actually takes `&str` path but through a different method signature: `mnt(path: &str)` — the doc example shows `mnt("/export")` which is correct, but the method returns `FhStatus` not a raw handle as implied |
+| API: `MountV1Client::mnt("/export")` takes string | **FALSE** | Actually takes `&str` path but through a different method signature: `mnt(path: &str)` -- the doc example shows `mnt("/export")` which is correct, but the method returns `FhStatus` not a raw handle as implied |
 | "src/proto/conn.rs contains Socks5Connector" | **FALSE** | No struct named `Socks5Connector`. SOCKS5 support is inline in `connect_proxy()` function. |
 | "check-all runs ... test (161 tests)" | **STALE** | Test count is 227, not 161. Rest of the make target chain is correct. |
 | "Feature Backlog: No open work items" | TRUE | All items marked Done with live-test results |
@@ -213,11 +213,11 @@ All 57 RFCs in `ref/all_rfcs/` classified by implementation tier.
 
 ## Section 5: Documentation Freshness
 
-### docs/DESIGN.md — 1 critical stale claim
+### docs/DESIGN.md -- 1 critical stale claim
 
 - **Lines 179-180 (Design Decision #4)**: Claims "the binary does not link [nfswolf-nfs2]" and "the shell refuses --nfs-version 2". **Completely wrong.** NFSv2 shell is fully implemented and live-tested. `src/cli/shell.rs` dispatches to `run_nfs2_shell()`, `MountV1Client` is used for MOUNT v1 MNT.
 
-### docs/ARCHITECTURE.md — 5 stale claims
+### docs/ARCHITECTURE.md -- 5 stale claims
 
 - **Line 623**: Lists `src/shell.rs` as single file. Actually `src/shell/` directory with mod.rs, ops.rs, v2.rs, v3.rs.
 - **Line 655**: `scan_types.rs` described as containing 'ScanResult, ExportInfo'. `ScanResult` doesn't exist (actual type is `ScanOutput`). `ExportInfo` doesn't exist anywhere.
@@ -225,34 +225,34 @@ All 57 RFCs in `ref/all_rfcs/` classified by implementation tier.
 - **Lines 178-189**: Shell command list includes `mode`, `size`, `atime` etc. as standalone commands. These are `ls --sort` options, not commands. Missing: `last`, `lastb`, `lastlog`, `root`, `quit`.
 - **Line 872**: Comparison table claims "TUI: Yes". nfswolf has readline REPL, not a TUI.
 
-### docs/REQUIREMENTS.md — Current
+### docs/REQUIREMENTS.md -- Current
 
 No stale claims found. All R1-R7 requirements, priority levels, and traceability links are accurate.
 
-### docs/FINDINGS.md — Current
+### docs/FINDINGS.md -- Current
 
 No stale claims found. All 41 findings have correct severity, RFC citations, and detection methods. F-6.x out-of-scope notation is correct.
 
-### docs/NFSv2.md — 2 stale claims
+### docs/NFSv2.md -- 2 stale claims
 
 - **Lines 141-146**: MOUNT v1 "Via" column says `nfswolf-rpc`. Should be `nfswolf-nfs2`.
 - **Lines 170-187**: NFS v2 procedures listed with "Via: Own code". Should say `nfswolf-nfs2` for consistency with NFSv3.md.
 
-### docs/NFSv3.md — 3 stale claims
+### docs/NFSv3.md -- 3 stale claims
 
 - **Lines 127-128**: Portmapper "Via" column says `nfswolf-nfs3`. Should be `nfswolf-rpc`.
-- **Line 203**: Typo `nfswolf-nfs3rary` → should be `nfswolf-nfs3 library`.
+- **Line 203**: Typo `nfswolf-nfs3rary` -> should be `nfswolf-nfs3 library`.
 - **Line 203**: Describes per-method circuit breaker/pool/stealth pattern. Superseded by `PooledTransport` architecture.
 
-### docs/NFSv4.md — 3 stale claims
+### docs/NFSv4.md -- 3 stale claims
 
 - **Line 207**: Claims XDR code in `src/proto/nfs4/types.rs`. File doesn't exist. Types are in `crates/nfswolf-nfs4/src/wire.rs`, re-exported as `types`.
 - **Line 207**: References "The nfs3-rs library" as current external dependency. Absorbed into in-tree crates in v0.6.0.
 - **Line 207**: States "nfswolf uses the library's RpcClient". Should reference own `nfswolf-rpc` crate.
 
-### docs/UNUSED_CODE.md — Entirely stale
+### docs/UNUSED_CODE.md -- Entirely stale
 
-Self-identified as "HISTORICAL" and "obsolete". References removed modules (auto_uid.rs, privilege.rs, ReconnectStrategy::ResetPerCall, PoolStats). Claims NFSv2 subsystem "has no consumer" — it now has a full consumer chain.
+Self-identified as "HISTORICAL" and "obsolete". References removed modules (auto_uid.rs, privilege.rs, ReconnectStrategy::ResetPerCall, PoolStats). Claims NFSv2 subsystem "has no consumer" -- it now has a full consumer chain.
 
 ---
 
@@ -280,11 +280,11 @@ Self-identified as "HISTORICAL" and "obsolete". References removed modules (auto
 
 8. **CLAUDE.md MOUNT v1 description**: Change "MNT + EXPORT" to "NULL, MNT, UMNT, EXPORT (4 methods)".
 
-9. **CLAUDE.md `Socks5Connector` reference**: Remove — SOCKS5 is inline in `connect_proxy()`, no dedicated struct.
+9. **CLAUDE.md `Socks5Connector` reference**: Remove -- SOCKS5 is inline in `connect_proxy()`, no dedicated struct.
 
-10. **docs/DESIGN.md Decision #4**: Rewrite to reflect NFSv2 shell is fully implemented and live-tested. This is the most critical doc fix — it directly contradicts the code.
+10. **docs/DESIGN.md Decision #4**: Rewrite to reflect NFSv2 shell is fully implemented and live-tested. This is the most critical doc fix -- it directly contradicts the code.
 
-11. **docs/ARCHITECTURE.md**: Fix `src/shell.rs` → `src/shell/`, fix `ScanResult`/`ExportInfo` references, fix shell command list, fix findings count (39 → 42), fix TUI claim.
+11. **docs/ARCHITECTURE.md**: Fix `src/shell.rs` -> `src/shell/`, fix `ScanResult`/`ExportInfo` references, fix shell command list, fix findings count (39 -> 42), fix TUI claim.
 
 12. **docs/NFSv2.md, NFSv3.md, NFSv4.md**: Fix "Via" column crate attributions, remove nfs3-rs references, fix `types.rs` path.
 
@@ -298,7 +298,7 @@ Self-identified as "HISTORICAL" and "obsolete". References removed modules (auto
 
 16. **NFSv4 named status codes**: Add ergonomic variants for commonly-encountered errors beyond the current 6 (PERM, NOENT, IO, NOTDIR, ISDIR, INVAL, ROFS, etc.).
 
-17. **rpcbind GETADDR**: Would enable direct service address resolution without portmapper v2 fallback. Low priority — portmapper v2 GETPORT works everywhere.
+17. **rpcbind GETADDR**: Would enable direct service address resolution without portmapper v2 fallback. Low priority -- portmapper v2 GETPORT works everywhere.
 
 18. **NFSv4 PUTPUBFH (op 23)**: Would enable WebNFS public handle probing on NFSv4 without MOUNT. Currently WebNFS detection only covers v2/v3.
 
