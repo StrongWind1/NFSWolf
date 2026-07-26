@@ -8,7 +8,9 @@
 //! [RFC 1057]: https://www.rfc-editor.org/rfc/rfc1057
 
 mod client;
+pub mod rpcbind;
 mod types;
 
 pub use client::PortmapperClient;
+pub use rpcbind::RpcbindClient;
 pub use types::*;
