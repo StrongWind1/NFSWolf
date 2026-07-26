@@ -199,9 +199,15 @@ pub struct accepted_reply<'a> {
     pub reply_data: accept_stat_data,
 }
 
+/// RPC-level accepted reply body (RFC 5531 sec 13.1).
+///
+/// SUCCESS carries no data at this layer: the procedure-specific reply
+/// payload remains on the stream for the caller (NFS/MOUNT/portmapper)
+/// to decode with its own type knowledge. The RPC layer cannot interpret
+/// it because it is generic over all programs and versions.
 #[derive(Debug, Clone, Copy)]
 pub enum accept_stat_data {
-    SUCCESS, // FIXME: Opaque
+    SUCCESS,
     PROG_UNAVAIL,
     PROG_MISMATCH { low: u32, high: u32 },
     PROC_UNAVAIL,
