@@ -113,6 +113,8 @@ pub enum NfsStat {
     Dquot = 69,
     /// Stale file handle.
     Stale = 70,
+    /// Write cache flushed (RFC 1094 S2.3.1, server-only advisory).
+    WFlush = 99,
 }
 
 impl NfsStat {
@@ -136,6 +138,7 @@ impl NfsStat {
             66 => Self::NotEmpty,
             69 => Self::Dquot,
             70 => Self::Stale,
+            99 => Self::WFlush,
             // 5 = NFS_ERR_IO; all unknown status codes also map to IO.
             _ => Self::Io,
         }
@@ -464,10 +467,14 @@ pub struct DirOpRes {
 
 impl Pack for DirOpRes {
     fn packed_size(&self) -> usize {
-        4 + FHSIZE + self.attrs.packed_size()
+        if self.status == NfsStat::Ok { 4 + FHSIZE + self.attrs.packed_size() } else { 4 }
     }
     fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
-        Ok(self.status.pack(out)? + self.handle.pack(out)? + self.attrs.pack(out)?)
+        let n = self.status.pack(out)?;
+        if self.status != NfsStat::Ok {
+            return Ok(n);
+        }
+        Ok(n + self.handle.pack(out)? + self.attrs.pack(out)?)
     }
 }
 
