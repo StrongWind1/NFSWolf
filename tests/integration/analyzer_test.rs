@@ -141,6 +141,90 @@ async fn memfs_root_handle_is_non_empty() {
     assert!(fh.len() <= 128, "file handle must fit within NFS spec limits");
 }
 
+// --- Multiple exports detection ---
+
+#[tokio::test]
+async fn memfs_export_path_is_nonempty_string() {
+    // The export path returned by MNTPROC_EXPORT must be a non-empty byte string.
+    // The analyzer uses this path to identify which exports to check.
+    let config = MemFsConfig::default();
+    let (_server, port) = start_memfs(config).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mc = mount_client(port).await;
+    let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
+    let export_list = exports.into_inner();
+    for export in &export_list {
+        let path = export.ex_dir.0.as_ref();
+        assert!(!path.is_empty(), "export path must not be empty");
+        // Export paths should be valid UTF-8 (typically "/" or "/export").
+        let path_str = std::str::from_utf8(path);
+        assert!(path_str.is_ok(), "export path must be valid UTF-8: {path:?}");
+    }
+}
+
+// --- Auth flavor values are well-known ---
+
+#[tokio::test]
+async fn memfs_auth_flavors_are_valid() {
+    // The auth_flavors from MNT must contain only well-known flavor values.
+    // AUTH_NONE=0, AUTH_SYS=1, AUTH_SHORT=2, RPCSEC_GSS=6.
+    let config = MemFsConfig::default();
+    let (_server, port) = start_memfs(config).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mc = mount_client(port).await;
+    let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
+    let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
+
+    let mount_res = mc.mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
+    let known_flavors: &[u32] = &[0, 1, 2, 6];
+    for &flavor in &mount_res.auth_flavors {
+        assert!(known_flavors.contains(&flavor) || flavor >= 300_000, "unexpected auth flavor {flavor} -- not a well-known value and not in RPCSEC_GSS range");
+    }
+}
+
+// --- Handle bearer token: stable across connections ---
+
+#[tokio::test]
+async fn memfs_file_handle_usable_across_connections() {
+    // Obtain a file handle on one connection, then use GETATTR with it on a
+    // second independent connection. Handles are bearer tokens (RFC 1094 sec. 2.3.3).
+    use nfswolf_nfs3::Nfs3Client;
+    use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3, nfs_fh3};
+
+    let mut config = MemFsConfig::default();
+    config.add_file("/bearer.txt", b"test data");
+
+    let (_server, port) = start_memfs(config).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Connection 1: MOUNT + LOOKUP to get a file handle.
+    let mc = mount_client(port).await;
+    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
+
+    let addr = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+    let stream1 = TcpStream::connect(addr).await.expect("connect 1");
+    let nfs1 = Nfs3Client::new(DirectTransport::new(TokioIo::new(stream1)));
+
+    let fh = match nfs1.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"bearer.txt")) } }).await.expect("LOOKUP must succeed") {
+        Nfs3Result::Ok(ok) => ok.object,
+        Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+    };
+
+    // Connection 2: GETATTR with the handle from connection 1.
+    let stream2 = TcpStream::connect(addr).await.expect("connect 2");
+    let nfs2 = Nfs3Client::new(DirectTransport::new(TokioIo::new(stream2)));
+
+    match nfs2.getattr(&GETATTR3args { object: fh }).await.expect("GETATTR must succeed") {
+        Nfs3Result::Ok(ok) => {
+            assert_eq!(ok.obj_attributes.type_, nfswolf_nfs3::wire::ftype3::NF3REG, "handle from conn 1 must work on conn 2");
+        },
+        Nfs3Result::Err((stat, _)) => panic!("GETATTR on second connection: {stat:?}"),
+    }
+}
+
 // --- Portmapper version detection ---
 
 #[tokio::test]
