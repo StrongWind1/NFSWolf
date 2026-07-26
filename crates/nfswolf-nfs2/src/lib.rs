@@ -19,7 +19,9 @@
 //! [RFC 2623]: https://www.rfc-editor.org/rfc/rfc2623
 
 mod client;
+pub mod mount;
 pub mod wire;
 
 pub use client::{Nfs2Client, Nfs2Error};
+pub use mount::MountV1Client;
 pub use wire::{NFS_PROGRAM as PROGRAM, NFS_VERSION as VERSION, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr, NfsStat};
