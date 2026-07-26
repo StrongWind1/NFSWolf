@@ -268,7 +268,11 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 
 /// Dispatch a single command in the NFSv4 shell REPL.
 async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, line: &str, cwd_fh: &mut Vec<u8>, cwd_path: &mut String, allow_write: bool, uid: &mut u32, gid: &mut u32, hostname: &mut String) {
-    let _ = allow_write; // write ops not yet implemented in NFSv4 shell
+    // NFSv4 write operations (CREATE, WRITE, REMOVE, RENAME, etc.) require
+    // OPEN+WRITE+CLOSE with stateid tracking (RFC 7530 S16.2.5), which is out
+    // of scope until stateful v4 support is added.  Suppress the unused warning
+    // until then.
+    let _ = allow_write;
     let mut parts = line.split_whitespace();
     let Some(cmd) = parts.next() else { return };
     let args: Vec<&str> = parts.collect();
@@ -461,6 +465,13 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             }
         },
         "exit" | "quit" => {}, // handled by the REPL loop
+        // Write commands exist in the v2/v3 shell but require stateful v4
+        // operations (OPEN+WRITE+CLOSE with stateid tracking, RFC 7530
+        // S16.2.5).  Tell the user explicitly rather than falling through to
+        // "unknown command".
+        "put" | "mkdir" | "rm" | "rmdir" | "mv" | "chmod" | "chown" | "symlink" | "link" | "mknod" => {
+            eprintln!("{cmd}: not supported in NFSv4 mode (requires stateful OPEN/CLOSE with stateid tracking)");
+        },
         _ => eprintln!("unknown command '{cmd}'  --  type 'help' for commands"),
     }
 }
