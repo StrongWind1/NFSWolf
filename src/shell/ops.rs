@@ -94,6 +94,7 @@ impl ShellHandle {
         use std::fmt::Write;
         let mut s = String::with_capacity(self.0.len() * 2);
         for b in &self.0 {
+            // Infallible: fmt::Write for String never fails.
             let _ = write!(s, "{b:02x}");
         }
         s

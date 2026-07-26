@@ -56,8 +56,10 @@ pub(super) fn sanitize_control(s: &str) -> String {
     for ch in s.chars() {
         let cp = u32::from(ch);
         if cp < 0x20 || cp == 0x7f || (0x80..=0x9f).contains(&cp) {
+            // Infallible: fmt::Write for String never fails.
             let _ = write!(out, "\\x{cp:02x}");
         } else if is_bidi_or_zero_width(cp) {
+            // Infallible: fmt::Write for String never fails.
             let _ = write!(out, "\\u{{{cp:04x}}}");
         } else {
             out.push(ch);

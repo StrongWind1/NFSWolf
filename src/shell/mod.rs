@@ -264,6 +264,7 @@ impl NfsShell {
     /// skip directly to this identity.
     fn cache_winner(&self, fh: &FileHandle, uid: u32, gid: u32) {
         let mut lock = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Previous value (if any) from the HashMap is not needed.
         let _ = lock.insert(fh.as_bytes().to_vec(), (uid, gid));
     }
 
@@ -1745,6 +1746,7 @@ async fn try_read_print(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()
                 if chunk.data.is_empty() {
                     break;
                 }
+                // Stdout write failure is non-fatal during cat (pipe closed, etc.).
                 drop(stdout.write_all(&chunk.data));
                 last_byte = chunk.data.last().copied();
                 offset = offset.saturating_add(chunk.data.len() as u64);
@@ -1814,6 +1816,7 @@ async fn download_file(nfs3: &Nfs3Client, fh: &FileHandle, dest_path: &str, _tot
     }
     let hash = hasher.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
         use std::fmt::Write as _;
+        // Infallible: fmt::Write for String never fails.
         let _ = write!(s, "{b:02x}");
         s
     });
@@ -2854,6 +2857,7 @@ fn pair_wtmp(recs: &[UtmpRecord]) -> Vec<LastEntry> {
                 // Replacing a record with the same ut_line means the previous
                 // entry was orphaned (no DEAD_PROCESS). The most recent USER on
                 // this line is what we keep.
+                // Previous session on this ut_line (if any) was orphaned; discard it.
                 drop(open.insert(rec.line.clone(), OpenSession { user: rec.user.clone(), host: pick_host(&rec), login: rec.tv_sec }));
             },
             UtType::DeadProcess => {

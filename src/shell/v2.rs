@@ -125,6 +125,7 @@ impl ShellOps for V2Ops {
 
     async fn write_chunk(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
         let off32 = u32::try_from(offset).unwrap_or(u32::MAX);
+        // NFSv2 WRITE returns attrs we don't use; errors propagate via ?.
         let _ = self.client.write(&to_v2_fh(fh), off32, data.to_vec()).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(u32::try_from(data.len()).unwrap_or(u32::MAX))
     }
@@ -163,11 +164,13 @@ impl ShellOps for V2Ops {
     }
 
     async fn set_mode(&self, fh: &ShellHandle, mode: u32) -> anyhow::Result<()> {
+        // NFSv2 SETATTR returns attrs we don't use; errors propagate via ?.
         let _ = self.client.setattr(&to_v2_fh(fh), &v2_sattr_mode(mode)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
 
     async fn set_owner(&self, fh: &ShellHandle, uid: Option<u32>, gid: Option<u32>) -> anyhow::Result<()> {
+        // NFSv2 SETATTR returns attrs we don't use; errors propagate via ?.
         let _ = self.client.setattr(&to_v2_fh(fh), &v2_sattr_owner(uid, gid)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }

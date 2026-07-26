@@ -252,6 +252,7 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
         handles.push(handle);
     }
     for handle in handles {
+        // Task results already collected into the shared vec; JoinError is non-fatal.
         drop(handle.await);
     }
 
@@ -566,9 +567,11 @@ fn exports_equal(a: &ExportListKind<'_>, b: &ExportListKind<'_>) -> bool {
 fn write_json(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyhow::Result<()> {
     let mut wrapper = serde_json::Map::new();
     if interrupted {
+        // Previous value (if any) from the map is not needed.
         drop(wrapper.insert("interrupted".to_owned(), serde_json::Value::Bool(true)));
     }
     let json_results: Vec<serde_json::Value> = results.iter().map(host_to_json).collect();
+    // Previous value (if any) from the map is not needed.
     drop(wrapper.insert("hosts".to_owned(), serde_json::Value::Array(json_results)));
     let json = serde_json::to_string_pretty(&serde_json::Value::Object(wrapper))?;
     std::fs::write(path, json)?;
@@ -651,6 +654,7 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
         // HostInfo column (which folds MOUNT client names/dirs and export paths)
         // are attacker-controlled wire data, so quoting/escaping is mandatory to
         // stop column breakage and spreadsheet formula injection.
+        // Infallible: fmt::Write for String never fails.
         let _ = writeln!(
             csv,
             "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
