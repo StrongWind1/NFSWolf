@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn u64_round_trip() {
         // RFC 4506 sec 4.5: unsigned hyper, 8 bytes.
-        for val in [0u64, 1, u32::MAX as u64, u64::MAX] {
+        for val in [0u64, 1, u64::from(u32::MAX), u64::MAX] {
             let mut buf = Vec::new();
             let written = val.pack(&mut buf).unwrap();
             assert_eq!(written, 8);

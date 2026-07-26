@@ -224,7 +224,7 @@ mod tests {
     fn opaque_packed_size_matches_actual_written() {
         // Verify packed_size agrees with the actual bytes written for various lengths.
         for len in 0..=17 {
-            let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let data: Vec<u8> = (0u8..len).collect();
             let op = Opaque::borrowed(&data);
             let mut buf = Vec::new();
             let written = op.pack(&mut buf).unwrap();

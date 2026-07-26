@@ -1334,10 +1334,10 @@ mod tests {
         let decoded_none = round_trip(&none);
         assert!(decoded_none.is_none());
 
-        let some: Nfs3Option<u32> = Nfs3Option::Some(0xDEADBEEF);
+        let some: Nfs3Option<u32> = Nfs3Option::Some(0xDEAD_BEEF);
         let decoded_some = round_trip(&some);
         assert!(decoded_some.is_some());
-        assert_eq!(decoded_some.unwrap(), 0xDEADBEEF);
+        assert_eq!(decoded_some.unwrap(), 0xDEAD_BEEF);
     }
 
     // --- wcc_attr (RFC 1813 sec 3.3.2, pre_op_attr carries this) ---

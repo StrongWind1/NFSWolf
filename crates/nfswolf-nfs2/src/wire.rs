@@ -938,17 +938,7 @@ mod tests {
     fn ftype_all_9_variants_round_trip() {
         // RFC 1094 S2.3.3 values 0-5; Linux kernel extensions 6 (socket),
         // 7 (bad), 8 (FIFO) from nfs2.h.
-        let all: [(u32, FType); 9] = [
-            (0, FType::NonFile),
-            (1, FType::Regular),
-            (2, FType::Directory),
-            (3, FType::Block),
-            (4, FType::Character),
-            (5, FType::Symlink),
-            (6, FType::Socket),
-            (7, FType::Bad),
-            (8, FType::Fifo),
-        ];
+        let all: [(u32, FType); 9] = [(0, FType::NonFile), (1, FType::Regular), (2, FType::Directory), (3, FType::Block), (4, FType::Character), (5, FType::Symlink), (6, FType::Socket), (7, FType::Bad), (8, FType::Fifo)];
         for (wire_val, expected) in &all {
             let mut buf = Vec::new();
             _ = expected.pack(&mut buf).unwrap();
@@ -1001,14 +991,7 @@ mod tests {
         assert_eq!(SATTR_UNCHANGED, 0xFFFF_FFFF);
         assert_eq!(SATTR_UNCHANGED, u32::MAX);
         // Verify the sentinel survives a pack/unpack cycle through Nfs2SetAttr.
-        let sa = Nfs2SetAttr {
-            mode: SATTR_UNCHANGED,
-            uid: SATTR_UNCHANGED,
-            gid: SATTR_UNCHANGED,
-            size: SATTR_UNCHANGED,
-            atime: Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED },
-            mtime: Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED },
-        };
+        let sa = Nfs2SetAttr { mode: SATTR_UNCHANGED, uid: SATTR_UNCHANGED, gid: SATTR_UNCHANGED, size: SATTR_UNCHANGED, atime: Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED }, mtime: Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED } };
         let mut buf = Vec::new();
         _ = sa.pack(&mut buf).unwrap();
         let (decoded, _) = Nfs2SetAttr::unpack(&mut Cursor::new(&buf)).unwrap();
@@ -1036,7 +1019,22 @@ mod tests {
         let res = DirOpRes {
             status: NfsStat::Ok,
             handle: Nfs2FileHandle::from_bytes(&[0x42; 32]),
-            attrs: Nfs2FileAttr { ftype: FType::Regular, mode: 0o644, nlink: 1, uid: 1000, gid: 1000, size: 4096, blocksize: 4096, rdev: 0, blocks: 8, fsid: 1, fileid: 42, atime: Timeval { seconds: 0, useconds: 0 }, mtime: Timeval { seconds: 0, useconds: 0 }, ctime: Timeval { seconds: 0, useconds: 0 } },
+            attrs: Nfs2FileAttr {
+                ftype: FType::Regular,
+                mode: 0o644,
+                nlink: 1,
+                uid: 1000,
+                gid: 1000,
+                size: 4096,
+                blocksize: 4096,
+                rdev: 0,
+                blocks: 8,
+                fsid: 1,
+                fileid: 42,
+                atime: Timeval { seconds: 0, useconds: 0 },
+                mtime: Timeval { seconds: 0, useconds: 0 },
+                ctime: Timeval { seconds: 0, useconds: 0 },
+            },
         };
         let mut buf = Vec::new();
         let n = res.pack(&mut buf).unwrap();
