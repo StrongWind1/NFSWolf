@@ -158,6 +158,10 @@ path = "tests/integration/analyzer_test.rs"
 name = "credential_test"
 path = "tests/integration/credential_test.rs"
 
+[[test]]
+name = "xdr_fuzz_test"
+path = "tests/integration/xdr_fuzz_test.rs"
+
 [profile.dev]
 # Catch integer overflows in debug builds rather than wrapping silently.
 overflow-checks = true
