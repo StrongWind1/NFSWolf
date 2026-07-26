@@ -6,7 +6,7 @@ nfswolf is a Rust NFS security toolkit that consolidates 10+ fragmented NFS secu
 
 ## Current Status
 
-v0.6.0 is the last tagged release. The full attack path (recon -> analyze -> escape -> shell -> exploit) is implemented in Rust across 6 workspace crates + the binary, with 390 tests. The `refactor/local-nfs-stack` branch (not yet merged to main) carries the six-crate workspace split, the NFSv3 domain API, the evidence-driven credential ladder, the unified `NfsShell<O: ShellOps>` architecture (v2 and v3 share all 44 shell commands), and several live-tested bug fixes. The v0.2.0 CLI overhaul removed the `attack` umbrella verb, promoted `escape` / `brute-handle` / `uid-spray` to top-level, renamed `export` to `convert`, and removed the NLM and NSM clients (lock-DoS was the only consumer; F-6.x is now out of scope). v0.3.x added the shell `wtmp` / `btmp` / `lastlog` log readers and rebased `escape-root` onto the filesystem root.
+v0.6.0 is the last tagged release. The full attack path (recon -> analyze -> escape -> shell -> exploit) is implemented in Rust across 6 workspace crates + the binary, with 451 tests. The `refactor/local-nfs-stack` branch (not yet merged to main) carries the six-crate workspace split, the NFSv3 domain API, the evidence-driven credential ladder, the unified `NfsShell<O: ShellOps>` architecture (v2 and v3 share all 44 shell commands), and several live-tested bug fixes. The v0.2.0 CLI overhaul removed the `attack` umbrella verb, promoted `escape` / `brute-handle` / `uid-spray` to top-level, renamed `export` to `convert`, and removed the NLM and NSM clients (lock-DoS was the only consumer; F-6.x is now out of scope). v0.3.x added the shell `wtmp` / `btmp` / `lastlog` log readers and rebased `escape-root` onto the filesystem root.
 
 The repository is a Cargo workspace. The NFS protocol stack is owned in-tree and split one crate per version over a shared foundation -- see the crate table below. There is no `nfs3_client` dependency and no `vendor/` patch tree; `nfs3_server` remains a dev-dependency for the mock server used in integration tests.
 
@@ -249,7 +249,7 @@ After every change:
 make check-all
 ```
 
-This runs: fmt -> clippy (zero warnings) -> cargo deny -> check -> test (390 tests) -> doc -> ascii-check -> lf-check -> machete.
+This runs: fmt -> clippy (zero warnings) -> cargo deny -> check -> test (451 tests) -> doc -> ascii-check -> lf-check -> machete.
 
 Makefile targets:
 - `make dev` -- debug build, fast iteration (`target/debug/`)
