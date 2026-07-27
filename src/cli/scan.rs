@@ -242,8 +242,8 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
             // escape task -- and the join loop waits for every task, stalling the
             // whole scan. Bound the full escape per host (scales with --timeout).
             let per_host = Duration::from_millis(g.timeout.saturating_mul(10).max(15_000));
-            let outcome = match tokio::time::timeout(per_host, escape::find_escape(&host, &export, escape::DEFAULT_BTRFS_SUBVOLS, escape::DEFAULT_MAX_ROOT_SCAN, &g, false)).await {
-                Ok(Ok((_client, outcome))) => Ok(outcome),
+            let outcome = match tokio::time::timeout(per_host, escape::find_escape_any(&host, &export, escape::DEFAULT_BTRFS_SUBVOLS, escape::DEFAULT_MAX_ROOT_SCAN, &g, false)).await {
+                Ok(Ok(outcome)) => Ok(outcome),
                 Ok(Err(e)) => Err(e.to_string()),
                 Err(_) => Err(format!("timed out after {}ms", per_host.as_millis())),
             };
@@ -276,7 +276,8 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
                 let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
                 let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
-                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+                let v2_flag = if note.contains("NFSv2") { " --nfs-version 2" } else { "" };
+                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
             Ok(EscapeOutcome::StaleNoRoot) => {
                 println!("  {}", format!("{}:{}  handle valid but root not found (raise `escape --max-root-scan`)", res.host, res.export).dimmed());
