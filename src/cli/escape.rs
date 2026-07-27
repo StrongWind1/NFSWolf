@@ -121,9 +121,17 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
     let result = find_escape(host, export, btrfs_subvols, max_root_scan, globals, true).await;
     let (probe_client, outcome) = match result {
         Ok(r) => r,
-        Err(_) => {
+        Err(v3_err) => {
             eprintln!("{}", crate::output::status_info("MOUNT v3 failed; trying NFSv2 escape"));
-            let outcome = find_escape_v2(host, export, max_root_scan, globals).await?;
+            let outcome = match find_escape_v2(host, export, max_root_scan, globals).await {
+                Ok(o) => o,
+                Err(v2_err) => {
+                    eprintln!("{}", crate::output::status_err(&format!("MOUNT failed on both v3 and v1 -- export may not exist or server is unreachable")));
+                    eprintln!("  v3: {v3_err}");
+                    eprintln!("  v1: {v2_err}");
+                    return Ok(());
+                },
+            };
             match outcome {
                 EscapeOutcome::Success { candidate, note } => {
                     print_escape_success(&candidate, &note, host);
