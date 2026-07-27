@@ -219,8 +219,11 @@ async fn report_hit(client: &Nfs3Client, candidate: &EscapeResult, note: &str, h
 }
 
 /// Inode sweep: fingerprint-driven known roots first (parity with `escape`),
-/// then a generic inode sweep. Returns true once a root is found.
+/// then a generic inode sweep. Reports all valid handles found, not just the root.
 async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_attempts: u64, host: &str) -> bool {
+    let mut found_root = false;
+    let mut extra_hits: Vec<(u64, String)> = Vec::new();
+
     // Phase 1: the same candidates escape tries (ext4 inode 2 / compound UUID,
     // plus XFS 128/64/32 when the type is XFS or ambiguous).
     let mut known: Vec<EscapeResult> = FileHandleAnalyzer::construct_escape_handle(seed).into_iter().collect();
@@ -232,19 +235,23 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_at
         match probe(client, &cand.root_handle).await {
             Probe::Dir => {
                 report_hit(client, cand, "known root, verified", host).await;
-                return true;
+                found_root = true;
             },
             Probe::Denied => {
                 report_hit(client, cand, "known root, access denied (root_squash)", host).await;
-                return true;
+                found_root = true;
             },
-            Probe::NonDir => tracing::debug!(inode = cand.inode_number, "known candidate hit a non-directory"),
+            Probe::NonDir => extra_hits.push((u64::from(cand.inode_number), cand.root_handle.to_hex())),
             Probe::Stale => stale += 1,
             Probe::Miss => {},
+        }
+        if found_root {
+            break;
         }
     }
 
     // Phase 2: generic inode sweep from the fs-appropriate start inode, gen=0.
+    // Continue even after finding root to discover more valid handles.
     let start = if matches!(fs, FsType::Xfs) { 64u64 } else { 2u64 };
     let mut tried = 0u64;
     for inode in start..start.saturating_add(max_attempts) {
@@ -258,20 +265,34 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_at
         tried += 1;
         match probe(client, &cand.root_handle).await {
             Probe::Dir => {
-                report_hit(client, &cand, "found via scan", host).await;
-                return true;
+                if found_root {
+                    extra_hits.push((inode, cand.root_handle.to_hex()));
+                } else {
+                    report_hit(client, &cand, "found via scan", host).await;
+                    found_root = true;
+                }
             },
             Probe::Denied => {
-                report_hit(client, &cand, "found via scan (ACCES -- root_squash active)", host).await;
-                return true;
+                if found_root {
+                    extra_hits.push((inode, cand.root_handle.to_hex()));
+                } else {
+                    report_hit(client, &cand, "found via scan (ACCES -- root_squash active)", host).await;
+                    found_root = true;
+                }
             },
-            Probe::NonDir => tracing::debug!(inode, "scan hit a non-directory inode (within export subtree)"),
+            Probe::NonDir => extra_hits.push((inode, cand.root_handle.to_hex())),
             Probe::Stale => stale += 1,
             Probe::Miss => {},
         }
     }
+    if !extra_hits.is_empty() {
+        eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
+        for (inode, hex) in &extra_hits {
+            eprintln!("    inode {inode:>6}  {hex}");
+        }
+    }
     eprintln!("{}", crate::output::status_info(&format!("Swept {tried} inodes, {stale} STALE (format match, wrong inode/gen)")));
-    false
+    found_root
 }
 
 /// Parameters for a fixed-inode generation sweep (grouped to keep the arg count sane).
@@ -317,12 +338,14 @@ async fn sweep_generations(client: &Nfs3Client, seed: &FileHandle, s: GenSweep, 
     false
 }
 
-/// BTRFS subvolume sweep (subvol IDs 5 and 256+).
+/// BTRFS subvolume sweep (subvol IDs 5 and 256+). Reports all discovered subvolumes.
 async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, host: &str) -> bool {
     let max = u32::try_from(max_attempts.min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
     let candidates = FileHandleAnalyzer::construct_btrfs_subvol_handles(seed, max);
     let mut tried = 0u64;
     let mut stale = 0u64;
+    let mut found_root = false;
+    let mut extra_hits: Vec<(u32, String)> = Vec::new();
     for cand in &candidates {
         if tried >= max_attempts {
             break;
@@ -330,18 +353,32 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
         tried += 1;
         match probe(client, &cand.root_handle).await {
             Probe::Dir => {
-                report_hit(client, cand, &format!("BTRFS subvol {}", cand.inode_number), host).await;
-                return true;
+                if found_root {
+                    extra_hits.push((cand.inode_number, cand.root_handle.to_hex()));
+                } else {
+                    report_hit(client, cand, &format!("BTRFS subvol {}", cand.inode_number), host).await;
+                    found_root = true;
+                }
             },
             Probe::Denied => {
-                report_hit(client, cand, &format!("BTRFS subvol {} (ACCES)", cand.inode_number), host).await;
-                return true;
+                if found_root {
+                    extra_hits.push((cand.inode_number, cand.root_handle.to_hex()));
+                } else {
+                    report_hit(client, cand, &format!("BTRFS subvol {} (ACCES)", cand.inode_number), host).await;
+                    found_root = true;
+                }
             },
-            Probe::NonDir => tracing::debug!(subvol = cand.inode_number, "btrfs subvol hit a non-directory"),
+            Probe::NonDir => extra_hits.push((cand.inode_number, cand.root_handle.to_hex())),
             Probe::Stale => stale += 1,
             Probe::Miss => {},
         }
     }
+    if !extra_hits.is_empty() {
+        eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
+        for (subvol, hex) in &extra_hits {
+            eprintln!("    subvol {subvol:>6}  {hex}");
+        }
+    }
     eprintln!("{}", crate::output::status_info(&format!("Tried {tried} BTRFS subvols, {stale} STALE")));
-    false
+    found_root
 }
