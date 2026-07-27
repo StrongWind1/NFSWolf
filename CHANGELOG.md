@@ -132,8 +132,8 @@ This release adds three login-history readers to the interactive shell -- `last`
 
 ### Verified against the lab
 
-- `10.252.0.30` (Ubuntu 24.04): 5 boot/shutdown sessions paired correctly; durations match wall-clock (a 4-day 17-hour 45-minute boot pairs with the matching `SHUTDOWN_TIME` record); 16 failed `lastb` entries showing both console (tty1) and `ssh:notty` attempts; `lastlog` correctly reports the file as empty.
-- `10.252.0.32` (Ubuntu 24.04): wtmp contains only `LOGIN_PROCESS` getty spawns, which util-linux's own `last` ignores per `last.c` lines 886-893; the new command produces the same "no completed sessions" outcome rather than synthesizing fake rows.
+- Multiple Ubuntu 24.04 targets: 5 boot/shutdown sessions paired correctly; durations match wall-clock (a 4-day 17-hour 45-minute boot pairs with the matching `SHUTDOWN_TIME` record); 16 failed `lastb` entries showing both console (tty1) and `ssh:notty` attempts; `lastlog` correctly reports the file as empty.
+- Target with getty-only wtmp: wtmp contains only `LOGIN_PROCESS` getty spawns, which util-linux's own `last` ignores per `last.c` lines 886-893; the new command produces the same "no completed sessions" outcome rather than synthesizing fake rows.
 
 ### Deferred
 
