@@ -527,29 +527,31 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 
     let target = parse_target(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
     let host = target.host;
-    let export = match &target.source {
-        Source::Export(p) => p.clone(),
-        _ => anyhow::bail!("--nfs-version 2 requires an export path (not a raw handle)"),
-    };
-    let addr = SocketAddr::new(host, 111);
-
     let uid = globals.uid;
     let gid = globals.gid;
     let hostname = globals.hostname.clone();
 
-    let mount_client = NfsMountClient::new().with_credential(Credential::Sys(AuthSys::new(uid, gid, &hostname)));
-    let mount_result = mount_client.mount_v1(addr, &export).await?;
-    let root_fh: Nfs2FileHandle = {
-        let b = mount_result.handle.as_bytes();
-        let mut arr = [0u8; 32];
-        let len = b.len().min(32);
-        #[expect(clippy::indexing_slicing, reason = "len = min(b.len(), 32) <= 32 = arr.len()")]
-        {
-            arr[..len].copy_from_slice(&b[..len]);
-        }
-        Nfs2FileHandle(arr)
+    let (root_fh, export) = match &target.source {
+        Source::Export(p) => {
+            let addr = SocketAddr::new(host, 111);
+            let mount_client = NfsMountClient::new().with_credential(Credential::Sys(AuthSys::new(uid, gid, &hostname)));
+            let mount_result = mount_client.mount_v1(addr, p).await?;
+            let fh: Nfs2FileHandle = {
+                let b = mount_result.handle.as_bytes();
+                Nfs2FileHandle::from_bytes(b)
+            };
+            (fh, p.clone())
+        },
+        Source::Handle(hex) => {
+            let generic = FileHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?;
+            let fh = Nfs2FileHandle::from_bytes(generic.as_bytes());
+            eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv2): {hex}")));
+            (fh, String::from("/"))
+        },
+        Source::None => anyhow::bail!("--nfs-version 2 requires an export path or --handle"),
     };
 
+    let addr = SocketAddr::new(host, 111);
     let nfs_port = if let Some(p) = globals.nfs_port {
         p
     } else {
