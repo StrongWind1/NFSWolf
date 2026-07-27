@@ -571,23 +571,34 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let mut cwd_fh = root_fh;
     let mut cwd_path = String::from("/");
 
+    // Non-interactive mode: run one command and return (same as v3 shell).
+    let single_command = args.command.clone();
+
     let mut rl = rustyline::DefaultEditor::new()?;
     loop {
-        let prompt = format!("nfsv2:{cwd_path}> ");
-        let input = match rl.readline(&prompt) {
-            Ok(l) => l,
-            Err(ReadlineError::Eof | ReadlineError::Interrupted) => break,
-            Err(e) => {
-                eprintln!("readline: {e}");
-                break;
-            },
+        let input = if let Some(ref cmd) = single_command {
+            cmd.clone()
+        } else {
+            let prompt = format!("nfsv2:{cwd_path}> ");
+            match rl.readline(&prompt) {
+                Ok(l) => l,
+                Err(ReadlineError::Eof | ReadlineError::Interrupted) => break,
+                Err(e) => {
+                    eprintln!("readline: {e}");
+                    break;
+                },
+            }
         };
         let line = input.trim();
         if line.is_empty() {
+            if single_command.is_some() {
+                break;
+            }
             continue;
         }
-        // History add failure is non-fatal (in-memory only).
-        drop(rl.add_history_entry(line));
+        if single_command.is_none() {
+            drop(rl.add_history_entry(line));
+        }
 
         let (cmd, arg) = line.split_once(' ').map_or((line, ""), |(c, a)| (c, a.trim()));
 
@@ -979,6 +990,9 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
             },
             "quit" | "exit" => break,
             _ => eprintln!("{}", format!("unknown command: {cmd}  (type 'help')").red()),
+        }
+        if single_command.is_some() {
+            break;
         }
     }
     Ok(())
