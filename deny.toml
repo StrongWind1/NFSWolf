@@ -29,10 +29,8 @@ highlight = "all"
 # Transitive duplicates we cannot resolve -- different direct deps pin
 # incompatible major versions of the same crate.
 #   hashbrown: dashmap 6.x -> 0.14, indexmap 2.x (via fuser) -> 0.17
-#   nix:       fuser -> 0.30, rustyline -> 0.31
 skip = [
     { crate = "hashbrown@0.14", reason = "dashmap 6.x has not upgraded to hashbrown 0.17" },
-    { crate = "nix@0.30", reason = "fuser has not upgraded to nix 0.31" },
     { crate = "syn@2", reason = "proc-macro crates have not all upgraded to syn 3" },
 ]
 

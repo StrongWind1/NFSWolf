@@ -226,9 +226,9 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     // The status banner and `# rerun:` line have already been emitted from
     // `main` before daemonization, so the operator sees them BEFORE their
     // shell prompt returns. From here on out we are the daemon child;
-    // `fuser::mount2` blocks for the lifetime of the kernel mount.
+    // `fuser::mount` blocks for the lifetime of the kernel mount.
     let mountpoint = Path::new(&args.mountpoint).to_path_buf();
-    tokio::task::spawn_blocking(move || fuser::mount2(fs, &mountpoint, &config)).await??;
+    tokio::task::spawn_blocking(move || fuser::mount(fs, &mountpoint, &config)).await??;
     Ok(())
 }
 
