@@ -316,14 +316,14 @@ async fn export_is_fs_root(client: &Nfs3Client, mount_handle: &FileHandle) -> bo
     let export_inode = ok.fileid;
     // ext4/ext3/ext2: root is always inode 2.
     // XFS: root is 128 (v5, default), 64 (v4 512B inodes), or 32 (v4 1024B inodes).
-    // On ext4, inodes 32/64/128 are metadata (journal, resize_inode) — never directories.
+    // On ext4, inodes 32/64/128 are metadata (journal, resize_inode) -- never directories.
     // So a directory with fileid in {2, 32, 64, 128} is unambiguously a filesystem root.
     if matches!(export_inode, 2 | 32 | 64 | 128) {
         return true;
     }
     // BTRFS: every subvolume root has fileid 256, so fileid alone can't distinguish
     // "export IS the FS_TREE root" from "export is a user subvolume that could escape
-    // to FS_TREE." Let the probe phase handle BTRFS — it will try FS_TREE (subvol 5)
+    // to FS_TREE." Let the probe phase handle BTRFS -- it will try FS_TREE (subvol 5)
     // and other subvols, and the identity check blocks self-matches.
     false
 }
@@ -430,9 +430,12 @@ fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
 /// NFSv2 has no BADHANDLE oracle (all rejections are NFSERR_STALE per RFC 1094)
 /// and handles are fixed 32 bytes. No post-escape shadow read (v2 has no ACCESS).
 async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<EscapeOutcome> {
-    use nfswolf_nfs2::{Nfs2Client, wire::{Nfs2FileHandle, FType}};
-    use nfswolf_rpc::{rpc::opaque_auth, transport::direct::DirectTransport, transport::tokio::TokioIo};
     use crate::proto::auth::next_stamp;
+    use nfswolf_nfs2::{
+        Nfs2Client,
+        wire::{FType, Nfs2FileHandle},
+    };
+    use nfswolf_rpc::{rpc::opaque_auth, transport::direct::DirectTransport, transport::tokio::TokioIo};
 
     let addr = parse_addr_with_port(host, globals.nfs_port)?;
     let mc = make_mount_client(globals);

@@ -139,10 +139,7 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     let search_space = inode_count.saturating_mul(gen_count);
 
     let ver_label = if matches!(nfs_ver, NfsVersion::V2Only) { "v2" } else { "v3" };
-    eprintln!("{}", crate::output::status_info(&format!(
-        "Brute-forcing handles on {host} [{fs:?}, {ver_label}] inodes {inode_start}..={inode_end} x gen {gen_start}..={gen_end} ({search_space} candidates, max {})",
-        args.max_attempts
-    )));
+    eprintln!("{}", crate::output::status_info(&format!("Brute-forcing handles on {host} [{fs:?}, {ver_label}] inodes {inode_start}..={inode_end} x gen {gen_start}..={gen_end} ({search_space} candidates, max {})", args.max_attempts)));
 
     let found = match nfs_ver {
         NfsVersion::V3 => {
@@ -165,9 +162,7 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
                 result
             }
         },
-        NfsVersion::V2Only => {
-            sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals).await
-        },
+        NfsVersion::V2Only => sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals).await,
     };
 
     if !found {
@@ -176,7 +171,6 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     crate::cli::emit_replay(globals);
     Ok(())
 }
-
 
 /// Outcome of probing one candidate handle with GETATTR.
 enum Probe {
@@ -366,9 +360,9 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
 /// inode/gen. Handles are fixed 32 bytes, zero-padded.
 #[expect(clippy::too_many_arguments, reason = "sweep parameters are all caller-controlled range bounds")]
 async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str, globals: &GlobalOpts) -> bool {
+    use crate::proto::auth::next_stamp;
     use nfswolf_nfs2::{Nfs2Client, wire::Nfs2FileHandle};
     use nfswolf_rpc::{rpc::opaque_auth, transport::direct::DirectTransport, transport::tokio::TokioIo};
-    use crate::proto::auth::next_stamp;
 
     let nfs_port = globals.nfs_port.unwrap_or(2049);
     let nfs_addr = std::net::SocketAddr::new(addr.ip(), nfs_port);

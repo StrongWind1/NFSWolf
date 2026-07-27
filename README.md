@@ -31,7 +31,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 | Async / concurrent scan | yes | no | no | yes | no | no |
 | AUTH_SYS UID spraying | yes | no | yes | yes | no | no |
 | Export escape (ext4/XFS/BTRFS) | yes | no | no | no | no | no |
-| Interactive NFS shell (40+ commands) | yes | no | no | no | no | yes |
+| Interactive NFS shell (44+ commands) | yes | no | no | no | no | yes |
 | FUSE mount (`nfswolf mount`) | yes | no | no | no | no | no |
 | Portmapper / mountd enumeration | yes | partial | no | no | no | no |
 | Self-contained HTML / JSON / CSV reports | yes | no | no | no | no | no |
@@ -44,8 +44,8 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 - **Documented security findings** across export, transport, file-handle, and credential attack categories - full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
 - **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2.
 - **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
-- **Offensive subcommands**: `escape` (export breakout), `brute-handle` (handle oracle), `uid-spray` (last-resort credential discovery).
-- **Interactive shell** with tab completion, `get -r` / `put -r`, `--verify <sha256>`, and all standard POSIX-style verbs.
+- **Offensive subcommands**: `escape` (export breakout with ext4/XFS/BTRFS subvol detection and NFSv2 fallback), `brute-handle` (inode/generation cross-product sweep with handle oracle), `uid-spray` (last-resort credential discovery).
+- **Interactive shell** across NFSv2, NFSv3, and NFSv4 with tab completion, `get -r` / `put -r`, `--verify <sha256>`, `--handle` MOUNT bypass, `-c` scripting mode, and all standard POSIX-style verbs.
 - **FUSE**: mount any NFS export locally with spoofed credentials via `nfswolf mount`.
 - **Six report formats**: HTML, JSON, CSV, Markdown, plain-text, ANSI console.
 
@@ -119,8 +119,10 @@ nfswolf scan 192.168.1.0/24
 nfswolf analyze --json 192.168.1.10 > results.json
 nfswolf convert -i results.json -f html -o report.html
 
-# Interactive shell against an export:
+# Interactive shell against an export (NFSv2, v3, or v4):
 nfswolf shell 192.168.1.10:/srv/nfs --uid 0
+nfswolf shell 192.168.1.10:/srv/nfs --nfs-version 2
+nfswolf shell 192.168.1.10 --handle DEADBEEF... --nfs-version 2
 
 # Mount an export locally via FUSE, spoofing UID 0:
 sudo nfswolf --uid 0 mount 192.168.1.10:/srv/nfs /mnt/target
@@ -128,8 +130,14 @@ sudo nfswolf --uid 0 mount 192.168.1.10:/srv/nfs /mnt/target
 # Construct an escape handle to reach the underlying filesystem root:
 nfswolf escape 192.168.1.10:/srv/nfs
 
+# Brute-force handles across an inode/generation cross-product:
+nfswolf brute-handle 192.168.1.10:/srv/nfs --inode-start 2 --inode-end 500 --gen-start 0 --gen-end 10
+
 # Last-resort UID/GID brute force when the auto-UID ladder doesn't find a hit:
 nfswolf uid-spray 192.168.1.10:/srv/nfs --uid-start 0 --uid-end 5000 --path /etc/shadow
+
+# Convert analysis results to console output (no -o needed for console format):
+nfswolf convert -i results.json --format console
 
 # Re-runnable replay: every successful command prints a `# rerun: ...`
 # line on stderr that you can paste back into your shell.
@@ -141,12 +149,12 @@ nfswolf uid-spray 192.168.1.10:/srv/nfs --uid-start 0 --uid-end 5000 --path /etc
 |---|---|---|
 | Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
 | Recon | `analyze` | Per-host security audit against the documented finding catalog |
-| Recon | `escape` | Construct ext4 / XFS / BTRFS escape handles to break out of an export |
-| Connect | `shell` | Interactive REPL over NFSv3 or NFSv4, with `get -r` / `put -r` / `--verify` |
+| Recon | `escape` | Construct ext4 / XFS / BTRFS escape handles (probes ext4 first, then XFS, then BTRFS subvols; auto-falls back to NFSv2) |
+| Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4, with `get -r` / `put -r` / `--verify` / `--handle` / `-c` |
 | Connect | `mount` | FUSE mount with spoofed AUTH_SYS credentials (`--features fuse`) |
-| Advanced | `brute-handle` | Brute-force file handles using the STALE / BADHANDLE oracle |
+| Advanced | `brute-handle` | Brute-force file handles via inode/generation cross-product sweep with STALE / BADHANDLE oracle; reports all discovered handles; NFSv2 auto-fallback |
 | Advanced | `uid-spray` | Last-resort UID/GID brute force when auto-UID escalation fails |
-| Utilities | `convert` | Render a saved analysis result to HTML / JSON / CSV / Markdown / text |
+| Utilities | `convert` | Render a saved analysis result to HTML / JSON / CSV / Markdown / text / console (console prints to stdout without `-o`) |
 | Utilities | `completions <shell>` | Generate shell completions for bash, zsh, fish, PowerShell |
 
 Global flags common to every subcommand:
@@ -185,12 +193,12 @@ See `nfswolf <subcommand> --help` for per-subcommand flags.
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 469+ tests across 6 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix, doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (469+ tests), doc, hygiene, machete
 ```
 
 ## Credits
