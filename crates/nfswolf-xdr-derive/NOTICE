@@ -1,0 +1,24 @@
+Provenance of nfswolf-xdr-derive
+================================
+
+This crate contains code derived from the Vaiz/nfs3 project
+<https://github.com/Vaiz/nfs3>, which is released into the public domain under
+the Unlicense.
+
+The Unlicense places no conditions on copying, modification, or relicensing.
+This NOTICE records the origin as a matter of good practice, not obligation.
+
+Code absorbed from Vaiz/nfs3 (Unlicense):
+
+  From crate nfs3_macros:
+    src/lib.rs                  -> src/lib.rs
+
+Deviations from upstream (workspace-wide):
+
+  * The smol runtime backend was dropped; only tokio is supported.
+  * The RPC credential and verifier are settable on an established connection,
+    so an AUTH_SYS identity can be swapped mid-session without reconnecting.
+  * PROG_MISMATCH replies preserve the server's supported (low, high) version
+    range instead of collapsing to an opaque error.
+  * The NFSv3 server implementation was not absorbed; NFSWolf depends on the
+    published nfs3_server crate as a dev-dependency for integration tests.

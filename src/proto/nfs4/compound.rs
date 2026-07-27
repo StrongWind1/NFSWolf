@@ -1,139 +1,24 @@
 //! NFSv4 COMPOUND client  --  sends batched operation sequences.
 //!
-//! Each method builds an appropriate op sequence, sends a single COMPOUND RPC,
-//! and returns the raw CompoundRes for the caller to interpret.
-//! Uses the connection pool for transport; each call checks out, calls, returns.
+//! Each method builds an op sequence, sends a single COMPOUND RPC, and returns
+//! the raw `CompoundRes` for the caller to interpret.
 //!
-//! Also provides `Nfs4DirectClient` for connecting directly to port 2049 without
-//! the MOUNT protocol  --  needed for NFSv4-only servers where MOUNT is unavailable.
+//! `Nfs4DirectClient` holds one raw TCP connection to port 2049 and speaks no
+//! MOUNT protocol, because NFSv4 has none -- the export tree is reached from
+//! PUTROOTFH instead.
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use nfs3_client::net::Connector as _;
-use nfs3_client::rpc::RpcClient;
-use nfs3_client::tokio::{TokioConnector, TokioIo};
+use nfswolf_rpc::rpc::RpcClient;
+use nfswolf_rpc::transport::net::Connector as _;
+use nfswolf_rpc::transport::tokio::{TokioConnector, TokioIo};
 use tokio::net::TcpStream;
 
-use crate::proto::auth::Credential;
-use crate::proto::conn::ReconnectStrategy;
-use crate::proto::nfs4::PseudoFsEntry;
 use crate::proto::nfs4::types::{ArgOp, AttrRequest, CompoundArgs, CompoundRes, NFS4_PROC_COMPOUND, NFS4_PROGRAM, NFS4_VERSION, ResOpData};
-use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::util::stealth::StealthConfig;
-
-/// NFSv4 client backed by the shared connection pool.
-///
-/// All calls are issued as NFSv4 COMPOUND RPCs (the only non-NULL NFSv4 procedure).
-/// This is stateless in the v4.0 sense  --  no clientid or sessions are managed here.
-pub(crate) struct Nfs4Client {
-    pool: Arc<ConnectionPool>,
-    pool_key: PoolKey,
-    credential: Credential,
-    /// Timing profile applied before every COMPOUND (Critical Design Rule 10).
-    stealth: StealthConfig,
-}
-
-impl std::fmt::Debug for Nfs4Client {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Nfs4Client").field("pool_key", &self.pool_key).finish_non_exhaustive()
-    }
-}
-
-impl Nfs4Client {
-    /// Create a new NFSv4 client that draws connections from `pool`.
-    ///
-    /// Stealth defaults to off; chain `with_stealth` to honor `--delay`/`--jitter`.
-    #[must_use]
-    pub(crate) const fn new(pool: Arc<ConnectionPool>, pool_key: PoolKey, credential: Credential) -> Self {
-        Self { pool, pool_key, credential, stealth: StealthConfig::none() }
-    }
-
-    /// Attach a stealth profile so each COMPOUND honors the configured pacing.
-    ///
-    /// Additive builder: `new` keeps its signature so existing call sites are
-    /// unaffected; callers with a configured `StealthConfig` chain this.
-    #[must_use]
-    pub(crate) const fn with_stealth(mut self, stealth: StealthConfig) -> Self {
-        self.stealth = stealth;
-        self
-    }
-
-    /// Send a COMPOUND containing `ops` and return the full response.
-    ///
-    /// Uses an empty tag and minorversion=0 (NFSv4.0).
-    pub(crate) async fn compound(&self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
-        // Pace v4 traffic like the v2/v3 clients (Critical Design Rule 10).
-        self.stealth.wait().await;
-        let args = CompoundArgs { tag: String::new(), minorversion: 0, ops };
-        let mut conn = self.pool.checkout(self.pool_key.clone(), self.credential.clone(), ReconnectStrategy::Persistent).await.context("pool checkout for NFSv4")?;
-        conn.call_raw::<CompoundArgs, CompoundRes>(NFS4_PROGRAM, NFS4_VERSION, NFS4_PROC_COMPOUND, &args).await.context("NFSv4 COMPOUND")
-    }
-
-    /// Look up a slash-decomposed path and request `attrs` on the final component.
-    ///
-    /// Builds: PUTROOTFH, LOOKUP(c1), LOOKUP(c2), ..., GETATTR.
-    pub(crate) async fn lookup_path(&self, components: &[&str], attrs: AttrRequest) -> anyhow::Result<CompoundRes> {
-        let mut ops = Vec::with_capacity(components.len() + 2);
-        ops.push(ArgOp::Putrootfh);
-        for &c in components {
-            ops.push(ArgOp::Lookup(c.to_owned()));
-        }
-        ops.push(ArgOp::Getattr(attrs));
-        self.compound(ops).await
-    }
-
-    /// Query auth flavors for `name` inside the directory reached via `parent_components`.
-    ///
-    /// Builds: PUTROOTFH, LOOKUP(p1), ..., SECINFO(name).
-    /// SECINFO reveals which Kerberos/RPCSEC_GSS flavors the server requires (F-3.4).
-    pub(crate) async fn secinfo(&self, parent_components: &[&str], name: &str) -> anyhow::Result<CompoundRes> {
-        let mut ops = Vec::with_capacity(parent_components.len() + 2);
-        ops.push(ArgOp::Putrootfh);
-        for &c in parent_components {
-            ops.push(ArgOp::Lookup(c.to_owned()));
-        }
-        ops.push(ArgOp::Secinfo(name.to_owned()));
-        self.compound(ops).await
-    }
-
-    /// Map the NFSv4 pseudo-filesystem root entry.
-    ///
-    /// Sends PUTROOTFH + GETFH + GETATTR(fsid) to discover the root.
-    /// Returns a single PseudoFsEntry for the root.  Callers that need deeper
-    /// enumeration should issue READDIR calls and recurse using `lookup_path`.
-    pub(crate) async fn map_pseudo_fs(&self, _depth: u32) -> anyhow::Result<Vec<PseudoFsEntry>> {
-        let ops = vec![ArgOp::Putrootfh, ArgOp::Getfh, ArgOp::Getattr(AttrRequest::fsid_only())];
-        let res = self.compound(ops).await.context("pseudo-FS root probe")?;
-        // Even a partial success (status != 0 but PUTROOTFH succeeded) tells us
-        // the server speaks NFSv4, which is the primary detection goal here.
-        let reachable = res.results.first().is_some_and(|r| r.status == 0);
-        // Identify the pseudo-root from the decoded root fsid, not the echoed
-        // request tag (which is always our own empty tag, so the old check was
-        // unconditionally true). Linux knfsd presents the NFSv4 pseudo-root (the
-        // `fsid=0` root export, exports(5)) with an all-zero fsid4; a real export
-        // at the root reports a non-zero, device-derived fsid (RFC 7530 S7.3
-        // pseudo-file system; S5.8.1.9 fsid). We claim pseudo-root only on
-        // positive evidence (decoded fsid == 0/0); an undecodable fsid yields no
-        // pseudo-root claim rather than a false positive.
-        let fsid = res.results.iter().find_map(|op| if let ResOpData::Getattr { fsid } = &op.data { *fsid } else { None });
-        let is_pseudo_root = fsid == Some((0, 0));
-        let entry = PseudoFsEntry {
-            path: "/".to_owned(),
-            fsid: fsid.unwrap_or((0, 0)),
-            is_pseudo_root,
-            // auth_methods are populated by a separate secinfo() call.
-            auth_methods: Vec::new(),
-            // A non-pseudo root whose fsid we decoded is itself an export
-            // boundary; with no decoded fsid we assert no boundary.
-            is_export_boundary: fsid.is_some() && !is_pseudo_root,
-        };
-        Ok(if reachable { vec![entry] } else { Vec::new() })
-    }
-}
 
 // =============================================================================
 // Nfs4DirectClient  --  pool-free, single-connection NFSv4 client
@@ -159,20 +44,6 @@ pub(crate) struct Nfs4DirectClient {
     /// a mid-session `uid`/`gid`/`hostname` reconnect preserves the operator's
     /// `--aux-gids` (the shadow-GID trick) instead of dropping them.
     aux_gids: Vec<u32>,
-}
-
-/// Build the AUTH_SYS GID list: primary `gid` first, then `aux_gids` (deduped).
-///
-/// Mirrors `cli::probe::build_gid_list`; duplicated here to keep the proto layer
-/// free of a dependency on the CLI layer.
-fn merge_gids(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
-    let mut gids = vec![gid];
-    for &g in aux_gids {
-        if !gids.contains(&g) {
-            gids.push(g);
-        }
-    }
-    gids
 }
 
 impl std::fmt::Debug for Nfs4DirectClient {
@@ -203,7 +74,7 @@ impl Nfs4DirectClient {
 
     /// Connect via an optional SOCKS5 proxy, using AUTH_NONE.
     pub(crate) async fn connect_proxy(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Self> {
-        let null_auth = nfs3_types::rpc::opaque_auth::default();
+        let null_auth = nfswolf_rpc::rpc::opaque_auth::default();
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, null_auth.clone(), null_auth);
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: Vec::new() })
@@ -221,9 +92,9 @@ impl Nfs4DirectClient {
     /// Connect with AUTH_SYS via an optional SOCKS5 proxy.
     pub(crate) async fn connect_with_auth_proxy(addr: SocketAddr, uid: u32, gid: u32, hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
-        let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth();
+        let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(addr, proxy).await?;
-        let rpc = RpcClient::new_with_auth(io, opaque, nfs3_types::rpc::opaque_auth::default());
+        let rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: Vec::new() })
     }
 
@@ -236,10 +107,10 @@ impl Nfs4DirectClient {
     /// `gid` is prepended automatically and the set is retained for reconnects.
     pub(crate) async fn connect_with_groups_proxy(addr: SocketAddr, uid: u32, gid: u32, aux_gids: &[u32], hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
-        let gids = merge_gids(gid, aux_gids);
-        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth();
+        let gids = aux_gids.to_vec();
+        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(addr, proxy).await?;
-        let rpc = RpcClient::new_with_auth(io, opaque, nfs3_types::rpc::opaque_auth::default());
+        let rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: aux_gids.to_vec() })
     }
 
@@ -263,10 +134,9 @@ impl Nfs4DirectClient {
     /// `gid`) so the shadow-GID trick survives a mid-session identity change.
     pub(crate) async fn reconnect_with_auth(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         use crate::proto::auth::AuthSys;
-        let gids = merge_gids(gid, &self.aux_gids);
-        let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth();
+        let opaque = AuthSys::with_groups(uid, gid, &self.aux_gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(self.addr, self.proxy.as_deref()).await?;
-        self.rpc = RpcClient::new_with_auth(io, opaque, nfs3_types::rpc::opaque_auth::default());
+        self.rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
         Ok(())
     }
 
@@ -330,13 +200,6 @@ impl Nfs4DirectClient {
     /// never sets `eof` cannot spin or exhaust memory -- the same defence the v3
     /// shell's `try_readdirplus` paging uses.
     ///
-    /// Known limitation: RFC 7530 S16.24 also requires echoing the server's
-    /// `cookieverf` on each continuation, but the READDIR decoder currently
-    /// discards the verifier (`ResOpData::Readdir` carries no cookieverf), so this
-    /// resumes with `cookieverf=0`. Servers that strictly validate the verifier
-    /// (returning NFS4ERR_NOT_SAME / NFS4ERR_BAD_COOKIE) will error on continuation
-    /// rather than truncate; fully correct pagination requires surfacing the
-    /// cookieverf from the decoder in `proto::nfs4::types` (cross-module change).
     pub(crate) async fn list_dir(&mut self, dir_fh: &[u8]) -> anyhow::Result<Vec<String>> {
         // Hard cap against a server that never signals eof (untrusted-server
         // hardening; mirrors the v3 shell readdir cap).
@@ -347,16 +210,19 @@ impl Nfs4DirectClient {
         // cycling cookie, which would never grow `names` and never break.
         let mut raw_seen: usize = 0;
         let mut cookie: u64 = 0;
+        // RFC 7530 S16.24: first call sends cookieverf=0; subsequent calls echo
+        // the server's verifier so it can detect directory mutations between pages.
+        let mut cookieverf: u64 = 0;
         loop {
-            // cookieverf=0: the first call requires it, and the decoder does not yet
-            // surface the server's verifier for continuation (see method note).
-            let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() }];
+            let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie, cookieverf, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() }];
             let res = self.compound(ops).await?;
             anyhow::ensure!(res.status == 0, "READDIR failed: NFSv4 status={}", res.status);
-            let (entries, eof) = match res.results.get(1).map(|op| &op.data) {
-                Some(ResOpData::Readdir { entries, eof }) => (entries, *eof),
+            let (server_verf, entries, eof) = match res.results.get(1).map(|op| &op.data) {
+                Some(ResOpData::Readdir { cookieverf, entries, eof }) => (*cookieverf, entries, *eof),
                 _ => anyhow::bail!("READDIR result missing or wrong type"),
             };
+            // Echo the server's verifier on the next continuation call.
+            cookieverf = u64::from_be_bytes(server_verf);
             // An empty page means no forward progress is possible (no cookie to
             // resume from); stop rather than re-issue the same request forever.
             let Some(last_cookie) = entries.last().map(|e| e.cookie) else { break };

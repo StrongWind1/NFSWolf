@@ -9,7 +9,7 @@ All findings that nfswolf detects, grouped by attack category. Each finding trac
 The NFS security model trusts client-supplied credentials without verification.
 
 > "There is no verifier, so credentials can easily be faked."
-> — RFC 1057 §9.3
+> -- RFC 1057 §9.3
 
 ### F-1.1: UID/GID Spoofing
 
@@ -89,10 +89,10 @@ The NFS security model trusts client-supplied credentials without verification.
 
 ## Category 2: Access Control Bypass (File Handle Exploitation)
 
-File handles are bearer tokens — possession is authorization.
+File handles are bearer tokens -- possession is authorization.
 
 > "An attacker can circumvent the MOUNT server's access control by either stealing a file handle or guessing a file handle."
-> — RFC 2623 §2.6
+> -- RFC 2623 §2.6
 
 ### F-2.1: Export Escape via Filesystem Root Handle
 
@@ -140,7 +140,7 @@ File handles are bearer tokens — possession is authorization.
 | Precondition | BTRFS filesystem, export on subvolume |
 | Detection | fileid_type 0x4d-0x4f in handle structure |
 
-**Why this exists**: BTRFS uses fileid_type encodings that include subvolume IDs. By constructing handles with different subvol IDs (256+), an attacker can access other subvolumes on the same filesystem — escaping the intended export boundary.
+**Why this exists**: BTRFS uses fileid_type encodings that include subvolume IDs. By constructing handles with different subvol IDs (256+), an attacker can access other subvolumes on the same filesystem -- escaping the intended export boundary.
 
 ### F-2.5: Stale Handle After Permission Revocation
 
@@ -277,7 +277,7 @@ File handles are bearer tokens — possession is authorization.
 | Precondition | no_root_squash enabled on export |
 | Detection | Create file as uid=0, check ownership |
 
-**Why the RFC allows this**: "This superuser permission may not be allowed on the server, since anyone who can become superuser on their client could gain access to all remote files." (RFC 1813 §4.4). When no_root_squash is set, uid=0 credentials are not remapped — full root access.
+**Why the RFC allows this**: "This superuser permission may not be allowed on the server, since anyone who can become superuser on their client could gain access to all remote files." (RFC 1813 §4.4). When no_root_squash is set, uid=0 credentials are not remapped -- full root access.
 
 **What nfswolf tests**: Write test file as uid=0, verify it's owned by root on server.
 
@@ -301,7 +301,7 @@ File handles are bearer tokens — possession is authorization.
 | Precondition | Writable export, no nodev mount on client |
 | Detection | Attempt MKNOD with NF3CHR/NF3BLK type |
 
-**Why the RFC allows this**: "Creates a special file of the type, specdata..." (RFC 1813 §3.3.11). MKNOD can create character and block device nodes with arbitrary major/minor numbers — potentially providing raw disk access from the client side.
+**Why the RFC allows this**: "Creates a special file of the type, specdata..." (RFC 1813 §3.3.11). MKNOD can create character and block device nodes with arbitrary major/minor numbers -- potentially providing raw disk access from the client side.
 
 ### F-4.4: Symlink Escape
 
@@ -371,7 +371,7 @@ File handles are bearer tokens — possession is authorization.
 | Precondition | Portmapper reachable |
 | Detection | PMAPPROC_DUMP returns all registered services |
 
-**Why the RFC allows this**: No authentication on DUMP. Returns program number, version, protocol, and port for all registered services — revealing the full RPC service topology.
+**Why the RFC allows this**: No authentication on DUMP. Returns program number, version, protocol, and port for all registered services -- revealing the full RPC service topology.
 
 ### F-5.5: NFSv4 Pseudo-Filesystem Structure Leakage
 
@@ -382,7 +382,7 @@ File handles are bearer tokens — possession is authorization.
 | Precondition | NFSv4 server |
 | Detection | Browse from PUTROOTFH |
 
-**Why the RFC allows this**: The pseudo-filesystem "provides a view of exported directories" (RFC 7530 §7.3). The server SHOULD hide existence via ancestor security policies, but this is only SHOULD — the directory structure between exports is often visible.
+**Why the RFC allows this**: The pseudo-filesystem "provides a view of exported directories" (RFC 7530 §7.3). The server SHOULD hide existence via ancestor security policies, but this is only SHOULD -- the directory structure between exports is often visible.
 
 ---
 
@@ -453,7 +453,7 @@ subcommand exercises these findings.
 | Precondition | all_squash enabled with anonuid=0 |
 | Detection | Squash probe (create file, check ownership) |
 
-**Why this matters**: all_squash maps ALL clients to the anonymous UID. If anonuid is set to 0, every client operation runs as root — worse than no_root_squash because no UID even needs to be forged.
+**Why this matters**: all_squash maps ALL clients to the anonymous UID. If anonuid is set to 0, every client operation runs as root -- worse than no_root_squash because no UID even needs to be forged.
 
 ### F-7.6: Absence of Audit Logging
 
@@ -484,7 +484,7 @@ subcommand exercises these findings.
 | F-2.4 | [BTRFS Subvolume Escape](findings/F-2.4-btrfs-subvolume-escape.md) | High | `escape` (subvol 5 + 256+), `shell escape-root` |
 | F-2.5 | [Stale Handle Persistence](findings/F-2.5-stale-handle-persistence.md) | Medium | `shell --handle <hex>`, `mount --handle <hex>`, `shell mount-handle` |
 | F-2.6 | [Bind Mount Escape](findings/F-2.6-bind-mount-escape.md) | High | `escape` (fsid-based handle). `analyze` detection removed: the old handle-fsid vs fattr3-fsid equality test compared two differently-encoded values and false-positived on normal exports; no sound oracle is available from a single GETATTR |
-| F-2.7 | [NFS Daemon ACL Blindness](findings/F-2.7-nfsd-acl-blindness.md) | Critical | `shell --handle <hex>` / `mount --handle <hex>` (port 2049, no MOUNT — handle resolves from any IP) |
+| F-2.7 | [NFS Daemon ACL Blindness](findings/F-2.7-nfsd-acl-blindness.md) | Critical | `shell --handle <hex>` / `mount --handle <hex>` (port 2049, no MOUNT -- handle resolves from any IP) |
 | F-2.8 | [Sibling Export Lateral Access](findings/F-2.8-sibling-export-lateral-access.md) | Critical | `escape` + `shell` (`escape-root`, then `cd` to a peer export, `ls`/`cat`) |
 | F-3.1 | [Plaintext Wire Protocol](findings/F-3.1-plaintext-wire-protocol.md) | High | `analyze` (Info: flags exports that advertise no RPCSEC_GSS; RFC 9289 TLS itself is not actively probed) |
 | F-3.2 | [Portmapper Amplification](findings/F-3.2-portmapper-amplification.md) | Medium | `scan` (UDP DUMP amplification factor), `analyze` |

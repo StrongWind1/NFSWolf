@@ -43,9 +43,9 @@ pub(crate) struct ConvertArgs {
     #[arg(long, value_enum, default_value = "html", value_name = "FORMAT", help_heading = H_OUTPUT)]
     pub format: ReportFormat,
 
-    /// Output file path
+    /// Output file path (omit for stdout with --format console)
     #[arg(short = 'o', long, value_name = "FILE", help_heading = H_OUTPUT)]
-    pub output: String,
+    pub output: Option<String>,
 
     /// Report title embedded in the output
     #[arg(long, default_value = "NFS Security Assessment", value_name = "TEXT", help_heading = H_OUTPUT)]
@@ -74,8 +74,6 @@ pub(crate) enum ReportFormat {
 /// Reads `args.input` as JSON, deserialises it as `Vec<AnalysisResult>`,
 /// then writes the rendered report to `args.output`.
 pub(crate) fn run(args: &ConvertArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
-    tracing::info!(input = %args.input, output = %args.output, "generating report");
-
     let content = fs::read_to_string(&args.input).map_err(|e| anyhow::anyhow!("cannot read {}: {e}", args.input))?;
 
     // Accept both a single AnalysisResult object and an array.
@@ -83,12 +81,18 @@ pub(crate) fn run(args: &ConvertArgs, globals: &GlobalOpts) -> anyhow::Result<()
 
     let finding_count: usize = results.iter().map(|r| r.findings.len()).sum();
 
-    let file = fs::File::create(&args.output).map_err(|e| anyhow::anyhow!("cannot create {}: {e}", args.output))?;
-    let mut out = BufWriter::new(file);
-    report::generate(&results, args.format, &args.title, &mut out)?;
-
-    if !globals.quiet {
-        eprintln!("{}", crate::output::status_ok(&format!("Report written -> {}  ({} host(s), {} finding(s), {:?} format)", args.output, results.len(), finding_count, args.format)));
+    if let Some(path) = &args.output {
+        tracing::info!(input = %args.input, output = %path, "generating report");
+        let file = fs::File::create(path).map_err(|e| anyhow::anyhow!("cannot create {path}: {e}"))?;
+        let mut out = BufWriter::new(file);
+        report::generate(&results, args.format, &args.title, &mut out)?;
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_ok(&format!("Report written -> {path}  ({} host(s), {finding_count} finding(s), {:?} format)", results.len(), args.format)));
+        }
+    } else {
+        tracing::info!(input = %args.input, output = "stdout", "generating report");
+        let mut out = BufWriter::new(std::io::stdout().lock());
+        report::generate(&results, args.format, &args.title, &mut out)?;
     }
     crate::cli::emit_replay(globals);
     Ok(())

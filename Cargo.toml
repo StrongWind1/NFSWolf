@@ -1,11 +1,55 @@
-[package]
-name = "nfswolf"
+# ---------------------------------------------------------------------------
+# Workspace
+#
+# NFSWolf owns its entire NFS stack.  The protocol layer lives in two internal
+# crates so the binary's application layer (pool, circuit breaker, stealth,
+# auto-UID) stays cleanly separated from the wire format:
+#
+#   crates/nfswolf-xdr-derive -- #[derive(XdrCodec)] proc macro (RFC 4506)
+#   crates/nfswolf-xdr        -- XDR codec (RFC 4506)
+#   crates/nfswolf-rpc        -- ONC RPC v2, portmapper, AUTH_SYS (RFC 5531)
+#   crates/nfswolf-nfs2       -- NFS v2 (RFC 1094)
+#   crates/nfswolf-nfs3       -- NFS v3 + MOUNT v3 (RFC 1813)
+#   crates/nfswolf-nfs4       -- NFS v4.0 COMPOUND (RFC 7530)
+#
+# Both crates originate from Vaiz/nfs3 (Unlicense / public domain) plus the
+# NFSv2 and NFSv4 layers NFSWolf wrote itself.  See the NOTICE file in each crate.
+# ---------------------------------------------------------------------------
+[workspace]
+members = [
+  ".",
+  "crates/nfswolf-xdr-derive",
+  "crates/nfswolf-xdr",
+  "crates/nfswolf-rpc",
+  "crates/nfswolf-nfs2",
+  "crates/nfswolf-nfs3",
+  "crates/nfswolf-nfs4",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.6.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an interactive shell for authorized red-team and pentest work."
 license = "Apache-2.0"
 repository = "https://github.com/StrongWind1/NFSWolf"
+
+[workspace.dependencies]
+nfswolf-xdr-derive = { version = "0.6.0", path = "crates/nfswolf-xdr-derive" }
+nfswolf-xdr = { version = "0.6.0", path = "crates/nfswolf-xdr" }
+nfswolf-rpc = { version = "0.6.0", path = "crates/nfswolf-rpc" }
+nfswolf-nfs2 = { version = "0.6.0", path = "crates/nfswolf-nfs2" }
+nfswolf-nfs3 = { version = "0.6.0", path = "crates/nfswolf-nfs3" }
+nfswolf-nfs4 = { version = "0.6.0", path = "crates/nfswolf-nfs4" }
+
+[package]
+name = "nfswolf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an interactive shell for authorized red-team and pentest work."
 keywords = ["nfs", "security", "pentest", "scanner", "rpc"]
 categories = ["command-line-utilities", "network-programming", "filesystem"]
 readme = "README.md"
@@ -38,12 +82,16 @@ clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# NFS protocol (NFSv3 + MOUNT + portmapper  --  pure Rust, no C deps)
-nfs3_client = { version = "0.9", features = ["tokio"] }
-nfs3_types = "0.5"
+# NFS protocol stack -- local crates, pure Rust, no C dependencies.
+nfswolf-xdr = { workspace = true }
+nfswolf-rpc = { workspace = true }
+nfswolf-nfs2 = { workspace = true }
+nfswolf-nfs3 = { workspace = true }
+nfswolf-nfs4 = { workspace = true }
 
-# Networking
-socket2 = { version = "0.6", features = ["all"] }
+# Concurrent maps for the connection pool and circuit breaker.
+# Privileged source-port binding lives in nfswolf-rpc (tokio TcpSocket), so
+# the binary needs no socket crate of its own.
 dashmap = "6"
 
 # FUSE
@@ -62,7 +110,6 @@ sha2 = "0.11"
 
 # Utilities
 rand = "0.10"
-thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -79,6 +126,9 @@ proptest = "1"
 assert_cmd = "2"
 predicates = "3"
 nfs3_server = { version = "0.11", features = ["memfs"] }
+
+[lints]
+workspace = true
 
 [features]
 default = ["fuse"]
@@ -104,24 +154,13 @@ path = "tests/integration/escape_test.rs"
 name = "analyzer_test"
 path = "tests/integration/analyzer_test.rs"
 
-# ---------------------------------------------------------------------------
-# [patch.crates-io]
-#
-# nfs3_client v0.9.0 does not expose a way to swap AUTH_SYS credentials on
-# an established Nfs3Client connection. NFSWolf needs this for UID/GID
-# spraying (F-3.1) and auto-uid escalation -- reuse one TCP session while
-# changing the AUTH_SYS stamp per call (see src/proto/conn.rs::access_as).
-#
-# Until upstream (Vaiz/nfs3 #150) ships a release with a public setter,
-# we patch locally via vendor/nfs3_client/:
-#   * src/nfs.rs   -- adds pub fn set_credential()
-#   * src/rpc.rs   -- makes credential/verifier fields pub
-#
-# When #150 ships, delete vendor/nfs3_client/ and remove this patch block,
-# then bump nfs3_client version in [dependencies] above.
-# ---------------------------------------------------------------------------
-[patch.crates-io]
-nfs3_client = { path = "vendor/nfs3_client" }
+[[test]]
+name = "credential_test"
+path = "tests/integration/credential_test.rs"
+
+[[test]]
+name = "xdr_fuzz_test"
+path = "tests/integration/xdr_fuzz_test.rs"
 
 [profile.dev]
 # Catch integer overflows in debug builds rather than wrapping silently.
@@ -146,8 +185,14 @@ strip = "symbols"
 # Overflow checks in tests to catch arithmetic bugs.
 overflow-checks = true
 
-# --- Lint policy ---
-[lints.rust]
+# ---------------------------------------------------------------------------
+# Lint policy
+#
+# Defined once at workspace level so the binary and both protocol crates are
+# held to identical standards.  `.cargo/config.toml` adds `-D warnings`, so
+# every "warn" below is a hard build failure.
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
 # --- Forbid (no override possible) ------------------------------------------
 # Provable integer overflow at compile time.
 arithmetic_overflow = "forbid"
@@ -172,16 +217,18 @@ text_direction_codepoint_in_literal = "forbid"
 # Code that provably panics at runtime -- always a bug.
 unconditional_panic = "forbid"
 # All unused-code lints (dead_code, unused_variables, unused_imports, etc.).
-unused = { level = "allow", priority = -3 }
+unused = { level = "deny", priority = -1 }
 # --- Deny (per-project override) --------------------------------------------
 # Deny (not forbid) -- NFSWolf needs one #[allow] for libc::daemon in src/main.rs.
 unsafe_code = "deny"
 # --- Deny (deny-by-default) -------------------------------------------------
 ambiguous_associated_items = "deny"
-ambiguous_glob_imports = "deny"
+# Ambiguous glob import is always a latent name collision -- no override needed.
+ambiguous_glob_imports = "forbid"
 binary_asm_labels = "deny"
 bindings_with_variant_name = "deny"
-conflicting_repr_hints = "deny"
+# Conflicting repr hints are always UB-adjacent -- no override needed.
+conflicting_repr_hints = "forbid"
 dangerous_implicit_autorefs = "deny"
 dependency_on_unit_never_type_fallback = "deny"
 duplicate_features = "deny"
@@ -195,7 +242,8 @@ invalid_from_utf8_unchecked = "deny"
 invalid_macro_export_arguments = "deny"
 invalid_type_param_default = "deny"
 legacy_derive_helpers = "deny"
-let_underscore_lock = "deny"
+# Silently dropping a lock guard is always a bug -- no override needed.
+let_underscore_lock = "forbid"
 long_running_const_eval = "deny"
 macro_expanded_macro_exports_accessed_by_absolute_paths = "deny"
 named_asm_labels = "deny"
@@ -262,7 +310,7 @@ unused_qualifications = "warn"
 unused_results = "warn"
 variant_size_differences = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 # --- Lint groups (explicit levels) -------------------------------------------
 # Priority -1 so per-lint overrides (default priority 0) take precedence.
 all                = { level = "deny", priority = -2 }
@@ -351,6 +399,12 @@ unnecessary_safety_doc = "warn"
 unused_result_ok = "warn"
 # No .unwrap() in library code -- force proper error propagation.
 unwrap_used = "warn"
+# --- Restriction lints promoted to deny (style) ------------------------------
+# No glob imports -- explicit names make dependencies visible in diffs.
+wildcard_imports = "deny"
+# --- Pedantic group: promoted to warn ----------------------------------------
+# Prefer Self over the concrete type name inside impl blocks.
+use_self = "warn"
 # --- Cargo group: override to allow -----------------------------------------
 # Transitive dependency version conflicts are not actionable.
 multiple_crate_versions = "allow"

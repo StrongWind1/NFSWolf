@@ -15,8 +15,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use nfs3_types::rpc::{RPC_VERSION_2, accept_stat_data, call_body, msg_body, opaque_auth, reply_body, rpc_msg};
-use nfs3_types::xdr_codec::{Pack, Unpack};
+use nfswolf_rpc::rpc::{RPC_VERSION_2, accept_stat_data, call_body, msg_body, opaque_auth, reply_body, rpc_msg};
+use nfswolf_xdr::{Pack, Unpack};
 
 /// Maximum UDP datagram size accepted for RPC responses.
 /// Portmapper DUMP responses can be large on heavily registered servers.
@@ -92,7 +92,7 @@ where
 /// arrives within `timeout`.  Used by the scanner to detect UDP-accessible
 /// portmapper or NFS services.
 pub(crate) async fn probe_udp_rpc(addr: SocketAddr, program: u32, version: u32, timeout: Duration) -> bool {
-    use nfs3_types::xdr_codec::Void;
+    use nfswolf_xdr::Void;
 
     call_rpc_udp::<Void, Void>(addr, program, version, 0, &Void, timeout).await.is_ok()
 }

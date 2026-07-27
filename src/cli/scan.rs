@@ -242,8 +242,8 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
             // escape task -- and the join loop waits for every task, stalling the
             // whole scan. Bound the full escape per host (scales with --timeout).
             let per_host = Duration::from_millis(g.timeout.saturating_mul(10).max(15_000));
-            let outcome = match tokio::time::timeout(per_host, escape::find_escape(&host, &export, escape::DEFAULT_BTRFS_SUBVOLS, escape::DEFAULT_MAX_ROOT_SCAN, &g, false)).await {
-                Ok(Ok((_client, outcome))) => Ok(outcome),
+            let outcome = match tokio::time::timeout(per_host, escape::find_escape_any(&host, &export, escape::DEFAULT_BTRFS_SUBVOLS, escape::DEFAULT_MAX_ROOT_SCAN, &g, false)).await {
+                Ok(Ok(outcome)) => Ok(outcome),
                 Ok(Err(e)) => Err(e.to_string()),
                 Err(_) => Err(format!("timed out after {}ms", per_host.as_millis())),
             };
@@ -252,6 +252,7 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
         handles.push(handle);
     }
     for handle in handles {
+        // Task results already collected into the shared vec; JoinError is non-fatal.
         drop(handle.await);
     }
 
@@ -275,7 +276,8 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
                 let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
                 let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
-                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+                let v2_flag = if note.contains("NFSv2") { " --nfs-version 2" } else { "" };
+                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
             Ok(EscapeOutcome::StaleNoRoot) => {
                 println!("  {}", format!("{}:{}  handle valid but root not found (raise `escape --max-root-scan`)", res.host, res.export).dimmed());
@@ -566,9 +568,11 @@ fn exports_equal(a: &ExportListKind<'_>, b: &ExportListKind<'_>) -> bool {
 fn write_json(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyhow::Result<()> {
     let mut wrapper = serde_json::Map::new();
     if interrupted {
+        // Previous value (if any) from the map is not needed.
         drop(wrapper.insert("interrupted".to_owned(), serde_json::Value::Bool(true)));
     }
     let json_results: Vec<serde_json::Value> = results.iter().map(host_to_json).collect();
+    // Previous value (if any) from the map is not needed.
     drop(wrapper.insert("hosts".to_owned(), serde_json::Value::Array(json_results)));
     let json = serde_json::to_string_pretty(&serde_json::Value::Object(wrapper))?;
     std::fs::write(path, json)?;
@@ -651,6 +655,7 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
         // HostInfo column (which folds MOUNT client names/dirs and export paths)
         // are attacker-controlled wire data, so quoting/escaping is mandatory to
         // stop column breakage and spreadsheet formula injection.
+        // Infallible: fmt::Write for String never fails.
         let _ = writeln!(
             csv,
             "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",

@@ -1,0 +1,18 @@
+[package]
+name = "nfswolf-nfs2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NFS version 2 (RFC 1094): all 18 procedures and the fixed-width wire format."
+keywords = ["nfs", "nfsv2", "rfc1094", "onc-rpc", "legacy"]
+categories = ["network-programming", "filesystem", "encoding"]
+readme = "README.md"
+
+[dependencies]
+nfswolf-xdr = { workspace = true }
+nfswolf-rpc = { workspace = true }
+
+[lints]
+workspace = true

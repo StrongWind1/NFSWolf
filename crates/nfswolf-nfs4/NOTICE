@@ -1,0 +1,9 @@
+Provenance of nfswolf-nfs4
+==========================
+
+This crate is original NFSWolf work (Apache-2.0). It implements NFS version 4.0 (RFC 7530)
+directly from the RFC and contains no code derived from any upstream project.
+
+It builds on nfswolf-xdr, which do carry code derived from the
+Vaiz/nfs3 project <https://github.com/Vaiz/nfs3> (Unlicense); see the NOTICE
+file shipped with that crate.

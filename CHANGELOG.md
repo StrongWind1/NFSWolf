@@ -4,6 +4,34 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (internal)** -- the NFS wire protocol is now owned in-tree, and the repository is a Cargo workspace of six library crates plus the binary. The `nfs3_client` and `nfs3_types` dependencies are gone, as is the `vendor/nfs3_client/` patch tree and the `[patch.crates-io]` block that pointed at it. `nfs3_server` remains a dev-dependency for the mock server used in integration tests. The absorbed code comes from [Vaiz/nfs3](https://github.com/Vaiz/nfs3), released into the public domain under the Unlicense; `NOTICE` records the file-level mapping.
+- The stack is layered strictly, with no edges between the three version crates: `nfswolf-xdr-derive` (the `#[derive(XdrCodec)]` proc macro) and `nfswolf-xdr` (RFC 4506 codec) sit at the bottom, `nfswolf-rpc` (ONC RPC v2, portmapper, AUTH_SYS) above them, and `nfswolf-nfs2` (RFC 1094, 18 procedures), `nfswolf-nfs3` (RFC 1813, 22 procedures plus MOUNT v3) and `nfswolf-nfs4` (RFC 7530 COMPOUND) in parallel on top. Each version crate carries its own MOUNT protocol, because MOUNT v1 and v3 are defined in different RFCs and their handle types genuinely differ. All six are standalone libraries that cover more of their RFCs than the binary uses.
+- The `RpcTransport` trait is the single seam between protocol and policy. Everything above it speaks in procedures and domain types; everything below it speaks in sockets, retries and timeouts. The libraries ship a policy-free `DirectTransport`; the binary supplies `PooledTransport`, which holds connection reuse, the circuit breaker, stealth pacing and deadlines in one place instead of a policy block repeated once per procedure.
+- `nfswolf-nfs3` gained a domain API: methods take and return `FileHandle`, `FileAttrs` and friends rather than raw XDR, and report failures as `Nfs3Fault`, which separates "no answer from the server" from "the server answered and refused". Consumers no longer hand-build wire args or match `Nfs3Result`, which removed roughly 670 wire-type references and 190 result-match arms from `src/`.
+- The four upstream workarounds this removes: the vendor patch that made `RpcClient`'s credential public for mid-session UID spraying, the `RawIoRef` borrow adapter that existed because `RpcClient` would not release its IO stream, the hand-rolled RPC prober that recovered `PROG_MISMATCH` version ranges upstream discarded, and the per-call timeout wrapper compensating for a receive path with no deadline. Credential swapping and version-range preservation are now simply how the code is written.
+- The credential ladder is evidence-driven. It reads the mode bits the server already reported and the ownership carried by every `READDIRPLUS` reply, both of which arrive free with calls already made. When a target grants no "other" access, POSIX gives an identity that is neither the owner nor in the owning group no path to the file, so the service-account rungs are provably wasted RPC and are skipped; identities actually observed owning files on the export outrank guesses. Root keeps its rung regardless, because `no_root_squash` bypasses the check outright.
+- The smol runtime backend that upstream offered was dropped during absorption; nfswolf is tokio-only.
+- `make lint`, `check`, `test`, `test-matrix` and `doc` now pass `--workspace`, so the protocol crates are covered by the gate rather than silently skipped.
+
+### Fixed
+
+- `Opaque::unpack` sized its allocation directly from an attacker-chosen 4-byte length, so a single malformed reply could ask for up to 4 GiB before the read failed. This decoder handles every filename, symlink target, file handle and `READ` payload. It now allocates incrementally through the hardened reader (CWE-789). `RpcClient`'s reply buffer had the same shape, bounded only by the fragment header's 2 GiB mask, and is now capped at 8 MiB.
+- The pooled MOUNT path dropped the AUTH_SYS credential and mounted as `AUTH_NONE`, which a `sec=sys` mountd refuses outright and which silently omitted `--hostname` from the server's logs. `NfsMountClient` now carries the credential through.
+- A MOUNT authorization denial tripped the circuit breaker. Since the breaker is keyed on address, ten refusals on one unauthorised export would have written off every other export on that host. An authorization decision is not an outage and no longer counts as one.
+- `RpcError::UnexpectedXid` was treated as a reusable connection error, but it means the reply stream is off by one; returning that connection to the pool wedged the slot permanently.
+- `AuthSys::with_groups` dropped the primary GID, unlike `AuthSys::new`. Servers resolve group access from the supplied list, so callers passing an empty auxiliary set built credentials with no groups at all. Fixing it also removed two hand-rolled workarounds that had been compensating for it.
+- `NfsConnection::health_check` had been weakened to an RPC `NULL` probe, which servers answer before any export check and which therefore stayed healthy across an `exportfs` reload. It is a `GETATTR` on the root handle again, with `NULL` only as a fallback.
+- `uid-spray` was unusable at its defaults: the GID range defaulted to the full 0-65535 space, so a 61-UID sweep expanded to about 4 million probes and a bare invocation to 4.3 billion. GID now follows UID by default, with `--gid-start`/`--gid-end` to opt into the cross product and a `--max-attempts` ceiling.
+- `--nfs-version 2` fell through to the v3 path and returned v3 results, which would read as evidence a server accepts v2. It is now refused explicitly; version detection in `scan` and `analyze` is unaffected.
+- `AsyncRead::async_read_exact` looped forever when the peer closed the connection mid-message, because a `read` returning `Ok(0)` left the remaining-bytes slice unchanged. It now returns `UnexpectedEof`. `async_write_all` gained the matching `WriteZero` guard.
+- `RpcClient::send_call` panicked rather than erroring on a message too large for a single RPC fragment: `u32::try_from` on the length would panic above 4 GiB, and `fragment_header::new` asserted above 2 GiB. Both now return `RpcError::WrongLength`.
+
+### Removed
+
+- Dead code that the workspace-wide `unused = "allow"` had been hiding: the unreferenced privilege helper, the pooled NFSv4 client (only the direct client was ever used), `ReconnectStrategy::ResetPerCall`, `PoolStats`, and the `AutoUidResolver`, whose nine steps turned out to be one never implemented, one already shipping as the `uid-spray` subcommand, one genuinely novel idea now folded into the credential ladder, and five duplicating the ladder outright.
+
 ## [0.5.0] - 2026-06-29
 
 ### Added

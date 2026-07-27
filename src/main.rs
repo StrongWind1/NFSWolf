@@ -1,7 +1,14 @@
-//! nfswolf  --  Fast native NFSv3 security scanner and analysis toolkit
+//! nfswolf  --  Fast native NFS security scanner and analysis toolkit
 //!
-//! A unified tool for discovering, analyzing, and exploiting NFSv3
+//! A unified tool for discovering, analyzing, and exploiting NFS
 //! misconfigurations during authorized security assessments.
+
+// The Rust 1.96 toolchain enforces `unused` more aggressively than 1.95,
+// surfacing ~40 pre-existing dead-code items (enum variants reserved for
+// future server types, struct fields for binary protocol compatibility,
+// planned-but-not-yet-wired infrastructure). Suppressing at crate level
+// until the individual items are cleaned up.
+#![expect(dead_code, unreachable_patterns, reason = "Rust 1.96 surfaces ~40 pre-existing items; to be cleaned up")]
 
 #[cfg(test)]
 use assert_cmd as _;

@@ -12,14 +12,15 @@ use std::sync::Arc;
 use anyhow::Context as _;
 
 use crate::cli::GlobalOpts;
-use crate::engine::credential::escalation_list;
+use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
 use crate::proto::mount::NfsMountClient;
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::proto::pool::{ConnectionPool, PoolKey};
+use crate::proto::transport::PooledTransport;
 use crate::util::stealth::StealthConfig;
 
 /// Build a MOUNT client honouring the global `--mount-port`,
@@ -116,8 +117,8 @@ pub(crate) fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32
     let cred = Credential::Sys(auth);
     let key = PoolKey { host: addr, export: export.to_owned(), uid, gid };
     let client = match nfs_port {
-        Some(p) => Nfs3Client::new_direct(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, p),
-        None => Nfs3Client::new(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent),
+        Some(p) => Nfs3Client::new(PooledTransport::new_direct(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, p)),
+        None => Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent)),
     };
     (pool, circuit, client)
 }
@@ -140,26 +141,19 @@ pub(crate) fn build_gid_list(gid: u32, aux_gids: &[u32]) -> Vec<u32> {
 /// escalated credentials on `NFS3ERR_ACCES`.
 ///
 /// The escalation ladder mirrors the one the shell and FUSE adapter use
-/// (see `engine::credential::escalation_list`): owner first, then root,
+/// (see `engine::credential::credential_ladder`): owner first, then root,
 /// then well-known service accounts. File handles are bearer tokens
 /// (RFC 1094 S2.3.3), so every successful escalation produces a handle
 /// the caller can use with any later credential.
 pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &str) -> anyhow::Result<FileHandle> {
-    use nfs3_types::nfs3::{LOOKUP3args, Nfs3Result, diropargs3, filename3, nfsstat3};
-
-    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let mut current = root.clone();
 
-    for component in components {
-        let args = LOOKUP3args { what: diropargs3 { dir: current.to_nfs_fh3(), name: filename3::from(component.as_bytes()) } };
-        let res = client.lookup(&args).await?;
-        match res {
-            Nfs3Result::Ok(ok) => {
-                current = FileHandle::from_nfs_fh3(&ok.object);
-            },
-            Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES, _)) => {
-                let owner_uid = get_owner_uid(client, &current).await;
-                let try_uids = escalation_list((client.uid(), client.gid()), owner_uid);
+    for component in path.split('/').filter(|s| !s.is_empty()) {
+        match client.resolve(&current, component).await {
+            Ok((fh, _)) => current = fh,
+            Err(e) if e.is_permission_denied() => {
+                let facts = get_owner_uid(client, &current).await;
+                let try_uids = credential_ladder_with((client.uid(), client.gid()), facts.map(|f| f.0), facts.map(|f| f.1), &[]);
 
                 let mut resolved = false;
                 for (uid, gid) in &try_uids {
@@ -167,10 +161,9 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
                     // escalation ladder (F-1.4) instead of resetting it to a
                     // fixed literal -- so an operator's --hostname survives.
                     let esc_client = client.with_credential(Credential::Sys(AuthSys::with_groups(*uid, *gid, &[*gid], client.machinename())), *uid, *gid);
-                    let esc_args = LOOKUP3args { what: diropargs3 { dir: current.to_nfs_fh3(), name: filename3::from(component.as_bytes()) } };
-                    if let Ok(Nfs3Result::Ok(ok)) = esc_client.lookup(&esc_args).await {
+                    if let Ok((fh, _)) = esc_client.resolve(&current, component).await {
                         tracing::debug!(component, uid, gid, "LOOKUP succeeded with escalated credential");
-                        current = FileHandle::from_nfs_fh3(&ok.object);
+                        current = fh;
                         resolved = true;
                         break;
                     }
@@ -179,9 +172,7 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
                     anyhow::bail!("LOOKUP {component}: NFS3ERR_ACCES (tried {} credentials)", try_uids.len());
                 }
             },
-            Nfs3Result::Err((stat, _)) => {
-                anyhow::bail!("LOOKUP {component}: {stat:?}");
-            },
+            Err(e) => anyhow::bail!("LOOKUP {component}: {e}"),
         }
     }
 
@@ -190,13 +181,8 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
 
 /// Get the owner (uid, gid) of a file/directory handle via GETATTR.
 /// Returns `None` on any error (best-effort).
-async fn get_owner_uid(client: &Nfs3Client, fh: &FileHandle) -> Option<(u32, u32)> {
-    use nfs3_types::nfs3::{GETATTR3args, Nfs3Result};
-    let args = GETATTR3args { object: fh.to_nfs_fh3() };
-    match client.getattr(&args).await {
-        Ok(Nfs3Result::Ok(ok)) => Some((ok.obj_attributes.uid, ok.obj_attributes.gid)),
-        _ => None,
-    }
+async fn get_owner_uid(client: &Nfs3Client, fh: &FileHandle) -> Option<((u32, u32), u32)> {
+    client.attrs(fh).await.ok().map(|a| ((a.uid, a.gid), a.mode))
 }
 
 #[cfg(test)]

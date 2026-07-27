@@ -33,15 +33,6 @@ pub(crate) struct PoolKey {
     pub gid: u32,
 }
 
-/// Pool statistics snapshot.
-#[derive(Debug, Clone)]
-pub(crate) struct PoolStats {
-    /// Total connections idle across all keys.
-    pub idle: usize,
-    /// Total connections currently checked out.
-    pub outstanding: usize,
-}
-
 /// Connection pool inner data  --  shared by clones.
 struct PoolInner {
     /// Per-key idle queues. The inner `Mutex<VecDeque>` is wrapped in `Arc` so a
@@ -151,6 +142,17 @@ impl ConnectionPool {
     ///
     /// `nfs_port` is the NFS port to connect to without portmapper or MOUNT.
     /// Used when `--handle` is given and portmapper is filtered but the NFS port is open.
+    /// Check out a connection, going direct to `nfs_port` when one is given.
+    ///
+    /// One entry point for both modes so callers do not have to branch on
+    /// whether MOUNT is in play.
+    pub(crate) async fn checkout_for(&self, key: PoolKey, credential: Credential, reconnect: ReconnectStrategy, direct_nfs_port: Option<u16>) -> anyhow::Result<PooledConnection> {
+        match direct_nfs_port {
+            Some(port) => self.checkout_direct(key, port, credential, reconnect).await,
+            None => self.checkout(key, credential, reconnect).await,
+        }
+    }
+
     pub(crate) async fn checkout_direct(&self, key: PoolKey, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy) -> anyhow::Result<PooledConnection> {
         let permit = Arc::clone(&self.inner.admission).acquire_owned().await.map_err(|e| anyhow::anyhow!("connection pool closed: {e}"))?;
 
@@ -163,25 +165,6 @@ impl ConnectionPool {
 
         let conn = NfsConnection::connect_direct(key.host, nfs_port, credential, reconnect, self.inner.proxy.as_deref()).await?;
         Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit })
-    }
-
-    /// Drain all idle connections for a key (used after a host goes down).
-    pub(crate) async fn drain(&self, key: &PoolKey) {
-        // Clone the queue handle out before awaiting, dropping the DashMap read
-        // guard first (same guard-across-await hazard as `try_pop`).
-        let queue = self.inner.pools.get(key).map(|q| Arc::clone(&q));
-        if let Some(queue) = queue {
-            queue.lock().await.clear();
-        }
-    }
-
-    /// Snapshot current pool statistics.
-    #[must_use]
-    pub(crate) fn stats(&self) -> PoolStats {
-        // Outstanding = permits handed out = max_total minus those still available.
-        let outstanding = self.inner.max_total.saturating_sub(self.inner.admission.available_permits());
-        let idle = self.inner.pools.iter().filter_map(|e| e.value().try_lock().ok().map(|q| q.len())).sum();
-        PoolStats { idle, outstanding }
     }
 
     /// Pop one idle connection, running a health check if it is stale.
@@ -222,13 +205,11 @@ impl ConnectionPool {
 /// connection created for uid=0/gid=0 with `gids=[100]` (or a specific hostname)
 /// could be reused for a later uid=0/gid=0 request carrying different aux-gids /
 /// hostname, silently running under the wrong supplementary groups. This mirrors
-/// the per-call credential swap `NfsConnection::access_as` already performs.
+/// the per-call credential swap `NfsConnection::call_as` already performs.
+///
+/// The connection re-encodes its credential on every call, so recording it here
+/// is enough -- there is no longer a baked-in copy inside a client to update.
 fn restamp_credential(conn: &mut NfsConnection, credential: Credential) {
-    let opaque = match &credential {
-        Credential::None => nfs3_types::rpc::opaque_auth::default(),
-        Credential::Sys(auth) => auth.to_opaque_auth(),
-    };
-    conn.inner_mut().nfs3_client.set_credential(opaque);
     conn.update_credential(credential);
 }
 

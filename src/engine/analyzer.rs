@@ -13,6 +13,11 @@
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use serde::{Deserialize, Serialize};
 
+/// Name of the temporary file the squash probes create and remove.
+///
+/// Dot-prefixed so it is inconspicuous in a listing if cleanup fails.
+const PROBE_NAME: &str = ".nfswolf_squash_probe";
+
 /// Well-known shadow group GIDs per distro family.
 /// Provided as defaults for `--test-read-gids` when no explicit GIDs given.
 pub(crate) const SHADOW_GID_DEBIAN: u32 = 42;
@@ -232,18 +237,18 @@ pub(crate) struct PortmapBypassResult {
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use nfs3_types::nfs3::{CREATE3args, FSSTAT3args, GETATTR3args, READDIRPLUS3args, REMOVE3args, cookieverf3, createhow3, diropargs3, filename3, sattr3};
-use nfs3_types::xdr_codec::Opaque;
+use nfswolf_nfs3::wire::{cookieverf3, sattr3};
 
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
 use crate::proto::mount::{ExportEntry, NfsMountClient};
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::proto::portmap::PortmapClient;
+use crate::proto::transport::PooledTransport;
 use crate::util::stealth::StealthConfig;
 
 /// Configuration for a full analysis run against one host.
@@ -334,6 +339,7 @@ impl Analyzer {
         check_v2_downgrade(&nfs_versions, &mut findings);
         run_nis_check(&self.portmap, addr, &mut findings).await;
         run_amplification_check(&self.portmap, addr, &mut findings).await;
+        check_webnfs_public_handle(addr, &nfs_versions, &mut findings, self.proxy.as_deref(), &self.stealth).await;
 
         // Per-export checks.
         let exports = self.mount.list_exports(addr).await.unwrap_or_default();
@@ -383,7 +389,7 @@ impl Analyzer {
             // Inherit the configured stealth pacing so every per-export probe RPC
             // (escape, btrfs, nohide, symlink, squash writes, file-access reads)
             // honours --delay/--jitter (Critical Design Rule 10).
-            Arc::new(Nfs3Client::new(pool, key, circuit, self.stealth.clone(), cred, ReconnectStrategy::Persistent))
+            Arc::new(Nfs3Client::new(PooledTransport::new(pool, key, circuit, self.stealth.clone(), cred, ReconnectStrategy::Persistent)))
         };
 
         let fh = mount_res.handle;
@@ -423,18 +429,17 @@ impl Analyzer {
         // BTRFS subvolume escape (F-2.4)  --  if handle fingerprints as BTRFS.
         check_btrfs_escape(&export_nfs3, &fh, &entry.path, findings).await;
 
-        // Bind mount escape (F-2.6): intentionally NOT emitted. The prior heuristic
-        // compared a fixed 8-byte slice (handle bytes 4..12) against the fattr3.fsid
-        // from FSSTAT and flagged a bind mount on any mismatch. That signal is
-        // unsound on two counts: the in-handle fsid is variable-length keyed on
-        // fsid_type (4/8/12/16 bytes -- see file_handle.rs fingerprint_fs), so the
-        // fixed slice is garbage for most handles; and the raw fsid embedded in the
-        // file handle uses a DIFFERENT encoding than the kernel-computed fattr3.fsid,
-        // so the two are essentially never equal on a normal export -- firing a
-        // constant false-positive HIGH finding. A sound F-2.6 oracle needs a
-        // different signal (e.g. building a filesystem-root handle from the handle's
-        // own fsid and confirming it resolves), so the broken check is disabled
-        // rather than emitting from an unsound equality.
+        // Bind mount escape (F-2.6): not separately detectable. A bind mount
+        // export is indistinguishable from a regular subtree export on the NFS
+        // wire: same fsid, same handles, same READDIRPLUS/FSSTAT results. The
+        // mount namespace is a kernel-side abstraction invisible to NFS clients.
+        // F-2.1 already covers the escape vector -- if subtree_check is off and
+        // the filesystem-root handle resolves, the attacker reaches the entire
+        // filesystem regardless of whether the export is a bind mount. The old
+        // heuristic (comparing in-handle fsid bytes against fattr3.fsid) was
+        // unsound because those use different encodings. No client-side oracle
+        // can distinguish "bind mount of /data/project-a" from "direct export
+        // of /data/project-a" without server-side information.
 
         // nohide/crossmnt detection (F-7.3).
         check_nohide(&export_nfs3, &fh, &entry.path, findings).await;
@@ -633,14 +638,20 @@ fn check_plaintext_transport(exports: &[ExportAnalysis], findings: &mut Vec<Find
     ));
 }
 
-/// Flag exports that support only AUTH_SYS (flavor 1) with no Kerberos.
+/// Flag exports that support only AUTH_SYS (F-1.1) or mixed AUTH_SYS + Kerberos (F-1.7).
 ///
 /// AUTH_SYS is trivially spoofable  --  the server cannot verify UID/GID claims.
 /// RFC 2623 S2.1 documents this weakness.
+///
+/// When BOTH AUTH_SYS and Kerberos are advertised on the same export, an attacker
+/// can choose AUTH_SYS and bypass Kerberos entirely  --  there is no negotiation
+/// that forces the stronger mechanism (RFC 2203 S5.2.1, RFC 2623 S5).
 fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Vec<Finding>) {
-    // Flavor 6 = RPCSEC_GSS (Kerberos). If absent, only AUTH_SYS is available.
-    let has_kerberos = auth_flavors.contains(&6);
     let has_auth_sys = auth_flavors.contains(&1);
+    // Kerberos: bare RPCSEC_GSS (6) or krb5 pseudo-flavors (390003-390005, IANA
+    // RPC auth-flavor registry). Real krb5 exports typically advertise the
+    // pseudo-flavors, not bare 6.
+    let has_kerberos = auth_flavors.iter().any(|&f| f == 6 || (390_003..=390_005).contains(&f));
     if has_auth_sys && !has_kerberos {
         findings.push(make_finding(
             &FindingSpec {
@@ -650,6 +661,27 @@ fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Ve
                        verify the client's UID/GID claims (RFC 2623 S2.1).",
                 evidence: &format!("auth_flavors={auth_flavors:?}"),
                 remediation: "Enable sec=krb5p in /etc/exports and configure Kerberos.",
+                export: Some(export_path),
+            },
+            Severity::High,
+        ));
+    } else if has_auth_sys && has_kerberos {
+        // Mixed flavors: Kerberos is deployed but not enforced. An attacker
+        // simply sends AUTH_SYS requests (RFC 2203 S5.2.1: no facility to
+        // negotiate mechanism). A MITM can also strip krb5 entries from the
+        // MOUNT flavor list (RFC 2623 S5) or from SECINFO (RFC 7530 S19).
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-1.7",
+                title: "Mixed auth flavors allow RPCSEC_GSS downgrade to AUTH_SYS",
+                desc: "The export advertises both AUTH_SYS and RPCSEC_GSS (Kerberos). An attacker \
+                       can choose AUTH_SYS and bypass Kerberos entirely  --  there is no negotiation \
+                       that forces the stronger mechanism (RFC 2203 S5.2.1). A MITM can also strip \
+                       the krb5 entries from the MOUNT flavor list to force legitimate clients onto \
+                       AUTH_SYS (RFC 2623 S5).",
+                evidence: &format!("auth_flavors={auth_flavors:?}"),
+                remediation: "Remove AUTH_SYS from exports that require Kerberos authentication: \
+                              use sec=krb5 (or krb5i/krb5p) exclusively in /etc/exports.",
                 export: Some(export_path),
             },
             Severity::High,
@@ -722,14 +754,8 @@ async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &s
 
 /// Count READDIRPLUS entries for a file handle; returns None on any error.
 async fn count_readdirplus(nfs3: &Nfs3Client, fh: &FileHandle) -> Option<u32> {
-    let args = READDIRPLUS3args { dir: fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
-    let res = nfs3.readdirplus(&args).await.ok()?;
-    if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res {
-        let count = u32::try_from(ok.reply.entries.0.len()).unwrap_or(u32::MAX);
-        Some(count)
-    } else {
-        None
-    }
+    let page = nfs3.list_dir_page(fh, 0, cookieverf3([0u8; 8])).await.ok()?;
+    Some(u32::try_from(page.entries.len()).unwrap_or(u32::MAX))
 }
 
 /// Check for NFSv2 downgrade risk: v2 registered alongside v3/v4.
@@ -807,6 +833,92 @@ async fn run_amplification_check(portmap: &PortmapClient, addr: SocketAddr, find
     }
 }
 
+/// Probe the WebNFS public file handle (XNFS Appendix E).
+///
+/// WebNFS defines a well-known handle (all-zero for v2, zero-length for v3)
+/// that any client can use without going through MOUNT. If the server answers
+/// a GETATTR or LOOKUP on this handle, MOUNT's export ACLs are bypassed
+/// entirely -- no privileged port needed, no hostname check, no auth flavor
+/// negotiation. Typical on Solaris, some NetApp configurations, and embedded
+/// RTOS NFS servers (VxWorks).
+async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], findings: &mut Vec<Finding>, _proxy: Option<&str>, stealth: &StealthConfig) {
+    use nfswolf_rpc::rpc::opaque_auth;
+    use nfswolf_rpc::transport::direct::DirectTransport;
+    use nfswolf_rpc::transport::tokio::TokioIo;
+
+    stealth.wait().await;
+
+    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+
+    // NFSv3 public handle: zero-length (send a GETATTR with an empty fh).
+    if nfs_versions.contains(&3)
+        && let Some(stream) = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(nfs_addr)).await.ok().and_then(Result::ok)
+    {
+        let transport = DirectTransport::new(TokioIo::new(stream));
+        let empty_fh = FileHandle::from_bytes(&[]);
+        let client = nfswolf_nfs3::Nfs3Client::new(transport);
+        if let Ok(attrs) = client.attrs(&empty_fh).await {
+            // Public handle accepted -- try multi-component LOOKUP to prove
+            // the full bypass (XNFS Appendix E: "A LOOKUP request that uses
+            // the public filehandle can provide a pathname containing multiple
+            // components").
+            let mut evidence = format!("NFSv3 public handle (zero-length) returned attrs: uid={}, gid={}, mode={:#o}", attrs.uid, attrs.gid, attrs.mode);
+            if let Ok((_, Some(shadow_attrs))) = client.resolve(&empty_fh, "etc/shadow").await {
+                evidence = format!("{evidence}; multi-component LOOKUP 'etc/shadow' succeeded: uid={}, gid={}, mode={:#o}, size={}", shadow_attrs.uid, shadow_attrs.gid, shadow_attrs.mode, shadow_attrs.size);
+            }
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-2.9",
+                    title: "WebNFS public file handle accepted (MOUNT bypass)",
+                    desc: "The server responds to requests using the WebNFS public file handle \
+                               (zero-length for NFSv3, per XNFS Appendix E). This gives any client \
+                               access to the public export without going through the MOUNT protocol, \
+                               bypassing export ACLs, hostname restrictions, and privileged-port checks. \
+                               A multi-component LOOKUP on the public handle can reach any file in \
+                               a single RPC without walking the directory tree.",
+                    evidence: &evidence,
+                    remediation: "Disable WebNFS on the server. On Solaris: remove the 'public' share option. On NetApp: nfs.webnfs.enable off.",
+                    export: None,
+                },
+                Severity::Critical,
+            ));
+            return;
+        }
+    }
+
+    // NFSv2 public handle: all-zero 32 bytes.
+    if nfs_versions.contains(&2)
+        && let Some(stream2) = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(nfs_addr)).await.ok().and_then(Result::ok)
+    {
+        let cred = AuthSys::new(0, 0, "localhost");
+        let opaque = cred.to_opaque_auth(crate::proto::auth::next_stamp());
+        let transport2 = DirectTransport::with_auth(TokioIo::new(stream2), opaque, opaque_auth::default());
+        let client = nfswolf_nfs2::Nfs2Client::new(transport2);
+        let zero_fh = nfswolf_nfs2::wire::Nfs2FileHandle([0u8; 32]);
+        if let Ok(attrs) = client.getattr(&zero_fh).await {
+            let mut evidence = format!("NFSv2 public handle (all-zero) returned attrs: uid={}, gid={}, mode={:#o}, size={}", attrs.uid, attrs.gid, attrs.mode, attrs.size);
+            // Multi-component LOOKUP: try to reach /etc/shadow in one call.
+            if let Ok((_, shadow_attrs)) = client.lookup_path(&zero_fh, "etc/shadow").await {
+                evidence = format!("{evidence}; multi-component path 'etc/shadow' succeeded: uid={}, gid={}, mode={:#o}, size={}", shadow_attrs.uid, shadow_attrs.gid, shadow_attrs.mode, shadow_attrs.size);
+            }
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-2.9",
+                    title: "WebNFS public file handle accepted (MOUNT bypass)",
+                    desc: "The server responds to requests using the WebNFS public file handle \
+                               (all-zero 32 bytes for NFSv2, per XNFS Appendix E). This gives any \
+                               client access to the public export without going through the MOUNT \
+                               protocol, bypassing export ACLs and hostname restrictions.",
+                    evidence: &evidence,
+                    remediation: "Disable WebNFS on the server.",
+                    export: None,
+                },
+                Severity::Critical,
+            ));
+        }
+    }
+}
+
 /// Check Windows file handle signing status.
 ///
 /// All-zero HMAC bytes mean signing is disabled  --  arbitrary handle forgery is possible.
@@ -872,15 +984,10 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
     };
 
     // Attempt READ of up to 128 bytes.
-    let read_args = nfs3_types::nfs3::READ3args { file: target_fh.to_nfs_fh3(), offset: 0, count: 128 };
-    let Ok(read_res) = test_client.read(&read_args).await else {
-        return result;
-    };
 
-    if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = read_res {
+    if let Ok(chunk) = test_client.read_at(&target_fh, 0, 128).await {
         result.readable = true;
-        let bytes = ok.data.as_ref();
-        result.preview = Some(String::from_utf8_lossy(bytes).chars().take(64).collect());
+        result.preview = Some(String::from_utf8_lossy(&chunk.data).chars().take(64).collect());
     }
 
     result
@@ -891,13 +998,7 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
 async fn walk_path(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str) -> Option<FileHandle> {
     let mut current = root_fh.clone();
     for component in path.split('/').filter(|c| !c.is_empty()) {
-        let args = nfs3_types::nfs3::LOOKUP3args { what: diropargs3 { dir: current.to_nfs_fh3(), name: filename3(Opaque::owned(component.as_bytes().to_vec())) } };
-        let res = nfs3.lookup(&args).await.ok()?;
-        if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res {
-            current = FileHandle::from_nfs_fh3(&ok.object);
-        } else {
-            return None;
-        }
+        current = nfs3.resolve(&current, component).await.ok()?.0;
     }
     Some(current)
 }
@@ -967,42 +1068,18 @@ async fn check_btrfs_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_pa
 /// (nohide/crossmnt is active). Per RFC 1813 S3.3.3, servers should not
 /// allow LOOKUP to cross mount points by default.
 async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
-    let rdp_args = READDIRPLUS3args { dir: root_fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
-    let Ok(res) = nfs3.readdirplus(&rdp_args).await else { return };
-    let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res else { return };
+    let Ok(page) = nfs3.list_dir_page(root_fh, 0, cookieverf3([0u8; 8])).await else { return };
 
-    // FSSTAT on the export root to get its fsid.
-    let root_stat = nfs3.fsstat(&FSSTAT3args { fsroot: root_fh.to_nfs_fh3() }).await.ok();
-    let root_fsid = root_stat
-        .and_then(|r| {
-            if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = r {
-                match ok.obj_attributes {
-                    nfs3_types::nfs3::Nfs3Option::Some(ref a) => Some(a.fsid),
-                    nfs3_types::nfs3::Nfs3Option::None => None,
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0);
+    // The export root's own fsid is the baseline every entry is compared to.
+    let root_fsid = nfs3.attrs(root_fh).await.map_or(0, |a| a.fsid);
 
     let mut submounts: Vec<String> = Vec::new();
-    for entry in &ok.reply.entries.0 {
-        // name_handle is Nfs3Option<nfs_fh3>  --  use match, not Some().
-        let entry_fh = match &entry.name_handle {
-            nfs3_types::nfs3::Nfs3Option::Some(fh_raw) => FileHandle::from_nfs_fh3(fh_raw),
-            nfs3_types::nfs3::Nfs3Option::None => continue,
-        };
-        let stat_res = nfs3.fsstat(&FSSTAT3args { fsroot: entry_fh.to_nfs_fh3() }).await.ok();
-        if let Some(nfs3_types::nfs3::Nfs3Result::Ok(st)) = stat_res {
-            let entry_fsid = match st.obj_attributes {
-                nfs3_types::nfs3::Nfs3Option::Some(ref a) => a.fsid,
-                nfs3_types::nfs3::Nfs3Option::None => continue,
-            };
-            if root_fsid != 0 && entry_fsid != root_fsid {
-                let name = String::from_utf8_lossy(entry.name.0.as_ref()).to_string();
-                submounts.push(name);
-            }
+    for entry in &page.entries {
+        // A server may omit the handle; without it the entry cannot be probed.
+        let Some(ref entry_fh) = entry.handle else { continue };
+        let Ok(a) = nfs3.attrs(entry_fh).await else { continue };
+        if root_fsid != 0 && a.fsid != root_fsid {
+            submounts.push(entry.name.clone());
         }
     }
 
@@ -1030,26 +1107,21 @@ async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str
 /// The attacker can replace a directory entry with a symlink pointing to a
 /// privileged path.
 async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
-    let args = READDIRPLUS3args { dir: root_fh.to_nfs_fh3(), cookie: 0, cookieverf: cookieverf3([0u8; 8]), dircount: 4096, maxcount: 65536 };
-    let Ok(res) = nfs3.readdirplus(&args).await else { return };
-    let nfs3_types::nfs3::Nfs3Result::Ok(ok) = res else { return };
+    let Ok(page) = nfs3.list_dir_page(root_fh, 0, cookieverf3([0u8; 8])).await else { return };
 
-    for entry in &ok.reply.entries.0 {
-        // name_attributes is Nfs3Option<fattr3>  --  use match, not Some().
-        let attrs = match &entry.name_attributes {
-            nfs3_types::nfs3::Nfs3Option::Some(a) => a,
-            nfs3_types::nfs3::Nfs3Option::None => continue,
-        };
+    for entry in &page.entries {
+        // A server may answer READDIRPLUS without attributes; nothing to judge.
+        let Some(ref attrs) = entry.attrs else { continue };
         // Flag ANY world-writable directory (mode & 0o002) regardless of owner. The
         // canonical symlink-escape target is a root-owned, world-writable, sticky dir
         // (/tmp, /var/tmp): any client can drop a symlink there no matter who owns it,
         // and AUTH_SYS lets the attacker assume any UID anyway. The F-4.4 precondition
         // is simply "writable directory" (docs/FINDINGS.md F-4.4); owner UID is
         // evidence, not a gate.
-        let is_dir = attrs.type_ == nfs3_types::nfs3::ftype3::NF3DIR;
+        let is_dir = attrs.file_type == nfswolf_nfs3::FileType::Directory;
         let world_writable = (attrs.mode & 0o002) != 0;
         if is_dir && world_writable {
-            let name = String::from_utf8_lossy(entry.name.0.as_ref()).to_string();
+            let name = entry.name.clone();
             findings.push(make_finding(
                 &FindingSpec {
                     id: "F-4.4",
@@ -1080,24 +1152,18 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
 /// F-7.5). F-4.1 is therefore emitted only when uid=0 lands as root AND the
 /// non-root probe did NOT also land as root.
 async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path: &str, squash_anon_uid: Option<u32>, findings: &mut Vec<Finding>) {
-    let probe_name = b".nfswolf_root_probe";
     let root_client = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(0, 0, &[], "nfswolf")), 0, 0);
 
-    let create_args = CREATE3args { where_: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) }, how: createhow3::UNCHECKED(sattr3::default()) };
-    let Ok(create_res) = root_client.create(&create_args).await else { return };
-    let nfs3_types::nfs3::Nfs3Result::Ok(created) = create_res else { return };
+    let Ok(created) = root_client.create_file(dir_fh, PROBE_NAME, sattr3::default()).await else { return };
 
     // GETATTR to check the resulting ownership.
-    let file_uid = if let nfs3_types::nfs3::Nfs3Option::Some(ref fh) = created.obj {
-        let fh = FileHandle::from_nfs_fh3(fh);
-        let ga_args = GETATTR3args { object: fh.to_nfs_fh3() };
-        nfs3.getattr(&ga_args).await.ok().and_then(|r| if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = r { Some(ok.obj_attributes.uid) } else { None })
-    } else {
-        None
+    let file_uid = match created {
+        Some(ref fh) => nfs3.attrs(fh).await.ok().map(|a| a.uid),
+        None => None,
     };
 
     // Always attempt cleanup regardless of getattr result.
-    drop(root_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await);
+    drop(root_client.unlink(dir_fh, PROBE_NAME).await);
 
     // If the uid=99999 probe ALSO landed as uid 0, every client UID is squashed
     // to root (all_squash + anonuid=0) -- that is F-7.5, not no_root_squash, so
@@ -1138,23 +1204,17 @@ async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_pat
 ///     the previous code computed but never reported.
 async fn check_squash_config(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) -> Option<u32> {
     const PROBE_UID: u32 = 99_999;
-    let probe_name = b".nfswolf_squash_probe";
     let probe_client = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(PROBE_UID, PROBE_UID, &[], "nfswolf")), PROBE_UID, PROBE_UID);
 
-    let create_args = CREATE3args { where_: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) }, how: createhow3::UNCHECKED(sattr3::default()) };
-    let Ok(create_res) = probe_client.create(&create_args).await else { return None };
-    let nfs3_types::nfs3::Nfs3Result::Ok(created) = create_res else { return None };
+    let Ok(created) = probe_client.create_file(dir_fh, PROBE_NAME, sattr3::default()).await else { return None };
 
-    let observed_uid = if let nfs3_types::nfs3::Nfs3Option::Some(ref fh) = created.obj {
-        let fh = FileHandle::from_nfs_fh3(fh);
-        let ga_args = GETATTR3args { object: fh.to_nfs_fh3() };
-        nfs3.getattr(&ga_args).await.ok().and_then(|r| if let nfs3_types::nfs3::Nfs3Result::Ok(ok) = r { Some(ok.obj_attributes.uid) } else { None })
-    } else {
-        None
+    let observed_uid = match created {
+        Some(ref fh) => nfs3.attrs(fh).await.ok().map(|a| a.uid),
+        None => None,
     };
 
     // Cleanup probe file before reporting.
-    drop(probe_client.remove(&REMOVE3args { object: diropargs3 { dir: dir_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(probe_name)) } }).await);
+    drop(probe_client.unlink(dir_fh, PROBE_NAME).await);
 
     let uid = observed_uid?;
     let result = infer_squash_mode(uid, PROBE_UID);
@@ -1231,12 +1291,14 @@ pub(crate) fn infer_squash_mode(observed_uid: u32, probe_uid: u32) -> SquashProb
     }
 }
 
-/// Probe NFSv4 SECINFO for an export path to detect AUTH_SYS-only access via NFSv4.
+/// Probe NFSv4 SECINFO for auth-flavor issues (F-3.4 AUTH_SYS-only, F-1.7 mixed).
 ///
 /// SECINFO (RFC 7530 S18.29) returns the actual required auth methods per directory,
 /// independent of the NFSv3 MOUNT auth flavor list.  AUTH_SYS-only NFSv4 means
 /// an attacker can spoof arbitrary UID/GID credentials even when accessing via NFSv4
-/// (F-3.4: TLS downgrade not enforced  --  RPCSEC_GSS not required).
+/// (F-3.4: TLS downgrade not enforced  --  RPCSEC_GSS not required).  Mixed
+/// AUTH_SYS + Kerberos means the attacker can choose AUTH_SYS and bypass Kerberos
+/// entirely (F-1.7, RFC 2203 S5.2.1).
 ///
 /// Best-effort: silently returns on timeout or PROG_MISMATCH (NFSv3-only server).
 async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
@@ -1276,7 +1338,8 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
     let flavors = res.results.last().and_then(|op| if let ResOpData::SecFlavors(f) = &op.data { Some(f.as_slice()) } else { None });
     let Some(flavors) = flavors else { return };
 
-    let has_kerberos = flavors.contains(&6); // 6 = RPCSEC_GSS (RFC 7530 S3.2.1)
+    // Kerberos: bare RPCSEC_GSS (6) or krb5 pseudo-flavors (390003-390005).
+    let has_kerberos = flavors.iter().any(|&f| f == 6 || (390_003..=390_005).contains(&f));
     let has_auth_sys = flavors.contains(&1); // 1 = AUTH_SYS (RFC 5531 S14)
 
     if has_auth_sys && !has_kerberos {
@@ -1292,6 +1355,27 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
                 ),
                 evidence: &format!("SECINFO flavors={flavors:?}"),
                 remediation: "Configure `sec=krb5p` in /etc/exports to require Kerberos authentication.",
+                export: Some(export_path),
+            },
+            Severity::High,
+        ));
+    } else if has_auth_sys && has_kerberos {
+        // Mixed flavors via NFSv4 SECINFO: same downgrade risk as the MOUNT
+        // flavor list (F-1.7). Without integrity protection on the SECINFO
+        // call itself, a MITM can strip krb5 entries (RFC 7530 S19).
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-1.7",
+                title: "NFSv4 SECINFO: mixed auth flavors allow RPCSEC_GSS downgrade to AUTH_SYS",
+                desc: &format!(
+                    "NFSv4 SECINFO for export {export_path} returns both AUTH_SYS and RPCSEC_GSS \
+                     (Kerberos). An attacker can choose AUTH_SYS and bypass Kerberos entirely \
+                     (RFC 2203 S5.2.1). Without integrity protection on the SECINFO call, a MITM \
+                     can also strip the krb5 entries to force clients onto AUTH_SYS (RFC 7530 S19).",
+                ),
+                evidence: &format!("SECINFO flavors={flavors:?}"),
+                remediation: "Remove AUTH_SYS from exports that require Kerberos authentication: \
+                              use sec=krb5 (or krb5i/krb5p) exclusively in /etc/exports.",
                 export: Some(export_path),
             },
             Severity::High,

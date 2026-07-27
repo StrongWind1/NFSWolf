@@ -186,6 +186,7 @@ impl UtmpRecord {
             }
             // chunks_exact(2) guarantees pair.len() == 2 -- safe to use a fold here.
             let group: u16 = pair.iter().fold(0u16, |acc, b| (acc << 8) | u16::from(*b));
+            // Infallible: fmt::Write for String never fails.
             let _ = write!(s, "{group:x}");
         }
         s

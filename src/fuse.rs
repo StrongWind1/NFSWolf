@@ -15,7 +15,7 @@
 //!   complete metadata.
 //! - **Auto-UID ladder (always on).** Any callback that returns
 //!   NFS3ERR_ACCES triggers the same credential-escalation ladder the
-//!   interactive shell uses (`engine::credential::escalation_list`),
+//!   interactive shell uses (`engine::credential::credential_ladder`),
 //!   and the resolved (uid, gid) is cached per inode so future calls
 //!   skip the search.
 //!
@@ -35,16 +35,16 @@ use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle as FuseFileHandle, FileType as FuseFileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow, WriteFlags,
 };
-use nfs3_types::nfs3::{
+use nfswolf_nfs3::wire::{
     ACCESS3args, COMMIT3args, CREATE3args, FSSTAT3args, GETATTR3args, LINK3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3, createhow3,
     devicedata3, diropargs3, filename3, mknoddata3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime, specdata3, stable_how, symlinkdata3,
 };
-use nfs3_types::xdr_codec::Opaque;
+use nfswolf_xdr::Opaque;
 
-use crate::engine::credential::escalation_list;
+use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
-use crate::proto::nfs3::client::Nfs3Client;
 use crate::proto::nfs3::types::{FileAttrs, FileHandle, FileType};
+use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 
 /// One directory entry paged from READDIRPLUS, owned so it outlives the
 /// per-page response buffer and can be cached across readdir callbacks:
@@ -312,7 +312,7 @@ impl NfsFuse {
 
     /// Build the credential-escalation ladder for `subject_ino`.
     ///
-    /// Mirrors the shell's behavior in `engine::credential::escalation_list`:
+    /// Mirrors the shell's behavior in `engine::credential::credential_ladder`:
     /// owner first (when known via GETATTR), then root, then well-known
     /// service UIDs. Root rungs are always included -- this is a security
     /// toolkit, the goal is unobstructed access.
@@ -321,17 +321,11 @@ impl NfsFuse {
         let owner = {
             let fh_opt = self.state.lock().expect("inode map lock").fh_for(subject_ino).cloned();
             match fh_opt {
-                Some(fh) => {
-                    let args = GETATTR3args { object: fh.to_nfs_fh3() };
-                    match self.nfs3.getattr(&args).await {
-                        Ok(Nfs3Result::Ok(ok)) => Some((ok.obj_attributes.uid, ok.obj_attributes.gid)),
-                        _ => None,
-                    }
-                },
+                Some(fh) => self.nfs3.attrs(&fh).await.ok().map(|a| ((a.uid, a.gid), a.mode)),
                 None => None,
             }
         };
-        escalation_list(caller, owner)
+        credential_ladder_with(caller, owner.map(|f| f.0), owner.map(|f| f.1), &[])
     }
 
     /// Retrieve the file handle for inode `ino` from the inode map.
@@ -437,7 +431,7 @@ impl NfsFuse {
     ///
     /// Tries, in order: any per-inode cached credential, then the default
     /// credential. Only if BOTH are rejected with `NFS3ERR_ACCES` /
-    /// `NFS3ERR_PERM` does it walk the rungs of `escalation_list(caller,
+    /// `NFS3ERR_PERM` does it walk the rungs of `credential_ladder(caller,
     /// owner)` -- so the happy path never pays for the owner-discovery
     /// GETATTR inside `ladder_for`. The first attempt that does not return
     /// `NFS3ERR_ACCES` / `NFS3ERR_PERM` wins; the winning credential is
@@ -446,10 +440,10 @@ impl NfsFuse {
     /// `op` is invoked with a fresh `Nfs3Client` that carries the credential
     /// for the rung being tried; the closure builds the args and calls the
     /// matching NFS3 procedure.
-    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> anyhow::Result<Nfs3Result<T, U>>
+    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>
     where
         F: Fn(Nfs3Client) -> Fut,
-        Fut: Future<Output = anyhow::Result<Nfs3Result<T, U>>>,
+        Fut: Future<Output = Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>>,
     {
         // Primary credentials: any per-inode cached winner, then the default.
         // We only fall back to the escalation ladder -- which costs an
@@ -467,13 +461,16 @@ impl NfsFuse {
         }
 
         let mut tried: Vec<(u32, u32)> = Vec::new();
-        let mut last: Option<anyhow::Result<Nfs3Result<T, U>>> = None;
+        let mut last: Option<Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>> = None;
         for (u, g) in primary {
             tried.push((u, g));
             let c = self.client_for(u, g);
             let r = op(c).await;
             match r {
-                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+                // Only a permission refusal is worth another rung. Any other
+                // status is a real answer -- climbing the ladder would just
+                // repeat it under identities that cannot change it.
+                Ok(Nfs3Result::Err((status, _))) if is_permission_refusal(status) => {
                     last = Some(r);
                 },
                 Ok(_) => {
@@ -495,7 +492,10 @@ impl NfsFuse {
             let c = self.client_for(u, g);
             let r = op(c).await;
             match r {
-                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
+                // Only a permission refusal is worth another rung. Any other
+                // status is a real answer -- climbing the ladder would just
+                // repeat it under identities that cannot change it.
+                Ok(Nfs3Result::Err((status, _))) if is_permission_refusal(status) => {
                     last = Some(r);
                 },
                 Ok(_) => {
@@ -507,7 +507,12 @@ impl NfsFuse {
                 Err(_) => return r,
             }
         }
-        last.unwrap_or_else(|| Err(anyhow::anyhow!("no credential rungs to try for inode {subject_ino}")))
+        last.unwrap_or_else(|| {
+            // Unreachable in practice: the ladder always has at least the
+            // default rung. Reported as an error rather than a panic so a
+            // FUSE callback cannot take the mount down.
+            Err(nfswolf_rpc::RpcError::Io(std::io::Error::other(format!("no credential rungs to try for inode {subject_ino}"))))
+        })
     }
 
     /// LOOKUP with the credential-escalation ladder, with server-side
@@ -817,7 +822,6 @@ impl Filesystem for NfsFuse {
 
         let result = self.block(self.try_with_ladder(ino.0, |c| {
             let fh = fh.clone();
-            let new_attrs = new_attrs.clone();
             async move {
                 let args = SETATTR3args { object: fh.to_nfs_fh3(), new_attributes: new_attrs, guard: Nfs3Option::None };
                 c.setattr(&args).await
@@ -996,7 +1000,6 @@ impl Filesystem for NfsFuse {
         let result = self.block(self.try_with_ladder(parent.0, |c| {
             let parent_fh = parent_fh.clone();
             let name_bytes = name_bytes.clone();
-            let attrs = attrs.clone();
             async move {
                 let args = MKDIR3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, attributes: attrs };
                 c.mkdir(&args).await
@@ -1078,7 +1081,6 @@ impl Filesystem for NfsFuse {
         let result = self.block(self.try_with_ladder(parent.0, |c| {
             let parent_fh = parent_fh.clone();
             let name_bytes = name_bytes.clone();
-            let attrs = attrs.clone();
             async move {
                 let args = CREATE3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, how: createhow3::UNCHECKED(attrs) };
                 c.create(&args).await
@@ -1540,7 +1542,7 @@ const fn sattr3_for_perms(perms: u32) -> sattr3 {
 
 /// Convert the optional post-op file handle returned by CREATE / MKNOD /
 /// MKDIR / SYMLINK responses (RFC 1813 §3.3.8 etc.) to our `FileHandle`.
-fn post_op_fh3_to_handle(opt: Nfs3Option<nfs3_types::nfs3::nfs_fh3>) -> Option<FileHandle> {
+fn post_op_fh3_to_handle(opt: Nfs3Option<nfswolf_nfs3::wire::nfs_fh3>) -> Option<FileHandle> {
     match opt {
         Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
         Nfs3Option::None => None,
@@ -1549,16 +1551,29 @@ fn post_op_fh3_to_handle(opt: Nfs3Option<nfs3_types::nfs3::nfs_fh3>) -> Option<F
 
 /// Convert an optional post-op attribute reply into our `FileAttrs`.
 #[expect(clippy::missing_const_for_fn, reason = "FileAttrs::from_fattr3 is not const")]
-fn post_op_attr_to_attrs(opt: nfs3_types::nfs3::post_op_attr) -> Option<FileAttrs> {
+fn post_op_attr_to_attrs(opt: nfswolf_nfs3::wire::post_op_attr) -> Option<FileAttrs> {
     match opt {
         Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
         Nfs3Option::None => None,
     }
 }
 
+/// Whether a status means "the server refused you" rather than "that failed".
+///
+/// The distinction drives credential escalation: only a refusal is worth
+/// retrying under a different identity.
+const fn is_permission_refusal(status: nfsstat3) -> bool {
+    matches!(status, nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM)
+}
+
 /// Reply to a no-data NFS3 callback (REMOVE / RMDIR / RENAME / COMMIT)
 /// based on the server's status code.
-fn reply_empty<T, U>(result: &anyhow::Result<Nfs3Result<T, U>>, reply: ReplyEmpty) {
+///
+/// This table stays at the wire level on purpose. It maps NFS status codes
+/// onto POSIX errnos, and that is a translation between two specifications --
+/// `Nfs3Error` is the same set of codes under Rust names, so routing through
+/// it would rename the left-hand column without changing what the table says.
+fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>, reply: ReplyEmpty) {
     match result {
         Ok(Nfs3Result::Ok(_)) => reply.ok(),
         Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),

@@ -47,13 +47,26 @@ pub(crate) struct UidSprayArgs {
     #[arg(long, default_value = "65535", value_name = "UID", help_heading = H_IDENTITY)]
     pub uid_end: u32,
 
-    /// GID range start (the global -g/--gid is not used here)
-    #[arg(long, default_value = "0", value_name = "GID", help_heading = H_IDENTITY)]
-    pub gid_start: u32,
+    /// GID range start. Unset, each UID is tried with the matching GID.
+    ///
+    /// Setting a range sweeps the full UID x GID cross product, which grows
+    /// fast -- see `--max-attempts`.
+    #[arg(long, value_name = "GID", help_heading = H_IDENTITY)]
+    pub gid_start: Option<u32>,
 
-    /// GID range end
-    #[arg(long, default_value = "65535", value_name = "GID", help_heading = H_IDENTITY)]
-    pub gid_end: u32,
+    /// GID range end. Unset, each UID is tried with the matching GID.
+    #[arg(long, value_name = "GID", help_heading = H_IDENTITY)]
+    pub gid_end: Option<u32>,
+
+    /// Refuse to start a sweep larger than this many credential probes.
+    ///
+    /// A cross-product sweep is easy to request by accident: the full 16-bit
+    /// space in both dimensions is 4.3 billion probes, which will not finish
+    /// and would be extraordinarily loud. This is a guard against asking for
+    /// that unintentionally, not a limit on what the tool can do -- raise it
+    /// deliberately if the sweep is what you want.
+    #[arg(long, default_value = "100000", value_name = "N", help_heading = H_BEHAVIOR)]
+    pub max_attempts: u64,
 
     /// Path to check access against
     #[arg(long, default_value = "/", value_name = "PATH", help_heading = H_BEHAVIOR)]
@@ -72,7 +85,27 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
 
-    eprintln!("{}", format!("[*] Spraying UIDs {}-{} on {host}:{export}", args.uid_start, args.uid_end).yellow());
+    // Unset GID bounds mean "gid follows uid"; a set bound sweeps the cross
+    // product. Compute the size up front so an unrunnable sweep is refused
+    // before the first packet rather than discovered by it hanging.
+    let paired_gid = args.gid_start.is_none() && args.gid_end.is_none();
+    let gid_range = args.gid_start.unwrap_or(0)..=args.gid_end.unwrap_or(65535);
+    let uid_count = u64::from(args.uid_end.saturating_sub(args.uid_start)) + 1;
+    let attempts = if paired_gid { uid_count } else { uid_count.saturating_mul(u64::from(gid_range.end().saturating_sub(*gid_range.start())) + 1) };
+
+    if attempts > args.max_attempts {
+        anyhow::bail!(
+            "sweep would issue {attempts} credential probes, over the {} limit.\n\
+             Narrow --uid-start/--uid-end or --gid-start/--gid-end, or raise --max-attempts if this is intended.",
+            args.max_attempts
+        );
+    }
+
+    if paired_gid {
+        eprintln!("{}", format!("[*] Spraying UIDs {}-{} (gid = uid) on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end).yellow());
+    } else {
+        eprintln!("{}", format!("[*] Spraying UIDs {}-{} x GIDs {}-{} on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end, gid_range.start(), gid_range.end()).yellow());
+    }
 
     let addr = parse_addr_with_port(&host, globals.nfs_port)?;
     let (_, circuit, client) = make_client_with_hostname(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
@@ -88,7 +121,7 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
     };
 
     let sprayer = UidSprayer::new(client, circuit, stealth.clone());
-    let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range: args.gid_start..=args.gid_end, auxiliary_gids: globals.aux_gids.clone(), target_path: args.path, concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };
+    let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range, paired_gid, auxiliary_gids: globals.aux_gids.clone(), target_path: args.path, concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };
 
     let results = sprayer.spray(&config, &target_fh).await;
     eprintln!("{}", format!("[+] {} credential(s) granted access", results.len()).green());

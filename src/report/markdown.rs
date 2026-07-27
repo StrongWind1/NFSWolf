@@ -104,6 +104,7 @@ fn md_escape_text(s: &str) -> String {
                 out.push(ch);
             },
             c if c.is_control() => {
+                // Infallible: fmt::Write for String never fails.
                 let _ = write!(out, "\\x{:02x}", u32::from(c));
             },
             c => out.push(c),
@@ -123,6 +124,7 @@ fn sanitize_fence_content(s: &str) -> String {
         if ch == '\n' || !ch.is_control() {
             out.push(ch);
         } else {
+            // Infallible: fmt::Write for String never fails.
             let _ = write!(out, "\\x{:02x}", u32::from(ch));
         }
     }

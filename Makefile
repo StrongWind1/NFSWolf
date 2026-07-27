@@ -63,16 +63,16 @@ fmt-fix:
 
 # Lint levels are defined in Cargo.toml [lints.clippy] and clippy.toml.
 lint:
-	$(CARGO) clippy --all-targets --all-features
+	$(CARGO) clippy --workspace --all-targets --all-features
 
 lint-fix:
-	$(CARGO) clippy --fix --allow-dirty --all-targets --all-features
+	$(CARGO) clippy --fix --allow-dirty --workspace --all-targets --all-features
 
 # -- Documentation ------------------------------------------------------------
 
 # Build docs for the public API; treat rustdoc warnings as errors.
 doc:
-	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --all-features --no-deps
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --all-features --no-deps
 
 # -- Build ---------------------------------------------------------------------
 
@@ -90,21 +90,21 @@ release: build
 
 # Fast type-check, no codegen.
 check:
-	$(CARGO) check --all-targets --all-features
+	$(CARGO) check --workspace --all-targets --all-features
 
 # -- Tests ---------------------------------------------------------------------
 
 # Full test suite (all features). Use for quick local runs.
 .PHONY: test
 test:
-	$(CARGO) test --all-targets --all-features
+	$(CARGO) test --workspace --all-targets --all-features
 
 # Feature matrix: all-features / no-features (no fuse) / fuse only.
 test-matrix:
 	@echo "==> test-matrix: --all-features"
-	$(CARGO) test --all-targets --all-features
+	$(CARGO) test --workspace --all-targets --all-features
 	@echo "==> test-matrix: --no-default-features"
-	$(CARGO) test --all-targets --no-default-features
+	$(CARGO) test --workspace --all-targets --no-default-features
 	@echo "==> test-matrix: --features fuse"
 	$(CARGO) test --all-targets --features fuse
 
@@ -403,11 +403,11 @@ check-all: fmt lint audit check test-matrix doc hygiene machete
 cut-release:
 	@test -n "$(VERSION)" || { echo "usage: make cut-release VERSION=X.Y.Z"; exit 1; }
 	@command -v cargo-set-version > /dev/null 2>&1 || cargo install cargo-edit --locked
-	cargo set-version -p nfswolf "$(VERSION)"
+	cargo set-version --workspace "$(VERSION)"
 	cargo upgrade --incompatible
 	cargo update
 	$(MAKE) check-all
-	git add Cargo.toml Cargo.lock
+	git add Cargo.toml Cargo.lock crates/*/Cargo.toml
 	@git diff --cached --quiet || git commit -S -m "chore(release): v$(VERSION)"
 	git tag -s "v$(VERSION)" -m "v$(VERSION)"
 	git push origin HEAD

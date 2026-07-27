@@ -1,0 +1,9 @@
+Provenance of nfswolf-nfs2
+==========================
+
+This crate is original NFSWolf work (Apache-2.0). It implements NFS version 2 (RFC 1094)
+directly from the RFC and contains no code derived from any upstream project.
+
+It builds on nfswolf-xdr and nfswolf-rpc, which do carry code derived from the
+Vaiz/nfs3 project <https://github.com/Vaiz/nfs3> (Unlicense); see the NOTICE
+file shipped with those crates.
