@@ -146,17 +146,23 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
 
     let found = match nfs_ver {
         NfsVersion::V3 => {
-            let (_, _, client) = make_client_with_hostname(addr, &pool_export, 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
-            if matches!(fs, FsType::Btrfs) {
+            let (_, _, client) = make_client_with_hostname(addr, &pool_export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+            let result = if matches!(fs, FsType::Btrfs) {
                 sweep_btrfs(&client, &seed, args.max_attempts, &host).await
             } else {
-                let result = sweep_inodes(&client, &seed, fs, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host).await;
-                if !result && matches!(fs, FsType::Unknown) {
+                let r = sweep_inodes(&client, &seed, fs, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host).await;
+                if !r && matches!(fs, FsType::Unknown) {
                     eprintln!("{}", crate::output::status_info("Inode sweep found nothing; trying BTRFS subvolume sweep as fallback"));
                     sweep_btrfs(&client, &seed, args.max_attempts, &host).await
                 } else {
-                    result
+                    r
                 }
+            };
+            if !result {
+                eprintln!("{}", crate::output::status_info("NFSv3 sweep failed; retrying with NFSv2"));
+                sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals).await
+            } else {
+                result
             }
         },
         NfsVersion::V2Only => {
