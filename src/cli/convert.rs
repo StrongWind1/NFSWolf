@@ -81,21 +81,18 @@ pub(crate) fn run(args: &ConvertArgs, globals: &GlobalOpts) -> anyhow::Result<()
 
     let finding_count: usize = results.iter().map(|r| r.findings.len()).sum();
 
-    match &args.output {
-        Some(path) => {
-            tracing::info!(input = %args.input, output = %path, "generating report");
-            let file = fs::File::create(path).map_err(|e| anyhow::anyhow!("cannot create {path}: {e}"))?;
-            let mut out = BufWriter::new(file);
-            report::generate(&results, args.format, &args.title, &mut out)?;
-            if !globals.quiet {
-                eprintln!("{}", crate::output::status_ok(&format!("Report written -> {path}  ({} host(s), {finding_count} finding(s), {:?} format)", results.len(), args.format)));
-            }
-        },
-        None => {
-            tracing::info!(input = %args.input, output = "stdout", "generating report");
-            let mut out = BufWriter::new(std::io::stdout().lock());
-            report::generate(&results, args.format, &args.title, &mut out)?;
-        },
+    if let Some(path) = &args.output {
+        tracing::info!(input = %args.input, output = %path, "generating report");
+        let file = fs::File::create(path).map_err(|e| anyhow::anyhow!("cannot create {path}: {e}"))?;
+        let mut out = BufWriter::new(file);
+        report::generate(&results, args.format, &args.title, &mut out)?;
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_ok(&format!("Report written -> {path}  ({} host(s), {finding_count} finding(s), {:?} format)", results.len(), args.format)));
+        }
+    } else {
+        tracing::info!(input = %args.input, output = "stdout", "generating report");
+        let mut out = BufWriter::new(std::io::stdout().lock());
+        report::generate(&results, args.format, &args.title, &mut out)?;
     }
     crate::cli::emit_replay(globals);
     Ok(())
