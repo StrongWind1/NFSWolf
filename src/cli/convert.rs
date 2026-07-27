@@ -90,12 +90,12 @@ pub(crate) fn run(args: &ConvertArgs, globals: &GlobalOpts) -> anyhow::Result<()
             if !globals.quiet {
                 eprintln!("{}", crate::output::status_ok(&format!("Report written -> {path}  ({} host(s), {finding_count} finding(s), {:?} format)", results.len(), args.format)));
             }
-        }
+        },
         None => {
             tracing::info!(input = %args.input, output = "stdout", "generating report");
             let mut out = BufWriter::new(std::io::stdout().lock());
             report::generate(&results, args.format, &args.title, &mut out)?;
-        }
+        },
     }
     crate::cli::emit_replay(globals);
     Ok(())
