@@ -201,12 +201,20 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
         return Ok((probe_client, EscapeOutcome::Unsupported));
     }
 
-    // --- Phase 1: known root inodes for the detected filesystem type ---
+    // --- Phase 1: known root inodes, ordered ext4 -> XFS -> BTRFS ---
 
-    // BTRFS: try subvolume IDs (256..256+btrfs_subvols) first, then fall through.
-    // construct_btrfs_subvol_handles can yield two variants per subvol on
-    // compound-UUID handles (fsid_type 7 + 6 fallback) -- announce each subvol
-    // ID only once so the operator-facing log isn't doubled.
+    // ext4 (inode 2) and XFS candidates (128/64/32) first -- cheapest probes.
+    let known: Vec<EscapeResult> = FileHandleAnalyzer::construct_root_candidates(&mnt.handle);
+    for candidate in &known {
+        if announce {
+            eprintln!("{}", crate::output::status_info(&format!("Probing {:?} inode {} ...", candidate.fs_type, candidate.inode_number)));
+        }
+        if probe_escape_candidate(&probe_client, candidate, export_fileid, &mnt.handle).await {
+            return Ok((probe_client, EscapeOutcome::Success { candidate: candidate.clone(), note: "verified".to_owned() }));
+        }
+    }
+
+    // BTRFS subvolume IDs (5, then 256..256+btrfs_subvols) last -- more expensive.
     let btrfs = FileHandleAnalyzer::construct_btrfs_subvol_handles(&mnt.handle, btrfs_subvols);
     let mut announced = std::collections::HashSet::with_capacity(btrfs.len());
     for candidate in &btrfs {
@@ -215,22 +223,6 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
         }
         if probe_escape_candidate(&probe_client, candidate, export_fileid, &mnt.handle).await {
             return Ok((probe_client, EscapeOutcome::Success { candidate: candidate.clone(), note: "subvolume (verified)".to_owned() }));
-        }
-    }
-
-    // ext4 (inode 2) and XFS known candidates (128/64/32).  construct_root_candidates
-    // fingerprints first so XFS inodes are not tried on a confirmed ext4 export, and for
-    // the ambiguous compound-UUID format it queues BOTH the ext4 root (inode 2) and the
-    // XFS roots -- probe_escape_candidate rejects non-directory hits, so a non-root inode
-    // that happens to exist (e.g. inode 128 = ext4 journal file) is never a false escape.
-    let known: Vec<EscapeResult> = FileHandleAnalyzer::construct_root_candidates(&mnt.handle);
-
-    for candidate in &known {
-        if announce {
-            eprintln!("{}", crate::output::status_info(&format!("Probing {:?} inode {} ...", candidate.fs_type, candidate.inode_number)));
-        }
-        if probe_escape_candidate(&probe_client, candidate, export_fileid, &mnt.handle).await {
-            return Ok((probe_client, EscapeOutcome::Success { candidate: candidate.clone(), note: "verified".to_owned() }));
         }
     }
 
@@ -296,22 +288,30 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
 /// True when the exported directory is itself the filesystem root (so there is nothing
 /// outside the export to reach).
 ///
-/// Uses inode-based heuristics: fileid 2 is the ext4 root; 32/64/128 are XFS roots
-/// (detected from handle format). The parent-is-self test (LOOKUP "..") is NOT used
-/// here because NFS servers clip ".." at the export boundary, making every export
-/// root look like a filesystem root from the client side.
+/// Uses fileid + directory-type heuristics. A directory export with fileid 2 is ext4
+/// root; fileid 32/64/128 is XFS root (these are never regular directories on any FS).
+/// The parent-is-self test (LOOKUP "..") is NOT used here because NFS servers clip
+/// ".." at the export boundary, making every export look like a root.
 async fn export_is_fs_root(client: &Nfs3Client, mount_handle: &FileHandle) -> bool {
     let Ok(ok) = client.attrs(mount_handle).await else {
         return false;
     };
+    if ok.file_type != FileType::Directory {
+        return false;
+    }
     let export_inode = ok.fileid;
-    // fileid_type 0x81 is the definitive XFS marker. fingerprint_fs catches it
-    // plus XFS-identified compound UUID handles.
-    let is_xfs = mount_handle.as_bytes().get(3).copied() == Some(0x81) || matches!(FileHandleAnalyzer::fingerprint_fs(mount_handle), crate::engine::file_handle::FsType::Xfs);
-    // BTRFS FS_TREE root has fileid 256 (BTRFS_FIRST_FREE_OBJECTID), but so does
-    // every user subvolume root — can't distinguish "export IS fs root" from
-    // "export is a subvolume" by fileid alone. Let the probe phase handle BTRFS.
-    export_inode == 2 || (is_xfs && matches!(export_inode, 32 | 64 | 128))
+    // ext4/ext3/ext2: root is always inode 2.
+    // XFS: root is 128 (v5, default), 64 (v4 512B inodes), or 32 (v4 1024B inodes).
+    // On ext4, inodes 32/64/128 are metadata (journal, resize_inode) — never directories.
+    // So a directory with fileid in {2, 32, 64, 128} is unambiguously a filesystem root.
+    if matches!(export_inode, 2 | 32 | 64 | 128) {
+        return true;
+    }
+    // BTRFS: every subvolume root has fileid 256, so fileid alone can't distinguish
+    // "export IS the FS_TREE root" from "export is a user subvolume that could escape
+    // to FS_TREE." Let the probe phase handle BTRFS — it will try FS_TREE (subvol 5)
+    // and other subvols, and the identity check blocks self-matches.
+    false
 }
 
 /// Probe a candidate handle with GETATTR and report whether it is a valid directory.
