@@ -307,7 +307,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // mountd port via UDP DUMP/GETPORT, pin the client to that port so
     // EXPORT and DUMP calls connect directly instead of trying GETPORT
     // through the unreachable TCP portmapper.
-    let explicit_mount_port = job.mount_port.or_else(|| if !portmap_reachability.has_tcp() { mountd_ports.iter().next().copied() } else { None });
+    let explicit_mount_port = job.mount_port.or_else(|| if portmap_reachability.has_tcp() { None } else { mountd_ports.iter().next().copied() });
     let mount_client = match explicit_mount_port {
         Some(port) => {
             let mc = NfsMountClient::with_port(port);

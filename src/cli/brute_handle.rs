@@ -109,13 +109,12 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
         Source::Handle(hex) => (FileHandle::from_hex(hex).context("invalid --seed-handle / --handle")?, "/".to_owned(), NfsVersion::V3),
         Source::Export(path) => {
             let mc = make_mount_client(globals);
-            match mc.mount(addr, path).await {
-                Ok(mnt) => (mnt.handle, path.clone(), NfsVersion::V3),
-                Err(_) => {
-                    eprintln!("{}", crate::output::status_info("MOUNT v3 failed, trying MOUNT v1 (NFSv2)"));
-                    let mnt = mc.mount_v1(addr, path).await.with_context(|| format!("MNT v3 and v1 both failed for {path}"))?;
-                    (mnt.handle, path.clone(), NfsVersion::V2Only)
-                },
+            if let Ok(mnt) = mc.mount(addr, path).await {
+                (mnt.handle, path.clone(), NfsVersion::V3)
+            } else {
+                eprintln!("{}", crate::output::status_info("MOUNT v3 failed, trying MOUNT v1 (NFSv2)"));
+                let mnt = mc.mount_v1(addr, path).await.with_context(|| format!("MNT v3 and v1 both failed for {path}"))?;
+                (mnt.handle, path.clone(), NfsVersion::V2Only)
             }
         },
         Source::None => bail!("no seed handle: pass <HOST>:/export (mounted to derive a seed) or --seed-handle HEX"),
@@ -155,11 +154,11 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
                     r
                 }
             };
-            if !result {
+            if result {
+                result
+            } else {
                 eprintln!("{}", crate::output::status_info("NFSv3 sweep failed; retrying with NFSv2"));
                 sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals).await
-            } else {
-                result
             }
         },
         NfsVersion::V2Only => sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals).await,
@@ -255,7 +254,6 @@ async fn report_hit(client: &Nfs3Client, candidate: &EscapeResult, note: &str, h
 /// Every valid handle is reported. The first root directory is printed as the
 /// primary result with writability hint and next-steps; all other hits
 /// (directories, files, denied handles) are listed as additional discoveries.
-#[expect(clippy::too_many_arguments, reason = "sweep parameters are all caller-controlled range bounds")]
 async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, _fs: FsType, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str) -> bool {
     let mut found_root = false;
     let mut extra_hits: Vec<(u64, u32, String)> = Vec::new();
@@ -358,7 +356,6 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
 /// NFSv2 has no BADHANDLE oracle (all rejections are NFSERR_STALE per
 /// RFC 1094 S2.3.1), so we can't distinguish format errors from wrong
 /// inode/gen. Handles are fixed 32 bytes, zero-padded.
-#[expect(clippy::too_many_arguments, reason = "sweep parameters are all caller-controlled range bounds")]
 async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str, globals: &GlobalOpts) -> bool {
     use crate::proto::auth::next_stamp;
     use nfswolf_nfs2::{Nfs2Client, wire::Nfs2FileHandle};

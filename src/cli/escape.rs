@@ -126,7 +126,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
             let outcome = match find_escape_v2(host, export, max_root_scan, globals).await {
                 Ok(o) => o,
                 Err(v2_err) => {
-                    eprintln!("{}", crate::output::status_err(&format!("MOUNT failed on both v3 and v1 -- export may not exist or server is unreachable")));
+                    eprintln!("{}", crate::output::status_err("MOUNT failed on both v3 and v1 -- export may not exist or server is unreachable"));
                     eprintln!("  v3: {v3_err}");
                     eprintln!("  v1: {v2_err}");
                     return Ok(());
@@ -350,10 +350,8 @@ async fn probe_escape_candidate(client: &Nfs3Client, candidate: &EscapeResult, e
             }
             // For non-BTRFS: a matching fileid means the constructed handle resolves
             // to the export's own root directory (whole-filesystem export).
-            if candidate.fs_type != crate::engine::file_handle::FsType::Btrfs {
-                if export_fileid.is_some_and(|exp| a.fileid == exp) {
-                    return false;
-                }
+            if candidate.fs_type != crate::engine::file_handle::FsType::Btrfs && export_fileid.is_some_and(|exp| a.fileid == exp) {
+                return false;
             }
             true
         },
