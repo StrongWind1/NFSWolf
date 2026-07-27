@@ -161,12 +161,19 @@ impl FileHandleAnalyzer {
 
         // Compound UUID handle (fsid_type=7, fileid_type=0, 28 bytes):
         //   [header 4B] | [export_inode 4B] | [export_gen 4B] | [UUID 16B]
-        // Used by Linux knfsd with UUID-based exports on both ext4 AND XFS.
-        // We cannot distinguish ext4 vs XFS from this format alone -- the escape
-        // tries inode 2 (ext4 root) first, then falls back to a scan that finds
-        // inode 64/128 (XFS root) if inode 2 returns STALE.
-        // Return Unknown here so the caller uses the scan path to determine type.
+        // The export_inode distinguishes some FS types: ext4 root=2, XFS root=32/64/128.
+        // BTRFS FS_TREE_OBJECTID=5 is unambiguous. Higher inodes (256+) are ambiguous:
+        // could be a BTRFS user subvol (256 is the first) or a regular ext4/XFS directory.
         if fsid_type == 7 && fileid_type == 0 && data.len() == 28 {
+            if let (Some(&b0), Some(&b1), Some(&b2), Some(&b3)) = (data.get(4), data.get(5), data.get(6), data.get(7)) {
+                let export_inode = u32::from_le_bytes([b0, b1, b2, b3]);
+                return match export_inode {
+                    5 => FsType::Btrfs,
+                    2 => FsType::Ext4,
+                    32 | 64 | 128 => FsType::Xfs,
+                    _ => FsType::Unknown,
+                };
+            }
             return FsType::Unknown;
         }
 
