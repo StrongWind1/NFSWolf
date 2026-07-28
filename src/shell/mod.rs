@@ -249,7 +249,7 @@ impl NfsShell {
     ///
     /// Called after every successful `cd` so Tab completion is immediately
     /// accurate in the new directory without an extra RPC on the first Tab press.
-    async fn refresh_tab_cache(&self) {
+    pub(crate) async fn refresh_tab_cache(&self) {
         let entries = match try_readdirplus(&self.nfs3, &self.cwd).await {
             Ok(es) => es.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name).collect(),
             Err(_) => Vec::new(),
@@ -264,6 +264,7 @@ impl NfsShell {
     ///
     /// Errors from NFS operations are printed to stderr and do not abort the
     /// shell -- the user can retry or navigate away.
+    #[expect(clippy::cognitive_complexity, reason = "shell dispatch table")]
     pub(crate) async fn dispatch(&mut self, line: &str) {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -301,6 +302,7 @@ impl NfsShell {
             "stat" => self.cmd_stat(arg).await,
             "readlink" => self.cmd_readlink(arg).await,
             "symlink" => self.cmd_symlink(arg).await,
+            "link" => self.cmd_link(arg).await,
             // Identity
             "uid" => self.cmd_uid(arg),
             "gid" => self.cmd_gid(arg),
@@ -485,6 +487,7 @@ impl NfsShell {
         if rel.is_empty() {
             self.cwd.clone_from(&self.export_root);
             "/".clone_into(&mut self.cwd_path);
+            self.refresh_tab_cache().await;
             return;
         }
 
@@ -1014,6 +1017,39 @@ impl NfsShell {
         match self.nfs3.create_symlink(&parent_fh, &link_filename, target, sattr3_with_mode(0o777)).await {
             Ok(()) => println!("{}", format!("{linkname} -> {target}").green()),
             Err(e) => report_write_stat("symlink", &e),
+        }
+    }
+
+    /// Create a hard link (NFS3 LINK, RFC 1813 §3.3.15).
+    async fn cmd_link(&self, line: &str) {
+        let (existing, linkname) = split2(line);
+        if existing.is_empty() || linkname.is_empty() {
+            eprintln!("{}", "usage: link <existing> <linkname>".yellow());
+            return;
+        }
+        if !self.allow_write {
+            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+            return;
+        }
+
+        let target_fh = match self.lookup_path(existing).await {
+            Ok((fh, _)) => fh,
+            Err(e) => {
+                eprintln!("{}", format!("link: {existing}: {e}").red());
+                return;
+            },
+        };
+        let (parent_fh, link_filename) = match self.resolve_parent(linkname).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", format!("link: {linkname}: {e}").red());
+                return;
+            },
+        };
+
+        match self.nfs3.hard_link(&target_fh, &parent_fh, &link_filename).await {
+            Ok(()) => println!("{}", format!("{linkname} => {existing}").green()),
+            Err(e) => report_write_stat("link", &e),
         }
     }
 

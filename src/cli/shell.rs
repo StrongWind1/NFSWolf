@@ -144,6 +144,7 @@ pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     };
 
     let mut shell = NfsShell::new(Arc::clone(&nfs3), root_fh, args.allow_write, globals.hostname.clone());
+    shell.refresh_tab_cache().await;
     eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid}{}   --   type 'help' for commands", if args.allow_write { "  [write enabled]" } else { "" })));
 
     if let Some(cmd) = args.command {
@@ -526,7 +527,7 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
 
 const V2_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "put", "rm", "mkdir", "rmdir", "mv", "chmod", "chown", "stat", "readlink", "symlink", "lcd", "lls", "lpwd", "lmkdir", "whoami", "handle", "root", "help", "exit", "quit"];
 
-const V4_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "uid", "gid", "hostname", "whoami", "help", "exit", "quit"];
+const V4_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "put", "mkdir", "rm", "rmdir", "mv", "chmod", "chown", "symlink", "link", "mknod", "uid", "gid", "hostname", "whoami", "help", "exit", "quit"];
 
 struct Nfs2RemoteCompleter<T: nfswolf_rpc::RpcTransport + Send + Sync + 'static> {
     client: Arc<nfswolf_nfs2::Nfs2Client<T>>,
@@ -633,14 +634,17 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let mut cwd_fh = root_fh;
     let mut cwd_path = String::from("/");
 
+    // Tab completion: populate cache with root dir, build completer.
+    let tab_cache = if args.command.is_none() {
+        let entries = v2_readdir_all(&client, &cwd_fh).await.map_or_else(|_| Vec::new(), |es| es.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name.clone()).collect());
+        Arc::new(std::sync::Mutex::new(crate::shell::complete::TabCache { cwd: cwd_fh.0.to_vec(), entries }))
+    } else {
+        Arc::new(std::sync::Mutex::new(crate::shell::complete::TabCache { cwd: cwd_fh.0.to_vec(), entries: Vec::new() }))
+    };
+
     // Non-interactive mode: run one command and return (same as v3 shell).
     let single_command = args.command.clone();
 
-    // Tab completion: populate cache with root dir, build completer.
-    let tab_cache = {
-        let entries = v2_readdir_all(&client, &cwd_fh).await.map_or_else(|_| Vec::new(), |es| es.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name.clone()).collect());
-        Arc::new(std::sync::Mutex::new(crate::shell::complete::TabCache { cwd: cwd_fh.0.to_vec(), entries }))
-    };
     let completer = ShellCompleter::new(Box::new(Nfs2RemoteCompleter { client: Arc::clone(&client) }), root_fh.0.to_vec(), Arc::clone(&tab_cache), V2_SHELL_COMMANDS);
     let mut rl = Editor::<ShellCompleter, DefaultHistory>::new()?;
     rl.set_helper(Some(completer));
@@ -1073,6 +1077,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
             break;
         }
     }
+    crate::cli::emit_replay(globals);
     Ok(())
 }
 
