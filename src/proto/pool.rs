@@ -133,7 +133,7 @@ impl ConnectionPool {
         // try_lock instead of blocking_lock: checkin runs from sync Drop,
         // which may execute inside the tokio runtime (e.g. when an async task
         // drops a PooledConnection). blocking_lock panics in that context.
-        // On contention the connection is simply discarded — a new one will be
+        // On contention the connection is simply discarded -- a new one will be
         // created on the next checkout, and the semaphore permit released by
         // our Drop ensures the slot is freed regardless.
         if let Ok(mut q) = queue.try_lock()
