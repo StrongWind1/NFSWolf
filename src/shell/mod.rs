@@ -33,12 +33,6 @@ const CAT_MAX_BYTES: u32 = 1_048_576; // 1 MiB
 /// Maximum bytes per NFS READ/WRITE chunk.
 const CHUNK_SIZE: u32 = 65_536; // 64 KiB
 
-/// Hard cap on accumulated directory entries in one listing. The NFS server is
-/// untrusted; a hostile server can return an ever-advancing cookie with
-/// `eof = false` forever, so paging must stop to avoid an infinite loop / OOM.
-/// Mirrors the FUSE side's `MAX_READDIR_ENTRIES`.
-const MAX_DIR_ENTRIES: usize = 1_000_000;
-
 /// All commands available in the NFSv3 interactive shell (for Tab completion of the first token).
 pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "ls",
@@ -274,7 +268,6 @@ impl<O: ShellOps> NfsShell<O> {
     // Navigation
     // -------------------------------------------------------------------------
 
-    /// List directory contents with type indicator, permissions, uid, gid, size.
     /// List directory contents.
     ///
     /// Usage: `ls [-a] [--sort=FIELD] [-r|--reverse] [path]`
@@ -937,7 +930,7 @@ impl<O: ShellOps> NfsShell<O> {
         }
     }
 
-    /// Create a hard link (NFS3 LINK, RFC 1813 §3.3.15).
+    /// Create a hard link (NFSv3 LINK RFC 1813 §3.3.15, NFSv2 LINK RFC 1094 §2.2.12).
     async fn cmd_link(&self, line: &str) {
         let (existing, linkname) = split2(line);
         if existing.is_empty() || linkname.is_empty() {
@@ -1466,13 +1459,14 @@ impl<O: ShellOps> NfsShell<O> {
         println!("{}", "File operations:".bold().underline());
         println!("  cat <file>                 print file contents");
         println!("  get [-r] <remote> [local | dir/]  download file/tree (auto-UID; dir/ keeps the basename)");
-        println!("  put <local> <remote>       upload file  [--allow-write]");
+        println!("  put [-r] <local> <remote>  upload file/tree  [--allow-write]");
         println!("  rm <file>                  remove file  [--allow-write]");
         println!("  mkdir <dir>                create directory  [--allow-write]");
         println!("  rmdir <dir>                remove directory  [--allow-write]");
         println!("  mv <src> <dst>             rename/move  [--allow-write]");
         println!("  cp <src> <dst>             copy file  [--allow-write]");
         println!("  symlink <target> <name>    create symlink  [--allow-write]");
+        println!("  link <existing> <name>     create hard link  [--allow-write]");
         println!("  readlink <path>            read symlink target");
         println!();
         println!("{}", "Attributes:".bold().underline());
@@ -1489,6 +1483,7 @@ impl<O: ShellOps> NfsShell<O> {
         if self.ops.supports_identity_change() {
             println!("  uid <n>                    switch UID");
             println!("  gid <n>                    switch GID");
+            println!("  hostname <name>            spoof AUTH_SYS machinename");
             println!("  impersonate <uid>:<gid>    switch both");
         }
         println!();
@@ -1509,7 +1504,9 @@ impl<O: ShellOps> NfsShell<O> {
         println!("  escape-root                build and switch to FS root handle");
         println!("  mount-handle <hex>         jump to arbitrary file handle");
         println!("  handle                     print current dir handle (hex)");
-        println!("  root                       probe NFSPROC_ROOT (obsolete MOUNT bypass)");
+        if self.ops.version_name() == "NFSv2" {
+            println!("  root                       probe NFSPROC_ROOT (obsolete MOUNT bypass)");
+        }
         println!();
         println!("{}", "Local:".bold().underline());
         println!("  lcd [dir]   lls [dir]   lpwd   lmkdir <dir>");

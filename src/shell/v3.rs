@@ -62,7 +62,7 @@ fn from_v3_fh(fh: &FileHandle) -> ShellHandle {
     ShellHandle(fh.as_bytes().to_vec())
 }
 
-pub(super) fn v3_info(a: &FileAttrs) -> ShellFileInfo {
+fn v3_info(a: &FileAttrs) -> ShellFileInfo {
     ShellFileInfo {
         file_type: match a.file_type {
             FileType::Regular => ShellFileType::Regular,
@@ -306,7 +306,7 @@ impl ShellOps for V3Ops {
 
 // --- Remote completion for tab-complete in the v3 shell ----------------------
 
-pub(super) struct Nfs3RemoteCompleter {
+struct Nfs3RemoteCompleter {
     pub nfs3: Arc<Nfs3Client>,
 }
 
