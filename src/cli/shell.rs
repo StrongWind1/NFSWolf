@@ -22,7 +22,8 @@ use crate::proto::nfs3::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::proto::transport::PooledTransport;
-use crate::shell::{NfsCompleter, NfsShell};
+use crate::shell::NfsShell;
+use crate::shell::complete::ShellCompleter;
 use crate::util::stealth::StealthConfig;
 
 /// Interactive NFS exploration shell.
@@ -154,7 +155,7 @@ pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 
     // Interactive REPL with Tab completion.
     let completer = shell.make_completer();
-    let mut rl = Editor::<NfsCompleter, DefaultHistory>::new()?;
+    let mut rl = Editor::<ShellCompleter, DefaultHistory>::new()?;
     rl.set_helper(Some(completer));
 
     loop {
@@ -210,7 +211,6 @@ const NFS4_READ_MAX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 /// the full NFSv3 shell commands sufficient to explore NFSv4-only servers.
 async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
-    use rustyline::DefaultEditor;
 
     let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
     let host = target.host;
@@ -234,7 +234,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let root_fh = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?;
     eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid} hostname={hostname}  (NFSv4 shell  --  type 'help' for commands)")));
 
-    let mut cwd_fh = root_fh;
+    let mut cwd_fh = root_fh.clone();
     let mut cwd_path = "/".to_owned();
 
     // Non-interactive mode: run one command and return.
@@ -244,19 +244,34 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
         return Ok(());
     }
 
-    // Interactive REPL (no Tab completion for NFSv4 shell).
-    let mut rl = DefaultEditor::new()?;
+    // Tab completion: wrap client for shared access, populate cache.
+    let client = Arc::new(tokio::sync::Mutex::new(client));
+    let tab_cache = {
+        let entries = client.lock().await.list_dir(&cwd_fh).await.unwrap_or_default();
+        Arc::new(std::sync::Mutex::new(crate::shell::complete::TabCache { cwd: cwd_fh.clone(), entries }))
+    };
+    let completer = ShellCompleter::new(Box::new(Nfs4RemoteCompleter { client: Arc::clone(&client) }), root_fh.clone(), Arc::clone(&tab_cache), V4_SHELL_COMMANDS);
+    let mut rl = Editor::<ShellCompleter, DefaultHistory>::new()?;
+    rl.set_helper(Some(completer));
+
     loop {
         let prompt = format!("nfswolf@{host}:{cwd_path} uid={uid} hostname={hostname} [v4]> ");
         match rl.readline(&prompt) {
             Ok(line) => {
-                // History add failure is non-fatal (in-memory only).
                 drop(rl.add_history_entry(&line));
                 let trimmed = line.trim();
                 if trimmed == "exit" || trimmed == "quit" {
                     break;
                 }
-                dispatch_nfs4(&mut client, trimmed, &mut cwd_fh, &mut cwd_path, args.allow_write, &mut uid, &mut gid, &mut hostname).await;
+                let mut c = client.lock().await;
+                dispatch_nfs4(&mut c, trimmed, &mut cwd_fh, &mut cwd_path, args.allow_write, &mut uid, &mut gid, &mut hostname).await;
+                // Refresh tab cache after every command (cheap if cwd unchanged).
+                if let Ok(entries) = c.list_dir(&cwd_fh).await
+                    && let Ok(mut cache) = tab_cache.lock()
+                {
+                    cache.cwd.clone_from(&cwd_fh);
+                    cache.entries = entries;
+                }
             },
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
             Err(e) => {
@@ -506,6 +521,51 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
 }
 
 // =============================================================================
+// Version-specific command lists + remote completers
+// =============================================================================
+
+const V2_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "put", "rm", "mkdir", "rmdir", "mv", "chmod", "chown", "stat", "readlink", "symlink", "lcd", "lls", "lpwd", "lmkdir", "whoami", "handle", "root", "help", "exit", "quit"];
+
+const V4_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "uid", "gid", "hostname", "whoami", "help", "exit", "quit"];
+
+struct Nfs2RemoteCompleter<T: nfswolf_rpc::RpcTransport + Send + Sync + 'static> {
+    client: Arc<nfswolf_nfs2::Nfs2Client<T>>,
+}
+
+impl<T: nfswolf_rpc::RpcTransport + Send + Sync + 'static> crate::shell::complete::RemoteCompleter for Nfs2RemoteCompleter<T> {
+    fn list_dir_entries(&self, handle: &[u8]) -> Vec<String> {
+        let client = Arc::clone(&self.client);
+        let fh = nfswolf_nfs2::wire::Nfs2FileHandle::from_bytes(handle);
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { v2_readdir_all(&client, &fh).await.map_or_else(|_| Vec::new(), |es| es.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name.clone()).collect()) }))
+    }
+
+    fn resolve_path(&self, start: &[u8], path: &str) -> Option<Vec<u8>> {
+        let client = Arc::clone(&self.client);
+        let fh = nfswolf_nfs2::wire::Nfs2FileHandle::from_bytes(start);
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { client.lookup_path(&fh, path).await.ok().map(|(fh, _)| fh.0.to_vec()) }))
+    }
+}
+
+struct Nfs4RemoteCompleter {
+    client: Arc<tokio::sync::Mutex<crate::proto::nfs4::compound::Nfs4DirectClient>>,
+}
+
+impl crate::shell::complete::RemoteCompleter for Nfs4RemoteCompleter {
+    fn list_dir_entries(&self, handle: &[u8]) -> Vec<String> {
+        let client = Arc::clone(&self.client);
+        let fh = handle.to_vec();
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { client.lock().await.list_dir(&fh).await.unwrap_or_default() }))
+    }
+
+    fn resolve_path(&self, start: &[u8], path: &str) -> Option<Vec<u8>> {
+        let client = Arc::clone(&self.client);
+        let fh = start.to_vec();
+        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { client.lock().await.lookup_from_fh(&fh, &components).await.ok() }))
+    }
+}
+
+// =============================================================================
 // NFSv2 shell  --  MOUNT v1 + Nfs2Client
 // =============================================================================
 
@@ -565,7 +625,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let cred = AuthSys::with_groups(uid, gid, &[gid], &hostname);
     let opaque = cred.to_opaque_auth(next_stamp());
     let transport = DirectTransport::with_auth(io, opaque, opaque_auth::default());
-    let client = Nfs2Client::new(transport);
+    let client = Arc::new(Nfs2Client::new(transport));
 
     println!("{}", format!("[+] Connected to {host} as uid={uid} gid={gid} (NFSv2 shell  --  type 'help' for commands)").green());
     println!("# rerun: nfswolf shell {host}:{export} --nfs-version 2 --uid {uid} --gid {gid}");
@@ -576,7 +636,14 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     // Non-interactive mode: run one command and return (same as v3 shell).
     let single_command = args.command.clone();
 
-    let mut rl = rustyline::DefaultEditor::new()?;
+    // Tab completion: populate cache with root dir, build completer.
+    let tab_cache = {
+        let entries = v2_readdir_all(&client, &cwd_fh).await.map_or_else(|_| Vec::new(), |es| es.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name.clone()).collect());
+        Arc::new(std::sync::Mutex::new(crate::shell::complete::TabCache { cwd: cwd_fh.0.to_vec(), entries }))
+    };
+    let completer = ShellCompleter::new(Box::new(Nfs2RemoteCompleter { client: Arc::clone(&client) }), root_fh.0.to_vec(), Arc::clone(&tab_cache), V2_SHELL_COMMANDS);
+    let mut rl = Editor::<ShellCompleter, DefaultHistory>::new()?;
+    rl.set_helper(Some(completer));
     loop {
         let input = if let Some(ref cmd) = single_command {
             cmd.clone()
@@ -635,18 +702,27 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                 if arg.is_empty() {
                     cwd_fh = root_fh;
                     "/".clone_into(&mut cwd_path);
-                    continue;
+                } else {
+                    match client.lookup_path(&cwd_fh, arg).await {
+                        Ok((fh, _)) => {
+                            cwd_fh = fh;
+                            if arg.starts_with('/') {
+                                cwd_path = format!("/{}", arg.trim_start_matches('/'));
+                            } else {
+                                cwd_path = format!("{}/{}", cwd_path.trim_end_matches('/'), arg);
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("{}", format!("cd: {arg}: {e}").red());
+                            continue;
+                        },
+                    }
                 }
-                match client.lookup_path(&cwd_fh, arg).await {
-                    Ok((fh, _)) => {
-                        cwd_fh = fh;
-                        if arg.starts_with('/') {
-                            cwd_path = format!("/{}", arg.trim_start_matches('/'));
-                        } else {
-                            cwd_path = format!("{}/{}", cwd_path.trim_end_matches('/'), arg);
-                        }
-                    },
-                    Err(e) => eprintln!("{}", format!("cd: {arg}: {e}").red()),
+                if let Ok(entries) = v2_readdir_all(&client, &cwd_fh).await
+                    && let Ok(mut cache) = tab_cache.lock()
+                {
+                    cache.cwd = cwd_fh.0.to_vec();
+                    cache.entries = entries.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name.clone()).collect();
                 }
             },
             "pwd" => println!("{cwd_path}"),

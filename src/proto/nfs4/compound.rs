@@ -186,6 +186,28 @@ impl Nfs4DirectClient {
         }
     }
 
+    /// Navigate to `components` starting from an arbitrary file handle.
+    ///
+    /// Like `lookup_fh` but uses PUTFH instead of PUTROOTFH, enabling
+    /// relative path resolution from the current working directory.
+    pub(crate) async fn lookup_from_fh(&mut self, start_fh: &[u8], components: &[&str]) -> anyhow::Result<Vec<u8>> {
+        if components.is_empty() {
+            return Ok(start_fh.to_vec());
+        }
+        let mut ops = Vec::with_capacity(components.len() + 2);
+        ops.push(ArgOp::Putfh(start_fh.to_vec()));
+        for &c in components {
+            ops.push(ArgOp::Lookup(c.to_owned()));
+        }
+        ops.push(ArgOp::Getfh);
+        let res = self.compound(ops).await?;
+        anyhow::ensure!(res.status == 0, "LOOKUP failed: NFSv4 status={}", res.status);
+        match res.results.last().map(|op| &op.data) {
+            Some(ResOpData::Fh(fh)) => Ok(fh.clone()),
+            _ => anyhow::bail!("GETFH result missing after LOOKUP chain"),
+        }
+    }
+
     /// List directory entries for the directory at `dir_fh`.
     ///
     /// Returns entry names excluding `"."` and `".."`.  Requests no inline

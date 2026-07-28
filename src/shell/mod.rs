@@ -4,6 +4,7 @@
 //! command dispatch, tab completion, and help text. Version-specific behavior
 //! lives in `v2::V2Ops` and `v3::V3Ops`.
 
+pub(crate) mod complete;
 pub(crate) mod ops;
 pub(crate) mod v2;
 pub(crate) mod v3;
@@ -88,108 +89,34 @@ pub(crate) const SHELL_COMMANDS: &[&str] = &[
     "quit",
 ];
 
-/// State shared between `NfsShell` and `NfsCompleter` for Tab completion.
-///
-/// Updated after every successful `cd`. The completer reads this without
-/// holding any async locks (std Mutex, not tokio).
-pub(crate) struct TabCache {
-    /// File handle of the directory whose entries are cached.
-    pub cwd: FileHandle,
-    /// Names of entries in `cwd` (updated after navigation).
-    pub entries: Vec<String>,
-}
-
 // =============================================================================
-// Tab completer  --  rustyline Helper implementation
+// NFSv3 remote completion  --  bridges ShellCompleter to Nfs3Client
 // =============================================================================
 
-/// Rustyline helper that provides Tab completion for the NFS shell.
-///
-/// Completes:
-/// - Shell commands when at the start of a line
-/// - Remote paths for file-argument commands (uses cached or live READDIRPLUS)
-pub(crate) struct NfsCompleter {
-    /// NFS client for live path lookups when the cache doesn't cover the directory.
-    pub nfs3: Arc<Nfs3Client>,
-    /// Export root handle (for absolute path resolution from `/`).
-    pub export_root: FileHandle,
-    /// Shared cache of the current directory's entry names.
-    /// Populated by `NfsShell::refresh_tab_cache()` after each `cd`.
-    pub cache: Arc<Mutex<TabCache>>,
+pub(crate) struct Nfs3RemoteCompleter {
+    nfs3: Arc<Nfs3Client>,
 }
 
-impl rustyline::completion::Completer for NfsCompleter {
-    type Candidate = String;
-
-    fn complete(&self, line: &str, pos: usize, _ctx: &rustyline::Context<'_>) -> rustyline::Result<(usize, Vec<String>)> {
-        let fragment = &line[..pos];
-
-        // --- Command completion (first token, no space yet) ---
-        if !fragment.contains(' ') {
-            let prefix = fragment;
-            let mut matches: Vec<String> = SHELL_COMMANDS.iter().filter(|c| c.starts_with(prefix)).map(|c| (*c).to_owned()).collect();
-            matches.sort();
-            return Ok((0, matches));
-        }
-
-        // --- Path completion (second+ token) ---
-        let arg_start = fragment.rfind(' ').map_or(0, |i| i + 1);
-        let path_partial = &fragment[arg_start..];
-
-        // Split at the last '/' to find the directory prefix and the name prefix.
-        let (dir_str, name_prefix, name_start) = if let Some(slash) = path_partial.rfind('/') {
-            let dir = &path_partial[..=slash]; // includes the trailing slash
-            let name = &path_partial[slash + 1..];
-            (dir.to_owned(), name, arg_start + slash + 1)
-        } else {
-            (String::new(), path_partial, arg_start)
-        };
-
-        // Fetch entries for the directory.
-        let entries = if dir_str.is_empty() {
-            // Use the cached current-directory entries.
-            self.cache.lock().map_or_else(|_| Vec::new(), |g| g.entries.clone())
-        } else {
-            // Live lookup via block_in_place (we are inside an async task but
-            // rustyline calls complete() synchronously; block_in_place moves the
-            // blocking work off the async thread pool safely).
-            let nfs3 = Arc::clone(&self.nfs3);
-            let export_root = self.export_root.clone();
-            let cwd_fh = self.cache.lock().map_or_else(|_| export_root.clone(), |g| g.cwd.clone());
-            let dir_owned = dir_str;
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    let (start, rel) = if dir_owned.starts_with('/') { (export_root, dir_owned.trim_start_matches('/').trim_end_matches('/').to_owned()) } else { (cwd_fh, dir_owned.trim_end_matches('/').to_owned()) };
-                    let dir_fh = if rel.is_empty() {
-                        start
-                    } else {
-                        match lookup_path_from(&nfs3, &start, &rel).await {
-                            Ok((fh, _)) => fh,
-                            Err(_) => return Vec::new(),
-                        }
-                    };
-                    match try_readdirplus(&nfs3, &dir_fh).await {
-                        Ok(es) => es.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name).collect(),
-                        Err(_) => Vec::new(),
-                    }
-                })
+impl complete::RemoteCompleter for Nfs3RemoteCompleter {
+    fn list_dir_entries(&self, handle: &[u8]) -> Vec<String> {
+        let nfs3 = Arc::clone(&self.nfs3);
+        let fh = FileHandle::from_bytes(handle);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                match try_readdirplus(&nfs3, &fh).await {
+                    Ok(entries) => entries.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name).collect(),
+                    Err(_) => Vec::new(),
+                }
             })
-        };
+        })
+    }
 
-        let mut matches: Vec<String> = entries.into_iter().filter(|e| e.starts_with(name_prefix) && e != "." && e != "..").collect();
-        matches.sort();
-        Ok((name_start, matches))
+    fn resolve_path(&self, start: &[u8], path: &str) -> Option<Vec<u8>> {
+        let nfs3 = Arc::clone(&self.nfs3);
+        let fh = FileHandle::from_bytes(start);
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { lookup_path_from(&nfs3, &fh, path).await.ok().map(|(fh, _)| fh.as_bytes().to_vec()) }))
     }
 }
-
-// rustyline requires the Helper trait which combines Completer + Hinter + Highlighter + Validator.
-// We only care about Completer; the rest get no-op implementations.
-impl rustyline::hint::Hinter for NfsCompleter {
-    type Hint = String;
-}
-impl rustyline::highlight::Highlighter for NfsCompleter {}
-impl rustyline::validate::Validator for NfsCompleter {}
-impl rustyline::Helper for NfsCompleter {}
 
 /// Interactive NFS shell  --  browse and extract files from an NFS export.
 ///
@@ -216,7 +143,7 @@ pub(crate) struct NfsShell {
     /// Shared state for the Tab completer. Updated after every successful cd.
     /// The Mutex is std (not tokio) so the sync completer can lock it without
     /// block_in_place overhead.
-    tab_cache: Arc<Mutex<TabCache>>,
+    tab_cache: Arc<Mutex<complete::TabCache>>,
     /// Credential winners from prior escalation walks. Keyed by file handle
     /// bytes so a repeat access to the same inode skips straight to the
     /// identity that worked last time. Flushed when the user changes identity
@@ -228,7 +155,7 @@ impl NfsShell {
     /// Create a new shell rooted at `root_fh` on the given client.
     #[must_use]
     pub(crate) fn new(nfs3: Arc<Nfs3Client>, root_fh: FileHandle, allow_write: bool, hostname: String) -> Self {
-        let tab_cache = Arc::new(Mutex::new(TabCache { cwd: root_fh.clone(), entries: Vec::new() }));
+        let tab_cache = Arc::new(Mutex::new(complete::TabCache { cwd: root_fh.as_bytes().to_vec(), entries: Vec::new() }));
         Self { nfs3, export_root: root_fh.clone(), cwd: root_fh, cwd_path: "/".to_owned(), allow_write, hostname, history: Vec::new(), tab_cache, cred_cache: Mutex::new(std::collections::HashMap::new()) }
     }
 
@@ -314,8 +241,8 @@ impl NfsShell {
     /// Build a Tab completer that shares the directory cache with this shell.
     ///
     /// Call once after construction; pass the result to rustyline `Editor::set_helper`.
-    pub(crate) fn make_completer(&self) -> NfsCompleter {
-        NfsCompleter { nfs3: Arc::clone(&self.nfs3), export_root: self.export_root.clone(), cache: Arc::clone(&self.tab_cache) }
+    pub(crate) fn make_completer(&self) -> complete::ShellCompleter {
+        complete::ShellCompleter::new(Box::new(Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) }), self.export_root.as_bytes().to_vec(), Arc::clone(&self.tab_cache), SHELL_COMMANDS)
     }
 
     /// Refresh the Tab completion cache with the current directory's entries.
@@ -328,7 +255,7 @@ impl NfsShell {
             Err(_) => Vec::new(),
         };
         if let Ok(mut cache) = self.tab_cache.lock() {
-            cache.cwd = self.cwd.clone();
+            cache.cwd = self.cwd.as_bytes().to_vec();
             cache.entries = entries;
         }
     }
