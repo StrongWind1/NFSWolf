@@ -386,7 +386,7 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             println!("  lmkdir <dir>    create local directory");
             println!("  exit / quit     exit the shell");
         },
-        "whoami" => println!("uid={uid}  gid={gid}  hostname={hostname}"),
+        "whoami" | "id" => println!("uid={uid}  gid={gid}  hostname={hostname}"),
         "uid" => match args.first().and_then(|s| s.parse::<u32>().ok()) {
             Some(new_uid) => {
                 *uid = new_uid;
@@ -419,9 +419,8 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             }
         },
         "pwd" => println!("{cwd_path}"),
-        "ls" => {
+        "ls" | "ll" | "dir" => {
             let target_fh = if let Some(subdir) = args.first() {
-                // Resolve subdir relative to cwd.
                 let components = cwd_path_plus(cwd_path, subdir);
                 let refs: Vec<&str> = components.iter().map(String::as_str).collect();
                 match client.lookup_fh(&refs).await {
@@ -475,7 +474,7 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             };
             *cwd_path = new_path;
         },
-        "cat" => {
+        "cat" | "type" => {
             let Some(filename) = args.first() else {
                 eprintln!("usage: cat <file>");
                 return;
@@ -594,7 +593,7 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
 // Version-specific command lists + remote completers
 // =============================================================================
 
-const V4_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "download", "uid", "gid", "hostname", "whoami", "handle", "lcd", "lls", "lpwd", "lmkdir", "history", "help", "exit", "quit"];
+const V4_SHELL_COMMANDS: &[&str] = &["ls", "ll", "dir", "cd", "pwd", "cat", "type", "get", "download", "uid", "gid", "hostname", "whoami", "id", "handle", "lcd", "lls", "lpwd", "lmkdir", "history", "help", "exit", "quit"];
 
 struct Nfs4RemoteCompleter {
     client: Arc<tokio::sync::Mutex<crate::proto::nfs4::compound::Nfs4DirectClient>>,

@@ -36,20 +36,26 @@ const CHUNK_SIZE: u32 = 65_536; // 64 KiB
 /// All commands available in the NFSv3 interactive shell (for Tab completion of the first token).
 pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "ls",
+    "ll",
+    "dir",
     "cd",
     "pwd",
     "tree",
     "find",
     "cat",
+    "type",
     "get",
     "download",
     "put",
     "upload",
     "rm",
+    "del",
     "mkdir",
     "rmdir",
     "mv",
+    "rename",
     "cp",
+    "copy",
     "chmod",
     "chown",
     "stat",
@@ -60,7 +66,9 @@ pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "gid",
     "hostname",
     "whoami",
+    "id",
     "impersonate",
+    "su",
     "mknod",
     "suid-scan",
     "world-writable",
@@ -83,32 +91,43 @@ pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
 
 /// Commands available in the NFSv2 shell (Tab completion).
 ///
-/// Excludes `uid`/`gid`/`hostname`/`impersonate` (identity changes require
-/// reconnection on V2's `DirectTransport`) and `mknod` (not in NFSv2).
-/// The unified dispatch still handles these with a clear error message.
+/// Excludes `mknod` (not in NFSv2).
+/// The unified dispatch still handles unsupported commands with a clear error.
 pub(crate) const V2_SHELL_COMMANDS: &[&str] = &[
     "ls",
+    "ll",
+    "dir",
     "cd",
     "pwd",
     "tree",
     "find",
     "cat",
+    "type",
     "get",
     "download",
     "put",
     "upload",
     "rm",
+    "del",
     "mkdir",
     "rmdir",
     "mv",
+    "rename",
     "cp",
+    "copy",
     "chmod",
     "chown",
     "stat",
     "readlink",
     "symlink",
     "link",
+    "uid",
+    "gid",
+    "hostname",
     "whoami",
+    "id",
+    "impersonate",
+    "su",
     "suid-scan",
     "world-writable",
     "secrets-scan",
@@ -213,20 +232,24 @@ impl<O: ShellOps> NfsShell<O> {
 
         match cmd {
             // Navigation
-            "ls" => self.cmd_ls(arg).await,
+            "ls" | "dir" => self.cmd_ls(arg).await,
+            "ll" => {
+                let ll_arg = format!("-a {arg}");
+                self.cmd_ls(ll_arg.trim_end()).await;
+            },
             "cd" => self.cmd_cd(arg).await,
             "pwd" => println!("{}", self.cwd_path),
             "tree" => self.cmd_tree(arg).await,
             "find" => self.cmd_find(arg).await,
             // File ops
-            "cat" => self.cmd_cat(arg).await,
+            "cat" | "type" => self.cmd_cat(arg).await,
             "get" | "download" => self.cmd_get(arg).await,
             "put" | "upload" => self.cmd_put(arg).await,
-            "rm" => self.cmd_rm(arg).await,
+            "rm" | "del" => self.cmd_rm(arg).await,
             "mkdir" => self.cmd_mkdir(arg).await,
             "rmdir" => self.cmd_rmdir(arg).await,
-            "mv" => self.cmd_mv(arg).await,
-            "cp" => self.cmd_cp(arg).await,
+            "mv" | "rename" => self.cmd_mv(arg).await,
+            "cp" | "copy" => self.cmd_cp(arg).await,
             // Permissions
             "chmod" => self.cmd_chmod(arg).await,
             "chown" => self.cmd_chown(arg).await,
@@ -238,8 +261,8 @@ impl<O: ShellOps> NfsShell<O> {
             "uid" => self.cmd_uid(arg),
             "gid" => self.cmd_gid(arg),
             "hostname" => self.cmd_hostname(arg),
-            "whoami" => self.cmd_whoami(),
-            "impersonate" => self.cmd_impersonate(arg),
+            "whoami" | "id" => self.cmd_whoami(),
+            "impersonate" | "su" => self.cmd_impersonate(arg),
             // Devices
             "mknod" => self.cmd_mknod(arg).await,
             // Analysis
@@ -1496,21 +1519,21 @@ impl<O: ShellOps> NfsShell<O> {
         println!("{}", format!("{ver} shell commands:").bold());
         println!();
         println!("{}", "Navigation:".bold().underline());
-        println!("  ls [-a] [--sort=FIELD] [-r] [path]  list directory; -a adds inode/nlink/used/rdev/atime/ctime columns; -r reverses");
+        println!("  ls [-a] [--sort=FIELD] [-r] [path]  list directory (aliases: ll = ls -a, dir)");
         println!("  cd <path>                  change directory  (/ = export root, /abs = absolute)");
         println!("  pwd                        print current path");
         println!("  tree [depth]               recursive tree (default depth 3; hidden dirs always shown)");
         println!("  find <pattern>             find filenames containing pattern");
         println!();
         println!("{}", "File operations:".bold().underline());
-        println!("  cat <file>                 print file contents");
+        println!("  cat <file>                 print file contents (alias: type)");
         println!("  get [-r] <remote> [local | dir/]  download file/tree (alias: download)");
         println!("  put [-r] <local> <remote>  upload file/tree  (alias: upload)  [--allow-write]");
-        println!("  rm <file>                  remove file  [--allow-write]");
+        println!("  rm <file>                  remove file (alias: del)  [--allow-write]");
         println!("  mkdir <dir>                create directory  [--allow-write]");
         println!("  rmdir <dir>                remove directory  [--allow-write]");
-        println!("  mv <src> <dst>             rename/move  [--allow-write]");
-        println!("  cp <src> <dst>             copy file  [--allow-write]");
+        println!("  mv <src> <dst>             rename/move (alias: rename)  [--allow-write]");
+        println!("  cp <src> <dst>             copy file (alias: copy)  [--allow-write]");
         println!("  symlink <target> <name>    create symlink  [--allow-write]");
         println!("  link <existing> <name>     create hard link  [--allow-write]");
         println!("  readlink <path>            read symlink target");
@@ -1525,12 +1548,12 @@ impl<O: ShellOps> NfsShell<O> {
         } else {
             println!("{}", "Identity  (read-only on this version):".bold().underline());
         }
-        println!("  whoami                     show current uid:gid");
+        println!("  whoami                     show current uid:gid (alias: id)");
         if self.ops.supports_identity_change() {
             println!("  uid <n>                    switch UID");
             println!("  gid <n>                    switch GID");
             println!("  hostname <name>            spoof AUTH_SYS machinename");
-            println!("  impersonate <uid>:<gid>    switch both");
+            println!("  impersonate <uid>:<gid>    switch both (alias: su)");
         }
         println!();
         if self.ops.supports_mknod() {
