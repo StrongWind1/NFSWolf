@@ -44,7 +44,7 @@ const CHUNK_SIZE: u32 = 65_536; // 64 KiB
 const MAX_DIR_ENTRIES: usize = 1_000_000;
 
 /// All commands available in the interactive shell (for Tab completion of the first token).
-pub(crate) const SHELL_COMMANDS: &[&str] = &[
+pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "ls",
     "cd",
     "pwd",
@@ -242,7 +242,7 @@ impl NfsShell {
     ///
     /// Call once after construction; pass the result to rustyline `Editor::set_helper`.
     pub(crate) fn make_completer(&self) -> complete::ShellCompleter {
-        complete::ShellCompleter::new(Box::new(Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) }), self.export_root.as_bytes().to_vec(), Arc::clone(&self.tab_cache), SHELL_COMMANDS)
+        complete::ShellCompleter::new(Box::new(Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) }), self.export_root.as_bytes().to_vec(), Arc::clone(&self.tab_cache), V3_SHELL_COMMANDS)
     }
 
     /// Refresh the Tab completion cache with the current directory's entries.
