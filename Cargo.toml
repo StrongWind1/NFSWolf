@@ -49,26 +49,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an interactive shell for authorized red-team and pentest work."
-keywords = ["nfs", "security", "pentest", "scanner", "rpc"]
-categories = ["command-line-utilities", "network-programming", "filesystem"]
 readme = "README.md"
-include = [
-  "/src/**/*",
-  "/tests/**/*",
-  "/Cargo.toml",
-  "/Cargo.lock",
-  "/README.md",
-  "/LICENSE",
-  "/CHANGELOG.md",
-]
-
-# Build the published documentation on docs.rs with all features enabled and a
-# stable cfg flag (`docsrs`), matching the convention used by most well-curated
-# Rust crates so doc rebuilds stay deterministic across nightly toolchains.
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # Async runtime
