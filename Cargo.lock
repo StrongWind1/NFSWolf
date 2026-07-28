@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "nfswolf"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "nfswolf-nfs2"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "nfswolf-rpc",
  "nfswolf-xdr",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "nfswolf-nfs3"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "nfswolf-rpc",
  "nfswolf-xdr",
@@ -713,14 +713,14 @@ dependencies = [
 
 [[package]]
 name = "nfswolf-nfs4"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "nfswolf-xdr",
 ]
 
 [[package]]
 name = "nfswolf-rpc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "fastrand",
  "nfswolf-xdr",
@@ -729,14 +729,14 @@ dependencies = [
 
 [[package]]
 name = "nfswolf-xdr"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "nfswolf-xdr-derive",
 ]
 
 [[package]]
 name = "nfswolf-xdr-derive"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "proc-macro2",
  "quote",
