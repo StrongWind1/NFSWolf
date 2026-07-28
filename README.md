@@ -170,9 +170,13 @@ Global flags common to every subcommand:
 --hostname <NAME>        AUTH_SYS machinename field
 --privileged-port        Bind source port <1024 (may require CAP_NET_BIND_SERVICE / root)
 --proxy <HOST:PORT>      Route all RPC through SOCKS5 (no-auth) proxy
---stealth-delay <MS>     Baseline inter-RPC delay
---stealth-jitter <MS>    Random jitter added to each delay
+--nfs-port <PORT>        Override NFS service port (default: portmapper lookup)
+--mount-port <PORT>      Override mountd port (default: portmapper lookup)
+--timeout <MS>           Per-RPC timeout in milliseconds (default 3000)
+--delay <MS>             Baseline inter-RPC delay (stealth pacing)
+--jitter <MS>            Random jitter added to each delay
 --no-color               Strip ANSI colors
+-q / --quiet             Suppress status banners and rerun hints
 -v / -vv / -vvv          Verbosity (info / debug / trace)
 ```
 
