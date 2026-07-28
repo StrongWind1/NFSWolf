@@ -1,5 +1,4 @@
 //! NFSv2 backend for the unified shell.
-#![allow(dead_code, reason = "V2Ops -- used by cli::shell but lint cannot trace through generic code")]
 
 use std::sync::Arc;
 

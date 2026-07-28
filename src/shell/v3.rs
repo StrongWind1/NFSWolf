@@ -1,5 +1,4 @@
 //! NFSv3 backend for the unified shell.
-#![allow(dead_code, reason = "V3Ops -- planned migration target for the v3 shell")]
 
 use std::sync::{Arc, Mutex};
 
