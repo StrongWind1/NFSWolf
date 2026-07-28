@@ -16,6 +16,7 @@ For the summary catalog with RFC rationale, see [FINDINGS.md](../FINDINGS.md).
 | F-1.4 | [Machine Name Spoofing / Log Poisoning](F-1.4-machine-name-spoofing.md) | Low |
 | F-1.5 | [Credential Replay from Wire](F-1.5-credential-replay.md) | High |
 | F-1.6 | [NFSv2 Downgrade (Auth Bypass)](F-1.6-nfsv2-downgrade.md) | High |
+| F-1.7 | [RPCSEC_GSS Flavor Downgrade (Mixed-Flavor Export)](F-1.7-rpcsec-gss-flavor-downgrade.md) | High |
 
 ### Category 2: Access Control Bypass (File Handle Exploitation)
 
@@ -29,6 +30,7 @@ For the summary catalog with RFC rationale, see [FINDINGS.md](../FINDINGS.md).
 | F-2.6 | [Bind Mount Export Escape](F-2.6-bind-mount-escape.md) | High |
 | F-2.7 | [NFS Daemon Export ACL Blindness](F-2.7-nfsd-acl-blindness.md) | Critical |
 | F-2.8 | [Sibling Export Lateral Access](F-2.8-sibling-export-lateral-access.md) | Critical |
+| F-2.9 | [WebNFS Public File Handle (MOUNT Bypass)](F-2.9-webnfs-public-handle.md) | Critical |
 
 ### Category 3: Network-Level Attacks
 

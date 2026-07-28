@@ -100,7 +100,7 @@ nfswolf analyze target --test-read /etc/shadow --test-read-gids 42,15,0 --test-r
 
 Every analysis runs the full check matrix unconditionally. The only per-run knobs are `--test-read PATH` (defaults to `/etc/shadow`), `--test-read-uids`, `--test-read-gids`, and `--v4-depth`.
 
-Output split: `analyze` prints an ANSI-coloured human-readable summary on stdout by default. With the global `--json` flag it emits a single JSON array on stdout instead -- redirect that into a file and feed it to `nfswolf convert` to render HTML/Markdown/CSV/TXT.
+Output split: `analyze` prints an ANSI-coloured human-readable summary on stdout by default. With `--json` it emits a single JSON array on stdout instead -- redirect that into a file and feed it to `nfswolf convert` to render HTML/Markdown/CSV/TXT.
 
 **Checks performed (all always-on):**
 
@@ -364,10 +364,10 @@ pub struct PoolKey {
 }
 
 pub struct ConnectionPool {
-    pools: DashMap<PoolKey, VecDeque<PooledConnection>>,
+    pools: DashMap<PoolKey, Arc<Mutex<VecDeque<NfsConnection>>>>,
     max_per_key: usize,        // max idle connections per key (default 4)
     max_total: usize,          // global connection limit (default 256)
-    outstanding: AtomicUsize,  // in-flight connections
+    admission: Arc<Semaphore>, // one permit per outstanding checkout
     stale_threshold: Duration, // connections older than this get health-checked (default 5s)
 }
 ```
@@ -376,7 +376,7 @@ pub struct ConnectionPool {
 1. **Checkout**: pop from idle queue -> if older than `stale_threshold`, send GETATTR on root handle as health check -> if healthy, return; if stale, discard and create new
 2. **Return**: push back to idle queue (LIFO for cache warmth)
 3. **Poison**: on RPC failure, mark connection as poisoned (discarded on next checkout)
-4. **Backpressure**: when `outstanding >= max_total`, waiters are queued via `tokio::sync::Notify` -- prevents thundering herd
+4. **Backpressure**: admission is gated by `tokio::sync::Semaphore` with `max_total` permits -- prevents thundering herd
 
 ### Circuit Breaker per Host
 
@@ -402,7 +402,7 @@ pub struct HostHealth {
 **Behavior:**
 - Only **transient** errors count (timeout, connection reset, ECONNREFUSED). Permission denials (NFS3ERR_ACCES, NFS3ERR_PERM) are expected during UID spraying and do NOT trip the breaker.
 - Cooldown: `base * 2^(trip_count - 1)` with full jitter, capped at `max_cooldown`
-- Recovery: success rate drops below 40% (half the trip threshold) -> reset `trip_count`
+- Recovery: success rate rises above `1.0 - (error_threshold / 2.0)` (i.e., above 60% at default 0.80 threshold) -> reset `trip_count`
 
 ### Evidence-Driven Credential Ladder
 
@@ -426,7 +426,7 @@ File handles obtained during the directory walk are reused across all credential
 
 The library crate (`nfswolf-nfs3`) exposes a domain API that takes and returns `FileHandle`, `FileAttrs` and friends rather than raw XDR. Failures are reported as `Nfs3Fault<E>`, which separates "no answer from the server" (`Rpc(E)`) from "the server answered and refused" (`Status(Nfs3Error)`).
 
-In the binary, `Nfs3Client` is a type alias: `nfswolf_nfs3::Nfs3Client<PooledTransport>`. The `PooledNfs3` trait provides domain accessors (`attrs`, `resolve`, `read_at`, `write_at`, `list_dir`, `read_all`, `walk`, etc.) that the shell, FUSE, analyzer, and offensive subcommands all call.
+In the binary, `Nfs3Client` is a type alias: `nfswolf_nfs3::Nfs3Client<PooledTransport>`. The domain methods (`attrs`, `resolve`, `read_at`, `write_at`, `list_dir`, `read_all`, `walk`, etc.) are inherent methods on the library's `Nfs3Client<T>`. The `PooledNfs3` extension trait adds pool-specific accessors (`host`, `uid`, `gid`, `machinename`, `with_credential`) that let the shell, FUSE, and offensive subcommands switch credentials mid-session.
 
 ### File Handle Analysis
 
@@ -444,27 +444,27 @@ impl FileHandleAnalyzer {
     /// Identify the filesystem type from fileid_type (F-2.1)
     pub fn fingerprint_fs(fh: &FileHandle) -> FsType;
 
-    /// Extract filesystem ID for escape construction (F-2.1)
-    pub fn extract_fsid(fh: &FileHandle) -> Option<FsId>;
-
     /// Construct a handle targeting an arbitrary inode (F-2.1, F-2.2 -- generic primitive)
-    pub fn construct_handle_for_inode(fh: &FileHandle, inode: u32, gen: u32) -> Option<FileHandle>;
+    pub fn construct_handle_for_inode(fh: &FileHandle, inode: u32, gen: u32) -> Option<EscapeResult>;
 
     /// Construct root directory handle (F-2.1 -- sugar for root inode per FS type)
     /// ext4: inode=2, xfs: inode=128/64, btrfs: inode=256
-    pub fn construct_escape_handle(fh: &FileHandle) -> Option<FileHandle>;
+    pub fn construct_escape_handle(fh: &FileHandle) -> Option<EscapeResult>;
+
+    /// Construct all XFS root candidates (inodes 32, 64, 128)
+    pub fn construct_xfs_escape_candidates(fh: &FileHandle) -> Vec<EscapeResult>;
+
+    /// Construct all known-root candidates across ext4/XFS/BTRFS
+    pub fn construct_root_candidates(fh: &FileHandle) -> Vec<EscapeResult>;
 
     /// Construct BTRFS subvolume handles (F-2.4 -- subvol IDs 256+)
-    pub fn construct_btrfs_subvol_handles(fh: &FileHandle) -> Vec<FileHandle>;
+    pub fn construct_btrfs_subvol_handles(fh: &FileHandle, max_subvols: u32) -> Vec<EscapeResult>;
 
     /// Check Windows handle signing (F-2.3 -- HMAC present/absent)
     pub fn check_windows_signing(fh: &FileHandle) -> SigningStatus;
 
     /// Estimate handle entropy in bits (F-2.2 -- brute-force feasibility)
     pub fn estimate_entropy(fh: &FileHandle) -> EntropyAnalysis;
-
-    /// Generate candidate handles for brute-force (F-2.2)
-    pub fn generate_candidates(fs_type: FsType, fsid: &FsId) -> impl Iterator<Item = FileHandle>;
 }
 
 /// Handle oracle: NFS3ERR_BADHANDLE (10001) = wrong format, NFS3ERR_STALE (70) = right format,
@@ -598,7 +598,7 @@ done from `shell` or `mount`.
 | FUSE binding | fuser | Pure Rust FUSE implementation |
 | Shell REPL | rustyline | Readline with tab completion and history |
 | Serialization | serde + serde_json | JSON output |
-| Networking | tokio::net + socket2 | Raw socket control for privileged ports |
+| Networking | tokio::net | Async TCP/UDP + privileged port binding via TcpSocket |
 | Proxy | Inline SOCKS5 CONNECT (`src/proto/conn.rs`) | No external crate; one-shot handshake |
 | Connection pool | Custom (DashMap + VecDeque) | Per-(host, export, uid, gid) pooling with health eviction |
 | Terminal output | colored + tabled + indicatif | ANSI colors, tables, progress bars |
@@ -671,18 +671,20 @@ nfswolf/
 │       ├── mod.rs
 │       ├── stealth.rs             # StealthConfig: delay + jitter + async wait()
 │       └── utmp.rs                # wtmp / btmp / lastlog binary record parsers
-├── tests/integration/             # 4 binaries, integration + unit tests
+├── tests/integration/             # 6 test binaries
 │   ├── scan_test.rs
 │   ├── nfs3_protocol_test.rs
 │   ├── analyzer_test.rs
-│   └── escape_test.rs
+│   ├── escape_test.rs
+│   ├── credential_test.rs
+│   └── xdr_fuzz_test.rs
 ├── docs/
 │   ├── FINDINGS.md                # Finding catalog (41 findings, F-1.1 through F-7.6)
 │   ├── REQUIREMENTS.md            # Tool requirements (R1 through R7)
 │   ├── DESIGN.md                  # Vision, goals, threat model
 │   ├── ARCHITECTURE.md            # This file
 │   ├── NFSv2.md, NFSv3.md, NFSv4.md  # Protocol reference notes
-│   └── findings/                  # Detailed finding write-ups (42 files: 41 findings + README.md)
+│   └── findings/                  # Detailed finding write-ups (42 files: 41 findings + README)
 └── ref/
     ├── nfs3/                      # Read-only Vaiz/nfs3 checkout (for upstream diffing)
     └── rfc/                       # NFS/RPC/XDR RFCs (1057, 1094, 1813, 1831, 2623, 5531, 7530, 9289)
@@ -736,10 +738,10 @@ command is still invoked flat, e.g. `nfswolf scan ...`, `nfswolf brute-handle ..
 
 ```bash
 # 1. Discover NFS servers (F-5.4 portmapper enum, F-5.1 export enum)
-nfswolf scan 10.0.0.0/8 --output targets.json
+nfswolf scan 10.0.0.0/8 --json targets.json
 
 # 2. Deep analysis of each target (full check matrix is always on)
-nfswolf analyze -f targets.txt --output findings.json
+nfswolf analyze -f targets.txt --json findings.json
 
 # 3. Construct an escape handle (F-2.1)
 HANDLE=$(nfswolf escape 10.0.1.50:/srv/share --json | jq -r .root_handle)
@@ -757,8 +759,8 @@ nfswolf convert --format html --input findings.json -o nfs-assessment.html
 
 ```bash
 # Audit all NFS servers in the environment
-nfswolf scan 192.168.0.0/16 --output inventory.json
-nfswolf analyze -f inventory.json --output audit.json
+nfswolf scan 192.168.0.0/16 --json inventory.json
+nfswolf analyze -f inventory.json --json audit.json
 
 # Parse JSON for custom alerting or generate HTML report
 ```
@@ -805,8 +807,8 @@ cargo build --release --target x86_64-apple-darwin          # macOS amd64
 cargo build --release --target aarch64-apple-darwin         # macOS arm64
 cargo build --release --target x86_64-pc-windows-gnu        # Windows amd64
 
-# Install
-cargo install --path .
+# Install from git
+cargo install --git https://github.com/StrongWind1/NFSWolf
 ```
 
 ## Comparison with Existing Tools

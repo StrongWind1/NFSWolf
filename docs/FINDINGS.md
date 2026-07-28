@@ -85,6 +85,19 @@ The NFS security model trusts client-supplied credentials without verification.
 
 **Why the RFC allows this**: "NFS Version 2 had no support for security flavor negotiation. It was up to the client to guess, or depend on prior knowledge." (RFC 2623 §2.7). A client explicitly requesting v2 bypasses any v3+ sec=krb5 requirements because the v2 code path has no mechanism to enforce them.
 
+### F-1.7: RPCSEC_GSS Flavor Downgrade (Mixed-Flavor Export)
+
+| Field | Value |
+|-------|-------|
+| Severity | High |
+| RFC Basis | RFC 2203 §5.2.1, RFC 7530 §19, RFC 2623 §5 |
+| Precondition | Server exports with both AUTH_SYS and krb5 flavors |
+| Detection | MOUNT auth-flavor list or NFSv4 SECINFO returns both AUTH_SYS and krb5 |
+
+**Why the RFC allows this**: When an export advertises multiple security flavors (e.g., `sec=krb5:sys`), a client may freely choose AUTH_SYS even though krb5 is available. The server does not enforce the strongest available flavor. An attacker who cannot obtain Kerberos credentials simply selects AUTH_SYS and proceeds with forged credentials (F-1.1).
+
+**What nfswolf tests**: `analyze` checks the auth-flavor list returned by MOUNT EXPORT and flags exports that accept AUTH_SYS alongside any RPCSEC_GSS flavor.
+
 ---
 
 ## Category 2: Access Control Bypass (File Handle Exploitation)
@@ -189,6 +202,19 @@ File handles are bearer tokens -- possession is authorization.
 **Why this works**: When two exports share a physical filesystem (same fsid) and `subtree_check` is disabled, the kernel does not verify that a handle's inode is within the export's directory tree. After escaping to the filesystem root (F-2.1), standard LOOKUP operations reach any directory on the filesystem -- including IP-restricted peer exports. No handle construction is needed for the lateral movement step.
 
 **What nfswolf tests**: `escape-root` + `cd /path/to/restricted` + `ls`/`cat` demonstrates the full chain.
+
+### F-2.9: WebNFS Public File Handle (MOUNT Bypass)
+
+| Field | Value |
+|-------|-------|
+| Severity | Critical |
+| RFC Basis | RFC 2054 §5, RFC 2055 §5, RFC 2224 §9, RFC 2623 §2.6 |
+| Precondition | Server has WebNFS enabled (Solaris `public` share, NetApp `nfs.webnfs.enable`) |
+| Detection | Issue NFS LOOKUP with the all-zeros public file handle (RFC 2055 §5) |
+
+**Why the RFC allows this**: WebNFS defines a well-known "public" file handle (all zeros) that any client can use to access the server's public export without going through MOUNT. This bypasses the MOUNT protocol's host-based ACLs entirely. If WebNFS is enabled, the zero handle grants immediate access to the public export from any IP.
+
+**What nfswolf tests**: `analyze` probes for the WebNFS public handle on each target and flags the finding when the server responds to the zero-handle LOOKUP.
 
 ---
 
@@ -478,6 +504,7 @@ subcommand exercises these findings.
 | F-1.4 | [Machine Name Spoofing](findings/F-1.4-machine-name-spoofing.md) | Low | `--hostname` global flag (every subcommand), `shell hostname` |
 | F-1.5 | [Credential Replay](findings/F-1.5-credential-replay.md) | High | Passive only -- precondition detected via F-3.1 |
 | F-1.6 | [NFSv2 Downgrade](findings/F-1.6-nfsv2-downgrade.md) | High | `scan` (portmapper version matrix), `analyze` |
+| F-1.7 | [RPCSEC_GSS Flavor Downgrade](findings/F-1.7-rpcsec-gss-flavor-downgrade.md) | High | `analyze` (mixed auth flavor detection) |
 | F-2.1 | [Export Escape](findings/F-2.1-export-escape.md) | Critical | `escape`, `analyze`, `shell escape-root` |
 | F-2.2 | [File Handle Guessing](findings/F-2.2-file-handle-guessing.md) | High | `analyze` (entropy), `brute-handle` |
 | F-2.3 | [Windows Handle Signing](findings/F-2.3-windows-handle-signing.md) | Critical | `analyze` (`FileHandleAnalyzer::check_windows_signing`) |
@@ -486,6 +513,7 @@ subcommand exercises these findings.
 | F-2.6 | [Bind Mount Escape](findings/F-2.6-bind-mount-escape.md) | High | `escape` (fsid-based handle). `analyze` detection removed: the old handle-fsid vs fattr3-fsid equality test compared two differently-encoded values and false-positived on normal exports; no sound oracle is available from a single GETATTR |
 | F-2.7 | [NFS Daemon ACL Blindness](findings/F-2.7-nfsd-acl-blindness.md) | Critical | `shell --handle <hex>` / `mount --handle <hex>` (port 2049, no MOUNT -- handle resolves from any IP) |
 | F-2.8 | [Sibling Export Lateral Access](findings/F-2.8-sibling-export-lateral-access.md) | Critical | `escape` + `shell` (`escape-root`, then `cd` to a peer export, `ls`/`cat`) |
+| F-2.9 | [WebNFS Public File Handle](findings/F-2.9-webnfs-public-handle.md) | Critical | `analyze` (WebNFS public handle probe) |
 | F-3.1 | [Plaintext Wire Protocol](findings/F-3.1-plaintext-wire-protocol.md) | High | `analyze` (Info: flags exports that advertise no RPCSEC_GSS; RFC 9289 TLS itself is not actively probed) |
 | F-3.2 | [Portmapper Amplification](findings/F-3.2-portmapper-amplification.md) | Medium | `scan` (UDP DUMP amplification factor), `analyze` |
 | F-3.3 | [IP Spoofing](findings/F-3.3-ip-spoofing-host-trust.md) | High | `analyze` (host-based ACL detection; no active exploit) |
@@ -495,13 +523,13 @@ subcommand exercises these findings.
 | F-4.1 | [no_root_squash](findings/F-4.1-no-root-squash.md) | Critical | `analyze`, `mount --uid 0 --allow-write`, `shell uid 0` |
 | F-4.2 | [SUID/SGID Escalation](findings/F-4.2-suid-sgid-escalation.md) | High | `shell suid-scan`, `mount` + `chmod u+s` via regular tools |
 | F-4.3 | [Device Node Creation](findings/F-4.3-device-node-creation.md) | High | `shell mknod` |
-| F-4.4 | [Symlink Escape](findings/F-4.4-symlink-escape.md) | High | `analyze` (writable parent detection), `shell ln -s` |
+| F-4.4 | [Symlink Escape](findings/F-4.4-symlink-escape.md) | High | `analyze` (writable parent detection), `shell symlink` |
 | F-4.5 | [SELinux Label Bypass](findings/F-4.5-selinux-label-bypass.md) | Medium | Not implemented -- documented for awareness (no SELinux/MAC check in `analyze`) |
 | F-5.1 | [Export List Enumeration](findings/F-5.1-export-list-enumeration.md) | Medium | `scan` (MNTPROC_EXPORT), `analyze` |
 | F-5.2 | [READDIRPLUS Harvesting](findings/F-5.2-readdirplus-handle-harvesting.md) | High | `shell ls`, `shell find`, `mount` (transparent via FUSE) |
 | F-5.3 | [NIS Credential Extraction](findings/F-5.3-nis-credential-extraction.md) | High | `scan` / `analyze` (portmapper 100004/100007 detect) |
 | F-5.4 | [RPC Service Enumeration](findings/F-5.4-rpc-service-enumeration.md) | Low | `scan` (PMAPPROC_DUMP full dump) |
-| F-5.5 | [NFSv4 Pseudo-FS Leakage](findings/F-5.5-nfsv4-pseudo-fs-leakage.md) | Low | `scan` (Nfs4Client::map_pseudo_fs) |
+| F-5.5 | [NFSv4 Pseudo-FS Leakage](findings/F-5.5-nfsv4-pseudo-fs-leakage.md) | Low | `scan` (pseudo-root READDIR via `Nfs4DirectClient`) |
 | F-6.1 | [NLM Lock Attacks](findings/F-6.1-nlm-lock-attacks.md) | Medium | Out of scope -- lock-DoS module removed |
 | F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | Out of scope -- never implemented |
 | F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | Out of scope -- never implemented |

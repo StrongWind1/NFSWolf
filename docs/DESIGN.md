@@ -177,7 +177,7 @@ nfswolf and [niffler](https://github.com/evilsocket/niffler) are complementary. 
 
 NFSv2 (RFC 1094) has zero security negotiation -- no auth flavor enforcement, no ACCESS procedure -- and some server implementations skip `root_squash` on the v2 code path (RFC 2623 §2.7). When `scan` or `analyze` detects v2 support alongside v3/v4 with RPCSEC_GSS, that combination is flagged as F-1.6 because v2 provides a downgrade path that bypasses the v3/v4 security policy entirely.
 
-The NFSv2 wire protocol lives in `nfswolf-nfs2` (all 18 procedures, fixed 32-byte handles, 32-bit sizes) and the binary links it. `--nfs-version 2` enters a v2 shell backed by `V2Ops`, which obtains a 32-byte root handle via MOUNT v1 MNT (`MountV1Client` in `src/proto/mount.rs`) and wraps an `Nfs2Client<DirectTransport>` -- no connection pooling and no credential escalation, because v2 AUTH_SYS credentials are fixed at connect time and the protocol has no ACCESS procedure to drive a ladder. `--handle HEX` also works, bypassing MOUNT entirely. All 44 shell commands are available through the unified `NfsShell<V2Ops>` architecture. `escape` and `brute-handle` fall back to NFSv2 automatically when MOUNT v3 fails, so v2-only servers are covered without an explicit `--nfs-version 2` flag. Live-tested against four VMs spanning kernels 2.6.32 through 4.15; Linux knfsd enforces `sec=krb5` on v2 NFS operations while MOUNT v1 leaks the handle without krb5 auth, confirming the downgrade gap documented in F-1.6.
+The NFSv2 wire protocol lives in `nfswolf-nfs2` (all 18 procedures, fixed 32-byte handles, 32-bit sizes) and the binary links it. `--nfs-version 2` enters a v2 shell backed by `V2Ops`, which obtains a 32-byte root handle via MOUNT v1 MNT (`MountV1Client` in `crates/nfswolf-nfs2/src/mount.rs`) and wraps an `Nfs2Client<DirectTransport>` -- no connection pooling and no credential escalation, because v2 AUTH_SYS credentials are fixed at connect time and the protocol has no ACCESS procedure to drive a ladder. `--handle HEX` also works, bypassing MOUNT entirely. All 44 shell commands are available through the unified `NfsShell<V2Ops>` architecture. `escape` and `brute-handle` fall back to NFSv2 automatically when MOUNT v3 fails, so v2-only servers are covered without an explicit `--nfs-version 2` flag. Live-tested against four VMs spanning kernels 2.6.32 through 4.15; Linux knfsd enforces `sec=krb5` on v2 NFS operations while MOUNT v1 leaks the handle without krb5 auth, confirming the downgrade gap documented in F-1.6.
 
 ### 5. Export Escape Lives in One Place -- `nfswolf escape`
 
@@ -225,7 +225,7 @@ Sliding-window (60s) circuit breaker per host prevents cascading failures during
 
 ## Comparison with Existing Tools
 
-See [ARCHITECTURE.md -- Comparison table](ARCHITECTURE.md#comparison-with-existing-tools) for the full feature matrix (10 tools, 58 feature rows).
+See [ARCHITECTURE.md -- Comparison table](ARCHITECTURE.md#comparison-with-existing-tools) for the full feature matrix (10 tools, 57 feature rows).
 
 ## References
 
