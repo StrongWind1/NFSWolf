@@ -221,13 +221,10 @@ impl std::fmt::Debug for NfsFuse {
     }
 }
 
-// Inode-state and credential-cache locks are protected by `Mutex`. A poisoned
-// lock can only happen if a thread previously panicked while holding it; the
-// expect calls below propagate the original panic, which is the correct
-// behavior here. `significant_drop_tightening` and `redundant_clone` are
-// inherent to the `Fn(Nfs3Client) -> Fut` ladder closures: each rung clones
-// captured values fresh, but a single rung looks "redundant" to clippy.
-#[expect(clippy::expect_used, clippy::significant_drop_tightening, reason = "Mutex poison propagates")]
+// `significant_drop_tightening` and `redundant_clone` are inherent to the
+// `Fn(Nfs3Client) -> Fut` ladder closures: each rung clones captured values
+// fresh, but a single rung looks "redundant" to clippy.
+#[expect(clippy::significant_drop_tightening, reason = "credential ladder closures")]
 impl NfsFuse {
     /// Create a new FUSE adapter from a config bundle.
     ///
@@ -295,19 +292,19 @@ impl NfsFuse {
 
     /// Look up the cached `(uid, gid)` for `ino`, if any.
     fn cached_cred(&self, ino: u64) -> Option<(u32, u32)> {
-        self.cred_cache.lock().expect("cred cache lock").get(&ino).copied()
+        self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&ino).copied()
     }
 
     /// Record `(uid, gid)` as the working credential for `ino`.
     fn cache_cred(&self, ino: u64, uid: u32, gid: u32) {
-        _ = self.cred_cache.lock().expect("cred cache lock").insert(ino, (uid, gid));
+        _ = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(ino, (uid, gid));
     }
 
     /// Bump the kernel lookup-reference count for `ino` (FUSE forget
     /// lifecycle). Called whenever we hand an inode to the kernel via an
     /// entry reply so a later `forget` can release it.
     fn record_lookup(&self, ino: u64) {
-        self.state.lock().expect("inode map lock").record_lookup(ino);
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_lookup(ino);
     }
 
     /// Build the credential-escalation ladder for `subject_ino`.
@@ -319,7 +316,7 @@ impl NfsFuse {
     async fn ladder_for(&self, subject_ino: u64) -> Vec<(u32, u32)> {
         let caller = (self.nfs3.uid(), self.nfs3.gid());
         let owner = {
-            let fh_opt = self.state.lock().expect("inode map lock").fh_for(subject_ino).cloned();
+            let fh_opt = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fh_for(subject_ino).cloned();
             match fh_opt {
                 Some(fh) => self.nfs3.attrs(&fh).await.ok().map(|a| ((a.uid, a.gid), a.mode)),
                 None => None,
@@ -330,12 +327,12 @@ impl NfsFuse {
 
     /// Retrieve the file handle for inode `ino` from the inode map.
     fn fh_for_ino(&self, ino: u64) -> Option<FileHandle> {
-        self.state.lock().expect("inode map lock").fh_for(ino).cloned()
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fh_for(ino).cloned()
     }
 
     /// Intern a child handle, returning the assigned inode.
     fn intern(&self, child_fh: FileHandle, parent_ino: u64) -> u64 {
-        self.state.lock().expect("inode map lock").intern_handle(child_fh, parent_ino)
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).intern_handle(child_fh, parent_ino)
     }
 
     /// Maximum symlink resolution depth before we give up to prevent loops.
@@ -383,7 +380,7 @@ impl NfsFuse {
 
         // Walk components, handling `.` and `..` along the way.
         let (mut cur_fh, mut cur_ino) = {
-            let st = self.state.lock().expect("inode map lock");
+            let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let fh = st.fh_for(start_ino).cloned().ok_or(nfsstat3::NFS3ERR_STALE)?;
             (fh, start_ino)
         };
@@ -393,7 +390,7 @@ impl NfsFuse {
                 continue;
             }
             if component == ".." {
-                let parent = self.state.lock().expect("inode map lock").parents.get(&cur_ino).copied().unwrap_or(1);
+                let parent = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).parents.get(&cur_ino).copied().unwrap_or(1);
                 let parent_fh = self.fh_for_ino(parent).ok_or(nfsstat3::NFS3ERR_STALE)?;
                 cur_fh = parent_fh;
                 cur_ino = parent;
@@ -420,7 +417,7 @@ impl NfsFuse {
         };
 
         if attrs.file_type == FileType::Symlink {
-            let parent_of_link = self.state.lock().expect("inode map lock").parents.get(&cur_ino).copied().unwrap_or(1);
+            let parent_of_link = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).parents.get(&cur_ino).copied().unwrap_or(1);
             return Box::pin(self.follow_symlink(cur_fh, parent_of_link, depth + 1)).await;
         }
 
@@ -702,9 +699,6 @@ impl NfsFuse {
     }
 }
 
-// The Mutex protecting the inode state can only be poisoned if a thread panics
-// while holding it, which propagates the panic anyway -- expect() is correct here.
-#[expect(clippy::expect_used, reason = "Mutex poison propagates existing panics")]
 impl Filesystem for NfsFuse {
     /// Look up a directory entry by name and return its attributes.
     ///
@@ -745,10 +739,10 @@ impl Filesystem for NfsFuse {
     /// without bound. fuser's default `batch_forget` dispatches to this per
     /// node, so multi-forget batches are covered too.
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
-        let removed = self.state.lock().expect("inode map lock").forget(ino.0, nlookup);
+        let removed = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).forget(ino.0, nlookup);
         if removed {
-            _ = self.cred_cache.lock().expect("cred cache lock").remove(&ino.0);
-            drop(self.readdir_cache.lock().expect("readdir cache lock").remove(&ino.0));
+            _ = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&ino.0);
+            drop(self.readdir_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&ino.0));
         }
     }
 
@@ -1248,7 +1242,7 @@ impl Filesystem for NfsFuse {
         if offset == 0 {
             match self.page_directory(ino.0, &dir_fh) {
                 Ok(entries) => {
-                    drop(self.readdir_cache.lock().expect("readdir cache lock").insert(ino.0, entries));
+                    drop(self.readdir_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(ino.0, entries));
                 },
                 Err(errno) => {
                     reply.error(errno);
@@ -1257,7 +1251,7 @@ impl Filesystem for NfsFuse {
             }
         }
 
-        let dotdot_ino = self.state.lock().expect("inode map lock").parents.get(&ino.0).copied().unwrap_or(1);
+        let dotdot_ino = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).parents.get(&ino.0).copied().unwrap_or(1);
 
         // FUSE readdir cookies are exclusive: when the kernel calls back with
         // `offset = N`, it expects entries with cookie > N (the entry AT
@@ -1275,7 +1269,7 @@ impl Filesystem for NfsFuse {
         // Serve entries from the per-inode cache populated on the offset == 0
         // callback (cloned out so the lock is not held across the per-entry
         // fix-up LOOKUPs below).
-        let entries = self.readdir_cache.lock().expect("readdir cache lock").get(&ino.0).cloned().unwrap_or_default();
+        let entries = self.readdir_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&ino.0).cloned().unwrap_or_default();
         for (idx, (name_bytes, attrs_opt, fh_opt)) in entries.into_iter().enumerate() {
             let entry_offset = (idx as u64) + 3;
             if offset >= entry_offset {
@@ -1312,7 +1306,7 @@ impl Filesystem for NfsFuse {
             // kernel issues an explicit LOOKUP -- the authoritative,
             // lookup-counted intern -- before it uses the entry.
             let entry_ino = {
-                let mut st = self.state.lock().expect("inode map lock");
+                let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let known = entry_fh.as_ref().and_then(|fh| st.ino_for_handle(fh));
                 known.unwrap_or_else(|| st.alloc_transient_ino())
             };

@@ -130,11 +130,9 @@ impl ConnectionPool {
             let entry = self.inner.pools.entry(key).or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())));
             Arc::clone(&entry)
         };
-        // Try to lock without blocking  --  if the mutex is contended, just drop.
-        if let Ok(mut q) = queue.try_lock()
-            && q.len() < self.inner.max_per_key
-        {
-            q.push_back(conn); // LIFO: push_back + pop_back
+        let mut q = queue.blocking_lock();
+        if q.len() < self.inner.max_per_key {
+            q.push_back(conn);
         }
     }
 

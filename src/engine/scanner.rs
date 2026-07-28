@@ -131,11 +131,11 @@ impl Scanner {
                 drop(join_set.spawn(async move {
                     let _permit = permit;
                     let result = scan_host(target, job).await;
-                    if let Some(ref r) = result
+                    if let Some(r) = result
                         && r.has_nfs()
                     {
                         _ = nfs_found.fetch_add(1, Ordering::Relaxed);
-                        results.lock().await.push(r.clone());
+                        results.lock().await.push(r);
                     }
                     pb.set_message(format!("{} with NFS", nfs_found.load(Ordering::Relaxed)));
                     pb.inc(1);
@@ -157,7 +157,7 @@ impl Scanner {
 
         pb.finish_and_clear();
         // All tasks are either complete or aborted -- safe to lock.
-        let collected = results.lock().await.clone();
+        let collected = std::mem::take(&mut *results.lock().await);
 
         ScanOutput { results: collected, total, interrupted }
     }

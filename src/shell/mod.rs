@@ -62,6 +62,7 @@ pub(crate) const SHELL_COMMANDS: &[&str] = &[
     "stat",
     "readlink",
     "symlink",
+    "link",
     "uid",
     "gid",
     "hostname",
