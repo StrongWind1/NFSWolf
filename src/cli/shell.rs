@@ -680,7 +680,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                 let dir = if arg.is_empty() {
                     cwd_fh
                 } else {
-                    match client.lookup_path(&cwd_fh, arg).await {
+                    match client.lookup_path(if arg.starts_with('/') { &root_fh } else { &cwd_fh }, arg).await {
                         Ok((fh, _)) => fh,
                         Err(e) => {
                             eprintln!("{}", format!("ls: {arg}: {e}").red());
@@ -703,18 +703,16 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                 }
             },
             "cd" => {
-                if arg.is_empty() {
+                if arg.is_empty() || arg == "/" {
                     cwd_fh = root_fh;
                     "/".clone_into(&mut cwd_path);
                 } else {
-                    match client.lookup_path(&cwd_fh, arg).await {
+                    let start = if arg.starts_with('/') { &root_fh } else { &cwd_fh };
+                    match client.lookup_path(start, arg).await {
                         Ok((fh, _)) => {
                             cwd_fh = fh;
-                            if arg.starts_with('/') {
-                                cwd_path = format!("/{}", arg.trim_start_matches('/'));
-                            } else {
-                                cwd_path = format!("{}/{}", cwd_path.trim_end_matches('/'), arg);
-                            }
+                            let components = cwd_path_plus(&cwd_path, arg);
+                            cwd_path = if components.is_empty() { "/".to_owned() } else { format!("/{}", components.join("/")) };
                         },
                         Err(e) => {
                             eprintln!("{}", format!("cd: {arg}: {e}").red());
@@ -735,7 +733,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                     eprintln!("{}", "usage: cat <file>".yellow());
                     continue;
                 }
-                match client.lookup_path(&cwd_fh, arg).await {
+                match client.lookup_path(if arg.starts_with('/') { &root_fh } else { &cwd_fh }, arg).await {
                     Ok((fh, _)) => match client.read_file(&fh).await {
                         Ok(data) => {
                             // Stdout write failure is non-fatal during cat (pipe closed, etc.).
@@ -751,7 +749,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                     eprintln!("{}", "usage: stat <path>".yellow());
                     continue;
                 }
-                match client.lookup_path(&cwd_fh, arg).await {
+                match client.lookup_path(if arg.starts_with('/') { &root_fh } else { &cwd_fh }, arg).await {
                     Ok((fh, a)) => {
                         println!("  File: {arg}");
                         println!("  Handle: {}", v2_handle_hex(&fh));
@@ -769,7 +767,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                     continue;
                 }
                 let dest = if local.is_empty() { remote.rsplit('/').next().unwrap_or(remote) } else { local };
-                match client.lookup_path(&cwd_fh, remote).await {
+                match client.lookup_path(if remote.starts_with('/') { &root_fh } else { &cwd_fh }, remote).await {
                     Ok((fh, _)) => match client.read_file(&fh).await {
                         Ok(data) => match std::fs::write(dest, &data) {
                             Ok(()) => println!("{}", format!("get: {} bytes -> {dest}", data.len()).green()),
@@ -927,7 +925,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                     eprintln!("{}", format!("chmod: invalid mode: {mode_s}").red());
                     continue;
                 };
-                match client.lookup_path(&cwd_fh, path).await {
+                match client.lookup_path(if path.starts_with('/') { &root_fh } else { &cwd_fh }, path).await {
                     Ok((fh, _)) => {
                         let sattr = v2_sattr_mode(mode);
                         match client.setattr(&fh, &sattr).await {
@@ -949,7 +947,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                     continue;
                 }
                 let (u, g) = if let Some((us, gs)) = owner_s.split_once(':') { (us.parse::<u32>().ok(), gs.parse::<u32>().ok()) } else { (owner_s.parse::<u32>().ok(), None) };
-                match client.lookup_path(&cwd_fh, path).await {
+                match client.lookup_path(if path.starts_with('/') { &root_fh } else { &cwd_fh }, path).await {
                     Ok((fh, _)) => {
                         use nfswolf_nfs2::wire::{SATTR_UNCHANGED, Timeval};
                         let ut = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
@@ -967,7 +965,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                     eprintln!("{}", "usage: readlink <path>".yellow());
                     continue;
                 }
-                match client.lookup_path(&cwd_fh, arg).await {
+                match client.lookup_path(if arg.starts_with('/') { &root_fh } else { &cwd_fh }, arg).await {
                     Ok((fh, _)) => match client.readlink(&fh).await {
                         Ok(target) => println!("{target}"),
                         Err(e) => eprintln!("{}", format!("readlink: {e}").red()),
