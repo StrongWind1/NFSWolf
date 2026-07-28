@@ -132,7 +132,7 @@ pub(crate) fn observed_identities(entries: &[crate::proto::nfs3::types::DirEntry
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo, clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::indexing_slicing, reason = "unit test  --  lints are suppressed per project policy")]
+    #![expect(clippy::pedantic, reason = "unit test  --  lints are suppressed per project policy")]
     use super::*;
 
     #[test]

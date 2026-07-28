@@ -46,7 +46,7 @@
 //! [RFC 4506]: https://www.rfc-editor.org/rfc/rfc4506
 //! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
 
-#![allow(
+#![expect(
     clippy::panic,
     reason = "a derive macro's \"runtime\" is the compiler's expansion pass, so a \
 panic here surfaces as a build failure on the offending type, never as a fault in \

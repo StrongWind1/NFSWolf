@@ -200,9 +200,11 @@ text_direction_codepoint_in_literal = "forbid"
 # Code that provably panics at runtime -- always a bug.
 unconditional_panic = "forbid"
 # All unused-code lints (dead_code, unused_variables, unused_imports, etc.).
+# Deny (not forbid) because external crates (nfs3_server, clap derive) emit
+# #[allow(unused_*)] / #[allow(dead_code)] which is incompatible with forbid.
 unused = { level = "deny", priority = -1 }
 # --- Deny (per-project override) --------------------------------------------
-# Deny (not forbid) -- NFSWolf needs one #[allow] for libc::daemon in src/main.rs.
+# Deny (not forbid) -- one #[expect(unsafe_code)] for libc::daemon in main.rs.
 unsafe_code = "deny"
 # --- Deny (deny-by-default) -------------------------------------------------
 ambiguous_associated_items = "deny"
@@ -320,8 +322,8 @@ unimplemented = "deny"
 # No .unwrap() inside functions returning Result -- propagate the error.
 unwrap_in_result = "deny"
 # --- Restriction lints promoted to warn --------------------------------------
-# Prefer #[expect] over #[allow] -- warns when the suppression becomes unnecessary.
-allow_attributes = "warn"
+# #[allow] is forbidden -- use #[expect] so the suppression auto-warns when unnecessary.
+allow_attributes = "deny"
 # Every #[allow] / #[expect] must carry a reason = "..." string.
 allow_attributes_without_reason = "warn"
 # Flag functions exceeding the complexity threshold (set in clippy.toml).

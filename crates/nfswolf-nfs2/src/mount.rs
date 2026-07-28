@@ -9,10 +9,9 @@
 //! The export types are defined locally rather than imported from `nfswolf-nfs3`
 //! because there are no edges between the version crates.
 
-#![allow(non_camel_case_types, reason = "identifiers are transcribed verbatim from RFC 1094's XDR definitions; renaming them to Rust conventions would break the correspondence a reader needs when checking this module against the spec")]
-#![allow(missing_docs, reason = "these are mechanical transcriptions of the RFC's XDR type table -- per-field prose would restate the field name and nothing more. The module doc cites the defining RFC section, which is the real documentation")]
-#![allow(missing_copy_implementations, reason = "Copy is derived on the wire types whose callers benefit from it; demanding it exhaustively cascades through every containing struct without improving the API")]
-#![allow(single_use_lifetimes, reason = "newtype wrappers over borrowed wire data genuinely need the parameter; the lint counts the declaration and the single use and misreads it as removable")]
+#![expect(non_camel_case_types, reason = "identifiers are transcribed verbatim from RFC 1094's XDR definitions; renaming them to Rust conventions would break the correspondence a reader needs when checking this module against the spec")]
+#![expect(missing_copy_implementations, reason = "Copy is derived on the wire types whose callers benefit from it; demanding it exhaustively cascades through every containing struct without improving the API")]
+#![expect(single_use_lifetimes, reason = "newtype wrappers over borrowed wire data genuinely need the parameter; the lint counts the declaration and the single use and misreads it as removable")]
 
 use std::io::{Read, Write};
 
@@ -193,21 +192,7 @@ impl<T: RpcTransport> MountV1Client<T> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::pedantic,
-        clippy::nursery,
-        clippy::cargo,
-        clippy::expect_used,
-        clippy::unwrap_used,
-        clippy::panic,
-        clippy::indexing_slicing,
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss,
-        reason = "unit test  --  lints are suppressed per project policy"
-    )]
+    #![expect(clippy::pedantic, reason = "unit test  --  lints are suppressed per project policy")]
     use super::*;
     use std::io::Cursor;
 
