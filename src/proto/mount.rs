@@ -204,6 +204,7 @@ impl NfsMountClient {
     }
 
     /// Unmount an export (MNTPROC_UMNT) for stealth cleanup (F-2.5).
+    #[cfg(feature = "fuse")]
     pub(crate) async fn unmount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
         let client = self.connect(addr).await?;
         let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));

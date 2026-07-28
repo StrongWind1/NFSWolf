@@ -199,10 +199,19 @@ text_direction_codepoint_in_comment = "forbid"
 text_direction_codepoint_in_literal = "forbid"
 # Code that provably panics at runtime -- always a bug.
 unconditional_panic = "forbid"
-# All unused-code lints (dead_code, unused_variables, unused_imports, etc.).
-# Deny (not forbid) because external crates (nfs3_server, clap derive) emit
-# #[allow(unused_*)] / #[allow(dead_code)] which is incompatible with forbid.
+# All unused-code lints as a group (dead_code, unused_variables, unused_imports, etc.).
+# Deny (not forbid) because clap derive macros and nfs3_server emit
+# #[allow(dead_code)] / #[allow(unused_*)] which is incompatible with forbid.
 unused = { level = "deny", priority = -1 }
+# Individual unused sublints elevated with reasons:
+unused_imports = "deny"
+unused_extern_crates = "deny"
+dead_code = "deny"
+unreachable_patterns = "deny"
+# Documentation is mandatory on all public items.
+missing_docs = "deny"
+# Copy should be derived when possible.
+missing_copy_implementations = "deny"
 # --- Deny (per-project override) --------------------------------------------
 # Deny (not forbid) -- one #[expect(unsafe_code)] for libc::daemon in main.rs.
 unsafe_code = "deny"
@@ -265,9 +274,7 @@ linker_info = "warn"
 linker_messages = "warn"
 macro_use_extern_crate = "warn"
 meta_variable_misuse = "warn"
-missing_copy_implementations = "warn"
 missing_debug_implementations = "warn"
-missing_docs = "warn"
 missing_unsafe_on_extern = "warn"
 redundant_imports = "warn"
 redundant_lifetimes = "warn"

@@ -23,10 +23,6 @@ use crate::engine::scan_types::{HostResult, NfsPortInfo};
 use crate::engine::scanner::{ScanConfig, ScanOutput, Scanner};
 use crate::util::stealth::StealthConfig;
 
-// Re-export for convenience.
-#[expect(unused_imports, reason = "used in type signatures below")]
-use crate::engine::scan_types;
-
 /// Discover NFS servers on a network.
 ///
 /// Accepts IPs, CIDR ranges, hostnames, or files containing one target per line.

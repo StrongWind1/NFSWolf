@@ -231,10 +231,3 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     tokio::task::spawn_blocking(move || fuser::mount(fs, &mountpoint, &config)).await??;
     Ok(())
 }
-
-/// Stub for builds without the `fuse` feature.
-#[cfg(not(feature = "fuse"))]
-pub(crate) async fn run(_args: MountArgs, _globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
-    eprintln!("FUSE support not compiled in. Rebuild with: cargo build --features fuse");
-    Ok(())
-}

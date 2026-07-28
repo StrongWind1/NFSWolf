@@ -16,12 +16,6 @@ pub(crate) enum OsGuess {
     Linux,
     Windows,
     FreeBsd,
-    #[expect(dead_code, reason = "valid server OS -- no fingerprint rule yet")]
-    Solaris,
-    #[expect(dead_code, reason = "valid server OS -- no fingerprint rule yet")]
-    NetApp,
-    #[expect(dead_code, reason = "valid server OS -- no fingerprint rule yet")]
-    HpUx,
     Unknown,
 }
 
@@ -34,20 +28,6 @@ pub(crate) enum FsType {
     Ext4,
     Xfs,
     Btrfs,
-    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
-    Ntfs,
-    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
-    Ufs,
-    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
-    Zfs,
-    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
-    Udf,
-    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
-    Nilfs,
-    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
-    Fat,
-    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
-    Lustre,
     Unknown,
 }
 
@@ -461,12 +441,12 @@ impl FileHandleAnalyzer {
             // XFS roots (128/64/32). probe_escape_candidate rejects non-directory hits, so a
             // non-root inode that merely exists (e.g. inode 128 = ext4 journal) is never a
             // false escape.
+            FsType::Btrfs => Self::construct_escape_handle(export_fh).into_iter().collect(),
             FsType::Unknown | FsType::Ext4 => {
                 let mut candidates: Vec<EscapeResult> = Self::construct_escape_handle(export_fh).into_iter().collect();
                 candidates.extend(Self::construct_xfs_escape_candidates(export_fh));
                 candidates
             },
-            _ => Self::construct_escape_handle(export_fh).into_iter().collect(),
         }
     }
 
@@ -570,7 +550,7 @@ impl FileHandleAnalyzer {
                     (0.0, vec![])
                 }
             },
-            _ => (32.0, vec!["unknown fields".into()]),
+            OsGuess::Unknown => (32.0, vec!["unknown fields".into()]),
         };
 
         let brute_force_seconds = entropy_bits.exp2() / 10000.0;
