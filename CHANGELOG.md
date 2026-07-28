@@ -4,6 +4,48 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-28
+
+### Added
+
+- **Shell aliases** -- `download`/`upload` for `get`/`put`, `ll` for `ls -a` (full columns), `dir` for `ls`, `type` for `cat`, `del` for `rm`, `rename` for `mv`, `copy` for `cp`, `id` for `whoami`, `su` for `impersonate`. All aliases work across v2, v3, and v4 shells with tab completion.
+- **NFSv4 local commands** -- `handle` (print current FH as hex), `lcd`, `lls`, `lpwd`, `lmkdir`, `history` now work in the v4 shell. Previously these were v2/v3-only.
+- **NFSv2 identity change** -- `uid`, `gid`, `hostname`, and `impersonate` now work in the v2 shell by tearing down the TCP session and reconnecting with new AUTH_SYS credentials. Previously v2 identity was fixed at connect time.
+- **NFSv2 default export** -- `nfswolf shell host --nfs-version 2` now defaults to mounting `/` when no export is specified, matching v3 behavior.
+- **NFSv2 escape guards** -- the v2 escape path now checks `export_is_fs_root` (prevents false positives when the export already is the filesystem root) and includes the BTRFS subvolume sweep (previously v3-only).
+- **Nfs2Error classification predicates** -- `is_permission_denied()`, `is_stale()`, `is_not_found()`, matching NFSv3's `Nfs3Fault` API.
+- **Display impls** -- `NfsStat` (v2, RFC 1094 names) and `Nfs4Status` (v4, RFC 7530 names) now implement `Display`.
+- `Nfs2Client::into_transport()` -- consuming accessor matching `Nfs3Client`.
+- NFSv2 RPC call failures are now logged at `tracing::debug!` level, matching v3.
+- `uid-spray --help` now documents the NFSv3 requirement (uses the ACCESS procedure).
+
+### Fixed
+
+- **Analyzer proxy bypass** -- per-export `Nfs3Client` instances now inherit `--proxy`, `--hostname`, and `--aux-gids` from the top-level configuration. Previously the per-export clients silently bypassed the SOCKS5 proxy and hardcoded `"nfswolf"` as the AUTH_SYS machinename.
+- **Analyzer shared pool** -- a single connection pool is shared across all exports instead of creating a fresh pool per export.
+- **Analyzer pagination** -- `check_nohide` and `check_symlink_preconditions` now iterate all READDIRPLUS pages instead of checking only the first page.
+- **`cat` vs `get` credential gap** -- `read_chunk()` (used by `get`/`download`) now performs full credential escalation matching `read_file()` (used by `cat`). Previously `cat /etc/shadow` could succeed via auto-escalation while `get /etc/shadow` failed with `NFS3ERR_ACCES`.
+- **NFSv4 `cat` binary corruption** -- replaced `String::from_utf8_lossy` with raw `stdout.write_all()`, matching v2/v3 behavior.
+- **NFSv2 fattr data loss** -- `rdev`, `fsid`, and `used` (disk usage) are now mapped from the NFSv2 wire data instead of hardcoded to zero. `stat` on device nodes shows correct major/minor numbers.
+- **Pool `blocking_lock` panic** -- `checkin()` now uses `try_lock()` instead of `blocking_lock()`, which panicked when called from within the tokio runtime (e.g. when an async task drops a `PooledConnection`). The shared-pool analyzer change exposed this latent issue.
+- **Scan interrupted message** -- no longer double-counts NFS hosts as both "completed" and "with NFS".
+- **Brute-handle inode truncation** -- warns when `--inode-start`/`--inode-end` exceeds u32 range instead of silently clamping.
+- NFSv2 shell now warns when `--proxy`, `--delay`, or `--jitter` are ignored.
+- NFSv4 tab completion no longer advertises write commands (`put`, `mkdir`, `rm`, etc.) that always fail.
+- NFSv4 prompt now shows `gid` (matching v2 pattern).
+- Replay hints (`# rerun: ...`) added to v3 and v4 shell connect paths (v2 already had one).
+
+### Changed
+
+- **Walker consolidation** -- four near-identical recursive walkers (`suid_scan_recursive`, `world_writable_recursive`, `secrets_recursive`, `find_recursive`) replaced by a single generic `walk_recursive()` with filter closures.
+- **rwx dedup** -- extracted `format_rwx()` in `ops.rs`; both `mode_string()` and `format_mode()` call it instead of duplicating the bit-manipulation logic.
+- `uid-spray` now shares a single connection pool between the sprayer and `lookup_path` instead of creating two independent pools.
+
+### Removed
+
+- Dead struct `RpcbindTime` (defined but never used; `gettime()` returns `u32` directly).
+- Duplicate `Opaque::from_vec()` constructor (identical to `Opaque::owned()`).
+
 ## [0.7.0] - 2026-07-27
 
 ### Changed
@@ -270,7 +312,8 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.5.0...v0.7.0
 [0.5.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.1...v0.4.0
