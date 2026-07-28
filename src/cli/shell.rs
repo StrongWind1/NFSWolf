@@ -491,7 +491,7 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             };
             nfs4_cat(client, &file_fh).await;
         },
-        "get" => {
+        "get" | "download" => {
             let Some(filename) = args.first() else {
                 eprintln!("usage: get <file>");
                 return;
@@ -594,7 +594,7 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
 // Version-specific command lists + remote completers
 // =============================================================================
 
-const V4_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "uid", "gid", "hostname", "whoami", "handle", "lcd", "lls", "lpwd", "lmkdir", "history", "help", "exit", "quit"];
+const V4_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "download", "uid", "gid", "hostname", "whoami", "handle", "lcd", "lls", "lpwd", "lmkdir", "history", "help", "exit", "quit"];
 
 struct Nfs4RemoteCompleter {
     client: Arc<tokio::sync::Mutex<crate::proto::nfs4::compound::Nfs4DirectClient>>,

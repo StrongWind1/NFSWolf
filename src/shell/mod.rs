@@ -42,7 +42,9 @@ pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "find",
     "cat",
     "get",
+    "download",
     "put",
+    "upload",
     "rm",
     "mkdir",
     "rmdir",
@@ -92,7 +94,9 @@ pub(crate) const V2_SHELL_COMMANDS: &[&str] = &[
     "find",
     "cat",
     "get",
+    "download",
     "put",
+    "upload",
     "rm",
     "mkdir",
     "rmdir",
@@ -216,8 +220,8 @@ impl<O: ShellOps> NfsShell<O> {
             "find" => self.cmd_find(arg).await,
             // File ops
             "cat" => self.cmd_cat(arg).await,
-            "get" => self.cmd_get(arg).await,
-            "put" => self.cmd_put(arg).await,
+            "get" | "download" => self.cmd_get(arg).await,
+            "put" | "upload" => self.cmd_put(arg).await,
             "rm" => self.cmd_rm(arg).await,
             "mkdir" => self.cmd_mkdir(arg).await,
             "rmdir" => self.cmd_rmdir(arg).await,
@@ -1500,8 +1504,8 @@ impl<O: ShellOps> NfsShell<O> {
         println!();
         println!("{}", "File operations:".bold().underline());
         println!("  cat <file>                 print file contents");
-        println!("  get [-r] <remote> [local | dir/]  download file/tree (auto-UID; dir/ keeps the basename)");
-        println!("  put [-r] <local> <remote>  upload file/tree  [--allow-write]");
+        println!("  get [-r] <remote> [local | dir/]  download file/tree (alias: download)");
+        println!("  put [-r] <local> <remote>  upload file/tree  (alias: upload)  [--allow-write]");
         println!("  rm <file>                  remove file  [--allow-write]");
         println!("  mkdir <dir>                create directory  [--allow-write]");
         println!("  rmdir <dir>                remove directory  [--allow-write]");

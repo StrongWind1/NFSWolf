@@ -53,8 +53,8 @@ enum CompletionKind {
 
 fn classify_arg(cmd: &str, positional: usize) -> CompletionKind {
     match (cmd, positional) {
-        ("get", 1) | ("put" | "lcd" | "lls" | "lmkdir", 0) => CompletionKind::Local,
-        ("ls" | "cd" | "cat" | "stat" | "readlink" | "rm" | "rmdir" | "mkdir" | "find" | "tree" | "mknod" | "get", 0) | ("mv" | "cp" | "symlink" | "link", 0 | 1) | ("chmod" | "chown" | "put", 1) => CompletionKind::Remote,
+        ("get" | "download", 1) | ("put" | "upload" | "lcd" | "lls" | "lmkdir", 0) => CompletionKind::Local,
+        ("ls" | "cd" | "cat" | "stat" | "readlink" | "rm" | "rmdir" | "mkdir" | "find" | "tree" | "mknod" | "get" | "download", 0) | ("mv" | "cp" | "symlink" | "link", 0 | 1) | ("chmod" | "chown" | "put" | "upload", 1) => CompletionKind::Remote,
         _ => CompletionKind::None,
     }
 }
