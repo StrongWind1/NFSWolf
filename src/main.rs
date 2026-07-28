@@ -8,7 +8,6 @@
 // future server types, struct fields for binary protocol compatibility,
 // planned-but-not-yet-wired infrastructure). Suppressing at crate level
 // until the individual items are cleaned up.
-#![expect(dead_code, unreachable_patterns, reason = "Rust 1.96 surfaces ~40 pre-existing items; to be cleaned up")]
 
 #[cfg(test)]
 use assert_cmd as _;

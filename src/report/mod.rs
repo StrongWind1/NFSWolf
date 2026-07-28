@@ -15,7 +15,9 @@ pub(crate) mod txt;
 use std::io::Write;
 
 use crate::cli::convert::ReportFormat;
-use crate::engine::analyzer::{AnalysisResult, Finding, Severity};
+use crate::engine::analyzer::AnalysisResult;
+#[cfg(test)]
+use crate::engine::analyzer::{Finding, Severity};
 
 /// Dispatch to the correct renderer for `format` and write to `out`.
 ///
@@ -35,6 +37,7 @@ pub(crate) fn generate(results: &[AnalysisResult], format: ReportFormat, title: 
 ///
 /// Weights: Critical = 10, High = 7, Medium = 4, Low = 1, Info = 0.
 /// Used for executive summary ordering and report headers.
+#[cfg(test)]
 pub(crate) fn risk_score(findings: &[Finding]) -> u32 {
     findings.iter().map(|f| severity_weight(f.severity)).sum()
 }
@@ -43,6 +46,7 @@ pub(crate) fn risk_score(findings: &[Finding]) -> u32 {
 ///
 /// Deduplication is needed when the same vulnerability appears on multiple
 /// code paths (e.g., UID sprayer and manual check both detect NFS3ERR_ACCES).
+#[cfg(test)]
 pub(crate) fn deduplicate_findings(findings: &mut Vec<Finding>) {
     let mut seen = std::collections::HashSet::new();
     findings.retain(|f| {
@@ -52,6 +56,7 @@ pub(crate) fn deduplicate_findings(findings: &mut Vec<Finding>) {
 }
 
 /// Map a severity level to its risk-score weight.
+#[cfg(test)]
 const fn severity_weight(sev: Severity) -> u32 {
     match sev {
         Severity::Critical => 10,

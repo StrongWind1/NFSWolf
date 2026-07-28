@@ -51,8 +51,8 @@ pub(crate) enum ReconnectStrategy {
 /// Health state of a pooled connection.
 #[derive(Debug)]
 pub(crate) struct ConnectionHealth {
-    /// When this connection was established.
-    pub created_at: Instant,
+    /// When this connection was established (tracked for pool age-out).
+    pub _created_at: Instant,
     /// When this connection last completed a successful call.
     pub last_used: Instant,
     /// Total number of RPC calls made on this connection.
@@ -64,7 +64,7 @@ pub(crate) struct ConnectionHealth {
 impl ConnectionHealth {
     fn new() -> Self {
         let now = Instant::now();
-        Self { created_at: now, last_used: now, request_count: 0, poisoned: false }
+        Self { _created_at: now, last_used: now, request_count: 0, poisoned: false }
     }
 }
 
@@ -80,16 +80,16 @@ pub(crate) struct NfsConnection {
     rpc: RpcClient<NfsIo>,
     /// Export root handle from MOUNT, absent when the connection bypassed MOUNT.
     pub root: Option<Vec<u8>>,
-    /// Auth flavors the server advertised for this export.
-    pub auth_flavors: Vec<u32>,
+    /// Auth flavors the server advertised for this export (stored for future ACL checks).
+    pub _auth_flavors: Vec<u32>,
     /// Remote server address.
     pub addr: SocketAddr,
     /// Export path this connection was established for.
     pub export: String,
     /// Credential calls are issued under by default.
     pub credential: Credential,
-    /// Reconnection behaviour.
-    reconnect: ReconnectStrategy,
+    /// Reconnection behaviour (stored for pool management decisions).
+    _reconnect: ReconnectStrategy,
     /// Health state for pool management.
     pub health: ConnectionHealth,
 }
@@ -133,7 +133,7 @@ impl NfsConnection {
         let io = Self::open(nfs_addr, proxy).await.with_context(|| format!("NFS connect to {nfs_addr}"))?;
         let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default());
 
-        Ok(Self { rpc, root: Some(mounted.handle.as_bytes().to_vec()), auth_flavors: mounted.auth_flavors, addr, export: export.to_owned(), credential, reconnect, health: ConnectionHealth::new() })
+        Ok(Self { rpc, root: Some(mounted.handle.as_bytes().to_vec()), _auth_flavors: mounted.auth_flavors, addr, export: export.to_owned(), credential, _reconnect: reconnect, health: ConnectionHealth::new() })
     }
 
     /// Establish a connection straight to the NFS port, bypassing MOUNT.
@@ -149,7 +149,7 @@ impl NfsConnection {
 
         // Nothing was advertised; assume AUTH_SYS, which is what a raw handle is
         // being used with in the first place.
-        Ok(Self { rpc, root: None, auth_flavors: vec![1], addr, export: format!("__direct__{nfs_port}"), credential, reconnect, health: ConnectionHealth::new() })
+        Ok(Self { rpc, root: None, _auth_flavors: vec![1], addr, export: format!("__direct__{nfs_port}"), credential, _reconnect: reconnect, health: ConnectionHealth::new() })
     }
 
     /// Open a TCP session to `target`, through the proxy when one is configured.

@@ -39,6 +39,7 @@
 /// to be an explicit operator decision rather than an automatic fallback. The
 /// NFSv2 downgrade -- some servers apply `root_squash` on their v3 path but not
 /// their v2 one -- is not implemented; see the backlog.
+#[cfg(test)]
 pub(crate) fn credential_ladder(caller: (u32, u32), owner: Option<(u32, u32)>) -> Vec<(u32, u32)> {
     credential_ladder_with(caller, owner, None, &[])
 }
@@ -103,31 +104,6 @@ pub(crate) fn credential_ladder_with(caller: (u32, u32), owner: Option<(u32, u32
     let mut seen = std::collections::HashSet::new();
     list.retain(|pair| seen.insert(*pair));
     list
-}
-
-/// Identities seen owning entries in a directory listing, most common first.
-///
-/// Every READDIRPLUS reply carries `uid`/`gid` per entry, so after one listing
-/// the identities that actually exist on this export are known. Ranking those
-/// beats guessing at service accounts: an export owned by uid 5000 will never
-/// be reached by trying www-data.
-///
-/// The caller's own identity is excluded -- it has already been refused.
-pub(crate) fn observed_identities(entries: &[crate::proto::nfs3::types::DirEntryPlus], caller: (u32, u32)) -> Vec<(u32, u32)> {
-    let mut counts: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
-    for e in entries {
-        if let Some(ref a) = e.attrs {
-            let pair = (a.uid, a.gid);
-            if pair != caller {
-                *counts.entry(pair).or_insert(0) += 1;
-            }
-        }
-    }
-    let mut ranked: Vec<((u32, u32), usize)> = counts.into_iter().collect();
-    // Frequency first; the pair itself breaks ties so the order is stable
-    // across runs rather than dependent on HashMap iteration.
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    ranked.into_iter().map(|(pair, _)| pair).collect()
 }
 
 #[cfg(test)]

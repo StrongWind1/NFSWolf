@@ -24,20 +24,8 @@ impl V3Ops {
         Self { nfs3, cred_cache: Mutex::new(std::collections::HashMap::new()) }
     }
 
-    pub(crate) fn nfs3(&self) -> &Nfs3Client {
-        &self.nfs3
-    }
-
-    pub(crate) fn nfs3_arc(&self) -> &Arc<Nfs3Client> {
-        &self.nfs3
-    }
-
     pub(crate) fn flush_cred_cache(&self) {
         self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
-    }
-
-    pub(crate) fn with_credential(&self, cred: Credential, uid: u32, gid: u32) -> Nfs3Client {
-        self.nfs3.with_credential(cred, uid, gid)
     }
 
     fn cached_client(&self, fh: &ShellHandle) -> Option<Nfs3Client> {

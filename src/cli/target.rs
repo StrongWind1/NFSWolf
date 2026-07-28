@@ -83,13 +83,6 @@ pub(crate) fn parse(positional: &str, export_flag: Option<&str>, handle_flag: Op
     Ok(Target { host, source })
 }
 
-/// Convenience: parse with no positional target (only flags).  Used by
-/// subcommands that already split the host into its own positional but
-/// still want to honour `--export`/`--handle` consistently.
-pub(crate) fn parse_flags_only(host: &str, export_flag: Option<&str>, handle_flag: Option<&str>, require_source: bool) -> anyhow::Result<Target> {
-    parse(host, export_flag, handle_flag, require_source)
-}
-
 /// Split `host[:/export]` into (`host`, `Option<&export>`).
 ///
 /// IPv6 in brackets is preserved verbatim in the host part.  The split
@@ -154,6 +147,7 @@ impl Target {
     }
 
     /// Borrow the raw handle hex if this target uses `--handle`.
+    #[cfg(test)]
     #[must_use]
     pub(crate) const fn handle_hex(&self) -> Option<&str> {
         match &self.source {

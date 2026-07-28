@@ -251,8 +251,8 @@ pub(crate) struct GlobalOpts {
     pub jitter: u64,
     /// Disable colored output.
     pub no_color: bool,
-    /// Verbose logging level.
-    pub verbose: u8,
+    /// Verbose logging level (set by CLI, consumed by tracing subscriber init).
+    pub _verbose: u8,
     /// Suppress non-essential output.
     pub quiet: bool,
 }
@@ -277,7 +277,7 @@ impl Cli {
             delay: self.delay,
             jitter: self.jitter,
             no_color: self.no_color,
-            verbose: self.verbose,
+            _verbose: self.verbose,
             quiet: self.quiet,
         }
     }

@@ -94,22 +94,22 @@ pub(crate) struct UtmpRecord {
     pub pid: i32,
     /// tty device name (without the `/dev/` prefix) or pseudo-tty marker (`~`).
     pub line: String,
-    /// `ut_id` -- the four-byte identifier `init` uses.
-    pub id: [u8; 4],
+    /// `ut_id` -- the four-byte identifier `init` uses (parsed for layout).
+    pub _id: [u8; 4],
     /// Username (or sysvinit pseudo-user like `reboot`, `shutdown`, `runlevel`).
     pub user: String,
     /// Hostname or IP string (legacy clients put kernel version here for boot).
     pub host: String,
-    /// `ut_exit.e_termination`.
-    pub e_termination: i16,
-    /// `ut_exit.e_exit`.
-    pub e_exit: i16,
-    /// Session ID (only populated by some windowing terminals).
-    pub session: i32,
+    /// `ut_exit.e_termination` (parsed for layout).
+    pub _e_termination: i16,
+    /// `ut_exit.e_exit` (parsed for layout).
+    pub _e_exit: i16,
+    /// Session ID (only populated by some windowing terminals; parsed for layout).
+    pub _session: i32,
     /// `ut_tv.tv_sec` -- seconds since Unix epoch (32-bit).
     pub tv_sec: i32,
-    /// `ut_tv.tv_usec` -- microseconds (32-bit).
-    pub tv_usec: i32,
+    /// `ut_tv.tv_usec` -- microseconds (32-bit; parsed for layout).
+    pub _tv_usec: i32,
     /// `ut_addr_v6` -- 16 raw bytes; IPv4 stored in the first 4 bytes.
     pub addr_v6: [u8; 16],
 }
@@ -142,7 +142,7 @@ impl UtmpRecord {
         let timestamp_secs = i32::from_ne_bytes(read_arr::<4>(bytes, 340)?);
         let timestamp_micros = i32::from_ne_bytes(read_arr::<4>(bytes, 344)?);
         let addr_v6 = read_arr::<16>(bytes, 348)?;
-        Some(Self { ut_type: UtType::from_raw(ut_type), pid, line, id, user, host, e_termination, e_exit, session, tv_sec: timestamp_secs, tv_usec: timestamp_micros, addr_v6 })
+        Some(Self { ut_type: UtType::from_raw(ut_type), pid, line, _id: id, user, host, _e_termination: e_termination, _e_exit: e_exit, _session: session, tv_sec: timestamp_secs, _tv_usec: timestamp_micros, addr_v6 })
     }
 
     /// True when `ut_addr_v6` decodes as an IPv4-mapped or plain-IPv4 address.

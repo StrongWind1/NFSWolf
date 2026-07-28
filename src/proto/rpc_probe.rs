@@ -29,7 +29,7 @@ pub(crate) enum ProbeResult<T> {
     /// the contiguous range of supported versions (RFC 1831 S13).
     ProgMismatch(VersionRange),
     /// TCP connection, RPC framing, or auth failure.  No version info.
-    Failed(anyhow::Error),
+    Failed(#[expect(dead_code, reason = "carried for Debug output")] anyhow::Error),
 }
 
 impl<T> ProbeResult<T> {

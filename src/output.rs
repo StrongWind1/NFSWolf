@@ -121,17 +121,6 @@ pub(crate) fn severity_badge(sev: Severity) -> String {
     }
 }
 
-/// Return a short colour-coded severity word for table cells.
-pub(crate) fn severity_cell(sev: Severity) -> String {
-    match sev {
-        Severity::Critical => "CRITICAL".red().bold().to_string(),
-        Severity::High => "HIGH".yellow().bold().to_string(),
-        Severity::Medium => "MEDIUM".cyan().to_string(),
-        Severity::Low => "LOW".white().to_string(),
-        Severity::Info => "INFO".dimmed().to_string(),
-    }
-}
-
 // --- export table -------------------------------------------------------------
 
 /// One row for the exports summary table.

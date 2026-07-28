@@ -45,6 +45,7 @@ pub(crate) fn make_mount_client(globals: &GlobalOpts) -> NfsMountClient {
 /// Accepts the same `<TARGET>` shapes as the rest of the CLI:
 /// `host`, `host:port`, `host:/export` (export portion ignored here), and
 /// IPv6 literals (bare `2001:db8::1` or bracketed `[2001:db8::1]` / `[..]:port`).
+#[cfg(test)]
 pub(crate) fn parse_addr(host: &str) -> anyhow::Result<SocketAddr> {
     parse_addr_with_port(host, None)
 }
@@ -84,28 +85,18 @@ pub(crate) fn parse_addr_with_port(host: &str, nfs_port: Option<u16>) -> anyhow:
     format!("{host}:{port}").parse::<SocketAddr>().with_context(|| format!("invalid host: {host}"))
 }
 
-/// Build an `Nfs3Client` for the given host, export, and AUTH_SYS credential.
+/// Build an `Nfs3Client` for the given host, export, and AUTH_SYS credential,
+/// honouring the operator's spoofed `--hostname` as the AUTH_SYS machinename.
 ///
 /// When `proxy` is `Some`, the connection pool tunnels all TCP through the
 /// SOCKS5 proxy. When `nfs_port` is `Some(p)` (the global `--nfs-port`
 /// override), the client connects directly to NFS port `p`, bypassing
 /// portmapper GETPORT -- needed when TCP/111 is firewalled and the operator
 /// knows the fixed NFS port. `None` resolves the NFS port via portmapper as
-/// before. Handles are bearer tokens (RFC 1094 S2.3.3) obtained from the
-/// separate MOUNT step, so the direct client needs no MOUNT of its own.
-pub(crate) fn make_client(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
-    make_client_with_hostname(addr, export, uid, gid, aux_gids, stealth, proxy, nfs_port, "nfswolf")
-}
-
-/// Like [`make_client`] but honouring the operator's spoofed `--hostname`
-/// (`globals.hostname`) as the AUTH_SYS machinename.
+/// before.
 ///
 /// The hostname is the client identity some servers key export ACLs on, and
-/// `auth_unix.machinename` carries it on the wire (F-1.4).  Offensive
-/// subcommands (escape / brute-handle / uid-spray) should pass
-/// `&globals.hostname` here so the spoof is honoured the same way `shell`,
-/// `mount` and `analyze` already do, rather than the fixed `"nfswolf"` literal
-/// the convenience [`make_client`] wrapper uses.
+/// `auth_unix.machinename` carries it on the wire (F-1.4).
 pub(crate) fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
     let pool = Arc::new(match proxy {
         Some(p) => ConnectionPool::with_proxy(p.to_owned()),

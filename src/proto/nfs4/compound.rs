@@ -7,9 +7,7 @@
 //! MOUNT protocol, because NFSv4 has none -- the export tree is reached from
 //! PUTROOTFH instead.
 
-// Toolkit API  --  not all items are used in currently-implemented phases.
-use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::net::SocketAddr;
 
 use anyhow::Context as _;
 use nfswolf_rpc::rpc::RpcClient;
@@ -64,29 +62,12 @@ impl Nfs4DirectClient {
         }
     }
 
-    /// Connect directly to the NFS port on `addr` without MOUNT, using AUTH_NONE.
-    ///
-    /// Suitable for anonymous probes (scanner, analyzer).  For interactive shell
-    /// use `connect_with_auth` so UID/GID/hostname are sent in every COMPOUND.
-    pub(crate) async fn connect(addr: SocketAddr) -> anyhow::Result<Self> {
-        Self::connect_proxy(addr, None).await
-    }
-
     /// Connect via an optional SOCKS5 proxy, using AUTH_NONE.
     pub(crate) async fn connect_proxy(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Self> {
         let null_auth = nfswolf_rpc::rpc::opaque_auth::default();
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, null_auth.clone(), null_auth);
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: Vec::new() })
-    }
-
-    /// Connect with an AUTH_SYS credential (`uid`, `gid`, `hostname`).
-    ///
-    /// The credential is injected into every COMPOUND call via the standard
-    /// AUTH_SYS opaque_auth structure (RFC 5531 S14 / RFC 2623 S2.1).
-    /// The server cannot verify these claims, so any values can be spoofed.
-    pub(crate) async fn connect_with_auth(addr: SocketAddr, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<Self> {
-        Self::connect_with_auth_proxy(addr, uid, gid, hostname, None).await
     }
 
     /// Connect with AUTH_SYS via an optional SOCKS5 proxy.
@@ -286,23 +267,4 @@ impl Nfs4DirectClient {
             _ => anyhow::bail!("READ result missing or wrong type"),
         }
     }
-
-    /// Server address this client is connected to.
-    #[must_use]
-    pub(crate) const fn addr(&self) -> SocketAddr {
-        self.addr
-    }
-}
-
-/// Probe whether `ip:2049` speaks NFSv4 by sending a minimal COMPOUND.
-///
-/// Sends `PUTROOTFH` and returns `true` if the server responds with `NFS4_OK`.
-/// Used by the scanner to confirm NFSv4 reachability independent of portmapper.
-/// When `proxy` is `Some`, the TCP connection is tunnelled through SOCKS5.
-pub(crate) async fn probe_nfs4(ip: IpAddr, probe_timeout: Duration, proxy: Option<&str>) -> bool {
-    let addr = SocketAddr::new(ip, 2049);
-    let connect = tokio::time::timeout(probe_timeout, Nfs4DirectClient::connect_proxy(addr, proxy)).await;
-    let Ok(Ok(mut client)) = connect else { return false };
-    let result = tokio::time::timeout(probe_timeout, client.compound(vec![ArgOp::Putrootfh])).await;
-    matches!(result, Ok(Ok(res)) if res.status == 0)
 }

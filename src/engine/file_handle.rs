@@ -16,8 +16,11 @@ pub(crate) enum OsGuess {
     Linux,
     Windows,
     FreeBsd,
+    #[expect(dead_code, reason = "valid server OS -- no fingerprint rule yet")]
     Solaris,
+    #[expect(dead_code, reason = "valid server OS -- no fingerprint rule yet")]
     NetApp,
+    #[expect(dead_code, reason = "valid server OS -- no fingerprint rule yet")]
     HpUx,
     Unknown,
 }
@@ -31,12 +34,19 @@ pub(crate) enum FsType {
     Ext4,
     Xfs,
     Btrfs,
+    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
     Ntfs,
+    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
     Ufs,
+    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
     Zfs,
+    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
     Udf,
+    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
     Nilfs,
+    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
     Fat,
+    #[expect(dead_code, reason = "valid filesystem -- no fingerprint rule yet")]
     Lustre,
     Unknown,
 }
@@ -53,6 +63,7 @@ pub(crate) enum SigningStatus {
 }
 
 /// Which NFS version's handle format was checked for Windows signing.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsHandleVersion {
     /// NFSv3: 32-byte handle, last 10 bytes are HMAC
@@ -233,6 +244,7 @@ impl FileHandleAnalyzer {
     }
 
     /// Detect which Windows handle version format we're looking at.
+    #[cfg(test)]
     pub(crate) fn detect_windows_handle_version(fh: &FileHandle) -> Option<WindowsHandleVersion> {
         match fh.as_bytes().len() {
             32 => Some(WindowsHandleVersion::V3),
@@ -845,38 +857,6 @@ mod tests {
         let fh = windows_handle(false);
         let handles = FileHandleAnalyzer::construct_btrfs_subvol_handles(&fh, 10);
         assert!(handles.is_empty(), "non-Linux handle must yield no BTRFS candidates");
-    }
-
-    // --- Additional tests for fsid_type variants ---
-
-    /// Build a Linux BTRFS handle with fsid_type=1 (4-byte fsid).
-    fn linux_btrfs_fsid1_handle(inode: u32, generation: u32) -> FileHandle {
-        let mut data = vec![
-            0x01, // version = 1
-            0x00, // auth_type = 0
-            0x01, // fsid_type = 1 (dev number only, 4 bytes)
-            0x4d, // fileid_type = 0x4d (BTRFS)
-            // fsid: 4 bytes
-            0x08, 0x00, 0x00, 0x00,
-        ];
-        data.extend_from_slice(&inode.to_le_bytes());
-        data.extend_from_slice(&generation.to_le_bytes());
-        FileHandle::from_bytes(&data)
-    }
-
-    /// Build a Linux BTRFS handle with fsid_type=2 (12-byte fsid).
-    fn linux_btrfs_fsid2_handle(inode: u32, generation: u32) -> FileHandle {
-        let mut data = vec![
-            0x01, // version = 1
-            0x00, // auth_type = 0
-            0x02, // fsid_type = 2 (dev + UUID prefix, 12 bytes)
-            0x4d, // fileid_type = 0x4d (BTRFS)
-        ];
-        // fsid: 12 bytes
-        data.extend_from_slice(&[0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0xCC, 0xDD]);
-        data.extend_from_slice(&inode.to_le_bytes());
-        data.extend_from_slice(&generation.to_le_bytes());
-        FileHandle::from_bytes(&data)
     }
 
     #[test]

@@ -30,8 +30,8 @@ pub(crate) struct MountResult {
     /// Raw u32 values from the MNT response. Known values:
     /// `AUTH_NONE=0`, `AUTH_SYS=1`, `AUTH_SHORT=2`, `RPCSEC_GSS=6`.
     pub auth_flavors: Vec<u32>,
-    /// Parsed auth flavor enum values (best-effort).
-    pub parsed_flavors: Vec<AuthFlavor>,
+    /// Parsed auth flavor enum values (best-effort; stored for future ACL reporting).
+    pub _parsed_flavors: Vec<AuthFlavor>,
 }
 
 /// One export with its access control list.
@@ -143,7 +143,7 @@ impl NfsMountClient {
         let res = client.mnt(path).await.with_context(|| format!("MNT {export}"))?;
         let handle = FileHandle::from_bytes(res.fhandle.0.as_ref());
         let parsed_flavors = res.auth_flavors.iter().map(|&f| parse_flavor(f)).collect();
-        Ok(MountResult { handle, auth_flavors: res.auth_flavors, parsed_flavors })
+        Ok(MountResult { handle, auth_flavors: res.auth_flavors, _parsed_flavors: parsed_flavors })
     }
 
     /// Mount an NFSv2 export via MOUNT v1 MNT (program 100005, version 1, proc 1).
@@ -200,7 +200,7 @@ impl NfsMountClient {
             anyhow::bail!("MNT v1 {export}: status {}", result.status);
         }
         let handle = FileHandle::from_bytes(&result.fhandle);
-        Ok(MountResult { handle, auth_flavors: vec![1], parsed_flavors: vec![AuthFlavor::Sys] })
+        Ok(MountResult { handle, auth_flavors: vec![1], _parsed_flavors: vec![AuthFlavor::Sys] })
     }
 
     /// Unmount an export (MNTPROC_UMNT) for stealth cleanup (F-2.5).

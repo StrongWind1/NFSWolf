@@ -121,7 +121,7 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
     };
 
     let sprayer = UidSprayer::new(client, circuit, stealth.clone());
-    let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range, paired_gid, auxiliary_gids: globals.aux_gids.clone(), target_path: args.path, concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };
+    let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range, paired_gid, auxiliary_gids: globals.aux_gids.clone(), _target_path: args.path, _concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };
 
     let results = sprayer.spray(&config, &target_fh).await;
     eprintln!("{}", format!("[+] {} credential(s) granted access", results.len()).green());

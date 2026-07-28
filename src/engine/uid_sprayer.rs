@@ -34,50 +34,6 @@ pub(crate) struct SprayResult {
     pub access: u32,
 }
 
-impl SprayResult {
-    /// True if the server granted READ access.
-    #[must_use]
-    pub(crate) const fn can_read(&self) -> bool {
-        self.access & access_bits::READ != 0
-    }
-
-    /// True if the server granted LOOKUP (directory list) access.
-    #[must_use]
-    pub(crate) const fn can_lookup(&self) -> bool {
-        self.access & access_bits::LOOKUP != 0
-    }
-
-    /// True if the server granted MODIFY (write/setattr) access.
-    #[must_use]
-    pub(crate) const fn can_modify(&self) -> bool {
-        self.access & access_bits::MODIFY != 0
-    }
-
-    /// True if the server granted EXTEND (append/create) access.
-    #[must_use]
-    pub(crate) const fn can_extend(&self) -> bool {
-        self.access & access_bits::EXTEND != 0
-    }
-
-    /// True if the server granted DELETE access.
-    #[must_use]
-    pub(crate) const fn can_delete(&self) -> bool {
-        self.access & access_bits::DELETE != 0
-    }
-
-    /// True if the server granted EXECUTE access.
-    #[must_use]
-    pub(crate) const fn can_execute(&self) -> bool {
-        self.access & access_bits::EXECUTE != 0
-    }
-
-    /// Check whether a specific set of required access bits are all granted.
-    #[must_use]
-    pub(crate) const fn has_access(&self, required: u32) -> bool {
-        self.access & required == required
-    }
-}
-
 /// Configuration for UID spraying.
 #[derive(Debug)]
 pub(crate) struct SprayConfig {
@@ -93,11 +49,10 @@ pub(crate) struct SprayConfig {
     pub paired_gid: bool,
     /// Auxiliary GIDs to permute per UID attempt (injected into AUTH_SYS).
     pub auxiliary_gids: Vec<u32>,
-    /// Remote path string (informational, used in log output).
-    pub target_path: String,
-    /// Unused in the current sequential implementation; reserved for future
-    /// parallel spray support.
-    pub concurrency: usize,
+    /// Remote path string (informational, included in Debug output).
+    pub _target_path: String,
+    /// Reserved for future parallel spray support.
+    pub _concurrency: usize,
     /// Which access bits to test for (bitmask). Default: ALL.
     /// The server always returns the full bitmask, but this controls
     /// which results are considered "hits" for filtering/reporting.

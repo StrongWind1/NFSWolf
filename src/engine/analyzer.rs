@@ -18,11 +18,6 @@ use serde::{Deserialize, Serialize};
 /// Dot-prefixed so it is inconspicuous in a listing if cleanup fails.
 const PROBE_NAME: &str = ".nfswolf_squash_probe";
 
-/// Well-known shadow group GIDs per distro family.
-/// Provided as defaults for `--test-read-gids` when no explicit GIDs given.
-pub(crate) const SHADOW_GID_DEBIAN: u32 = 42;
-pub(crate) const SHADOW_GID_SUSE: u32 = 15;
-
 /// Well-known anonuid values that indicate misconfiguration.
 pub(crate) const ANON_UID_ROOT: u32 = 0;
 pub(crate) const ANON_UID_NOBODY: u32 = 65534;
@@ -107,23 +102,6 @@ pub(crate) struct Nfs4Ace {
     pub who: String,
 }
 
-/// Result of symlink attack precondition check.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct SymlinkPrecondition {
-    pub writable_path: String,
-    pub owner_uid: u32,
-    pub owner_gid: u32,
-    pub mode: u32,
-}
-
-/// Result of escape confirmation via directory comparison.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct EscapeConfirmation {
-    pub root_entries: u32,
-    pub export_entries: u32,
-    pub confirmed: bool,
-}
-
 /// Squash configuration detected via write-and-check probing.
 ///
 /// Creates a test file and inspects the resulting ownership to infer
@@ -143,93 +121,6 @@ pub(crate) struct SquashProbeResult {
     pub squash_mode: String,
     /// Whether the `insecure` option appears active (accepts ports >1024).
     pub insecure_port: bool,
-}
-
-/// Result of NFSv2 downgrade attack detection.
-///
-/// If a server supports NFSv2 alongside v3/v4, an attacker can explicitly
-/// request v2 to bypass sec=krb5 or other v3+ security features.
-/// See docs/issues/21-nfsv2-downgrade-attack.md.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct VersionDowngradeResult {
-    /// NFS versions the server advertises (e.g., [2, 3, 4]).
-    pub supported_versions: Vec<u32>,
-    /// Whether v2 is enabled alongside newer versions (the downgrade risk).
-    pub v2_downgrade_possible: bool,
-    /// Whether v3+ requires krb5 but v2 accepts AUTH_SYS (critical bypass).
-    pub krb5_bypass_via_v2: bool,
-}
-
-/// Result of portmapper UDP amplification check.
-///
-/// Measures whether the portmapper responds to DUMP requests over UDP
-/// and calculates the amplification factor. A factor >10x indicates
-/// the host can be weaponized as a DDoS reflector.
-/// See docs/issues/20-portmapper-amplification-ddos.md.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct PortmapAmplificationResult {
-    /// Whether UDP port 111 responded to a DUMP request.
-    pub udp_responsive: bool,
-    /// Size of the request packet (typically 68 bytes).
-    pub request_bytes: u32,
-    /// Size of the response packet.
-    pub response_bytes: u32,
-    /// Amplification factor (response / request).
-    pub amplification_factor: f64,
-    /// Number of registered RPC programs in the response.
-    pub registered_programs: u32,
-}
-
-/// Result of `nohide` export option detection.
-///
-/// When `nohide` is set, the server exposes filesystems mounted beneath
-/// the export point without requiring explicit export entries. This enables
-/// traversal to sibling filesystems that may contain more sensitive data.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct NohideExportResult {
-    /// Export path checked.
-    pub export_path: String,
-    /// Whether sub-mount traversal was detected (nohide or crossmnt active).
-    pub nohide_active: bool,
-    /// Paths of sub-mounts discovered via traversal.
-    pub discovered_submounts: Vec<String>,
-}
-
-/// Result of NIS (YP) service detection alongside NFS.
-///
-/// NIS is an RPC directory service frequently co-hosted on NFS servers.
-/// When ypserv/ypbind are registered in portmapper, an attacker who discovers
-/// the NIS domain name can extract password hashes, group memberships,
-/// and host tables without authentication.
-/// See docs/issues/22-nis-credential-extraction.md.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct NisDetectionResult {
-    /// Whether ypserv (program 100004) is registered in portmapper.
-    pub ypserv_present: bool,
-    /// Whether ypbind (program 100007) is registered in portmapper.
-    pub ypbind_present: bool,
-    /// NIS domain name if discovered.
-    pub domain_name: Option<String>,
-    /// Available NIS maps (e.g., passwd.byname, group.byname).
-    pub available_maps: Vec<String>,
-}
-
-/// Result of portmapper bypass detection.
-///
-/// When port 111 is filtered but NFS ports are open, the firewall config
-/// is ineffective  --  NFS can still be accessed by specifying ports directly
-/// or tunneling through a local fake portmapper.
-/// See docs/issues/23-portmapper-tunnel-bypass.md.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct PortmapBypassResult {
-    /// Whether port 111 is filtered/closed.
-    pub portmapper_filtered: bool,
-    /// Whether NFS port 2049 is open despite filtered portmapper.
-    pub nfs_reachable: bool,
-    /// Whether mountd is reachable on a discovered port.
-    pub mountd_reachable: bool,
-    /// Mountd port if discovered (via scanning or guessing).
-    pub mountd_port: Option<u16>,
 }
 
 // --- AnalyzeConfig ---

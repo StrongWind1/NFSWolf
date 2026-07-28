@@ -286,11 +286,8 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
                 found_stale = true;
                 tracing::debug!(inode, "STALE");
             },
-            Err(stat) => {
-                tracing::debug!(inode, ?stat, "probe rejected");
-            },
             Err(e) => {
-                tracing::debug!(inode, err = %e, "RPC error during escape scan");
+                tracing::debug!(inode, err = %e, "probe rejected");
             },
         }
     }
