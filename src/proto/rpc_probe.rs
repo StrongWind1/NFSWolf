@@ -29,7 +29,8 @@ pub(crate) enum ProbeResult<T> {
     /// the contiguous range of supported versions (RFC 1831 S13).
     ProgMismatch(VersionRange),
     /// TCP connection, RPC framing, or auth failure.  No version info.
-    Failed(#[expect(dead_code, reason = "carried for Debug output")] anyhow::Error),
+    /// The error is logged at debug level before returning this variant.
+    Failed,
 }
 
 impl<T> ProbeResult<T> {
@@ -109,22 +110,38 @@ fn parse_reply<R: Unpack>(buf: Vec<u8>, expected_xid: u32) -> ProbeResult<R> {
     let mut cursor = Cursor::new(buf);
     let resp = match rpc_msg::unpack(&mut cursor) {
         Ok((msg, _)) => msg,
-        Err(e) => return ProbeResult::Failed(anyhow::anyhow!("unpack RPC reply: {e}")),
+        Err(e) => {
+            tracing::debug!("unpack RPC reply: {e}");
+            return ProbeResult::Failed;
+        },
     };
     if resp.xid != expected_xid {
-        return ProbeResult::Failed(anyhow::anyhow!("XID mismatch: got {}, expected {expected_xid}", resp.xid));
+        tracing::debug!("XID mismatch: got {}, expected {expected_xid}", resp.xid);
+        return ProbeResult::Failed;
     }
     match resp.body {
         msg_body::REPLY(reply_body::MSG_ACCEPTED(accepted)) => match accepted.reply_data {
             accept_stat_data::SUCCESS => match R::unpack(&mut cursor) {
                 Ok((result, _)) => ProbeResult::Accepted(result),
-                Err(e) => ProbeResult::Failed(anyhow::anyhow!("decode result: {e}")),
+                Err(e) => {
+                    tracing::debug!("decode result: {e}");
+                    ProbeResult::Failed
+                },
             },
             accept_stat_data::PROG_MISMATCH { low, high } => ProbeResult::ProgMismatch(VersionRange { low, high }),
-            other => ProbeResult::Failed(anyhow::anyhow!("RPC not accepted: {other:?}")),
+            other => {
+                tracing::debug!("RPC not accepted: {other:?}");
+                ProbeResult::Failed
+            },
         },
-        msg_body::REPLY(reply_body::MSG_DENIED(denied)) => ProbeResult::Failed(anyhow::anyhow!("RPC denied: {denied:?}")),
-        msg_body::CALL(_) => ProbeResult::Failed(anyhow::anyhow!("unexpected CALL in reply")),
+        msg_body::REPLY(reply_body::MSG_DENIED(denied)) => {
+            tracing::debug!("RPC denied: {denied:?}");
+            ProbeResult::Failed
+        },
+        msg_body::CALL(_) => {
+            tracing::debug!("unexpected CALL in reply");
+            ProbeResult::Failed
+        },
     }
 }
 
@@ -138,12 +155,19 @@ async fn send_and_recv<R: Unpack>(stream: &mut TcpStream, program: u32, version:
     let xid = next_xid();
     let buf = build_tcp_call(xid, program, version, proc_num, args);
     if let Err(e) = tokio::time::timeout(timeout, stream.write_all(&buf)).await {
-        return ProbeResult::Failed(e.into());
+        tracing::debug!("RPC write timeout: {e}");
+        return ProbeResult::Failed;
     }
     match tokio::time::timeout(timeout, read_rpc_record(stream)).await {
         Ok(Ok(reply_buf)) => parse_reply::<R>(reply_buf, xid),
-        Ok(Err(e)) => ProbeResult::Failed(e),
-        Err(e) => ProbeResult::Failed(e.into()),
+        Ok(Err(e)) => {
+            tracing::debug!("RPC read error: {e}");
+            ProbeResult::Failed
+        },
+        Err(e) => {
+            tracing::debug!("RPC read timeout: {e}");
+            ProbeResult::Failed
+        },
     }
 }
 
@@ -158,8 +182,8 @@ pub(crate) async fn probe_nfs_versions_tcp(addr: SocketAddr, timeout: Duration, 
         let proxy_addr = match crate::proto::conn::parse_proxy_addr(p) {
             Ok(a) => a,
             Err(e) => {
-                let msg = format!("bad proxy address: {e}");
-                return (ProbeResult::Failed(anyhow::anyhow!("{msg}")), ProbeResult::Failed(anyhow::anyhow!("{msg}")), ProbeResult::Failed(anyhow::anyhow!("{msg}")));
+                tracing::debug!("bad proxy address: {e}");
+                return (ProbeResult::Failed, ProbeResult::Failed, ProbeResult::Failed);
             },
         };
         tokio::time::timeout(timeout, crate::proto::conn::socks5_connect(proxy_addr, addr)).await
@@ -170,12 +194,12 @@ pub(crate) async fn probe_nfs_versions_tcp(addr: SocketAddr, timeout: Duration, 
     let mut stream = match connect_result {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            let msg = format!("connect to {addr}: {e}");
-            return (ProbeResult::Failed(anyhow::anyhow!("{msg}")), ProbeResult::Failed(anyhow::anyhow!("{msg}")), ProbeResult::Failed(anyhow::anyhow!("{msg}")));
+            tracing::debug!("connect to {addr}: {e}");
+            return (ProbeResult::Failed, ProbeResult::Failed, ProbeResult::Failed);
         },
         Err(_) => {
-            let msg = format!("connect to {addr}: timeout");
-            return (ProbeResult::Failed(anyhow::anyhow!("{msg}")), ProbeResult::Failed(anyhow::anyhow!("{msg}")), ProbeResult::Failed(anyhow::anyhow!("{msg}")));
+            tracing::debug!("connect to {addr}: timeout");
+            return (ProbeResult::Failed, ProbeResult::Failed, ProbeResult::Failed);
         },
     };
 
@@ -210,17 +234,27 @@ pub(crate) async fn probe_rpc_udp<R: Unpack>(addr: SocketAddr, program: u32, ver
 
     let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
-        Err(e) => return ProbeResult::Failed(e.into()),
+        Err(e) => {
+            tracing::debug!("UDP bind: {e}");
+            return ProbeResult::Failed;
+        },
     };
     if let Err(e) = socket.send_to(&buf, addr).await {
-        return ProbeResult::Failed(e.into());
+        tracing::debug!("UDP send to {addr}: {e}");
+        return ProbeResult::Failed;
     }
 
     let mut recv_buf = vec![0u8; 65_536];
     let n = match tokio::time::timeout(timeout, socket.recv_from(&mut recv_buf)).await {
         Ok(Ok((n, _))) => n,
-        Ok(Err(e)) => return ProbeResult::Failed(e.into()),
-        Err(e) => return ProbeResult::Failed(e.into()),
+        Ok(Err(e)) => {
+            tracing::debug!("UDP recv from {addr}: {e}");
+            return ProbeResult::Failed;
+        },
+        Err(e) => {
+            tracing::debug!("UDP recv timeout from {addr}: {e}");
+            return ProbeResult::Failed;
+        },
     };
     recv_buf.truncate(n);
     parse_reply::<R>(recv_buf, xid)
