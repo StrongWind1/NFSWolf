@@ -34,12 +34,6 @@ impl<'a> Opaque<'a> {
         Opaque(Cow::Borrowed(data))
     }
 
-    /// Creates a new `Opaque` from a `Vec<u8>`.
-    #[must_use]
-    pub const fn from_vec(data: Vec<u8>) -> Self {
-        Opaque(Cow::Owned(data))
-    }
-
     /// Returns the length of the opaque data.
     #[must_use]
     pub fn len(&self) -> usize {

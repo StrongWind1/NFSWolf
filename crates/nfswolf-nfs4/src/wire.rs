@@ -668,6 +668,39 @@ impl Nfs4Status {
     }
 }
 
+impl core::fmt::Display for Nfs4Status {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Ok => f.write_str("NFS4_OK"),
+            Self::Perm => f.write_str("NFS4ERR_PERM"),
+            Self::NoEnt => f.write_str("NFS4ERR_NOENT"),
+            Self::Io => f.write_str("NFS4ERR_IO"),
+            Self::Nxio => f.write_str("NFS4ERR_NXIO"),
+            Self::Acces => f.write_str("NFS4ERR_ACCESS"),
+            Self::Exist => f.write_str("NFS4ERR_EXIST"),
+            Self::NotDir => f.write_str("NFS4ERR_NOTDIR"),
+            Self::IsDir => f.write_str("NFS4ERR_ISDIR"),
+            Self::Inval => f.write_str("NFS4ERR_INVAL"),
+            Self::Fbig => f.write_str("NFS4ERR_FBIG"),
+            Self::NoSpc => f.write_str("NFS4ERR_NOSPC"),
+            Self::Rofs => f.write_str("NFS4ERR_ROFS"),
+            Self::NameTooLong => f.write_str("NFS4ERR_NAMETOOLONG"),
+            Self::NotEmpty => f.write_str("NFS4ERR_NOTEMPTY"),
+            Self::Stale => f.write_str("NFS4ERR_STALE"),
+            Self::BadHandle => f.write_str("NFS4ERR_BADHANDLE"),
+            Self::BadCookie => f.write_str("NFS4ERR_BAD_COOKIE"),
+            Self::NotSupp => f.write_str("NFS4ERR_NOTSUPP"),
+            Self::Denied => f.write_str("NFS4ERR_DENIED"),
+            Self::Expired => f.write_str("NFS4ERR_EXPIRED"),
+            Self::Locked => f.write_str("NFS4ERR_LOCKED"),
+            Self::WrongSec => f.write_str("NFS4ERR_WRONGSEC"),
+            Self::Moved => f.write_str("NFS4ERR_MOVED"),
+            Self::BadXdr => f.write_str("NFS4ERR_BADXDR"),
+            Self::Unknown(n) => write!(f, "NFS4ERR_UNKNOWN({n})"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![expect(clippy::pedantic, unused_results, reason = "unit test  --  lints are suppressed per project policy")]

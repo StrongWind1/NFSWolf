@@ -19,6 +19,9 @@ use crate::util::stealth::StealthConfig;
 
 /// Spray UID/GID combinations to find which identities can access a path.
 ///
+/// Requires NFSv3 -- the permission oracle is the NFSv3 ACCESS procedure
+/// (RFC 1813 sec. 3.3.4), which has no equivalent in NFSv2.
+///
 /// Last-resort credential discovery. This should not normally be needed:
 /// the auto-UID ladder built into `shell` and `mount` already tries owner,
 /// root, and common service UIDs on every ACCES, and `escape` bypasses
@@ -111,14 +114,11 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
     let (_, circuit, client) = make_client_with_hostname(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
 
     // Mount to get the root handle, then walk to the target path.
+    // lookup_path reuses the same pool-backed client the sprayer will use --
+    // no reason to stand up a second pool and circuit breaker for one walk.
     let mount = make_mount_client(globals);
     let mnt = mount.mount(addr, &export).await?;
-    let target_fh = if args.path == "/" {
-        mnt.handle
-    } else {
-        let (_, _, lookup_client) = make_client_with_hostname(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
-        lookup_path(&lookup_client, &mnt.handle, &args.path).await?
-    };
+    let target_fh = if args.path == "/" { mnt.handle } else { lookup_path(&client, &mnt.handle, &args.path).await? };
 
     let sprayer = UidSprayer::new(client, circuit, stealth.clone());
     let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range, paired_gid, auxiliary_gids: globals.aux_gids.clone(), _target_path: args.path, _concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };

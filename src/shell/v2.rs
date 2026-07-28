@@ -1,27 +1,43 @@
 //! NFSv2 backend for the unified shell.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use nfswolf_nfs2::Nfs2Client;
 use nfswolf_nfs2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};
+use nfswolf_rpc::rpc::opaque_auth;
 use nfswolf_rpc::transport::direct::DirectTransport;
 use nfswolf_rpc::transport::tokio::TokioIo;
+
+use crate::proto::auth::{AuthSys, Credential, next_stamp};
+use crate::proto::mount::NfsMountClient;
 
 use super::ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
 
 type V2Transport = DirectTransport<TokioIo<tokio::net::TcpStream>>;
 
 /// NFSv2 backend wrapping a `Nfs2Client` over a single TCP connection.
+///
+/// Unlike `V3Ops`, whose `PooledTransport` allows mid-session credential swaps,
+/// `DirectTransport` fixes the credential at construction time. Identity changes
+/// therefore reconnect: new TCP socket, new `AuthSys`, and a fresh MOUNT v1 MNT
+/// to verify that the new identity has export access.
 pub(crate) struct V2Ops {
     client: Arc<Nfs2Client<V2Transport>>,
     uid: u32,
     gid: u32,
     hostname: String,
+    /// Portmapper address (host:111) used for MOUNT port discovery on reconnect.
+    addr: SocketAddr,
+    /// Export path for re-mounting on identity change.
+    export_path: String,
+    /// NFS daemon port for the data connection.
+    nfs_port: u16,
 }
 
 impl V2Ops {
-    pub(crate) fn new(client: Arc<Nfs2Client<V2Transport>>, uid: u32, gid: u32, hostname: String) -> Self {
-        Self { client, uid, gid, hostname }
+    pub(crate) fn new(client: Arc<Nfs2Client<V2Transport>>, uid: u32, gid: u32, hostname: String, addr: SocketAddr, export_path: String, nfs_port: u16) -> Self {
+        Self { client, uid, gid, hostname, addr, export_path, nfs_port }
     }
 
     /// Probe NFSPROC_ROOT (proc 3) -- obsolete MOUNT bypass check.
@@ -69,9 +85,11 @@ fn v2_info(a: &Nfs2FileAttr) -> ShellFileInfo {
         atime_secs: a.atime.seconds,
         mtime_secs: a.mtime.seconds,
         ctime_secs: a.ctime.seconds,
-        used: 0,
-        rdev: (0, 0),
-        fsid: 0,
+        // NFSv2 reports disk usage in 512-byte blocks (RFC 1094 S2.3.5).
+        used: u64::from(a.blocks) * 512,
+        // Old Linux dev_t encoding: major = bits 15:8, minor = bits 7:0.
+        rdev: ((a.rdev >> 8) & 0xFF, a.rdev & 0xFF),
+        fsid: u64::from(a.fsid),
     }
 }
 
@@ -197,8 +215,35 @@ impl ShellOps for V2Ops {
         &self.hostname
     }
 
-    fn change_identity(&mut self, _uid: u32, _gid: u32, _hostname: &str) -> anyhow::Result<()> {
-        anyhow::bail!("identity changes require reconnection on NFSv2 (DirectTransport credential is fixed at connect time)")
+    fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
+        // DirectTransport fixes the credential at construction time, so changing
+        // identity requires tearing down the old TCP session and building a new
+        // one. Bridge into async via block_in_place (we are always called from
+        // within a tokio runtime).
+        let hostname = hostname.to_owned();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                // Re-mount the export with the new identity to verify access.
+                // The returned handle is a bearer token identical to the one the
+                // shell already holds, so we discard it.
+                let mount_client = NfsMountClient::new().with_credential(Credential::Sys(AuthSys::new(uid, gid, &hostname)));
+                drop(mount_client.mount_v1(self.addr, &self.export_path).await.map_err(|e| anyhow::anyhow!("MNT v1 failed for uid={uid} gid={gid}: {e}"))?);
+
+                // Create a fresh NFS connection with the new AUTH_SYS credential.
+                let nfs_addr = SocketAddr::new(self.addr.ip(), self.nfs_port);
+                let stream = tokio::net::TcpStream::connect(nfs_addr).await.map_err(|e| anyhow::anyhow!("connect to NFSv2 at {nfs_addr}: {e}"))?;
+                let io = TokioIo::new(stream);
+                let cred = AuthSys::with_groups(uid, gid, &[gid], &hostname);
+                let auth = cred.to_opaque_auth(next_stamp());
+                let transport = DirectTransport::with_auth(io, auth, opaque_auth::default());
+
+                self.client = Arc::new(Nfs2Client::new(transport));
+                self.uid = uid;
+                self.gid = gid;
+                self.hostname = hostname;
+                Ok(())
+            })
+        })
     }
 
     fn version_name(&self) -> &'static str {
@@ -209,7 +254,7 @@ impl ShellOps for V2Ops {
     }
 
     fn supports_identity_change(&self) -> bool {
-        false
+        true
     }
 
     fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter> {

@@ -160,6 +160,31 @@ impl Unpack for NfsStat {
     }
 }
 
+impl std::fmt::Display for NfsStat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ok => "NFS_OK",
+            Self::Perm => "NFSERR_PERM",
+            Self::NoEnt => "NFSERR_NOENT",
+            Self::Io => "NFSERR_IO",
+            Self::Nxio => "NFSERR_NXIO",
+            Self::Acces => "NFSERR_ACCES",
+            Self::Exist => "NFSERR_EXIST",
+            Self::NoDev => "NFSERR_NODEV",
+            Self::NotDir => "NFSERR_NOTDIR",
+            Self::IsDir => "NFSERR_ISDIR",
+            Self::Fbig => "NFSERR_FBIG",
+            Self::NoSpc => "NFSERR_NOSPC",
+            Self::Rofs => "NFSERR_ROFS",
+            Self::NameTooLong => "NFSERR_NAMETOOLONG",
+            Self::NotEmpty => "NFSERR_NOTEMPTY",
+            Self::Dquot => "NFSERR_DQUOT",
+            Self::Stale => "NFSERR_STALE",
+            Self::WFlush => "NFSERR_WFLUSH",
+        })
+    }
+}
+
 /// NFSv2 file type.
 ///
 /// RFC 1094 S2.3.3 defines values 0-5. The Linux kernel header (nfs2.h)

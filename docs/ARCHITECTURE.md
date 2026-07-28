@@ -202,7 +202,7 @@ Session:       help, history, exit, quit
 - **Symlink creation**: Create symlinks pointing outside export boundaries (F-4.4)
 - **Inline escape**: `escape-root` constructs filesystem root handle from current session (F-2.1)
 - **NFSv2 mode**: `--nfs-version 2` drops into an NFSv2 shell via MOUNT v1 + `Nfs2Client`. Supports `--handle HEX` for MOUNT bypass. Includes the `root` probe (NFSPROC_ROOT bypass check, RFC 1094 sec. 2.2.3) which is not available in the v3 shell.
-- **NFSv4 mode**: `--nfs-version 4` drops into a minimal NFSv4 shell (ls/cd/cat/get) without MOUNT
+- **NFSv4 mode**: `--nfs-version 4` drops into an NFSv4 shell (ls/cd/cat/get/handle/lcd/lls/lpwd/lmkdir/history) without MOUNT -- read-only NFS operations plus local commands
 
 ### 5. Offensive subcommands -- `escape`, `brute-handle`, `uid-spray`
 
@@ -294,9 +294,9 @@ This began as a dependency on [`nfs3-rs`](https://github.com/Vaiz/nfs3) (Unlicen
 | `nfswolf-xdr-derive` | `#[derive(XdrCodec)]` proc macro |
 | `nfswolf-xdr` | `Pack`/`Unpack` traits, `Opaque`, `List`, `BoundedList`, `Void`, length-hardened readers (`PREALLOC_CAP`) |
 | `nfswolf-rpc` | `RpcClient`, `RpcTransport` trait, `DirectTransport`, portmapper v2, `AuthSys`, `AuthFlavor`, fragment headers, `AsyncRead`/`AsyncWrite` with tokio backend |
-| `nfswolf-nfs2` | All 18 NFSv2 procedures (RFC 1094), fixed 32-byte handles, `Nfs2Client` |
+| `nfswolf-nfs2` | All 18 NFSv2 procedures (RFC 1094), fixed 32-byte handles, `Nfs2Client`, `Nfs2Error` with classification predicates, `Display` for `NfsStat` |
 | `nfswolf-nfs3` | All 22 NFSv3 procedures + MOUNT v3, domain API (`FileHandle`, `FileAttrs`, `Nfs3Fault`), `Nfs3Error` with handle-oracle predicates |
-| `nfswolf-nfs4` | NFSv4.0 COMPOUND (RFC 7530) read-only subset |
+| `nfswolf-nfs4` | NFSv4.0 COMPOUND (RFC 7530) read-only subset, `Display` for `Nfs4Status` |
 
 **What is deliberately absent:**
 - A server implementation -- integration tests use the published `nfs3_server` crate as a mock
@@ -622,9 +622,10 @@ nfswolf/
 │   ├── output.rs                  # status_info/warn/err, print_handle, print_handle_next_steps
 │   ├── shell/                     # NfsShell: 44+ commands, tab completion, readline REPL
 │   │   ├── mod.rs                 # Shell REPL loop, command dispatch, tab completion
+│   │   ├── complete.rs            # Tab completion for remote/local paths
 │   │   ├── ops.rs                 # ShellOps trait + version-neutral types
-│   │   ├── v2.rs                  # V2Ops: ShellOps impl for NFSv2
-│   │   └── v3.rs                  # V3Ops: ShellOps impl for NFSv3 with credential escalation
+│   │   ├── v2.rs                  # V2Ops: ShellOps impl for NFSv2 with identity change via TCP reconnect
+│   │   └── v3.rs                  # V3Ops: ShellOps impl for NFSv3 with credential escalation (read_file and read_chunk)
 │   ├── fuse.rs                    # NfsFuse: full FUSE Filesystem trait, inode map, attr cache
 │   ├── cli/
 │   │   ├── mod.rs                 # Cli, Command enum, GlobalOpts, H_* help-section constants

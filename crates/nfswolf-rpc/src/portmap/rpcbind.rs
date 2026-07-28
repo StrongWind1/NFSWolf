@@ -25,17 +25,6 @@ const RPCBIND_V3: u32 = 3;
 /// rpcbind version 4 -- adds GETSTAT and indirect call helpers.
 const RPCBIND_V4: u32 = 4;
 
-/// Server time returned by RPCBPROC_GETTIME (RFC 1833 sec. 2.1).
-///
-/// Just a `u32` wrapper giving the server's local clock as seconds since
-/// the Unix epoch.  Useful for Kerberos ticket timing and correlating
-/// log timestamps.
-#[derive(Debug, Clone, Copy)]
-pub struct RpcbindTime {
-    /// Seconds since the Unix epoch.
-    pub epoch_secs: u32,
-}
-
 /// One rpcbind version's operational statistics from RPCBPROC_GETSTAT
 /// (RFC 1833 sec. 2.2.2).
 ///

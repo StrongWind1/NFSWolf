@@ -133,6 +133,14 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
         bail!("--gen-end ({gen_end}) must be >= --gen-start ({gen_start})");
     }
 
+    // construct_handle_for_inode takes u32; warn when the CLI range exceeds that.
+    if inode_end > u64::from(u32::MAX) {
+        tracing::warn!("--inode-end {} exceeds 32-bit maximum; clamping to {}", inode_end, u32::MAX);
+    }
+    if inode_start > u64::from(u32::MAX) {
+        tracing::warn!("--inode-start {} exceeds 32-bit maximum; clamping to {}", inode_start, u32::MAX);
+    }
+
     let inode_count = inode_end - inode_start + 1;
     let gen_count = u64::from(gen_end - gen_start) + 1;
     let search_space = inode_count.saturating_mul(gen_count);

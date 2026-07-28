@@ -176,8 +176,37 @@ impl ShellOps for V3Ops {
     }
 
     async fn read_chunk(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
-        let chunk = self.nfs3.read_at(&to_v3_fh(fh), offset, count).await.map_err(fault_to_anyhow)?;
-        Ok(chunk.data)
+        // Credential escalation mirrors read_file(): cached cred -> base -> ladder.
+        // The cred_cache persists across loop iterations in download_file(), so
+        // only the first chunk pays the escalation cost.
+        if let Some(client) = self.cached_client(fh) {
+            match read_chunk_v3(&client, &to_v3_fh(fh), offset, count).await {
+                Ok(data) => return Ok(data),
+                Err(e) if !is_nfs_acces(&e) => return Err(e),
+                Err(_) => {},
+            }
+        }
+        match read_chunk_v3(&self.nfs3, &to_v3_fh(fh), offset, count).await {
+            Ok(data) => return Ok(data),
+            Err(e) if !is_nfs_acces(&e) => return Err(e),
+            Err(_) => {},
+        }
+        let fh3 = to_v3_fh(fh);
+        let facts = getattr_owner(&self.nfs3, &fh3).await;
+        let caller = (self.nfs3.uid(), self.nfs3.gid());
+        for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
+            let esc = self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid);
+            match read_chunk_v3(&esc, &fh3, offset, count).await {
+                Ok(data) => {
+                    tracing::debug!(uid, gid, "read_chunk escalated");
+                    self.cache_winner(fh, uid, gid);
+                    return Ok(data);
+                },
+                Err(e) if !is_nfs_acces(&e) => return Err(e),
+                Err(_) => {},
+            }
+        }
+        anyhow::bail!("NFS3ERR_ACCES: permission denied reading file chunk")
     }
 
     async fn write_chunk(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
@@ -344,6 +373,11 @@ async fn list_dir_v3(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<V
         }
     }
     Ok(out)
+}
+
+async fn read_chunk_v3(nfs3: &Nfs3Client, fh: &FileHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
+    let chunk = nfs3.read_at(fh, offset, count).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(chunk.data)
 }
 
 const READ_ALL_MAX: u64 = 256 * 1024 * 1024;

@@ -152,8 +152,7 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
     }
 
     if interrupted {
-        let nfs_count = results.len();
-        anyhow::bail!("Interrupted  --  {} of {} host(s) completed, {} with NFS", results.len(), total, nfs_count);
+        anyhow::bail!("Interrupted -- {} host(s) with NFS found (of {} targets)", results.len(), total);
     }
 
     // Auto-escape pass: only on a complete scan (a Ctrl+C above already exited).

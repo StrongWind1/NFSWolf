@@ -178,6 +178,14 @@ pub(crate) struct Analyzer {
     pub proxy: Option<String>,
     /// Stealth pacing applied to per-export probe RPCs (Critical Design Rule 10).
     pub stealth: StealthConfig,
+    /// Shared connection pool for per-export clients (avoids a fresh pool per export).
+    pub pool: Arc<ConnectionPool>,
+    /// Shared circuit breaker for per-export clients.
+    pub circuit: Arc<CircuitBreaker>,
+    /// AUTH_SYS machinename from --hostname (F-1.4).
+    pub hostname: String,
+    /// Auxiliary GIDs from --aux-gids, threaded into per-export credentials.
+    pub aux_gids: Vec<u32>,
 }
 
 impl std::fmt::Debug for Analyzer {
@@ -190,8 +198,8 @@ impl Analyzer {
     /// Construct an Analyzer from pre-built clients.
     #[must_use]
     #[expect(clippy::missing_const_for_fn, reason = "Arc<T> cannot be used in const context")]
-    pub(crate) fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient) -> Self {
-        Self { nfs3, mount, portmap, proxy: None, stealth: StealthConfig::none() }
+    pub(crate) fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient, pool: Arc<ConnectionPool>, circuit: Arc<CircuitBreaker>, hostname: String, aux_gids: Vec<u32>) -> Self {
+        Self { nfs3, mount, portmap, proxy: None, stealth: StealthConfig::none(), pool, circuit, hostname, aux_gids }
     }
 
     /// Attach a SOCKS5 proxy for NFSv4 SECINFO probes.
@@ -270,17 +278,19 @@ impl Analyzer {
 
         // Build a per-export NFS client so pool checkout uses the correct MOUNT path.
         // The global self.nfs3 has export="/" which fails on servers with restricted exports.
+        // Shares self.pool / self.circuit (the pool keys on (host, export, uid, gid) so
+        // different exports get different connection slots automatically), and inherits
+        // the proxy, hostname, and aux-gids the operator supplied.
         let export_nfs3 = {
             let uid = self.nfs3.uid();
             let gid = self.nfs3.gid();
-            let pool = Arc::new(ConnectionPool::default_config());
-            let circuit = Arc::new(CircuitBreaker::default_config());
-            let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf"));
+            let gids = crate::cli::probe::build_gid_list(gid, &self.aux_gids);
+            let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &self.hostname));
             let key = PoolKey { host: addr, export: entry.path.clone(), uid, gid };
             // Inherit the configured stealth pacing so every per-export probe RPC
             // (escape, btrfs, nohide, symlink, squash writes, file-access reads)
             // honours --delay/--jitter (Critical Design Rule 10).
-            Arc::new(Nfs3Client::new(PooledTransport::new(pool, key, circuit, self.stealth.clone(), cred, ReconnectStrategy::Persistent)))
+            Arc::new(Nfs3Client::new(PooledTransport::new(Arc::clone(&self.pool), key, Arc::clone(&self.circuit), self.stealth.clone(), cred, ReconnectStrategy::Persistent)))
         };
 
         let fh = mount_res.handle;
@@ -959,19 +969,29 @@ async fn check_btrfs_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_pa
 /// (nohide/crossmnt is active). Per RFC 1813 S3.3.3, servers should not
 /// allow LOOKUP to cross mount points by default.
 async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
-    let Ok(page) = nfs3.list_dir_page(root_fh, 0, cookieverf3([0u8; 8])).await else { return };
-
     // The export root's own fsid is the baseline every entry is compared to.
     let root_fsid = nfs3.attrs(root_fh).await.map_or(0, |a| a.fsid);
 
     let mut submounts: Vec<String> = Vec::new();
-    for entry in &page.entries {
-        // A server may omit the handle; without it the entry cannot be probed.
-        let Some(ref entry_fh) = entry.handle else { continue };
-        let Ok(a) = nfs3.attrs(entry_fh).await else { continue };
-        if root_fsid != 0 && a.fsid != root_fsid {
-            submounts.push(entry.name.clone());
+    // Page through the full directory listing -- a single page may miss entries
+    // on large exports, causing sub-mount detection to silently skip them.
+    let mut cookie = 0u64;
+    let mut verf = cookieverf3([0u8; 8]);
+    loop {
+        let Ok(page) = nfs3.list_dir_page(root_fh, cookie, verf).await else { break };
+        for entry in &page.entries {
+            // A server may omit the handle; without it the entry cannot be probed.
+            let Some(ref entry_fh) = entry.handle else { continue };
+            let Ok(a) = nfs3.attrs(entry_fh).await else { continue };
+            if root_fsid != 0 && a.fsid != root_fsid {
+                submounts.push(entry.name.clone());
+            }
         }
+        if page.eof || page.entries.is_empty() {
+            break;
+        }
+        cookie = page.cookie;
+        verf = page.cookieverf;
     }
 
     if !submounts.is_empty() {
@@ -998,35 +1018,45 @@ async fn check_nohide(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str
 /// The attacker can replace a directory entry with a symlink pointing to a
 /// privileged path.
 async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
-    let Ok(page) = nfs3.list_dir_page(root_fh, 0, cookieverf3([0u8; 8])).await else { return };
-
-    for entry in &page.entries {
-        // A server may answer READDIRPLUS without attributes; nothing to judge.
-        let Some(ref attrs) = entry.attrs else { continue };
-        // Flag ANY world-writable directory (mode & 0o002) regardless of owner. The
-        // canonical symlink-escape target is a root-owned, world-writable, sticky dir
-        // (/tmp, /var/tmp): any client can drop a symlink there no matter who owns it,
-        // and AUTH_SYS lets the attacker assume any UID anyway. The F-4.4 precondition
-        // is simply "writable directory" (docs/FINDINGS.md F-4.4); owner UID is
-        // evidence, not a gate.
-        let is_dir = attrs.file_type == nfswolf_nfs3::FileType::Directory;
-        let world_writable = (attrs.mode & 0o002) != 0;
-        if is_dir && world_writable {
-            let name = entry.name.clone();
-            findings.push(make_finding(
-                &FindingSpec {
-                    id: "F-4.4",
-                    title: "World-writable directory  --  symlink attack possible",
-                    desc: "A world-writable directory is present in the export. An attacker \
-                           with write access can replace directory entries with symlinks \
-                           pointing to privileged paths outside the export.",
-                    evidence: &format!("path={export_path}/{name} mode={:04o} uid={}", attrs.mode, attrs.uid),
-                    remediation: "Remove world-write permission from directories in NFS exports.",
-                    export: Some(export_path),
-                },
-                Severity::High,
-            ));
+    // Page through the full directory listing -- a single page may miss
+    // world-writable directories deeper in the listing.
+    let mut cookie = 0u64;
+    let mut verf = cookieverf3([0u8; 8]);
+    loop {
+        let Ok(page) = nfs3.list_dir_page(root_fh, cookie, verf).await else { break };
+        for entry in &page.entries {
+            // A server may answer READDIRPLUS without attributes; nothing to judge.
+            let Some(ref attrs) = entry.attrs else { continue };
+            // Flag ANY world-writable directory (mode & 0o002) regardless of owner. The
+            // canonical symlink-escape target is a root-owned, world-writable, sticky dir
+            // (/tmp, /var/tmp): any client can drop a symlink there no matter who owns it,
+            // and AUTH_SYS lets the attacker assume any UID anyway. The F-4.4 precondition
+            // is simply "writable directory" (docs/FINDINGS.md F-4.4); owner UID is
+            // evidence, not a gate.
+            let is_dir = attrs.file_type == nfswolf_nfs3::FileType::Directory;
+            let world_writable = (attrs.mode & 0o002) != 0;
+            if is_dir && world_writable {
+                let name = entry.name.clone();
+                findings.push(make_finding(
+                    &FindingSpec {
+                        id: "F-4.4",
+                        title: "World-writable directory  --  symlink attack possible",
+                        desc: "A world-writable directory is present in the export. An attacker \
+                               with write access can replace directory entries with symlinks \
+                               pointing to privileged paths outside the export.",
+                        evidence: &format!("path={export_path}/{name} mode={:04o} uid={}", attrs.mode, attrs.uid),
+                        remediation: "Remove world-write permission from directories in NFS exports.",
+                        export: Some(export_path),
+                    },
+                    Severity::High,
+                ));
+            }
         }
+        if page.eof || page.entries.is_empty() {
+            break;
+        }
+        cookie = page.cookie;
+        verf = page.cookieverf;
     }
 }
 

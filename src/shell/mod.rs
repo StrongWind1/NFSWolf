@@ -444,7 +444,16 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: find <pattern>".yellow());
             return;
         }
-        find_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), pattern.to_ascii_lowercase()).await;
+        let pattern_lower = pattern.to_ascii_lowercase();
+        let filter = |entry: &ShellEntry, path: &str| -> Option<String> {
+            if entry.name.to_ascii_lowercase().contains(&pattern_lower) {
+                let tc = entry.info.as_ref().map_or('?', |a| a.file_type.letter());
+                Some(colorize_name(path, tc))
+            } else {
+                None
+            }
+        };
+        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
     }
 
     // -------------------------------------------------------------------------
@@ -1114,19 +1123,52 @@ impl<O: ShellOps> NfsShell<O> {
     /// Recursively walk and report SUID/SGID binaries.
     async fn cmd_suid_scan(&self) {
         eprintln!("{}", "[*] scanning for SUID/SGID binaries...".blue());
-        suid_scan_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone()).await;
+        let filter = |entry: &ShellEntry, path: &str| -> Option<String> {
+            let a = entry.info.as_ref()?;
+            // SUID = 0o4000, SGID = 0o2000 (RFC 1094 sec. 2.3.5)
+            if a.file_type == ShellFileType::Regular && (a.mode & 0o6000 != 0) {
+                let tag = match a.mode & 0o6000 {
+                    0o6000 => "SUID+SGID",
+                    0o4000 => "SUID",
+                    _ => "SGID",
+                };
+                Some(format!("{} {:04o}  uid={}  {path}", format!("[!] {tag}").yellow().bold(), a.mode & 0o7777, a.uid))
+            } else {
+                None
+            }
+        };
+        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
     }
 
     /// Recursively walk and report world-writable files and directories.
     async fn cmd_world_writable(&self) {
         eprintln!("{}", "[*] scanning for world-writable entries...".blue());
-        world_writable_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone()).await;
+        let filter = |entry: &ShellEntry, path: &str| -> Option<String> {
+            let a = entry.info.as_ref()?;
+            // World-write bit = 0o002
+            if a.mode & 0o002 != 0 {
+                let tc = a.file_type.letter();
+                Some(format!("{} {:04o}  uid={}  {path}", format!("[!] world-writable ({tc})").yellow(), a.mode & 0o7777, a.uid))
+            } else {
+                None
+            }
+        };
+        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
     }
 
     /// Recursively walk and report files matching known credential/secret patterns.
     async fn cmd_secrets_scan(&self) {
         eprintln!("{}", "[*] scanning for secrets and credentials...".blue());
-        secrets_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone()).await;
+        let filter = |entry: &ShellEntry, path: &str| -> Option<String> {
+            let lower = entry.name.to_ascii_lowercase();
+            if SECRET_PATTERNS.iter().any(|pat| lower.contains(pat)) {
+                let size = entry.info.as_ref().map_or(0, |a| a.size);
+                Some(format!("{} {path}  ({size} bytes)", "[!] potential secret:".yellow().bold()))
+            } else {
+                None
+            }
+        };
+        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
     }
 
     /// `last [N]` / `lastb [N]` -- decode `/var/log/wtmp` (or `/var/log/btmp`).
@@ -1741,100 +1783,31 @@ fn tree_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, prefix: Stri
     })
 }
 
-/// Recursive find: print paths whose filename contains the pattern (case-insensitive).
-fn find_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, dir_path: String, pattern: String) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+/// Generic recursive directory walker with a per-entry filter.
+///
+/// Walks the tree rooted at `handle`, building full paths from `base_path`.
+/// For each non-dot entry, calls `filter(entry, full_path)`. If the filter
+/// returns `Some(line)`, the line is printed. Directories are always recursed
+/// into regardless of filter outcome, matching the behavior of the individual
+/// scanners this replaces (suid-scan, world-writable, secrets-scan, find).
+fn walk_recursive<'a, O: ShellOps, F>(ops: &'a O, handle: ShellHandle, base_path: String, filter: &'a F) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+where
+    F: Fn(&ShellEntry, &str) -> Option<String> + Send + Sync,
+{
     Box::pin(async move {
-        let Ok(entries) = ops.list_dir(&dir_fh).await else { return };
+        let Ok(entries) = ops.list_dir(&handle).await else { return };
         for entry in &entries {
             if entry.name == "." || entry.name == ".." {
                 continue;
             }
-            let entry_path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
-            if entry.name.to_ascii_lowercase().contains(&pattern) {
-                let tc = entry.info.as_ref().map_or('?', |a| a.file_type.letter());
-                println!("{}", colorize_name(&entry_path, tc));
+            let full_path = format!("{}/{}", base_path.trim_end_matches('/'), entry.name);
+            if let Some(line) = filter(entry, &full_path) {
+                println!("{line}");
             }
             if entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory)
                 && let Some(ref fh) = entry.handle
             {
-                find_recursive(ops, fh.clone(), entry_path, pattern.clone()).await;
-            }
-        }
-    })
-}
-
-/// Recursive SUID/SGID scanner via ShellOps.
-fn suid_scan_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(async move {
-        let Ok(entries) = ops.list_dir(&dir_fh).await else { return };
-        for entry in &entries {
-            if entry.name == "." || entry.name == ".." {
-                continue;
-            }
-            let path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
-            if let Some(ref a) = entry.info {
-                // SUID = 0o4000, SGID = 0o2000 (RFC 1094 sec. 2.3.5)
-                if a.file_type == ShellFileType::Regular && (a.mode & 0o6000 != 0) {
-                    let tag = match a.mode & 0o6000 {
-                        0o6000 => "SUID+SGID",
-                        0o4000 => "SUID",
-                        _ => "SGID",
-                    };
-                    println!("{} {:04o}  uid={}  {path}", format!("[!] {tag}").yellow().bold(), a.mode & 0o7777, a.uid);
-                }
-                if a.file_type == ShellFileType::Directory
-                    && let Some(ref fh) = entry.handle
-                {
-                    suid_scan_recursive(ops, fh.clone(), path).await;
-                }
-            }
-        }
-    })
-}
-
-/// Recursive world-writable scanner via ShellOps.
-fn world_writable_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(async move {
-        let Ok(entries) = ops.list_dir(&dir_fh).await else { return };
-        for entry in &entries {
-            if entry.name == "." || entry.name == ".." {
-                continue;
-            }
-            let path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
-            if let Some(ref a) = entry.info {
-                // World-write bit = 0o002
-                if a.mode & 0o002 != 0 {
-                    let tc = a.file_type.letter();
-                    println!("{} {:04o}  uid={}  {path}", format!("[!] world-writable ({tc})").yellow(), a.mode & 0o7777, a.uid);
-                }
-                if a.file_type == ShellFileType::Directory
-                    && let Some(ref fh) = entry.handle
-                {
-                    world_writable_recursive(ops, fh.clone(), path).await;
-                }
-            }
-        }
-    })
-}
-
-/// Recursive secrets scanner via ShellOps.
-fn secrets_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, dir_path: String) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(async move {
-        let Ok(entries) = ops.list_dir(&dir_fh).await else { return };
-        for entry in &entries {
-            if entry.name == "." || entry.name == ".." {
-                continue;
-            }
-            let path = format!("{}/{}", dir_path.trim_end_matches('/'), entry.name);
-            let lower = entry.name.to_ascii_lowercase();
-            if SECRET_PATTERNS.iter().any(|pat| lower.contains(pat)) {
-                let size = entry.info.as_ref().map_or(0, |a| a.size);
-                println!("{} {path}  ({size} bytes)", "[!] potential secret:".yellow().bold());
-            }
-            if entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory)
-                && let Some(ref fh) = entry.handle
-            {
-                secrets_recursive(ops, fh.clone(), path).await;
+                walk_recursive(ops, fh.clone(), full_path, filter).await;
             }
         }
     })
@@ -1896,8 +1869,7 @@ const SECRET_PATTERNS: &[&str] = &[
 
 /// Format a Unix permission mode word as `rwxrwxrwx` (9 chars).
 fn format_mode(mode: u32) -> String {
-    let bits = [(0o400, 'r'), (0o200, 'w'), (0o100, 'x'), (0o040, 'r'), (0o020, 'w'), (0o010, 'x'), (0o004, 'r'), (0o002, 'w'), (0o001, 'x')];
-    bits.iter().map(|(mask, ch)| if mode & mask != 0 { *ch } else { '-' }).collect()
+    ops::format_rwx(mode)
 }
 
 /// Colorize a directory entry name by type.

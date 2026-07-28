@@ -698,6 +698,7 @@ version = "0.7.0"
 dependencies = [
  "nfswolf-rpc",
  "nfswolf-xdr",
+ "tracing",
 ]
 
 [[package]]

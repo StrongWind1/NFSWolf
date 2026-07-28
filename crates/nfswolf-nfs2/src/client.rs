@@ -31,6 +31,11 @@ impl<T: RpcTransport> Nfs2Client<T> {
         &self.transport
     }
 
+    /// Consume the client and return the transport.
+    pub fn into_transport(self) -> T {
+        self.transport
+    }
+
     /// NFSPROC_NULL (proc 0)  --  no-op connectivity check.
     pub async fn null(&self) -> Result<(), Nfs2Error<T::Error>> {
         self.raw_call::<Void, Void>(proc::NFSPROC_NULL, &Void).await.map(|_| ())
@@ -239,12 +244,22 @@ impl<T: RpcTransport> Nfs2Client<T> {
     }
 
     /// Issue one NFSv2 procedure call against program 100003, version 2.
+    ///
+    /// Failures are traced with the procedure number before propagating so
+    /// that transport errors carry enough context to diagnose without a
+    /// packet capture.
     async fn raw_call<C, R>(&self, proc: u32, args: &C) -> Result<R, Nfs2Error<T::Error>>
     where
         C: Pack + Send + Sync,
         R: Unpack,
     {
-        self.transport.call::<C, R>(NFS_PROGRAM, NFS_VERSION, proc, args).await.map_err(Nfs2Error::Rpc)
+        self.transport
+            .call::<C, R>(NFS_PROGRAM, NFS_VERSION, proc, args)
+            .await
+            .inspect_err(|e| {
+                tracing::debug!(procedure = proc, error = %e, "NFSv2 call failed");
+            })
+            .map_err(Nfs2Error::Rpc)
     }
 }
 
@@ -264,7 +279,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Nfs2Error<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Rpc(e) => e.fmt(f),
-            Self::Status(s) => write!(f, "NFSv2 error: {s:?}"),
+            Self::Status(s) => write!(f, "NFSv2 error: {s}"),
         }
     }
 }
@@ -286,6 +301,31 @@ impl<E> Nfs2Error<E> {
             Self::Status(s) => Some(*s),
             Self::Rpc(_) => None,
         }
+    }
+
+    /// Whether the server denied access (NFSERR_ACCES or NFSERR_PERM).
+    ///
+    /// Expected during identity probing -- these must never trip a circuit
+    /// breaker.
+    #[must_use]
+    pub const fn is_permission_denied(&self) -> bool {
+        matches!(self, Self::Status(NfsStat::Acces | NfsStat::Perm))
+    }
+
+    /// Whether the server returned NFSERR_STALE (70).
+    ///
+    /// NFSv2 has no BADHANDLE counterpart, so there is no oracle split, but
+    /// STALE still means the handle format was accepted and only the inode
+    /// is wrong.
+    #[must_use]
+    pub const fn is_stale(&self) -> bool {
+        matches!(self, Self::Status(NfsStat::Stale))
+    }
+
+    /// Whether the server returned NFSERR_NOENT (2).
+    #[must_use]
+    pub const fn is_not_found(&self) -> bool {
+        matches!(self, Self::Status(NfsStat::NoEnt))
     }
 }
 

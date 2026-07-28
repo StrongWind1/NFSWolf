@@ -204,7 +204,7 @@ nfswolf implements 9 of the 39 operations -- the subset needed for recon and rea
 | 39 | `RELEASE_LOCKOWNER` | Lock cleanup | Part of lock state machine. |
 | 10044 | `ILLEGAL` | Error sentinel | Server returns this for unrecognized op numbers. |
 
-**Implementation**: All 9 operations are nfswolf's own XDR code -- `#[derive(XdrCodec)]` Pack/Unpack implementations in `crates/nfswolf-nfs4/src/wire.rs` (re-exported as `types` via `src/proto/nfs4/mod.rs`). The `Nfs4Status` enum carries 25 named variants (Ok + 24 error codes including `BadHandle`, `WrongSec`, `Moved`, and `BadXdr`) plus an `Unknown(u32)` catch-all. nfswolf uses the `nfswolf-rpc` crate's `RpcClient` for the RPC transport layer but implements all NFSv4 XDR encoding/decoding in its own crate.
+**Implementation**: All 9 operations are nfswolf's own XDR code -- `#[derive(XdrCodec)]` Pack/Unpack implementations in `crates/nfswolf-nfs4/src/wire.rs` (re-exported as `types` via `src/proto/nfs4/mod.rs`). The `Nfs4Status` enum carries 25 named variants (Ok + 24 error codes including `BadHandle`, `WrongSec`, `Moved`, and `BadXdr`) plus an `Unknown(u32)` catch-all, and implements `Display` with RFC 7530 error names (e.g., `NFS4ERR_STALE`). nfswolf uses the `nfswolf-rpc` crate's `RpcClient` for the RPC transport layer but implements all NFSv4 XDR encoding/decoding in its own crate.
 
 ### NFSv4 client variants
 
@@ -247,8 +247,14 @@ The interactive v4 shell (`nfswolf shell --nfs-version 4`) supports:
 | `gid <n>` | Reconnects with new AUTH_SYS credential |
 | `hostname <name>` | Reconnects with new AUTH_SYS machine name |
 | `whoami` | Shows current uid/gid/hostname |
+| `handle` | (local state) -- prints current FH as hex |
+| `lcd <dir>` | (local filesystem) -- change local working directory |
+| `lls [dir]` | (local filesystem) -- list local directory |
+| `lpwd` | (local filesystem) -- print local working directory |
+| `lmkdir <dir>` | (local filesystem) -- create local directory |
+| `history` | (local state) -- navigate command history via readline |
 
-**Limitations vs the v3 shell**: No `stat`, `put`, `mkdir`, `rm`, `escape-root`, `secrets-scan`, `suid-scan`, `world-writable`, `mount-handle`, recursive `get -r`/`put -r`. These require either write operations (OPEN/WRITE/CREATE) or v3-specific procedures (READDIRPLUS, FSSTAT). Use the v3 shell for the full feature set.
+**Limitations vs the v3 shell**: No `stat`, `put`, `mkdir`, `rm`, `escape-root`, `secrets-scan`, `suid-scan`, `world-writable`, `mount-handle`, recursive `get -r`/`put -r`, `tree`, `find`, `readlink`, `last`/`lastb`/`lastlog`. These require either write operations (OPEN/WRITE/CREATE) or v3-specific procedures (READDIRPLUS, FSSTAT). Local commands (`lcd`, `lls`, `lpwd`, `lmkdir`, `handle`, `history`) are fully supported. The read-only NFS commands (`stat`, `tree`, `find`, `readlink`, analysis commands) could technically work with existing COMPOUND+GETATTR+READDIR but are not yet implemented. Use the v3 shell for the full feature set.
 
 ### When port 2049 is blocked
 

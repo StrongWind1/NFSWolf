@@ -210,7 +210,7 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
         Some(p) => PortmapClient::default_port().with_proxy(p.clone()),
         None => PortmapClient::default_port(),
     };
-    let mut analyzer = Analyzer::new(nfs3, mount_client, portmap_client).with_stealth(StealthConfig::new(globals.delay, globals.jitter));
+    let mut analyzer = Analyzer::new(nfs3, mount_client, portmap_client, pool, circuit, globals.hostname.clone(), globals.aux_gids.clone()).with_stealth(StealthConfig::new(globals.delay, globals.jitter));
     if let Some(ref p) = globals.proxy {
         analyzer = analyzer.with_proxy(p.clone());
     }

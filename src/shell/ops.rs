@@ -58,11 +58,7 @@ impl ShellFileInfo {
     pub(crate) fn mode_string(&self) -> String {
         let mut s = String::with_capacity(10);
         s.push(self.file_type.letter());
-        let rwx = b"xwr";
-        for shift in (0..9).rev() {
-            let ch = rwx.get(shift % 3).map_or(b'?', |c| *c);
-            s.push(if self.mode & (1 << shift) != 0 { ch as char } else { '-' });
-        }
+        s.push_str(&format_rwx(self.mode));
         s
     }
 
@@ -78,6 +74,15 @@ impl ShellFileInfo {
             ShellFileType::Unknown => "???",
         }
     }
+}
+
+/// Format a Unix permission mode word as `rwxrwxrwx` (9 chars, no type prefix).
+///
+/// Shared implementation used by both `ShellFileInfo::mode_string()` (which
+/// prepends the type letter) and the `ls` column formatter in the shell.
+pub(crate) fn format_rwx(mode: u32) -> String {
+    let bits = [(0o400, 'r'), (0o200, 'w'), (0o100, 'x'), (0o040, 'r'), (0o020, 'w'), (0o010, 'x'), (0o004, 'r'), (0o002, 'w'), (0o001, 'x')];
+    bits.iter().map(|(mask, ch)| if mode & mask != 0 { *ch } else { '-' }).collect()
 }
 
 /// One directory entry returned by `ShellOps::list_dir`.
@@ -184,8 +189,8 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
     /// Switch the AUTH_SYS identity for subsequent calls.
     ///
     /// V3Ops rebuilds the pooled client and flushes the credential cache.
-    /// V2Ops returns an error since the DirectTransport credential is fixed
-    /// at construction time (reconnection would be needed).
+    /// V2Ops tears down the TCP session, re-mounts the export with the new
+    /// credential, and opens a fresh `DirectTransport` connection.
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()>;
 
     // -- Capabilities --

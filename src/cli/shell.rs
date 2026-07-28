@@ -4,6 +4,7 @@
 //! so the operator can browse the filesystem without a kernel NFS client.
 //! A single `--command` flag lets it run headlessly (useful in scripts).
 
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -151,6 +152,7 @@ pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let mut shell = NfsShell::new(ops, root_handle, args.allow_write, globals.hostname.clone(), V3_SHELL_COMMANDS);
     shell.refresh_tab_cache().await;
     eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid}{}   --   type 'help' for commands", if args.allow_write { "  [write enabled]" } else { "" })));
+    eprintln!("# rerun: nfswolf shell {host}:{export} --uid {uid} --gid {gid}");
 
     if let Some(cmd) = args.command {
         // Non-interactive: run one command and return.
@@ -239,6 +241,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     // Fetch the root FH from PUTROOTFH + GETFH.
     let root_fh = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?;
     eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid} hostname={hostname}  (NFSv4 shell  --  type 'help' for commands)")));
+    eprintln!("# rerun: nfswolf shell {host} --nfs-version 4 --uid {uid} --gid {gid}");
 
     let mut cwd_fh = root_fh.clone();
     let mut cwd_path = "/".to_owned();
@@ -261,7 +264,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     rl.set_helper(Some(completer));
 
     loop {
-        let prompt = format!("nfswolf@{host}:{cwd_path} uid={uid} hostname={hostname} [v4]> ");
+        let prompt = format!("nfswolf@{host}:{cwd_path} uid={uid} gid={gid} [v4]> ");
         match rl.readline(&prompt) {
             Ok(line) => {
                 drop(rl.add_history_entry(&line));
@@ -290,6 +293,68 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     Ok(())
 }
 
+/// Read a remote file and stream its contents to stdout (NFSv4 `cat`).
+async fn nfs4_cat(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, file_fh: &[u8]) {
+    let mut offset: u64 = 0;
+    loop {
+        match client.read_chunk(file_fh, offset, 65536).await {
+            Ok((data, eof)) => {
+                if let Err(e) = std::io::stdout().write_all(&data) {
+                    eprintln!("cat: write to stdout: {e}");
+                    break;
+                }
+                offset += data.len() as u64;
+                if eof || data.is_empty() {
+                    break;
+                }
+                // Untrusted server: stop once the cap is hit so a server
+                // that never sets eof can't loop forever.
+                if offset > NFS4_READ_MAX_BYTES {
+                    eprintln!("cat: aborted at {offset} bytes: exceeds {NFS4_READ_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
+                    break;
+                }
+            },
+            Err(e) => {
+                eprintln!("cat: {e}");
+                break;
+            },
+        }
+    }
+    drop(std::io::stdout().flush());
+}
+
+/// Read a remote file and save it locally (NFSv4 `get`).
+async fn nfs4_get(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, file_fh: &[u8], local_name: &str) {
+    let mut buf = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        match client.read_chunk(file_fh, offset, 65536).await {
+            Ok((data, eof)) => {
+                offset += data.len() as u64;
+                buf.extend_from_slice(&data);
+                if eof || data.is_empty() {
+                    break;
+                }
+                // Untrusted server: abort (don't write a partial file)
+                // once the cap is hit so endless non-EOF chunks can't
+                // grow `buf` without bound.
+                if offset > NFS4_READ_MAX_BYTES {
+                    eprintln!("get: aborted at {offset} bytes: exceeds {NFS4_READ_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
+                    return;
+                }
+            },
+            Err(e) => {
+                eprintln!("get: read error: {e}");
+                return;
+            },
+        }
+    }
+    match std::fs::write(local_name, &buf) {
+        Ok(()) => println!("{}", crate::output::status_ok(&format!("saved {} bytes -> {local_name}", buf.len()))),
+        Err(e) => eprintln!("get: write {local_name}: {e}"),
+    }
+}
+
 /// Dispatch a single command in the NFSv4 shell REPL.
 async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, line: &str, cwd_fh: &mut Vec<u8>, cwd_path: &mut String, allow_write: bool, uid: &mut u32, gid: &mut u32, hostname: &mut String) {
     // NFSv4 write operations (CREATE, WRITE, REMOVE, RENAME, etc.) require
@@ -314,6 +379,11 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             println!("  gid <n>         set AUTH_SYS GID (reconnects)");
             println!("  hostname <name> spoof AUTH_SYS machine name (reconnects)");
             println!("  whoami          show current uid/gid/hostname");
+            println!("  handle          print current file handle as hex");
+            println!("  lcd <dir>       change local working directory");
+            println!("  lls [dir]       list local directory");
+            println!("  lpwd            print local working directory");
+            println!("  lmkdir <dir>    create local directory");
             println!("  exit / quit     exit the shell");
         },
         "whoami" => println!("uid={uid}  gid={gid}  hostname={hostname}"),
@@ -419,29 +489,7 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
                     return;
                 },
             };
-            let mut offset: u64 = 0;
-            loop {
-                match client.read_chunk(&file_fh, offset, 65536).await {
-                    Ok((data, eof)) => {
-                        // Safety: print as lossy UTF-8 to avoid crashing on binary files.
-                        print!("{}", String::from_utf8_lossy(&data));
-                        offset += data.len() as u64;
-                        if eof || data.is_empty() {
-                            break;
-                        }
-                        // Untrusted server: stop once the cap is hit so a server
-                        // that never sets eof can't loop forever.
-                        if offset > NFS4_READ_MAX_BYTES {
-                            eprintln!("cat: aborted at {offset} bytes: exceeds {NFS4_READ_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
-                            break;
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("cat: {e}");
-                        break;
-                    },
-                }
-            }
+            nfs4_cat(client, &file_fh).await;
         },
         "get" => {
             let Some(filename) = args.first() else {
@@ -459,35 +507,51 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             };
             // Derive local filename from the last component.
             let local_name = file_components.last().map_or(*filename, String::as_str);
-            let mut buf = Vec::new();
-            let mut offset: u64 = 0;
-            loop {
-                match client.read_chunk(&file_fh, offset, 65536).await {
-                    Ok((data, eof)) => {
-                        offset += data.len() as u64;
-                        buf.extend_from_slice(&data);
-                        if eof || data.is_empty() {
-                            break;
-                        }
-                        // Untrusted server: abort (don't write a partial file)
-                        // once the cap is hit so endless non-EOF chunks can't
-                        // grow `buf` without bound.
-                        if offset > NFS4_READ_MAX_BYTES {
-                            eprintln!("get: aborted at {offset} bytes: exceeds {NFS4_READ_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
-                            return;
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("get: read error: {e}");
-                        return;
-                    },
-                }
-            }
-            match std::fs::write(local_name, &buf) {
-                Ok(()) => println!("{}", crate::output::status_ok(&format!("saved {} bytes -> {local_name}", buf.len()))),
-                Err(e) => eprintln!("get: write {local_name}: {e}"),
+            nfs4_get(client, &file_fh, local_name).await;
+        },
+        "handle" => {
+            let hex = cwd_fh.iter().fold(String::with_capacity(cwd_fh.len() * 2), |mut s, b| {
+                use std::fmt::Write;
+                let _ = write!(s, "{b:02x}");
+                s
+            });
+            println!("{hex}");
+        },
+        "lcd" => {
+            let dir = args.first().copied().unwrap_or(".");
+            match std::env::set_current_dir(dir) {
+                Ok(()) => println!("{}", std::env::current_dir().map_or_else(|_| dir.to_owned(), |p| p.display().to_string())),
+                Err(e) => eprintln!("lcd: {e}"),
             }
         },
+        "lls" => {
+            let target = args.first().copied().unwrap_or(".");
+            match std::fs::read_dir(target) {
+                Ok(iter) => {
+                    let mut names: Vec<String> = iter.filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+                    names.sort();
+                    for n in &names {
+                        println!("{n}");
+                    }
+                },
+                Err(e) => eprintln!("lls: {e}"),
+            }
+        },
+        "lpwd" => match std::env::current_dir() {
+            Ok(p) => println!("{}", p.display()),
+            Err(e) => eprintln!("lpwd: {e}"),
+        },
+        "lmkdir" => {
+            let Some(dir) = args.first() else {
+                eprintln!("usage: lmkdir <dir>");
+                return;
+            };
+            match std::fs::create_dir_all(dir) {
+                Ok(()) => println!("created {dir}"),
+                Err(e) => eprintln!("lmkdir: {e}"),
+            }
+        },
+        "history" => eprintln!("history: use up/down arrow keys (readline) to navigate command history"),
         "exit" | "quit" => {}, // handled by the REPL loop
         // Write commands exist in the v2/v3 shell but require stateful v4
         // operations (OPEN+WRITE+CLOSE with stateid tracking, RFC 7530
@@ -530,7 +594,7 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
 // Version-specific command lists + remote completers
 // =============================================================================
 
-const V4_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "put", "mkdir", "rm", "rmdir", "mv", "chmod", "chown", "symlink", "link", "mknod", "uid", "gid", "hostname", "whoami", "help", "exit", "quit"];
+const V4_SHELL_COMMANDS: &[&str] = &["ls", "cd", "pwd", "cat", "get", "uid", "gid", "hostname", "whoami", "handle", "lcd", "lls", "lpwd", "lmkdir", "history", "help", "exit", "quit"];
 
 struct Nfs4RemoteCompleter {
     client: Arc<tokio::sync::Mutex<crate::proto::nfs4::compound::Nfs4DirectClient>>,
@@ -570,6 +634,13 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     use crate::shell::V2_SHELL_COMMANDS;
     use crate::shell::v2::V2Ops;
 
+    if globals.proxy.is_some() {
+        tracing::warn!("--proxy not supported with NFSv2; connecting directly");
+    }
+    if globals.delay > 0 || globals.jitter > 0 {
+        tracing::warn!("--delay/--jitter not supported with NFSv2");
+    }
+
     let target = parse_target(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
     let host = target.host;
     let uid = globals.uid;
@@ -590,7 +661,14 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
             eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv2): {hex}")));
             (fh, String::from("/"))
         },
-        Source::None => anyhow::bail!("--nfs-version 2 requires an export path or --handle"),
+        Source::None => {
+            let addr = SocketAddr::new(host, 111);
+            let export = "/".to_owned();
+            let mount_client = NfsMountClient::new().with_credential(Credential::Sys(AuthSys::new(uid, gid, &hostname)));
+            let mount_result = mount_client.mount_v1(addr, &export).await?;
+            let fh = nfswolf_nfs2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
+            (fh, export)
+        },
     };
 
     let addr = SocketAddr::new(host, 111);
@@ -609,7 +687,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let transport = DirectTransport::with_auth(io, opaque, opaque_auth::default());
     let client = Arc::new(Nfs2Client::new(transport));
 
-    let v2ops = V2Ops::new(client, uid, gid, hostname.clone());
+    let v2ops = V2Ops::new(client, uid, gid, hostname.clone(), addr, export.clone(), nfs_port);
     let root = ShellHandle(root_fh.0.to_vec());
     let mut shell = NfsShell::new(v2ops, root, args.allow_write, hostname, V2_SHELL_COMMANDS);
     shell.refresh_tab_cache().await;
