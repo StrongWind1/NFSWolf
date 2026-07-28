@@ -50,6 +50,9 @@ pub(crate) struct ShellFileInfo {
     pub atime_secs: u32,
     pub mtime_secs: u32,
     pub ctime_secs: u32,
+    pub used: u64,
+    pub rdev: (u32, u32),
+    pub fsid: u64,
 }
 
 impl ShellFileInfo {
@@ -83,6 +86,7 @@ impl ShellFileInfo {
 pub(crate) struct ShellEntry {
     pub name: String,
     pub info: Option<ShellFileInfo>,
+    pub handle: Option<ShellHandle>,
 }
 
 /// Opaque file handle that works for both v2 (fixed 32) and v3 (variable).
@@ -100,9 +104,23 @@ impl ShellHandle {
         s
     }
 
+    pub(crate) fn from_hex(hex: &str) -> anyhow::Result<Self> {
+        let hex = hex.trim();
+        anyhow::ensure!(hex.len().is_multiple_of(2), "hex string must have even length");
+        let bytes: Result<Vec<u8>, _> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16)).collect();
+        Ok(Self(bytes.map_err(|e| anyhow::anyhow!("invalid hex: {e}"))?))
+    }
+
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+}
+
+/// Device type for `ShellOps::mknod`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellDeviceType {
+    Char,
+    Block,
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +166,10 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
 
     fn symlink(&self, dir: &ShellHandle, name: &str, target: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
 
+    fn hard_link(&self, fh: &ShellHandle, dir: &ShellHandle, name: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    fn mknod(&self, dir: &ShellHandle, name: &str, dev_type: ShellDeviceType, major: u32, minor: u32, mode: u32) -> impl Future<Output = anyhow::Result<ShellHandle>> + Send;
+
     fn readlink(&self, fh: &ShellHandle) -> impl Future<Output = anyhow::Result<String>> + Send;
 
     fn set_mode(&self, fh: &ShellHandle, mode: u32) -> impl Future<Output = anyhow::Result<()>> + Send;
@@ -171,6 +193,10 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
 
     fn version_name(&self) -> &'static str;
     fn supports_mknod(&self) -> bool;
+
+    fn supports_identity_change(&self) -> bool;
+
+    fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter>;
 
     /// V2-only: probe NFSPROC_ROOT (obsolete MOUNT bypass check).
     /// Returns `Ok(None)` on versions that don't support it.

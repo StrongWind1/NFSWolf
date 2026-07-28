@@ -4,14 +4,15 @@
 use std::sync::{Arc, Mutex};
 
 use nfswolf_nfs3::Nfs3Fault;
-use nfswolf_nfs3::wire::{Nfs3Option, sattr3, set_atime, set_mtime, stable_how};
+use nfswolf_nfs3::wire::{MKNOD3args, Nfs3Option, Nfs3Result, devicedata3, diropargs3, filename3, mknoddata3, sattr3, set_atime, set_mtime, specdata3, stable_how};
+use nfswolf_xdr::Opaque;
 
 use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 
-use super::ops::{ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
+use super::ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
 
 /// NFSv3 backend wrapping a pooled `Nfs3Client` with credential escalation.
 pub(crate) struct V3Ops {
@@ -82,6 +83,9 @@ pub(super) fn v3_info(a: &FileAttrs) -> ShellFileInfo {
         atime_secs: a.atime.seconds,
         mtime_secs: a.mtime.seconds,
         ctime_secs: a.ctime.seconds,
+        used: a.used,
+        rdev: a.rdev,
+        fsid: a.fsid,
     }
 }
 
@@ -226,6 +230,35 @@ impl ShellOps for V3Ops {
         self.nfs3.create_symlink(&to_v3_fh(dir), name, target, sattr3_with_mode(0o777)).await.map_err(fault_to_anyhow)
     }
 
+    async fn hard_link(&self, fh: &ShellHandle, dir: &ShellHandle, name: &str) -> anyhow::Result<()> {
+        self.nfs3.hard_link(&to_v3_fh(fh), &to_v3_fh(dir), name).await.map_err(fault_to_anyhow)
+    }
+
+    async fn mknod(&self, dir: &ShellHandle, name: &str, dev_type: ShellDeviceType, major: u32, minor: u32, mode: u32) -> anyhow::Result<ShellHandle> {
+        let devdata = devicedata3 { dev_attributes: sattr3_with_mode(mode), spec: specdata3 { specdata1: major, specdata2: minor } };
+        let what = match dev_type {
+            ShellDeviceType::Char => mknoddata3::NF3CHR(devdata),
+            ShellDeviceType::Block => mknoddata3::NF3BLK(devdata),
+        };
+        let args = MKNOD3args { where_: diropargs3 { dir: to_v3_fh(dir).to_nfs_fh3(), name: filename3(Opaque::owned(name.as_bytes().to_vec())) }, what };
+        match self.nfs3.mknod(&args).await {
+            Ok(Nfs3Result::Ok(ok)) => {
+                if let Nfs3Option::Some(fh) = ok.obj {
+                    Ok(ShellHandle(fh.data.into_owned()))
+                } else {
+                    // Server didn't return a handle; look it up.
+                    let (fh, _) = self.nfs3.resolve(&to_v3_fh(dir), name).await.map_err(fault_to_anyhow)?;
+                    Ok(from_v3_fh(&fh))
+                }
+            },
+            Ok(Nfs3Result::Err((status, _))) => {
+                let err = nfswolf_nfs3::Nfs3Error::from_nfsstat3(status).unwrap_or(nfswolf_nfs3::Nfs3Error::ServerFault);
+                Err(anyhow::anyhow!("{err}"))
+            },
+            Err(e) => Err(anyhow::anyhow!("{e}")),
+        }
+    }
+
     async fn readlink(&self, fh: &ShellHandle) -> anyhow::Result<String> {
         self.nfs3.read_link(&to_v3_fh(fh)).await.map_err(fault_to_anyhow)
     }
@@ -262,10 +295,46 @@ impl ShellOps for V3Ops {
     fn supports_mknod(&self) -> bool {
         true
     }
+
+    fn supports_identity_change(&self) -> bool {
+        true
+    }
+
+    fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter> {
+        Box::new(Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) })
+    }
+}
+
+// --- Remote completion for tab-complete in the v3 shell ----------------------
+
+pub(super) struct Nfs3RemoteCompleter {
+    pub nfs3: Arc<Nfs3Client>,
+}
+
+impl crate::shell::complete::RemoteCompleter for Nfs3RemoteCompleter {
+    fn list_dir_entries(&self, handle: &[u8]) -> Vec<String> {
+        let nfs3 = Arc::clone(&self.nfs3);
+        let fh = FileHandle::from_bytes(handle);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                match list_dir_v3(&nfs3, &fh).await {
+                    Ok(entries) => entries.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name).collect(),
+                    Err(_) => Vec::new(),
+                }
+            })
+        })
+    }
+
+    fn resolve_path(&self, start: &[u8], path: &str) -> Option<Vec<u8>> {
+        let nfs3 = Arc::clone(&self.nfs3);
+        let fh = FileHandle::from_bytes(start);
+        let path = path.to_owned();
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { nfs3.walk(&fh, &path).await.ok().map(|(fh, _)| fh.as_bytes().to_vec()) }))
+    }
 }
 
 fn to_shell_entries(entries: Vec<DirEntryPlus>) -> Vec<ShellEntry> {
-    entries.into_iter().map(|e| ShellEntry { name: e.name, info: e.attrs.as_ref().map(v3_info) }).collect()
+    entries.into_iter().map(|e| ShellEntry { name: e.name, info: e.attrs.as_ref().map(v3_info), handle: e.handle.as_ref().map(from_v3_fh) }).collect()
 }
 
 fn sattr3_with_mode(mode: u32) -> sattr3 {

@@ -1,25 +1,27 @@
 //! NFSv2 backend for the unified shell.
 #![allow(dead_code, reason = "V2Ops -- used by cli::shell but lint cannot trace through generic code")]
 
+use std::sync::Arc;
+
 use nfswolf_nfs2::Nfs2Client;
 use nfswolf_nfs2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};
 use nfswolf_rpc::transport::direct::DirectTransport;
 use nfswolf_rpc::transport::tokio::TokioIo;
 
-use super::ops::{ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
+use super::ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
 
 type V2Transport = DirectTransport<TokioIo<tokio::net::TcpStream>>;
 
 /// NFSv2 backend wrapping a `Nfs2Client` over a single TCP connection.
 pub(crate) struct V2Ops {
-    client: Nfs2Client<V2Transport>,
+    client: Arc<Nfs2Client<V2Transport>>,
     uid: u32,
     gid: u32,
     hostname: String,
 }
 
 impl V2Ops {
-    pub(crate) fn new(client: Nfs2Client<V2Transport>, uid: u32, gid: u32, hostname: String) -> Self {
+    pub(crate) fn new(client: Arc<Nfs2Client<V2Transport>>, uid: u32, gid: u32, hostname: String) -> Self {
         Self { client, uid, gid, hostname }
     }
 
@@ -68,6 +70,9 @@ fn v2_info(a: &Nfs2FileAttr) -> ShellFileInfo {
         atime_secs: a.atime.seconds,
         mtime_secs: a.mtime.seconds,
         ctime_secs: a.ctime.seconds,
+        used: 0,
+        rdev: (0, 0),
+        fsid: 0,
     }
 }
 
@@ -104,11 +109,11 @@ impl ShellOps for V2Ops {
         }
         let mut result = Vec::with_capacity(all_entries.len());
         for e in &all_entries {
-            let info = match self.client.lookup(&v2dir, &e.name).await {
-                Ok((_, attrs)) => Some(v2_info(&attrs)),
-                Err(_) => None,
+            let (info, handle) = match self.client.lookup(&v2dir, &e.name).await {
+                Ok((fh, attrs)) => (Some(v2_info(&attrs)), Some(from_v2_fh(&fh))),
+                Err(_) => (None, None),
             };
-            result.push(ShellEntry { name: e.name.clone(), info });
+            result.push(ShellEntry { name: e.name.clone(), info, handle });
         }
         Ok(result)
     }
@@ -159,6 +164,14 @@ impl ShellOps for V2Ops {
         self.client.symlink(&to_v2_fh(dir), name, target, &attrs).await.map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    async fn hard_link(&self, fh: &ShellHandle, dir: &ShellHandle, name: &str) -> anyhow::Result<()> {
+        self.client.link(&to_v2_fh(fh), &to_v2_fh(dir), name).await.map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    async fn mknod(&self, _dir: &ShellHandle, _name: &str, _dev_type: ShellDeviceType, _major: u32, _minor: u32, _mode: u32) -> anyhow::Result<ShellHandle> {
+        anyhow::bail!("MKNOD is not supported in NFSv2")
+    }
+
     async fn readlink(&self, fh: &ShellHandle) -> anyhow::Result<String> {
         self.client.readlink(&to_v2_fh(fh)).await.map_err(|e| anyhow::anyhow!("{e}"))
     }
@@ -196,6 +209,14 @@ impl ShellOps for V2Ops {
         false
     }
 
+    fn supports_identity_change(&self) -> bool {
+        false
+    }
+
+    fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter> {
+        Box::new(V2RemoteCompleter { client: Arc::clone(&self.client) })
+    }
+
     async fn probe_root(&self) -> anyhow::Result<Option<ShellHandle>> {
         self.probe_root().await
     }
@@ -211,4 +232,47 @@ fn v2_sattr_owner(uid: Option<u32>, gid: Option<u32>) -> Nfs2SetAttr {
     use nfswolf_nfs2::wire::{SATTR_UNCHANGED, Timeval};
     let unchanged_time = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
     Nfs2SetAttr { mode: SATTR_UNCHANGED, uid: uid.unwrap_or(SATTR_UNCHANGED), gid: gid.unwrap_or(SATTR_UNCHANGED), size: SATTR_UNCHANGED, atime: unchanged_time, mtime: unchanged_time }
+}
+
+// --- Remote completion for tab-complete in the v2 shell ----------------------
+
+/// Paginated READDIR collecting all entry names, filtering `.` and `..`.
+async fn v2_readdir_all_names<T: nfswolf_rpc::RpcTransport>(client: &Nfs2Client<T>, dir: &Nfs2FileHandle) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cookie = 0u32;
+    loop {
+        let Ok(entries) = client.readdir(dir, cookie, 4096).await else { break };
+        if entries.is_empty() {
+            break;
+        }
+        cookie = entries.last().map_or(0, |e| e.cookie);
+        for e in &entries {
+            if e.name != "." && e.name != ".." {
+                names.push(e.name.clone());
+            }
+        }
+        if names.len() > 100_000 {
+            break;
+        }
+    }
+    names
+}
+
+struct V2RemoteCompleter<T: nfswolf_rpc::RpcTransport + Send + Sync + 'static> {
+    client: Arc<Nfs2Client<T>>,
+}
+
+impl<T: nfswolf_rpc::RpcTransport + Send + Sync + 'static> crate::shell::complete::RemoteCompleter for V2RemoteCompleter<T> {
+    fn list_dir_entries(&self, handle: &[u8]) -> Vec<String> {
+        let client = Arc::clone(&self.client);
+        let fh = Nfs2FileHandle::from_bytes(handle);
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { v2_readdir_all_names(&client, &fh).await }))
+    }
+
+    fn resolve_path(&self, start: &[u8], path: &str) -> Option<Vec<u8>> {
+        let client = Arc::clone(&self.client);
+        let fh = Nfs2FileHandle::from_bytes(start);
+        let path = path.to_owned();
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { client.lookup_path(&fh, &path).await.ok().map(|(fh, _)| fh.0.to_vec()) }))
+    }
 }

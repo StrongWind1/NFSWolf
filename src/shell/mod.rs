@@ -89,35 +89,6 @@ pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "quit",
 ];
 
-// =============================================================================
-// NFSv3 remote completion  --  bridges ShellCompleter to Nfs3Client
-// =============================================================================
-
-pub(crate) struct Nfs3RemoteCompleter {
-    nfs3: Arc<Nfs3Client>,
-}
-
-impl complete::RemoteCompleter for Nfs3RemoteCompleter {
-    fn list_dir_entries(&self, handle: &[u8]) -> Vec<String> {
-        let nfs3 = Arc::clone(&self.nfs3);
-        let fh = FileHandle::from_bytes(handle);
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                match try_readdirplus(&nfs3, &fh).await {
-                    Ok(entries) => entries.into_iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name).collect(),
-                    Err(_) => Vec::new(),
-                }
-            })
-        })
-    }
-
-    fn resolve_path(&self, start: &[u8], path: &str) -> Option<Vec<u8>> {
-        let nfs3 = Arc::clone(&self.nfs3);
-        let fh = FileHandle::from_bytes(start);
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move { lookup_path_from(&nfs3, &fh, path).await.ok().map(|(fh, _)| fh.as_bytes().to_vec()) }))
-    }
-}
-
 /// Interactive NFS shell  --  browse and extract files from an NFS export.
 ///
 /// Maintains a current working directory handle and path string so that
@@ -242,7 +213,7 @@ impl NfsShell {
     ///
     /// Call once after construction; pass the result to rustyline `Editor::set_helper`.
     pub(crate) fn make_completer(&self) -> complete::ShellCompleter {
-        complete::ShellCompleter::new(Box::new(Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) }), self.export_root.as_bytes().to_vec(), Arc::clone(&self.tab_cache), V3_SHELL_COMMANDS)
+        complete::ShellCompleter::new(Box::new(v3::Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) }), self.export_root.as_bytes().to_vec(), Arc::clone(&self.tab_cache), V3_SHELL_COMMANDS)
     }
 
     /// Refresh the Tab completion cache with the current directory's entries.
