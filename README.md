@@ -98,6 +98,10 @@ cosign verify-blob \
 ### From source
 
 ```sh
+# Option 1: cargo install from git (builds and installs to ~/.cargo/bin/)
+cargo install --git https://github.com/StrongWind1/NFSWolf
+
+# Option 2: clone and build locally
 git clone https://github.com/StrongWind1/NFSWolf
 cd NFSWolf
 make release          # optimised native build -> target/release/nfswolf

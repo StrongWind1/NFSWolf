@@ -7,8 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "ONC RPC v2 (RFC 5531) client, portmapper/RPCBIND, and a runtime-agnostic async transport layer."
-keywords = ["onc-rpc", "rfc5531", "portmapper", "rpcbind", "sunrpc"]
-categories = ["network-programming", "encoding"]
 readme = "README.md"
 
 [dependencies]

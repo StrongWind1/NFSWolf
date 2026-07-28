@@ -7,8 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "NFS version 4.0 (RFC 7530): COMPOUND encoding and the stateless read-only operation subset."
-keywords = ["nfs", "nfsv4", "rfc7530", "compound", "onc-rpc"]
-categories = ["network-programming", "filesystem", "encoding"]
 readme = "README.md"
 
 [dependencies]

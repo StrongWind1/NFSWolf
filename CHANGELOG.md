@@ -4,6 +4,8 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-27
+
 ### Changed
 
 - **Breaking (internal)** -- the NFS wire protocol is now owned in-tree, and the repository is a Cargo workspace of six library crates plus the binary. The `nfs3_client` and `nfs3_types` dependencies are gone, as is the `vendor/nfs3_client/` patch tree and the `[patch.crates-io]` block that pointed at it. `nfs3_server` remains a dev-dependency for the mock server used in integration tests. The absorbed code comes from [Vaiz/nfs3](https://github.com/Vaiz/nfs3), released into the public domain under the Unlicense; `NOTICE` records the file-level mapping.
@@ -268,7 +270,8 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.5.0...v0.7.0
 [0.5.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.0...v0.3.1

@@ -7,8 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "NFS version 3 (RFC 1813): all 22 procedures, the MOUNT v3 protocol, and domain types over the raw wire format."
-keywords = ["nfs", "nfsv3", "rfc1813", "mount", "onc-rpc"]
-categories = ["network-programming", "filesystem", "encoding"]
 readme = "README.md"
 
 [dependencies]

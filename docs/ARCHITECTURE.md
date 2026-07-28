@@ -620,7 +620,7 @@ nfswolf/
 ├── src/
 │   ├── main.rs                    # CLI entry point with tracing + subcommand dispatch
 │   ├── output.rs                  # status_info/warn/err, print_handle, print_handle_next_steps
-│   ├── shell/                     # NfsShell: 41 commands, tab completion, readline REPL
+│   ├── shell/                     # NfsShell: 44+ commands, tab completion, readline REPL
 │   │   ├── mod.rs                 # Shell REPL loop, command dispatch, tab completion
 │   │   ├── ops.rs                 # ShellOps trait + version-neutral types
 │   │   ├── v2.rs                  # V2Ops: ShellOps impl for NFSv2
