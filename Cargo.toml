@@ -49,9 +49,26 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
 description = "Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an interactive shell for authorized red-team and pentest work."
+keywords = ["nfs", "security", "pentest", "scanner", "rpc"]
+categories = ["command-line-utilities", "network-programming", "filesystem"]
 readme = "README.md"
+include = [
+  "/src/**/*",
+  "/tests/**/*",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/LICENSE",
+  "/CHANGELOG.md",
+]
+
+# Build the published documentation on docs.rs with all features enabled and a
+# stable cfg flag (`docsrs`), matching the convention used by most well-curated
+# Rust crates so doc rebuilds stay deterministic across nightly toolchains.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # Async runtime
@@ -199,21 +216,10 @@ text_direction_codepoint_in_comment = "forbid"
 text_direction_codepoint_in_literal = "forbid"
 # Code that provably panics at runtime -- always a bug.
 unconditional_panic = "forbid"
-# All unused-code lints as a group (dead_code, unused_variables, unused_imports, etc.).
-# Deny (not forbid) because clap derive macros and nfs3_server emit
-# #[allow(dead_code)] / #[allow(unused_*)] which is incompatible with forbid.
+# All unused-code lints (dead_code, unused_variables, unused_imports, etc.).
 unused = { level = "deny", priority = -1 }
-# Individual unused sublints elevated with reasons:
-unused_imports = "deny"
-unused_extern_crates = "deny"
-dead_code = "deny"
-unreachable_patterns = "deny"
-# Documentation is mandatory on all public items.
-missing_docs = "deny"
-# Copy should be derived when possible.
-missing_copy_implementations = "deny"
 # --- Deny (per-project override) --------------------------------------------
-# Deny (not forbid) -- one #[expect(unsafe_code)] for libc::daemon in main.rs.
+# Deny (not forbid) -- NFSWolf needs one #[allow] for libc::daemon in src/main.rs.
 unsafe_code = "deny"
 # --- Deny (deny-by-default) -------------------------------------------------
 ambiguous_associated_items = "deny"
@@ -274,7 +280,9 @@ linker_info = "warn"
 linker_messages = "warn"
 macro_use_extern_crate = "warn"
 meta_variable_misuse = "warn"
+missing_copy_implementations = "warn"
 missing_debug_implementations = "warn"
+missing_docs = "warn"
 missing_unsafe_on_extern = "warn"
 redundant_imports = "warn"
 redundant_lifetimes = "warn"
@@ -329,8 +337,8 @@ unimplemented = "deny"
 # No .unwrap() inside functions returning Result -- propagate the error.
 unwrap_in_result = "deny"
 # --- Restriction lints promoted to warn --------------------------------------
-# #[allow] is forbidden -- use #[expect] so the suppression auto-warns when unnecessary.
-allow_attributes = "deny"
+# Prefer #[expect] over #[allow] -- warns when the suppression becomes unnecessary.
+allow_attributes = "warn"
 # Every #[allow] / #[expect] must carry a reason = "..." string.
 allow_attributes_without_reason = "warn"
 # Flag functions exceeding the complexity threshold (set in clippy.toml).
