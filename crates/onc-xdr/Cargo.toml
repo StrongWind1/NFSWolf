@@ -1,0 +1,22 @@
+[package]
+name = "onc-xdr"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "XDR (RFC 4506) codec: Pack/Unpack traits, opaque and list types, and length-hardened decoders for untrusted input."
+readme = "README.md"
+keywords = ["xdr", "serialization", "onc", "rpc", "codec"]
+categories = ["network-programming", "parser-implementations"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+onc-xdr-derive = { workspace = true }
+
+[lints]
+workspace = true

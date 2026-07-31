@@ -1,0 +1,31 @@
+[package]
+name = "onc-xdr-derive"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derive macro for XDR (RFC 4506) Pack/Unpack encoding used by the NFSWolf protocol stack."
+readme = "README.md"
+keywords = ["xdr", "derive", "onc", "rpc", "codec"]
+categories = ["network-programming", "parser-implementations"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }
+
+[dev-dependencies]
+onc-xdr = { workspace = true }
+trybuild = "1"
+
+[lints]
+workspace = true

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use nfswolf_nfs2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};
+use nfs_v2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};
 
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs2::{Nfs2Client, PooledNfs2 as _};
@@ -57,7 +57,7 @@ fn v2_info(a: &Nfs2FileAttr) -> ShellFileInfo {
             FType::Symlink => ShellFileType::Symlink,
             FType::Socket => ShellFileType::Socket,
             FType::Fifo => ShellFileType::Fifo,
-            FType::NonFile | FType::Bad => ShellFileType::Unknown,
+            FType::NonFile | FType::Bad | _ => ShellFileType::Unknown,
         },
         mode: a.mode,
         nlink: a.nlink,
@@ -227,13 +227,13 @@ impl ShellOps for V2Ops {
 }
 
 fn v2_sattr_mode(mode: u32) -> Nfs2SetAttr {
-    use nfswolf_nfs2::wire::{SATTR_UNCHANGED, Timeval};
+    use nfs_v2::wire::{SATTR_UNCHANGED, Timeval};
     let unchanged_time = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
     Nfs2SetAttr { mode, uid: SATTR_UNCHANGED, gid: SATTR_UNCHANGED, size: SATTR_UNCHANGED, atime: unchanged_time, mtime: unchanged_time }
 }
 
 fn v2_sattr_owner(uid: Option<u32>, gid: Option<u32>) -> Nfs2SetAttr {
-    use nfswolf_nfs2::wire::{SATTR_UNCHANGED, Timeval};
+    use nfs_v2::wire::{SATTR_UNCHANGED, Timeval};
     let unchanged_time = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
     Nfs2SetAttr { mode: SATTR_UNCHANGED, uid: uid.unwrap_or(SATTR_UNCHANGED), gid: gid.unwrap_or(SATTR_UNCHANGED), size: SATTR_UNCHANGED, atime: unchanged_time, mtime: unchanged_time }
 }

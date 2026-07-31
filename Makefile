@@ -7,7 +7,8 @@
         build-macos-arm build-macos-x86 build-macos-universal \
         build-windows \
         dist size \
-        fix hooks clean check-all all
+        fix hooks clean check-all all \
+        msrv-check hack-check
 
 # Default target -- running bare `make` builds dist artifacts for the current platform.
 .PHONY: all
@@ -390,6 +391,30 @@ clean:
 	# Note: ~/.cargo/advisory-db is intentionally preserved so `make audit`
 	# remains usable after a clean. Remove it manually if you need a fresh
 	# advisory fetch.
+
+# -- MSRV verification ----------------------------------------------------------
+
+# Verify the declared Minimum Supported Rust Version still compiles.
+# Requires `rustup toolchain install 1.95.0` (done once).
+MSRV := 1.95.0
+
+msrv-check:
+	@if ! rustup run $(MSRV) rustc --version > /dev/null 2>&1; then \
+		echo "Installing MSRV toolchain $(MSRV)..."; \
+		rustup toolchain install $(MSRV) --profile minimal; \
+	fi
+	rustup run $(MSRV) cargo check --workspace --all-targets --all-features
+
+# -- Feature-powerset check (cargo-hack) ---------------------------------------
+
+# Verify every feature combination compiles.  Requires cargo-hack:
+#   cargo install cargo-hack --locked
+hack-check:
+	@if ! command -v cargo-hack > /dev/null 2>&1; then \
+		echo "Installing cargo-hack..."; \
+		cargo install cargo-hack --locked; \
+	fi
+	cargo hack --feature-powerset --no-dev-deps check
 
 # -- Gates ---------------------------------------------------------------------
 

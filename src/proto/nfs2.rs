@@ -4,7 +4,7 @@
 //! `PooledTransport` owns the policy. This module is the seam between them.
 
 /// An NFSv2 client issuing calls through nfswolf's pooled transport.
-pub(crate) type Nfs2Client = nfswolf_nfs2::Nfs2Client<crate::proto::transport::PooledTransport>;
+pub(crate) type Nfs2Client = nfs_v2::Nfs2Client<crate::proto::transport::PooledTransport>;
 
 /// Hostname presented when no AUTH_SYS credential is configured.
 ///

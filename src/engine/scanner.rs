@@ -24,10 +24,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use ipnet::IpNet;
-use nfswolf_rpc::RpcClient;
-use nfswolf_rpc::RpcError;
-use nfswolf_rpc::transport::tokio::TokioIo;
-use nfswolf_xdr::Void;
+use onc_rpc_client::RpcClient;
+use onc_rpc_client::RpcError;
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_xdr::Void;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -390,7 +390,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             let addr = SocketAddr::new(ip, port_info.port);
             if !port_info.v2 {
                 job.stealth.wait().await;
-                match nfswolf_rpc::transport::udp::call_rpc_udp::<Void, Void>(addr, 100_003, 2, 0, &Void, probe_timeout).await {
+                match onc_rpc_client::transport::udp::call_rpc_udp::<Void, Void>(addr, 100_003, 2, 0, &Void, probe_timeout).await {
                     Ok(Void) => port_info.v2 = true,
                     Err(RpcError::ProgMismatch { low, high }) if hint.is_none() => hint = Some(VersionRange { low, high }),
                     Err(_) => {},
@@ -398,7 +398,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             }
             if !port_info.v3 {
                 job.stealth.wait().await;
-                match nfswolf_rpc::transport::udp::call_rpc_udp::<Void, Void>(addr, 100_003, 3, 0, &Void, probe_timeout).await {
+                match onc_rpc_client::transport::udp::call_rpc_udp::<Void, Void>(addr, 100_003, 3, 0, &Void, probe_timeout).await {
                     Ok(Void) => port_info.v3 = true,
                     Err(RpcError::ProgMismatch { low, high }) if hint.is_none() => hint = Some(VersionRange { low, high }),
                     Err(_) => {},

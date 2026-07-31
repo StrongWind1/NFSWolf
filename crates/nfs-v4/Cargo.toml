@@ -1,0 +1,24 @@
+[package]
+name = "nfs-v4"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NFS version 4.0 (RFC 7530): COMPOUND encoding and the stateless read-only operation subset."
+readme = "README.md"
+keywords = ["nfs", "nfsv4", "rpc", "filesystem", "network"]
+categories = ["network-programming", "parser-implementations"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+onc-xdr = { workspace = true }
+onc-rpc-client = { workspace = true }
+tracing = "0.1"
+
+[lints]
+workspace = true

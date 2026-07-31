@@ -1,4 +1,4 @@
-//! MOUNT protocol client  --  wraps `nfswolf_nfs3::MountClient`
+//! MOUNT protocol client  --  wraps `nfs_v3::MountClient`
 //! (RFC 1813 Appendix I).
 //!
 //! `nfswolf-nfs3` provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
@@ -9,13 +9,13 @@
 //! - Stealth unmount after handle acquisition (F-2.5)
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
-use nfswolf_rpc::transport::DirectTransport;
+use onc_rpc_client::transport::DirectTransport;
 use std::net::SocketAddr;
 
 use anyhow::Context as _;
-use nfswolf_nfs3::MountClient;
-use nfswolf_nfs3::wire::mount::{dirpath, export_node};
-use nfswolf_xdr::Opaque;
+use nfs_v3::MountClient;
+use nfs_v3::wire::mount::{dirpath, export_node};
+use onc_xdr::Opaque;
 
 use crate::proto::auth::{AuthFlavor, Credential};
 use crate::proto::nfs3::types::FileHandle;
@@ -169,7 +169,7 @@ impl NfsMountClient {
 
     /// Single v1 MNT attempt.
     async fn mount_v1_once(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
-        use nfswolf_rpc::rpc::RpcClient;
+        use onc_rpc_client::rpc::RpcClient;
 
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
@@ -183,14 +183,14 @@ impl NfsMountClient {
         let io = if let Some(ref p) = self.proxy {
             let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
             let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            nfswolf_rpc::transport::tokio::TokioIo::new(stream)
+            onc_rpc_client::transport::tokio::TokioIo::new(stream)
         } else if self.privileged_required {
             connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
         } else {
             connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
         };
         let opaque = self.credential.to_opaque_auth();
-        let mut rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
+        let mut rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
 
         // MOUNT v1 MNT: program=100005, version=1, proc=1
         // args = dirpath (XDR string), result = fhstatus (u32 status + opaque[32])
@@ -231,9 +231,9 @@ impl NfsMountClient {
     /// MOUNT v1 EXPORT returns the NFSv2 export list; MOUNT v3 EXPORT returns
     /// the NFSv3 export list.  These are usually identical but CAN differ.
     pub(crate) async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
-        use nfswolf_mount::wire::exports;
-        use nfswolf_rpc::rpc::RpcClient;
-        use nfswolf_xdr::Void;
+        use nfs_mount::wire::exports;
+        use onc_rpc_client::rpc::RpcClient;
+        use onc_xdr::Void;
 
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
@@ -250,7 +250,7 @@ impl NfsMountClient {
         let io = if let Some(ref p) = self.proxy {
             let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
             let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            nfswolf_rpc::transport::tokio::TokioIo::new(stream)
+            onc_rpc_client::transport::tokio::TokioIo::new(stream)
         } else if self.privileged_required {
             connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
         } else {
@@ -301,13 +301,13 @@ impl NfsMountClient {
         let io = if let Some(ref p) = self.proxy {
             let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
             let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd at {mount_addr} via {p}"))?;
-            nfswolf_rpc::transport::tokio::TokioIo::new(stream)
+            onc_rpc_client::transport::tokio::TokioIo::new(stream)
         } else if self.privileged_required {
             connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} (privileged-only)"))?
         } else {
             connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))?
         };
-        Ok(MountClient::v3(DirectTransport::with_auth(io, self.credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default())))
+        Ok(MountClient::v3(DirectTransport::with_auth(io, self.credential.to_opaque_auth(), onc_rpc_client::rpc::opaque_auth::default())))
     }
 
     /// Try well-known mountd ports when portmapper is unavailable.
@@ -322,10 +322,10 @@ impl NfsMountClient {
             let mount_addr = SocketAddr::new(addr.ip(), port);
             let io_result = if let Some(ref p) = self.proxy {
                 let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-                crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.map(nfswolf_rpc::transport::tokio::TokioIo::new)
+                crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.map(onc_rpc_client::transport::tokio::TokioIo::new)
             } else {
-                use nfswolf_rpc::transport::net::Connector as _;
-                nfswolf_rpc::transport::tokio::TokioConnector.connect(mount_addr).await
+                use onc_rpc_client::transport::net::Connector as _;
+                onc_rpc_client::transport::tokio::TokioConnector.connect(mount_addr).await
             };
             let Ok(io) = io_result else { continue };
             let mc = MountClient::v3(DirectTransport::new(io));
@@ -348,11 +348,11 @@ impl Default for NfsMountClient {
 ///
 /// Used to decide whether to retry with a privileged source port.
 /// We walk the anyhow source chain because `mount_once` wraps the raw
-/// `nfswolf_mount::MountError` with a `with_context`.
+/// `nfs_mount::MountError` with a `with_context`.
 fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
-    use nfswolf_mount::MountError;
-    use nfswolf_mount::wire::mountstat3;
-    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError<nfswolf_rpc::RpcError>>(), Some(MountError::Status(mountstat3::MNT3ERR_ACCES))))
+    use nfs_mount::MountError;
+    use nfs_mount::wire::mountstat3;
+    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError<onc_rpc_client::RpcError>>(), Some(MountError::Status(mountstat3::MNT3ERR_ACCES))))
 }
 
 /// Connect to `addr` from a privileged source port (300-1023), falling back to ephemeral.
@@ -363,8 +363,8 @@ fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
 /// against TIME_WAIT pile-up on busy hosts that would otherwise eat the
 /// privileged range and silently slide us onto an ephemeral port.
 async fn connect_privileged_or_fallback(addr: SocketAddr) -> std::io::Result<crate::proto::conn::NfsIo> {
-    use nfswolf_rpc::transport::net::Connector as _;
-    use nfswolf_rpc::transport::tokio::TokioConnector;
+    use onc_rpc_client::transport::net::Connector as _;
+    use onc_rpc_client::transport::tokio::TokioConnector;
 
     for local_port in 300_u16..1024 {
         match TokioConnector.connect_with_port(addr, local_port).await {
@@ -388,8 +388,8 @@ async fn connect_privileged_or_fallback(addr: SocketAddr) -> std::io::Result<cra
 /// `MNT3ERR_ACCES`. Returns the last error if every port in 300-1023
 /// fails to bind/connect.
 async fn connect_privileged_only(addr: SocketAddr) -> std::io::Result<crate::proto::conn::NfsIo> {
-    use nfswolf_rpc::transport::net::Connector as _;
-    use nfswolf_rpc::transport::tokio::TokioConnector;
+    use onc_rpc_client::transport::net::Connector as _;
+    use onc_rpc_client::transport::tokio::TokioConnector;
 
     let mut last_err: Option<std::io::Error> = None;
     for local_port in 300_u16..1024 {
@@ -430,4 +430,4 @@ fn bytes_to_string(bytes: &[u8]) -> String {
 }
 
 /// Re-use the MOUNT v1 MNT response from nfswolf-mount.
-use nfswolf_mount::wire::FhStatus;
+use nfs_mount::wire::FhStatus;

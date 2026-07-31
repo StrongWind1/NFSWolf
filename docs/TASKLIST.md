@@ -79,7 +79,7 @@ Remove duplication by extracting crates that the target design calls for. Worth 
 
 ### `onc-rpcbind` extraction (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [crate 4 spec](CRATE-DESIGN.md#4-onc-rpcbind--rfc-1833-rfc-1057-app-a--program-100000--extract-from-onc-rpc-client))
 
-- [ ] **Extract portmapper + RPCBIND from `nfswolf-rpc` into `onc-rpcbind`.** Currently modules of the RPC crate. Separate crate, depends on `onc-rpc-client`.
+- [x] **Extract portmapper + RPCBIND from `nfswolf-rpc` into `nfswolf-rpcbind`.** 6 procedures, rpcbind v3/v4, program name table, all wire types moved to `crates/nfswolf-rpcbind/`.
 
 ### `Nfs2RawClient` (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [the completeness rule](CRATE-DESIGN.md#the-completeness-rule))
 

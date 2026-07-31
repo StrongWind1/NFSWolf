@@ -10,9 +10,9 @@
 use std::net::SocketAddr;
 
 use anyhow::Context as _;
-use nfswolf_rpc::rpc::RpcClient;
-use nfswolf_rpc::transport::net::Connector as _;
-use nfswolf_rpc::transport::tokio::{TokioConnector, TokioIo};
+use onc_rpc_client::rpc::RpcClient;
+use onc_rpc_client::transport::net::Connector as _;
+use onc_rpc_client::transport::tokio::{TokioConnector, TokioIo};
 use tokio::net::TcpStream;
 
 use crate::proto::nfs4::types::{ArgOp, AttrRequest, CompoundArgs, CompoundRes, NFS4_PROC_COMPOUND, NFS4_PROGRAM, NFS4_VERSION, ResOpData};
@@ -64,7 +64,7 @@ impl Nfs4DirectClient {
 
     /// Connect via an optional SOCKS5 proxy, using AUTH_NONE.
     pub(crate) async fn connect_proxy(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Self> {
-        let null_auth = nfswolf_rpc::rpc::opaque_auth::default();
+        let null_auth = onc_rpc_client::rpc::opaque_auth::default();
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, null_auth.clone(), null_auth);
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: Vec::new() })
@@ -75,7 +75,7 @@ impl Nfs4DirectClient {
         use crate::proto::auth::AuthSys;
         let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(addr, proxy).await?;
-        let rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
+        let rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: Vec::new() })
     }
 
@@ -92,7 +92,7 @@ impl Nfs4DirectClient {
         let gids = aux_gids.to_vec();
         let opaque = AuthSys::with_groups(uid, gid, &gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(addr, proxy).await?;
-        let rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
+        let rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
         Ok(Self { rpc, addr, proxy: proxy.map(String::from), stealth: StealthConfig::none(), aux_gids: aux_gids.to_vec() })
     }
 
@@ -119,7 +119,7 @@ impl Nfs4DirectClient {
         use crate::proto::auth::AuthSys;
         let opaque = AuthSys::with_groups(uid, gid, &self.aux_gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(self.addr, self.proxy.as_deref()).await?;
-        self.rpc = RpcClient::new_with_auth(io, opaque, nfswolf_rpc::rpc::opaque_auth::default());
+        self.rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
         Ok(())
     }
 

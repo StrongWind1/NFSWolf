@@ -10,10 +10,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nfswolf_rpc::RpcError;
-use nfswolf_rpc::RpcTransport;
-use nfswolf_rpc::rpc::opaque_auth;
-use nfswolf_xdr::{Pack, Unpack};
+use onc_rpc_client::RpcError;
+use onc_rpc_client::RpcTransport;
+use onc_rpc_client::rpc::opaque_auth;
+use onc_xdr::{Pack, Unpack};
 
 use crate::proto::auth::Credential;
 use crate::proto::circuit::CircuitBreaker;
@@ -196,7 +196,7 @@ impl PooledTransport {
 /// host is demonstrably alive. Only a genuine transport fault should feed the
 /// breaker.
 fn is_authorization_denial(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| cause.downcast_ref::<nfswolf_mount::MountError<RpcError>>().is_some_and(nfswolf_mount::MountError::is_denial))
+    err.chain().any(|cause| cause.downcast_ref::<nfs_mount::MountError<RpcError>>().is_some_and(nfs_mount::MountError::is_denial))
 }
 
 /// Flatten a checkout failure into the transport's error type.

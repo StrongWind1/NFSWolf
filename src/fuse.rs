@@ -35,12 +35,12 @@ use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle as FuseFileHandle, FileType as FuseFileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow, WriteFlags,
 };
-use nfswolf_nfs3::Nfs3Error;
-use nfswolf_nfs3::wire::{
+use nfs_v3::Nfs3Error;
+use nfs_v3::wire::{
     ACCESS3args, COMMIT3args, CREATE3args, FSSTAT3args, GETATTR3args, LINK3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3, createhow3,
     devicedata3, diropargs3, filename3, mknoddata3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime, specdata3, stable_how, symlinkdata3,
 };
-use nfswolf_xdr::Opaque;
+use onc_xdr::Opaque;
 
 use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
@@ -367,7 +367,7 @@ impl NfsFuse {
         let target_bytes: Vec<u8> = match self.nfs3.readlink(&args).await {
             Ok(Nfs3Result::Ok(ok)) => ok.data.0.as_ref().to_vec(),
             Ok(Nfs3Result::Err((stat, _))) => return Err(stat),
-            Err(_) => return Err(nfsstat3::NFS3ERR_IO),
+            Ok(_) | Err(_) => return Err(nfsstat3::NFS3ERR_IO),
         };
 
         // Decide where to start resolving from.
@@ -406,7 +406,7 @@ impl NfsFuse {
                     cur_ino = next_ino;
                 },
                 Ok(Nfs3Result::Err((stat, _))) => return Err(stat),
-                Err(_) => return Err(nfsstat3::NFS3ERR_IO),
+                Ok(_) | Err(_) => return Err(nfsstat3::NFS3ERR_IO),
             }
         }
 
@@ -414,7 +414,7 @@ impl NfsFuse {
         let attrs = match self.nfs3.getattr(&GETATTR3args { object: cur_fh.to_nfs_fh3() }).await {
             Ok(Nfs3Result::Ok(ok)) => FileAttrs::from_fattr3(&ok.obj_attributes),
             Ok(Nfs3Result::Err((stat, _))) => return Err(stat),
-            Err(_) => return Err(nfsstat3::NFS3ERR_IO),
+            Ok(_) | Err(_) => return Err(nfsstat3::NFS3ERR_IO),
         };
 
         if attrs.file_type == FileType::Symlink {
@@ -438,10 +438,10 @@ impl NfsFuse {
     /// `op` is invoked with a fresh `Nfs3Client` that carries the credential
     /// for the rung being tried; the closure builds the args and calls the
     /// matching NFS3 procedure.
-    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>
+    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> Result<Nfs3Result<T, U>, onc_rpc_client::RpcError>
     where
         F: Fn(Nfs3Client) -> Fut,
-        Fut: Future<Output = Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>>,
+        Fut: Future<Output = Result<Nfs3Result<T, U>, onc_rpc_client::RpcError>>,
     {
         // Primary credentials: any per-inode cached winner, then the default.
         // We only fall back to the escalation ladder -- which costs an
@@ -459,7 +459,7 @@ impl NfsFuse {
         }
 
         let mut tried: Vec<(u32, u32)> = Vec::new();
-        let mut last: Option<Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>> = None;
+        let mut last: Option<Result<Nfs3Result<T, U>, onc_rpc_client::RpcError>> = None;
         for (u, g) in primary {
             tried.push((u, g));
             let c = self.client_for(u, g);
@@ -509,7 +509,7 @@ impl NfsFuse {
             // Unreachable in practice: the ladder always has at least the
             // default rung. Reported as an error rather than a panic so a
             // FUSE callback cannot take the mount down.
-            Err(nfswolf_rpc::RpcError::Io(std::io::Error::other(format!("no credential rungs to try for inode {subject_ino}"))))
+            Err(onc_rpc_client::RpcError::Io(std::io::Error::other(format!("no credential rungs to try for inode {subject_ino}"))))
         })
     }
 
@@ -539,6 +539,7 @@ impl NfsFuse {
                 (fh, attrs)
             },
             Nfs3Result::Err((stat, _)) => return Err(stat),
+            _ => return Err(nfsstat3::NFS3ERR_IO),
         };
 
         let child_ino = self.intern(child_fh.clone(), parent_ino);
@@ -578,6 +579,7 @@ impl NfsFuse {
         let (child_fh, attrs_opt) = match result {
             Nfs3Result::Ok(ok) => (FileHandle::from_nfs_fh3(&ok.object), post_op_attr_to_attrs(ok.obj_attributes)),
             Nfs3Result::Err((stat, _)) => return Err(stat),
+            _ => return Err(nfsstat3::NFS3ERR_IO),
         };
 
         let attrs = if let Some(a) = attrs_opt {
@@ -595,6 +597,7 @@ impl NfsFuse {
             match r {
                 Nfs3Result::Ok(ok) => FileAttrs::from_fattr3(&ok.obj_attributes),
                 Nfs3Result::Err((stat, _)) => return Err(stat),
+                _ => return Err(nfsstat3::NFS3ERR_IO),
             }
         };
         Ok((child_fh, attrs))
@@ -616,7 +619,7 @@ impl NfsFuse {
             .ok()?;
         match result {
             Nfs3Result::Ok(ok) => Some(FileAttrs::from_fattr3(&ok.obj_attributes)),
-            Nfs3Result::Err(_) => None,
+            Nfs3Result::Err(_) | _ => None,
         }
     }
 
@@ -665,11 +668,11 @@ impl NfsFuse {
                         let name = e.name.as_ref().to_vec();
                         let attrs = match e.name_attributes {
                             Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-                            Nfs3Option::None => None,
+                            Nfs3Option::None | _ => None,
                         };
                         let handle = match e.name_handle {
                             Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
-                            Nfs3Option::None => None,
+                            Nfs3Option::None | _ => None,
                         };
                         entries.push((name, attrs, handle));
                     }
@@ -690,8 +693,8 @@ impl NfsFuse {
                     tracing::debug!(?ino, ?stat, "READDIRPLUS failed");
                     return Err(Errno::EIO);
                 },
-                Err(e) => {
-                    tracing::debug!(?ino, error = %e, "READDIRPLUS RPC error");
+                Ok(_) | Err(_) => {
+                    tracing::debug!(?ino, "READDIRPLUS failed");
                     return Err(Errno::EIO);
                 },
             }
@@ -769,7 +772,7 @@ impl Filesystem for NfsFuse {
                 reply.attr(&ATTR_TTL, &attr);
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -829,7 +832,7 @@ impl Filesystem for NfsFuse {
                     let attrs = FileAttrs::from_fattr3(&a);
                     reply.attr(&ATTR_TTL, &Self::make_attr(ino.0, &attrs));
                 },
-                Nfs3Option::None => {
+                Nfs3Option::None | _ => {
                     // SETATTR succeeded but server didn't return post-op attrs;
                     // re-issue GETATTR to keep the kernel in sync.
                     if let Some(attrs) = self.block(self.try_getattr(ino.0)) {
@@ -841,7 +844,7 @@ impl Filesystem for NfsFuse {
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_NOTSUPP, _))) => reply.error(Errno::ENOTSUP),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -875,7 +878,7 @@ impl Filesystem for NfsFuse {
                 }
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -902,7 +905,7 @@ impl Filesystem for NfsFuse {
         match result {
             Ok(Nfs3Result::Ok(ok)) => reply.data(ok.data.0.as_ref()),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -974,7 +977,7 @@ impl Filesystem for NfsFuse {
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -1014,7 +1017,7 @@ impl Filesystem for NfsFuse {
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -1055,7 +1058,7 @@ impl Filesystem for NfsFuse {
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -1086,11 +1089,11 @@ impl Filesystem for NfsFuse {
             Ok(Nfs3Result::Ok(ok)) => {
                 let fh_opt = match ok.obj {
                     Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
-                    Nfs3Option::None => None,
+                    Nfs3Option::None | _ => None,
                 };
                 let attrs_opt = match ok.obj_attributes {
                     Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-                    Nfs3Option::None => None,
+                    Nfs3Option::None | _ => None,
                 };
 
                 let Some((child_fh, child_ino, attrs)) = self.intern_with_lookup_fallback(parent.0, &parent_fh, &name_bytes, fh_opt, attrs_opt) else {
@@ -1105,7 +1108,7 @@ impl Filesystem for NfsFuse {
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -1216,7 +1219,7 @@ impl Filesystem for NfsFuse {
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -1365,7 +1368,7 @@ impl Filesystem for NfsFuse {
                     reply.error(Errno::EACCES);
                     return;
                 },
-                Ok(Nfs3Result::Err(_)) | Err(_) if buf.is_empty() => {
+                Ok(_) | Err(_) if buf.is_empty() => {
                     reply.error(Errno::EIO);
                     return;
                 },
@@ -1410,7 +1413,7 @@ impl Filesystem for NfsFuse {
                 reply.written(ok.count.min(sent));
             },
             Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+            Ok(_) | Err(_) => reply.error(Errno::EIO),
         }
     }
 
@@ -1456,7 +1459,7 @@ impl Filesystem for NfsFuse {
                 let bavail = ok.abytes / u64::from(bsize);
                 reply.statfs(blocks, bfree, bavail, ok.tfiles, ok.ffiles, bsize, 255, bsize);
             },
-            Ok(Nfs3Result::Err(_)) | Err(_) => {
+            Ok(_) | Err(_) => {
                 // Many servers reject FSSTAT for non-root callers; reply
                 // with zeros so `df` doesn't break the mount.
                 reply.statfs(0, 0, 0, 0, 0, 512, 255, 512);
@@ -1474,7 +1477,7 @@ const fn to_fuse_type(ft: FileType) -> FuseFileType {
         FileType::Character => FuseFileType::CharDevice,
         FileType::Fifo => FuseFileType::NamedPipe,
         FileType::Socket => FuseFileType::Socket,
-        FileType::Regular => FuseFileType::RegularFile,
+        FileType::Regular | _ => FuseFileType::RegularFile,
     }
 }
 
@@ -1537,19 +1540,19 @@ const fn sattr3_for_perms(perms: u32) -> sattr3 {
 
 /// Convert the optional post-op file handle returned by CREATE / MKNOD /
 /// MKDIR / SYMLINK responses (RFC 1813 §3.3.8 etc.) to our `FileHandle`.
-fn post_op_fh3_to_handle(opt: Nfs3Option<nfswolf_nfs3::wire::nfs_fh3>) -> Option<FileHandle> {
+fn post_op_fh3_to_handle(opt: Nfs3Option<nfs_v3::wire::nfs_fh3>) -> Option<FileHandle> {
     match opt {
         Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
-        Nfs3Option::None => None,
+        Nfs3Option::None | _ => None,
     }
 }
 
 /// Convert an optional post-op attribute reply into our `FileAttrs`.
 #[expect(clippy::missing_const_for_fn, reason = "FileAttrs::from_fattr3 is not const")]
-fn post_op_attr_to_attrs(opt: nfswolf_nfs3::wire::post_op_attr) -> Option<FileAttrs> {
+fn post_op_attr_to_attrs(opt: nfs_v3::wire::post_op_attr) -> Option<FileAttrs> {
     match opt {
         Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-        Nfs3Option::None => None,
+        Nfs3Option::None | _ => None,
     }
 }
 
@@ -1560,7 +1563,7 @@ fn post_op_attr_to_attrs(opt: nfswolf_nfs3::wire::post_op_attr) -> Option<FileAt
 /// onto POSIX errnos, and that is a translation between two specifications --
 /// `Nfs3Error` is the same set of codes under Rust names, so routing through
 /// it would rename the left-hand column without changing what the table says.
-fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>, reply: ReplyEmpty) {
+fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, onc_rpc_client::RpcError>, reply: ReplyEmpty) {
     match result {
         Ok(Nfs3Result::Ok(_)) => reply.ok(),
         Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
@@ -1572,6 +1575,6 @@ fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, nfswolf_rpc::RpcError>, r
         Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_NOSPC, _))) => reply.error(Errno::ENOSPC),
         Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_DQUOT, _))) => reply.error(Errno::EDQUOT),
         Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ROFS, _))) => reply.error(Errno::EROFS),
-        Ok(Nfs3Result::Err(_)) | Err(_) => reply.error(Errno::EIO),
+        Ok(_) | Err(_) => reply.error(Errno::EIO),
     }
 }

@@ -36,20 +36,20 @@
     clippy::cast_sign_loss,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use nfswolf_rpc::transport::DirectTransport;
+use onc_rpc_client::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use assert_cmd::Command;
+use nfs_v3::MountClient;
+use nfs_v3::Nfs3Client;
+use nfs_v3::wire::mount::dirpath;
+use nfs_v3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3};
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfswolf_nfs3::MountClient;
-use nfswolf_nfs3::Nfs3Client;
-use nfswolf_nfs3::wire::mount::dirpath;
-use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3};
-use nfswolf_rpc::transport::tokio::TokioIo;
-use nfswolf_rpcbind::PortmapperClient;
-use nfswolf_xdr::Opaque;
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_rpcbind::PortmapperClient;
+use onc_xdr::Opaque;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use tokio::net::TcpStream;
@@ -164,7 +164,7 @@ async fn memfs_portmapper_responds_to_getport() {
 
     // PMAPPROC_GETPORT: query where NFS v3 is listening.
     // MemFs serves NFS on the same port it was bound to.
-    let nfs_port = pm.getport(100_003, 3, nfswolf_rpcbind::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
+    let nfs_port = pm.getport(100_003, 3, onc_rpcbind::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
     assert_eq!(nfs_port, port, "portmapper must report NFS port matching server bind port");
 }
 
@@ -230,7 +230,7 @@ async fn memfs_getattr_on_root() {
     // MOUNT to get the root handle.
     let mc = mount_client(port).await;
     let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
-    let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
+    let root_fh = nfs_v3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     // GETATTR on the root handle.
     let nfs = nfs3_client(port).await;
@@ -239,11 +239,12 @@ async fn memfs_getattr_on_root() {
     match result {
         Nfs3Result::Ok(ok) => {
             // Root must be a directory.
-            assert_eq!(ok.obj_attributes.type_, nfswolf_nfs3::wire::ftype3::NF3DIR, "root must be a directory");
+            assert_eq!(ok.obj_attributes.type_, nfs_v3::wire::ftype3::NF3DIR, "root must be a directory");
         },
         Nfs3Result::Err((stat, _)) => {
             panic!("GETATTR failed: {stat:?}");
         },
+        _ => unreachable!(),
     }
 }
 
@@ -258,7 +259,7 @@ async fn memfs_lookup_file_in_root() {
 
     let mc = mount_client(port).await;
     let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
-    let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
+    let root_fh = nfs_v3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
 
@@ -273,12 +274,13 @@ async fn memfs_lookup_file_in_root() {
         Nfs3Result::Err((stat, _)) => {
             panic!("LOOKUP failed: {stat:?}");
         },
+        _ => unreachable!(),
     }
 }
 
 #[tokio::test]
 async fn memfs_lookup_missing_file_returns_noent() {
-    use nfswolf_nfs3::wire::nfsstat3;
+    use nfs_v3::wire::nfsstat3;
 
     let config = MemFsConfig::default();
     let (_server, port) = start_memfs_server(config).await;
@@ -286,7 +288,7 @@ async fn memfs_lookup_missing_file_returns_noent() {
 
     let mc = mount_client(port).await;
     let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
-    let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
+    let root_fh = nfs_v3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
     let result = nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"does_not_exist.txt")) } }).await.expect("LOOKUP RPC must succeed (protocol level)");
@@ -297,12 +299,13 @@ async fn memfs_lookup_missing_file_returns_noent() {
             // The server must return NFS3ERR_NOENT for a missing file.
             assert_eq!(stat, nfsstat3::NFS3ERR_NOENT, "missing file must return NOENT");
         },
+        _ => unreachable!(),
     }
 }
 
 #[tokio::test]
 async fn memfs_read_file_content() {
-    use nfswolf_nfs3::wire::{LOOKUP3args, READ3args, diropargs3};
+    use nfs_v3::wire::{LOOKUP3args, READ3args, diropargs3};
 
     let expected = b"integration test content";
     let mut config = MemFsConfig::default();
@@ -313,7 +316,7 @@ async fn memfs_read_file_content() {
 
     let mc = mount_client(port).await;
     let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
-    let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
+    let root_fh = nfs_v3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
 
@@ -321,6 +324,7 @@ async fn memfs_read_file_content() {
     let lookup_ok = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"data.bin")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP failed: {stat:?}"),
+        _ => unreachable!(),
     };
 
     // READ the file content.
@@ -332,5 +336,6 @@ async fn memfs_read_file_content() {
             assert!(ok.eof, "small file must be EOF on first read");
         },
         Nfs3Result::Err((stat, _)) => panic!("READ failed: {stat:?}"),
+        _ => unreachable!(),
     }
 }

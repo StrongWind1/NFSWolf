@@ -1,6 +1,6 @@
 //! NFSv4 for nfswolf: both direct (probe) and pooled (shell) clients.
 //!
-//! The wire types live in `nfswolf_nfs4`; this module provides:
+//! The wire types live in `nfs_v4`; this module provides:
 //!
 //! - `Nfs4DirectClient` (in `compound.rs`): pool-free, single-connection client
 //!   for scanner/analyzer probes. Manages its own TCP socket, proxy tunnelling,
@@ -25,11 +25,11 @@
 //!
 //! Only the read-only subset is implemented. The stateful half of the protocol
 //! -- OPEN, CLOSE, LOCK, delegations, and the v4.1 session machinery -- is out
-//! of scope; see `nfswolf_nfs4` for the operations that are covered.
+//! of scope; see `nfs_v4` for the operations that are covered.
 
 /// NFSv4 wire types live in the protocol crate; re-exported under the name
 /// call sites already use.
-pub(crate) use nfswolf_nfs4::wire as types;
+pub(crate) use nfs_v4::wire as types;
 
 pub(crate) mod compound;
 
@@ -43,7 +43,7 @@ pub(crate) mod compound;
 /// analyzer), this type gets circuit breaking, connection reuse, stealth
 /// pacing, and zero-round-trip credential swaps -- the same policy surface as
 /// `proto::nfs3::Nfs3Client`.
-pub(crate) type Nfs4Client = nfswolf_nfs4::Nfs4Client<crate::proto::transport::PooledTransport>;
+pub(crate) type Nfs4Client = nfs_v4::Nfs4Client<crate::proto::transport::PooledTransport>;
 
 /// Hostname presented when no AUTH_SYS credential is configured.
 ///

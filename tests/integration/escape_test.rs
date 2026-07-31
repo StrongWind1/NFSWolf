@@ -29,17 +29,17 @@
     clippy::missing_asserts_for_indexing,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use nfswolf_rpc::transport::DirectTransport;
+use onc_rpc_client::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use nfs_v3::MountClient;
+use nfs_v3::Nfs3Client;
+use nfs_v3::wire::mount::dirpath;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfswolf_nfs3::MountClient;
-use nfswolf_nfs3::Nfs3Client;
-use nfswolf_nfs3::wire::mount::dirpath;
-use nfswolf_rpc::transport::tokio::TokioIo;
-use nfswolf_xdr::Opaque;
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_xdr::Opaque;
 use tokio::net::TcpStream;
 
 // --- Server helpers ---
@@ -531,7 +531,7 @@ async fn memfs_escape_attempt_fails_gracefully() {
     // Verifies that constructing an escape handle against MemFs returns BADHANDLE or STALE,
     // confirming the handle oracle works (BADHANDLE = wrong format, STALE = wrong inode).
     // MemFs handles are synthetic and don't follow the ext4/XFS filesystem format.
-    use nfswolf_nfs3::wire::{GETATTR3args, Nfs3Result, nfsstat3};
+    use nfs_v3::wire::{GETATTR3args, Nfs3Result, nfsstat3};
 
     let config = MemFsConfig::default();
     let (_server, port) = start_server(config).await;
@@ -549,7 +549,7 @@ async fn memfs_escape_attempt_fails_gracefully() {
     // inode = 2 (ext4 root) at offset 20
     escape_handle[27] = 2;
 
-    let fake_fh = nfswolf_nfs3::wire::nfs_fh3 { data: nfswolf_xdr::Opaque::owned(escape_handle) };
+    let fake_fh = nfs_v3::wire::nfs_fh3 { data: onc_xdr::Opaque::owned(escape_handle) };
     let res = nfs.getattr(&GETATTR3args { object: fake_fh }).await.expect("GETATTR RPC must succeed at protocol level");
 
     // MemFs must reject an escape handle with BADHANDLE or STALE -- never panic or succeed.
@@ -561,5 +561,6 @@ async fn memfs_escape_attempt_fails_gracefully() {
             // If MemFs somehow accepts the handle, that's OK -- it means the format matched.
             // The important thing is no panic.
         },
+        _ => unreachable!(),
     }
 }

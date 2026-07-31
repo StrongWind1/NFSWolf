@@ -666,12 +666,12 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
             let addr = SocketAddr::new(host, 111);
             eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{p} (MOUNT v1)")));
             let mount_result = mount_client.mount_v1(addr, p).await?;
-            let fh = nfswolf_nfs2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
+            let fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
             (fh, p.clone())
         },
         Source::Handle(hex) => {
             let generic = FileHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?;
-            let fh = nfswolf_nfs2::wire::Nfs2FileHandle::from_bytes(generic.as_bytes());
+            let fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(generic.as_bytes());
             eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv2): {hex}")));
             (fh, String::from("/"))
         },
@@ -681,7 +681,7 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
             let export = "/".to_owned();
             eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:/ (MOUNT v1)")));
             let mount_result = mount_client.mount_v1(addr, &export).await?;
-            let fh = nfswolf_nfs2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
+            let fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
             (fh, export)
         },
     };

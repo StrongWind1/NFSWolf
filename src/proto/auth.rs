@@ -1,6 +1,6 @@
 //! AUTH_SYS stamp policy.
 //!
-//! The credential itself is RFC 5531 sec. 14 and lives in `nfswolf_rpc::auth`.
+//! The credential itself is RFC 5531 sec. 14 and lives in `onc_rpc_client::auth`.
 //! What belongs here is the part that is nfswolf's choice rather than the
 //! spec's: which stamp each encoded credential carries.
 //!
@@ -17,9 +17,9 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use nfswolf_rpc::rpc::opaque_auth;
+use onc_rpc_client::rpc::opaque_auth;
 
-pub(crate) use nfswolf_rpc::auth::{AuthFlavor, AuthSys};
+pub(crate) use onc_rpc_client::auth::{AuthFlavor, AuthSys};
 
 /// Stamp start value, and the floor the counter wraps back to.
 ///
@@ -83,13 +83,13 @@ mod tests {
 
     #[test]
     fn credential_none_encodes_as_auth_none() {
-        use nfswolf_rpc::rpc::auth_flavor;
+        use onc_rpc_client::rpc::auth_flavor;
         assert_eq!(Credential::None.to_opaque_auth().flavor, auth_flavor::AUTH_NULL);
     }
 
     #[test]
     fn credential_sys_encodes_as_auth_unix() {
-        use nfswolf_rpc::rpc::auth_flavor;
+        use onc_rpc_client::rpc::auth_flavor;
         let cred = Credential::Sys(AuthSys::new(1000, 1000, "host"));
         assert_eq!(cred.to_opaque_auth().flavor, auth_flavor::AUTH_UNIX);
     }

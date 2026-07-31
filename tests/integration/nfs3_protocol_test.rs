@@ -30,21 +30,21 @@
     clippy::cast_sign_loss,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use nfswolf_rpc::transport::DirectTransport;
+use onc_rpc_client::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use nfs3_server::memfs::{MemFs, MemFsConfig};
-use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfswolf_nfs3::MountClient;
-use nfswolf_nfs3::Nfs3Client;
-use nfswolf_nfs3::wire::mount::dirpath;
-use nfswolf_nfs3::wire::{
+use nfs_v3::MountClient;
+use nfs_v3::Nfs3Client;
+use nfs_v3::wire::mount::dirpath;
+use nfs_v3::wire::{
     ACCESS3_DELETE, ACCESS3_EXECUTE, ACCESS3_EXTEND, ACCESS3_LOOKUP, ACCESS3_MODIFY, ACCESS3_READ, ACCESS3args, CREATE3args, FSINFO3args, FSSTAT3args, GETATTR3args, LOOKUP3args, Nfs3Result, PATHCONF3args, READ3args, READDIR3args, READDIRPLUS3args, REMOVE3args, WRITE3args, cookieverf3, createhow3,
     diropargs3, filename3, ftype3, nfs_fh3, nfsstat3, sattr3, stable_how,
 };
-use nfswolf_rpc::transport::tokio::TokioIo;
-use nfswolf_xdr::Opaque;
+use nfs3_server::memfs::{MemFs, MemFsConfig};
+use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_xdr::Opaque;
 use tokio::net::TcpStream;
 
 // --- Server helpers ---
@@ -99,6 +99,7 @@ async fn readdirplus_lists_all_entries() {
             assert!(names.contains(&"gamma.txt".to_owned()), "gamma.txt missing from READDIRPLUS: {names:?}");
         },
         Nfs3Result::Err((stat, _)) => panic!("READDIRPLUS failed: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -130,6 +131,7 @@ async fn readdirplus_entries_carry_attributes() {
             assert!(entry.name_handle.is_some(), "data.txt should have inline file handle");
         },
         Nfs3Result::Err((stat, _)) => panic!("READDIRPLUS failed: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -182,6 +184,7 @@ async fn lookup_then_read_reproduces_content() {
     let file_fh = match lookup {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP failed: {stat:?}"),
+        _ => unreachable!(),
     };
 
     let read = nfs.read(&READ3args { file: file_fh, offset: 0, count: 256 }).await.expect("READ RPC must succeed");
@@ -192,6 +195,7 @@ async fn lookup_then_read_reproduces_content() {
             assert!(ok.eof, "small file must be EOF after first full read");
         },
         Nfs3Result::Err((stat, _)) => panic!("READ failed: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -215,6 +219,7 @@ async fn memfs_getattr_root_nlink_is_nonzero() {
             assert!(ok.obj_attributes.nlink >= 1, "root dir nlink must be >= 1, got {}", ok.obj_attributes.nlink);
         },
         Nfs3Result::Err((stat, _)) => panic!("GETATTR failed: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -237,6 +242,7 @@ async fn memfs_read_at_offset_returns_partial() {
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"partial.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     // Read starting at offset 4 with count 4  --  should return "4567"
@@ -246,6 +252,7 @@ async fn memfs_read_at_offset_returns_partial() {
             assert_eq!(ok.data.as_ref(), b"4567", "offset read must return correct slice");
         },
         Nfs3Result::Err((stat, _)) => panic!("READ: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -266,6 +273,7 @@ async fn memfs_read_past_eof_returns_empty() {
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"short.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     // Read starting past the end of the file
@@ -276,6 +284,7 @@ async fn memfs_read_past_eof_returns_empty() {
             assert!(ok.eof, "read past EOF must set eof flag");
         },
         Nfs3Result::Err((stat, _)) => panic!("READ: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -302,6 +311,7 @@ async fn memfs_readdirplus_empty_dir() {
             assert!(!names.contains(&"alpha.txt".to_owned()), "empty dir must not contain alpha.txt");
         },
         Nfs3Result::Err((stat, _)) => panic!("READDIRPLUS: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -324,13 +334,15 @@ async fn memfs_getattr_file_type_is_regular() {
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"regular.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     match nfs.getattr(&GETATTR3args { object: fh }).await.expect("GETATTR must succeed") {
         Nfs3Result::Ok(ok) => {
-            assert_eq!(ok.obj_attributes.type_, nfswolf_nfs3::wire::ftype3::NF3REG, "file must have type NF3REG");
+            assert_eq!(ok.obj_attributes.type_, nfs_v3::wire::ftype3::NF3REG, "file must have type NF3REG");
         },
         Nfs3Result::Err((stat, _)) => panic!("GETATTR: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -352,6 +364,7 @@ async fn getattr_size_matches_file_content_length() {
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"sized.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP failed: {stat:?}"),
+        _ => unreachable!(),
     };
 
     match nfs.getattr(&GETATTR3args { object: fh }).await.expect("GETATTR must succeed") {
@@ -359,6 +372,7 @@ async fn getattr_size_matches_file_content_length() {
             assert_eq!(ok.obj_attributes.size, content.len() as u64, "GETATTR size must equal content length");
         },
         Nfs3Result::Err((stat, _)) => panic!("GETATTR failed: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -382,6 +396,7 @@ async fn chunked_read_reassembles_full_content() {
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"chunks.bin")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     let chunk_size = 32u32;
@@ -400,6 +415,7 @@ async fn chunked_read_reassembles_full_content() {
                 }
             },
             Nfs3Result::Err((stat, _)) => panic!("READ at offset {offset}: {stat:?}"),
+            _ => unreachable!(),
         }
     }
 
@@ -440,6 +456,7 @@ async fn access_read_on_file_returns_read_bit() {
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"readable.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     let args = ACCESS3args { object: fh, access: ACCESS3_READ };
@@ -448,6 +465,7 @@ async fn access_read_on_file_returns_read_bit() {
             assert!(ok.access & ACCESS3_READ != 0, "ACCESS must grant READ on a readable file");
         },
         Nfs3Result::Err((stat, _)) => panic!("ACCESS: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -469,6 +487,7 @@ async fn access_lookup_on_directory_returns_lookup_bit() {
             assert!(ok.access & ACCESS3_LOOKUP != 0, "ACCESS must grant LOOKUP on root directory");
         },
         Nfs3Result::Err((stat, _)) => panic!("ACCESS: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -492,6 +511,7 @@ async fn access_all_bits_requested() {
             assert_eq!(ok.access & !all_bits, 0, "server must not grant bits the client did not request");
         },
         Nfs3Result::Err((stat, _)) => panic!("ACCESS: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -517,6 +537,7 @@ async fn fsstat_returns_nonzero_total_space() {
             assert!(ok.tbytes > 0, "total bytes should be nonzero, got {}", ok.tbytes);
         },
         Nfs3Result::Err((stat, _)) => panic!("FSSTAT: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -546,6 +567,7 @@ async fn fsinfo_returns_read_write_limits() {
             assert!(ok.wtpref <= ok.wtmax, "wtpref must be <= wtmax");
         },
         Nfs3Result::Err((stat, _)) => panic!("FSINFO: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -570,6 +592,7 @@ async fn pathconf_returns_valid_limits() {
             assert!(ok.name_max > 0, "name_max must be nonzero, got {}", ok.name_max);
         },
         Nfs3Result::Err((stat, _)) => panic!("PATHCONF: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -598,6 +621,7 @@ async fn readdir_lists_file_names() {
             assert!(names.contains(&"bbb.txt".to_owned()), "bbb.txt missing from READDIR: {names:?}");
         },
         Nfs3Result::Err((stat, _)) => panic!("READDIR: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -621,6 +645,7 @@ async fn write_then_read_data_integrity() {
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"writable.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     let new_data = b"overwritten content here";
@@ -630,6 +655,7 @@ async fn write_then_read_data_integrity() {
             assert_eq!(ok.count, new_data.len() as u32, "WRITE must report full byte count");
         },
         Nfs3Result::Err((stat, _)) => panic!("WRITE: {stat:?}"),
+        _ => unreachable!(),
     }
 
     // Read back and verify the content matches.
@@ -639,6 +665,7 @@ async fn write_then_read_data_integrity() {
             assert_eq!(ok.data.as_ref(), new_data.as_slice(), "READ after WRITE must return the written data");
         },
         Nfs3Result::Err((stat, _)) => panic!("READ: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -664,6 +691,7 @@ async fn create_then_lookup_finds_new_file() {
             assert!(ok.obj.is_some(), "CREATE must return a file handle for the new file");
         },
         Nfs3Result::Err((stat, _)) => panic!("CREATE: {stat:?}"),
+        _ => unreachable!(),
     }
 
     // LOOKUP the newly created file.
@@ -672,6 +700,7 @@ async fn create_then_lookup_finds_new_file() {
             assert!(!ok.object.data.as_ref().is_empty(), "LOOKUP must return a non-empty handle for the created file");
         },
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP after CREATE: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -696,6 +725,7 @@ async fn remove_then_lookup_returns_noent() {
     match nfs.remove(&rm_args).await.expect("REMOVE RPC must succeed") {
         Nfs3Result::Ok(_) => {},
         Nfs3Result::Err((stat, _)) => panic!("REMOVE: {stat:?}"),
+        _ => unreachable!(),
     }
 
     // LOOKUP must now fail with NOENT.
@@ -704,6 +734,7 @@ async fn remove_then_lookup_returns_noent() {
         Nfs3Result::Err((stat, _)) => {
             assert_eq!(stat, nfsstat3::NFS3ERR_NOENT, "removed file must return NOENT");
         },
+        _ => unreachable!(),
     }
 }
 
@@ -733,48 +764,56 @@ async fn multiple_sequential_operations_same_connection() {
     match nfs.getattr(&GETATTR3args { object: root_fh.clone() }).await.expect("GETATTR must succeed") {
         Nfs3Result::Ok(ok) => assert_eq!(ok.obj_attributes.type_, ftype3::NF3DIR),
         Nfs3Result::Err((stat, _)) => panic!("GETATTR: {stat:?}"),
+        _ => unreachable!(),
     }
 
     // 3. LOOKUP seq_a.txt
     let fh_a = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh.clone(), name: filename3(Opaque::borrowed(b"seq_a.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP seq_a: {stat:?}"),
+        _ => unreachable!(),
     };
 
     // 4. READ seq_a.txt
     match nfs.read(&READ3args { file: fh_a.clone(), offset: 0, count: 256 }).await.expect("READ must succeed") {
         Nfs3Result::Ok(ok) => assert_eq!(ok.data.as_ref(), b"aaa"),
         Nfs3Result::Err((stat, _)) => panic!("READ seq_a: {stat:?}"),
+        _ => unreachable!(),
     }
 
     // 5. ACCESS on seq_a.txt
     match nfs.access(&ACCESS3args { object: fh_a, access: ACCESS3_READ }).await.expect("ACCESS must succeed") {
         Nfs3Result::Ok(_) => {},
         Nfs3Result::Err((stat, _)) => panic!("ACCESS seq_a: {stat:?}"),
+        _ => unreachable!(),
     }
 
     // 6. LOOKUP seq_b.txt
     let fh_b = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh.clone(), name: filename3(Opaque::borrowed(b"seq_b.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP seq_b: {stat:?}"),
+        _ => unreachable!(),
     };
 
     // 7. GETATTR on seq_b.txt
     match nfs.getattr(&GETATTR3args { object: fh_b }).await.expect("GETATTR must succeed") {
         Nfs3Result::Ok(ok) => assert_eq!(ok.obj_attributes.type_, ftype3::NF3REG),
         Nfs3Result::Err((stat, _)) => panic!("GETATTR seq_b: {stat:?}"),
+        _ => unreachable!(),
     }
 
     // 8. FSSTAT on root
     match nfs.fsstat(&FSSTAT3args { fsroot: root_fh.clone() }).await.expect("FSSTAT must succeed") {
         Nfs3Result::Ok(_) => {},
         Nfs3Result::Err((stat, _)) => panic!("FSSTAT: {stat:?}"),
+        _ => unreachable!(),
     }
 
     // 9. FSINFO on root
     match nfs.fsinfo(&FSINFO3args { fsroot: root_fh }).await.expect("FSINFO must succeed") {
         Nfs3Result::Ok(_) => {},
         Nfs3Result::Err((stat, _)) => panic!("FSINFO: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -797,6 +836,7 @@ async fn getattr_reflects_size_after_write() {
     let fh = match nfs.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"grow.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     let payload = b"new payload of 24 bytes!";
@@ -804,6 +844,7 @@ async fn getattr_reflects_size_after_write() {
     match nfs.write(&write_args).await.expect("WRITE must succeed") {
         Nfs3Result::Ok(_) => {},
         Nfs3Result::Err((stat, _)) => panic!("WRITE: {stat:?}"),
+        _ => unreachable!(),
     }
 
     match nfs.getattr(&GETATTR3args { object: fh }).await.expect("GETATTR must succeed") {
@@ -811,6 +852,7 @@ async fn getattr_reflects_size_after_write() {
             assert_eq!(ok.obj_attributes.size, payload.len() as u64, "GETATTR size must reflect written content length");
         },
         Nfs3Result::Err((stat, _)) => panic!("GETATTR after WRITE: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -833,6 +875,7 @@ async fn lookup_nonexistent_entry_returns_noent() {
         Nfs3Result::Err((stat, _)) => {
             assert_eq!(stat, nfsstat3::NFS3ERR_NOENT, "missing file must return NOENT, got {stat:?}");
         },
+        _ => unreachable!(),
     }
 }
 
@@ -854,6 +897,7 @@ async fn getattr_invalid_handle_returns_error() {
         Nfs3Result::Err((stat, _)) => {
             assert!(matches!(stat, nfsstat3::NFS3ERR_BADHANDLE | nfsstat3::NFS3ERR_STALE), "invalid handle must return BADHANDLE or STALE, got {stat:?}");
         },
+        _ => unreachable!(),
     }
 }
 
@@ -878,6 +922,7 @@ async fn file_handle_works_across_separate_connections() {
     let fh = match nfs1.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"bearer.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     // Connection 2: READ using the handle obtained from connection 1.
@@ -887,5 +932,6 @@ async fn file_handle_works_across_separate_connections() {
             assert_eq!(ok.data.as_ref(), b"token test", "handle must work on a different connection (bearer token)");
         },
         Nfs3Result::Err((stat, _)) => panic!("READ on second connection: {stat:?}"),
+        _ => unreachable!(),
     }
 }

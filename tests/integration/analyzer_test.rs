@@ -35,17 +35,17 @@
     clippy::cast_sign_loss,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use nfswolf_rpc::transport::DirectTransport;
+use onc_rpc_client::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use nfs_v3::MountClient;
+use nfs_v3::wire::mount::dirpath;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfswolf_nfs3::MountClient;
-use nfswolf_nfs3::wire::mount::dirpath;
-use nfswolf_rpc::transport::tokio::TokioIo;
-use nfswolf_rpcbind::PortmapperClient;
-use nfswolf_xdr::Opaque;
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_rpcbind::PortmapperClient;
+use onc_xdr::Opaque;
 use tokio::net::TcpStream;
 
 // --- Helpers ---
@@ -190,8 +190,8 @@ async fn memfs_auth_flavors_are_valid() {
 async fn memfs_file_handle_usable_across_connections() {
     // Obtain a file handle on one connection, then use GETATTR with it on a
     // second independent connection. Handles are bearer tokens (RFC 1094 sec. 2.3.3).
-    use nfswolf_nfs3::Nfs3Client;
-    use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3, nfs_fh3};
+    use nfs_v3::Nfs3Client;
+    use nfs_v3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3, nfs_fh3};
 
     let mut config = MemFsConfig::default();
     config.add_file("/bearer.txt", b"test data");
@@ -211,6 +211,7 @@ async fn memfs_file_handle_usable_across_connections() {
     let fh = match nfs1.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"bearer.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     // Connection 2: GETATTR with the handle from connection 1.
@@ -219,9 +220,10 @@ async fn memfs_file_handle_usable_across_connections() {
 
     match nfs2.getattr(&GETATTR3args { object: fh }).await.expect("GETATTR must succeed") {
         Nfs3Result::Ok(ok) => {
-            assert_eq!(ok.obj_attributes.type_, nfswolf_nfs3::wire::ftype3::NF3REG, "handle from conn 1 must work on conn 2");
+            assert_eq!(ok.obj_attributes.type_, nfs_v3::wire::ftype3::NF3REG, "handle from conn 1 must work on conn 2");
         },
         Nfs3Result::Err((stat, _)) => panic!("GETATTR on second connection: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -238,6 +240,6 @@ async fn memfs_portmapper_responds_to_nfs_getport() {
 
     let mut pm = portmap_client(port).await;
     // PMAPPROC_GETPORT for NFS v3 -- MemFs serves NFS on the same port it was bound to.
-    let nfs_port = pm.getport(100_003, 3, nfswolf_rpcbind::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
+    let nfs_port = pm.getport(100_003, 3, onc_rpcbind::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
     assert_eq!(nfs_port, port, "portmapper must report NFS v3 port matching server bind port");
 }

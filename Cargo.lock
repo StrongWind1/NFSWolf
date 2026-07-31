@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "aho-corasick"
-version = "1.1.5"
+version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
 dependencies = [
  "memchr",
 ]
@@ -197,9 +197,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.6"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca"
+checksum = "301b56658598e48f3648647ac6fc887be7e7108eddfa4e9b63fcf3ec58c0cadf"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -207,9 +207,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.6"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b48fea5a88e9ae728a2dcbedbfc0e730f7d60da42e1cb049a83c9fb8b789889"
+checksum = "94a65403d1a1bd28f7dc68eb8506e8874808ee5eecb59298de588e2e1407a078"
 dependencies = [
  "anstream",
  "anstyle",
@@ -220,9 +220,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.9"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3be2ad0423bdbbb0e25bc89add796f3559706d4a95e1bc98e4d9662a957b6a19"
+checksum = "b1f84a88507dbd05c695f2cb5e8558e747179134005e9893882dec964190ed89"
 dependencies = [
  "clap",
 ]
@@ -532,9 +532,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.12.1"
+version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
+checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -634,6 +634,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfs-mount"
+version = "0.1.0"
+dependencies = [
+ "onc-rpc-client",
+ "onc-xdr",
+]
+
+[[package]]
+name = "nfs-v2"
+version = "0.1.0"
+dependencies = [
+ "nfs-mount",
+ "onc-rpc-client",
+ "onc-xdr",
+ "tracing",
+]
+
+[[package]]
+name = "nfs-v3"
+version = "0.1.0"
+dependencies = [
+ "nfs-mount",
+ "onc-rpc-client",
+ "onc-xdr",
+ "tracing",
+]
+
+[[package]]
+name = "nfs-v4"
+version = "0.1.0"
+dependencies = [
+ "onc-rpc-client",
+ "onc-xdr",
+ "tracing",
+]
+
+[[package]]
 name = "nfs3_macros"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -679,14 +716,14 @@ dependencies = [
  "indicatif",
  "ipnet",
  "libc",
+ "nfs-mount",
+ "nfs-v2",
+ "nfs-v3",
+ "nfs-v4",
  "nfs3_server",
- "nfswolf-mount",
- "nfswolf-nfs2",
- "nfswolf-nfs3",
- "nfswolf-nfs4",
- "nfswolf-rpc",
- "nfswolf-rpcbind",
- "nfswolf-xdr",
+ "onc-rpc-client",
+ "onc-rpcbind",
+ "onc-xdr",
  "predicates",
  "proptest",
  "rand 0.10.2",
@@ -698,78 +735,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "nfswolf-mount"
-version = "0.8.0"
-dependencies = [
- "nfswolf-rpc",
- "nfswolf-xdr",
-]
-
-[[package]]
-name = "nfswolf-nfs2"
-version = "0.8.0"
-dependencies = [
- "nfswolf-mount",
- "nfswolf-rpc",
- "nfswolf-xdr",
- "tracing",
-]
-
-[[package]]
-name = "nfswolf-nfs3"
-version = "0.8.0"
-dependencies = [
- "nfswolf-mount",
- "nfswolf-rpc",
- "nfswolf-xdr",
- "tracing",
-]
-
-[[package]]
-name = "nfswolf-nfs4"
-version = "0.8.0"
-dependencies = [
- "nfswolf-rpc",
- "nfswolf-xdr",
- "tracing",
-]
-
-[[package]]
-name = "nfswolf-rpc"
-version = "0.8.0"
-dependencies = [
- "fastrand",
- "nfswolf-xdr",
- "tokio",
-]
-
-[[package]]
-name = "nfswolf-rpcbind"
-version = "0.8.0"
-dependencies = [
- "nfswolf-rpc",
- "nfswolf-xdr",
-]
-
-[[package]]
-name = "nfswolf-xdr"
-version = "0.8.0"
-dependencies = [
- "nfswolf-xdr-derive",
-]
-
-[[package]]
-name = "nfswolf-xdr-derive"
-version = "0.8.0"
-dependencies = [
- "nfswolf-xdr",
- "proc-macro2",
- "quote",
- "syn 3.0.3",
- "trybuild",
 ]
 
 [[package]]
@@ -848,6 +813,41 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "onc-rpc-client"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "onc-xdr",
+ "tokio",
+]
+
+[[package]]
+name = "onc-rpcbind"
+version = "0.1.0"
+dependencies = [
+ "onc-rpc-client",
+ "onc-xdr",
+]
+
+[[package]]
+name = "onc-xdr"
+version = "0.1.0"
+dependencies = [
+ "onc-xdr-derive",
+]
+
+[[package]]
+name = "onc-xdr-derive"
+version = "0.1.0"
+dependencies = [
+ "onc-xdr",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+ "trybuild",
 ]
 
 [[package]]
@@ -1137,9 +1137,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.18"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -1772,18 +1772,18 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "zerocopy"
-version = "0.8.56"
+version = "0.8.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
+checksum = "b5a105cd7b140f6eeec8acff2ea38135d3cab283ada58540f629fe51e46696eb"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.56"
+version = "0.8.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
+checksum = "0fe976fb70c78cd64cccfe3a6fc142244e8a77b70959b30faf9d0ac37ee228eb"
 dependencies = [
  "proc-macro2",
  "quote",

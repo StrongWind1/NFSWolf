@@ -1,0 +1,25 @@
+[package]
+name = "nfs-v2"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NFS version 2 (RFC 1094): all 18 procedures and the fixed-width wire format."
+readme = "README.md"
+keywords = ["nfs", "nfsv2", "rpc", "filesystem", "network"]
+categories = ["network-programming", "parser-implementations"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+onc-xdr = { workspace = true }
+onc-rpc-client = { workspace = true }
+nfs-mount = { workspace = true }
+tracing = "0.1"
+
+[lints]
+workspace = true

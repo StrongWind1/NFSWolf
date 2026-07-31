@@ -366,7 +366,7 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
 /// inode/gen. Handles are fixed 32 bytes, zero-padded.
 async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str, globals: &GlobalOpts) -> bool {
     use crate::cli::probe::make_v2_client_with_hostname;
-    use nfswolf_nfs2::wire::Nfs2FileHandle;
+    use nfs_v2::wire::Nfs2FileHandle;
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
@@ -394,7 +394,7 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
             match client.getattr(&fh).await {
                 Ok(a) => {
                     let hex = cand.root_handle.to_hex();
-                    let is_dir = a.ftype == nfswolf_nfs2::wire::FType::Directory;
+                    let is_dir = a.ftype == nfs_v2::wire::FType::Directory;
                     if is_dir && !found_root {
                         report_hit_v2(&cand, &format!("inode {inode} gen {generation}"), host);
                         found_root = true;
@@ -403,7 +403,7 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
                     }
                 },
                 Err(e) => {
-                    if matches!(e.status(), Some(nfswolf_nfs2::Nfs2Stat::Stale)) {
+                    if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) {
                         stale += 1;
                     }
                 },

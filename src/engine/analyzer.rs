@@ -157,8 +157,8 @@ pub(crate) struct SquashProbeResult {
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use nfswolf_nfs3::wire::{LOOKUP3args, Nfs3Option, Nfs3Result, READ3args, cookieverf3, diropargs3, filename3, nfsstat3, sattr3};
-use nfswolf_xdr::Opaque;
+use nfs_v3::wire::{LOOKUP3args, Nfs3Option, Nfs3Result, READ3args, cookieverf3, diropargs3, filename3, nfsstat3, sattr3};
+use onc_xdr::Opaque;
 
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus};
 use crate::proto::auth::{AuthSys, Credential};
@@ -865,9 +865,9 @@ async fn run_amplification_check(portmap: &PortmapClient, addr: SocketAddr, find
 /// negotiation. Typical on Solaris, some NetApp configurations, and embedded
 /// RTOS NFS servers (VxWorks).
 async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
-    use nfswolf_rpc::rpc::opaque_auth;
-    use nfswolf_rpc::transport::direct::DirectTransport;
-    use nfswolf_rpc::transport::tokio::TokioIo;
+    use onc_rpc_client::rpc::opaque_auth;
+    use onc_rpc_client::transport::direct::DirectTransport;
+    use onc_rpc_client::transport::tokio::TokioIo;
 
     stealth.wait().await;
 
@@ -879,7 +879,7 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
     {
         let transport = DirectTransport::new(TokioIo::new(stream));
         let empty_fh = FileHandle::from_bytes(&[]);
-        let client = nfswolf_nfs3::Nfs3Client::new(transport);
+        let client = nfs_v3::Nfs3Client::new(transport);
         if let Ok(attrs) = client.attrs(&empty_fh).await {
             // Public handle accepted -- try multi-component LOOKUP to prove
             // the full bypass (XNFS Appendix E: "A LOOKUP request that uses
@@ -916,8 +916,8 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
         let cred = AuthSys::new(0, 0, "localhost");
         let opaque = cred.to_opaque_auth(crate::proto::auth::next_stamp());
         let transport2 = DirectTransport::with_auth(TokioIo::new(stream2), opaque, opaque_auth::default());
-        let client = nfswolf_nfs2::Nfs2Client::new(transport2);
-        let zero_fh = nfswolf_nfs2::wire::Nfs2FileHandle([0u8; 32]);
+        let client = nfs_v2::Nfs2Client::new(transport2);
+        let zero_fh = nfs_v2::wire::Nfs2FileHandle([0u8; 32]);
         if let Ok(attrs) = client.getattr(&zero_fh).await {
             let mut evidence = format!("NFSv2 public handle (all-zero) returned attrs: uid={}, gid={}, mode={:#o}, size={}", attrs.uid, attrs.gid, attrs.mode, attrs.size);
             // Multi-component LOOKUP: try to reach /etc/shadow in one call.
@@ -1026,7 +1026,7 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
                 }
                 return (result, leaks);
             },
-            Err(_) => return (result, leaks),
+            Ok(_) | Err(_) => return (result, leaks),
         }
     }
 
@@ -1044,7 +1044,7 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
                 leaks.push(LeakedMetadata { operation: "READ", path: path.to_owned(), uid: attrs.uid, gid: attrs.gid, size: attrs.size, mode: attrs.mode });
             }
         },
-        Err(_) => {},
+        Ok(_) | Err(_) => {},
     }
 
     (result, leaks)
@@ -1179,7 +1179,7 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
             // and AUTH_SYS lets the attacker assume any UID anyway. The F-4.4 precondition
             // is simply "writable directory" (docs/FINDINGS.md F-4.4); owner UID is
             // evidence, not a gate.
-            let is_dir = attrs.file_type == nfswolf_nfs3::FileType::Directory;
+            let is_dir = attrs.file_type == nfs_v3::FileType::Directory;
             let world_writable = (attrs.mode & 0o002) != 0;
             if is_dir && world_writable {
                 let name = entry.name.clone();
@@ -1463,7 +1463,7 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
 ///   - GARBAGE_ARGS   -> Linux knfsd (XDR-level rejection)
 ///   - other NFS status / RPC error -> unknown / atypical implementation
 async fn check_null_filename_fingerprint(nfs3: &Nfs3Client, root_fh: &FileHandle) -> String {
-    use nfswolf_rpc::RpcError;
+    use onc_rpc_client::RpcError;
 
     // Construct LOOKUP with a zero-length filename against the export root.
     let args = LOOKUP3args { what: diropargs3 { dir: root_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(b"")) } };
@@ -1482,6 +1482,7 @@ async fn check_null_filename_fingerprint(nfs3: &Nfs3Client, root_fh: &FileHandle
             // Server accepted a zero-length filename LOOKUP -- very unusual.
             "Unknown (null-filename LOOKUP succeeded)".to_owned()
         },
+        Ok(_) => "Indeterminate (unexpected result shape)".to_owned(),
         Err(RpcError::GarbageArgs) => {
             // Linux knfsd: the XDR decoder rejects the zero-length filename
             // before the NFS LOOKUP procedure runs.

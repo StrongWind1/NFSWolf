@@ -504,7 +504,7 @@ fn print_host_details(results: &[HostResult]) {
 /// Print discovered RPC services with human-readable program names.
 ///
 /// Groups entries by (program, port) and shows each with versions and transport.
-/// Uses `nfswolf_rpcbind::program_name` to resolve the program number;
+/// Uses `onc_rpcbind::program_name` to resolve the program number;
 /// unknown programs are shown as their bare number.
 fn print_rpc_services(r: &HostResult) {
     if r.rpc_services.is_empty() {
@@ -520,17 +520,17 @@ fn print_rpc_services(r: &HostResult) {
         if !slot.0.contains(&entry.version) {
             slot.0.push(entry.version);
         }
-        if entry.protocol == nfswolf_rpcbind::IPPROTO_TCP {
+        if entry.protocol == onc_rpcbind::IPPROTO_TCP {
             slot.1 = true;
         }
-        if entry.protocol == nfswolf_rpcbind::IPPROTO_UDP {
+        if entry.protocol == onc_rpcbind::IPPROTO_UDP {
             slot.2 = true;
         }
     }
 
     println!("  RPC services:");
     for ((prog, port), (versions, tcp, udp)) in &groups {
-        let name = nfswolf_rpcbind::program_name(*prog).unwrap_or("unknown");
+        let name = onc_rpcbind::program_name(*prog).unwrap_or("unknown");
         let proto = port_proto_str(*tcp, *udp);
         let mut vers = versions.clone();
         vers.sort_unstable();
@@ -659,9 +659,9 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
         })).collect::<Vec<_>>(),
         "rpc_services": r.rpc_services.iter().map(|e| serde_json::json!({
             "program": e.program,
-            "program_name": nfswolf_rpcbind::program_name(e.program),
+            "program_name": onc_rpcbind::program_name(e.program),
             "version": e.version,
-            "protocol": if e.protocol == nfswolf_rpcbind::IPPROTO_TCP { "tcp" } else if e.protocol == nfswolf_rpcbind::IPPROTO_UDP { "udp" } else { "other" },
+            "protocol": if e.protocol == onc_rpcbind::IPPROTO_TCP { "tcp" } else if e.protocol == onc_rpcbind::IPPROTO_UDP { "udp" } else { "other" },
             "port": e.port,
         })).collect::<Vec<_>>(),
         "exports": {
