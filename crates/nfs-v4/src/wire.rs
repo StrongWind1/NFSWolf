@@ -164,6 +164,17 @@ impl AttrRequest {
         // FATTR4_FSID = 8 -> word 0, bit 8
         Self { words: vec![1 << 8, 0] }
     }
+
+    /// Request the SEC_LABEL attribute (attribute 80, RFC 7862 S12.2.4).
+    ///
+    /// Produces a bitmap with only bit 80 set (word 2, bit 16). The response
+    /// contains a `SecLabel4` value when the server supports labeled NFS.
+    #[cfg(feature = "v42")]
+    #[must_use]
+    pub fn sec_label() -> Self {
+        // Attribute 80 sits in word 2 (80 / 32 = 2), bit 16 (80 % 32 = 16).
+        Self { words: vec![0, 0, 1 << 16] }
+    }
 }
 
 impl Pack for AttrRequest {
@@ -999,6 +1010,48 @@ pub struct DirEntry4 {
     pub name: String,
 }
 
+// --- NFSv4.1 types (RFC 8881) ---
+
+/// Server implementation identity (RFC 8881 S18.35).
+///
+/// Returned inside the EXCHANGE_ID response. The domain and name fields
+/// reveal the NFS server vendor and product version -- high-value recon
+/// data for fingerprinting the server stack.
+#[cfg(feature = "v41")]
+#[derive(Debug, Clone)]
+pub struct NfsImplId4 {
+    /// DNS domain of the implementor (e.g., "kernel.org").
+    pub domain: String,
+    /// Implementation name / version string (e.g., "Linux NFS 6.1").
+    pub name: String,
+    /// Build date as `(seconds_since_epoch, nanoseconds)`.
+    pub date: (u64, u32),
+}
+
+// --- NFSv4.2 types (RFC 7862) ---
+
+/// FATTR4_SEC_LABEL attribute number (attribute 80, RFC 7862 S12.2.4).
+///
+/// Bit 80 in the attribute bitmap = word 2, bit 16.
+#[cfg(feature = "v42")]
+pub const FATTR4_SEC_LABEL: u32 = 80;
+
+/// MAC security label (RFC 7862 S12.2.4, attribute 80).
+///
+/// Carries the SELinux/Smack/AppArmor label assigned to a file.
+/// The `label` field contains the raw context string bytes
+/// (e.g., `b"system_u:object_r:nfs_t:s0"` for SELinux).
+#[cfg(feature = "v42")]
+#[derive(Debug, Clone)]
+pub struct SecLabel4 {
+    /// Label Format Specifier -- identifies the MAC model.
+    pub lfs: u32,
+    /// Policy Identifier -- further qualifies the LFS.
+    pub pi: u32,
+    /// Raw label bytes (opaque to the wire layer; interpretation is model-specific).
+    pub label: Vec<u8>,
+}
+
 /// Decoded payload from a successful NFSv4 operation result.
 ///
 /// Most operations produce no inline data beyond the status code.
@@ -1064,6 +1117,55 @@ pub enum ResOpData {
         /// 8-byte write verifier for detecting server reboots.
         writeverf: [u8; 8],
     },
+    // --- NFSv4.1 result variants (RFC 8881) ---
+    /// EXCHANGE_ID result: server identity and capabilities (op 42, RFC 8881 S18.35).
+    ///
+    /// Contains the server's client ID assignment, capability flags, and
+    /// implementation identity (vendor, version, build date).
+    #[cfg(feature = "v41")]
+    ExchangeId {
+        /// Server-assigned client ID.
+        clientid: u64,
+        /// Sequence ID for the client ID slot.
+        sequenceid: u32,
+        /// Server capability flags (EXCHGID4_FLAG_* bits, RFC 8881 S18.35.3).
+        flags: u32,
+        /// Server owner major ID (identifies the server instance).
+        server_owner: Vec<u8>,
+        /// Server scope (identifies the server's administrative domain).
+        server_scope: Vec<u8>,
+        /// Server implementation identity (0 or 1 element; vendor, product, build date).
+        impl_id: Vec<NfsImplId4>,
+    },
+    /// GETDEVICEINFO result: pNFS device address (op 47, RFC 8881 S18.40).
+    ///
+    /// The `device_addr` bytes carry the layout-type-specific address structure
+    /// (e.g., `nfsv4_1_file_layout_ds_addr4` for `LAYOUT4_NFSV4_1_FILES`).
+    #[cfg(feature = "v41")]
+    GetDeviceInfo {
+        /// Layout type this address applies to.
+        layout_type: u32,
+        /// Opaque device address body (layout-type-specific encoding).
+        device_addr: Vec<u8>,
+        /// Notification bitmap word 0 (which change notifications the server supports).
+        notification: u32,
+    },
+    /// GETDEVICELIST result: enumerated pNFS device IDs (op 48, RFC 8881 S18.41).
+    ///
+    /// Lists device IDs that can be passed to GETDEVICEINFO. Paginated via
+    /// cookie/cookieverf like READDIR.
+    #[cfg(feature = "v41")]
+    GetDeviceList {
+        /// Resume cookie for the next page.
+        cookie: u64,
+        /// Cookie verifier -- echo back for pagination integrity.
+        cookieverf: [u8; 8],
+        /// Device IDs (each 16 bytes, fixed size per RFC 8881).
+        deviceid_list: Vec<[u8; 16]>,
+        /// True if this is the last page of device IDs.
+        eof: bool,
+    },
+
     /// No result data  --  PUTPUBFH, PUTROOTFH, PUTFH, LOOKUP, LOOKUPP, REMOVE,
     /// RENAME, CLOSE, DELEGPURGE, DELEGRETURN, LINK, OPENATTR, OPEN_CONFIRM,
     /// OPEN_DOWNGRADE, RENEW, RESTOREFH, SAVEFH, SETCLIENTID_CONFIRM,
@@ -1347,6 +1449,118 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
                 }
             }
             Ok((ResOpData::SecFlavors(flavors), n))
+        },
+
+        // EXCHANGE_ID result (RFC 8881 S18.35.3).
+        //
+        // Decodes the server's identity, capability flags, and impl_id.
+        // Only SP4_NONE state protection is decodable -- SP4_MACH_CRED and
+        // SP4_SSV have complex nested structures that stop parsing.
+        #[cfg(feature = "v41")]
+        OP_EXCHANGE_ID => {
+            let (clientid, mut n) = u64::unpack(input)?;
+            let (sequenceid, sn) = u32::unpack(input)?;
+            n += sn;
+            let (flags, fn_) = u32::unpack(input)?;
+            n += fn_;
+            // state_protect4_r: union on state_protect_how4.
+            // SP4_NONE (0) carries no additional data; anything else is
+            // too complex to skip without the full ops-pair / SSV types.
+            let (protect_how, pn) = u32::unpack(input)?;
+            n += pn;
+            if protect_how != 0 {
+                return Err(onc_xdr::Error::InvalidEnumValue(protect_how));
+            }
+            // server_owner4: so_minor_id(u64) + so_major_id(opaque<>).
+            // Minor ID is typically 0 on Linux knfsd; only the major ID
+            // (server identity string) matters for recon.
+            let (_, mn) = u64::unpack(input)?;
+            n += mn;
+            let (major_len, mln) = u32::unpack(input)?;
+            n += mln;
+            let major_len_usize = major_len as usize;
+            let server_owner = onc_xdr::read_bytes(input, major_len_usize)?;
+            n += major_len_usize;
+            let pad = (4 - (major_len_usize % 4)) % 4;
+            onc_xdr::skip_pad(input, pad)?;
+            n += pad;
+            // server_scope: opaque<>.
+            let (scope_len, scn) = u32::unpack(input)?;
+            n += scn;
+            let scope_len_usize = scope_len as usize;
+            let server_scope = onc_xdr::read_bytes(input, scope_len_usize)?;
+            n += scope_len_usize;
+            let scope_pad = (4 - (scope_len_usize % 4)) % 4;
+            onc_xdr::skip_pad(input, scope_pad)?;
+            n += scope_pad;
+            // server_impl_id: array<nfs_impl_id4> (0 or 1 element per RFC).
+            let (impl_count, icn) = u32::unpack(input)?;
+            n += icn;
+            let mut impl_id = onc_xdr::vec_with_capacity(impl_count as usize);
+            for _ in 0..impl_count {
+                let (domain, dn) = onc_xdr::unpack_string(input)?;
+                n += dn;
+                let (name, nn) = onc_xdr::unpack_string(input)?;
+                n += nn;
+                // nfstime4: seconds(int64/hyper) + nseconds(uint32).
+                // Read as u64 -- the sign bit is irrelevant for recon timestamps.
+                let (seconds, tsn) = u64::unpack(input)?;
+                n += tsn;
+                let (nseconds, nsn) = u32::unpack(input)?;
+                n += nsn;
+                impl_id.push(NfsImplId4 { domain, name, date: (seconds, nseconds) });
+            }
+            Ok((ResOpData::ExchangeId { clientid, sequenceid, flags, server_owner, server_scope, impl_id }, n))
+        },
+
+        // GETDEVICEINFO result (RFC 8881 S18.40.3).
+        #[cfg(feature = "v41")]
+        OP_GETDEVICEINFO => {
+            // device_addr4: da_layout_type(u32) + da_addr_body(opaque<>).
+            let (layout_type, mut n) = u32::unpack(input)?;
+            let (addr_len, aln) = u32::unpack(input)?;
+            n += aln;
+            let addr_len_usize = addr_len as usize;
+            let device_addr = onc_xdr::read_bytes(input, addr_len_usize)?;
+            n += addr_len_usize;
+            let pad = (4 - (addr_len_usize % 4)) % 4;
+            onc_xdr::skip_pad(input, pad)?;
+            n += pad;
+            // notification: bitmap4 (array of u32 words).
+            let (notify_count, ncn) = u32::unpack(input)?;
+            n += ncn;
+            let mut notification = 0u32;
+            for i in 0..notify_count {
+                let (w, wn) = u32::unpack(input)?;
+                n += wn;
+                // Only word 0 is stored; higher words are read and discarded.
+                if i == 0 {
+                    notification = w;
+                }
+            }
+            Ok((ResOpData::GetDeviceInfo { layout_type, device_addr, notification }, n))
+        },
+
+        // GETDEVICELIST result (RFC 8881 S18.41.3).
+        #[cfg(feature = "v41")]
+        OP_GETDEVICELIST => {
+            let (cookie, mut n) = u64::unpack(input)?;
+            let mut cookieverf = [0u8; 8];
+            input.read_exact(&mut cookieverf).map_err(onc_xdr::Error::Io)?;
+            n += 8;
+            // deviceid_list: array of deviceid4 (each 16 bytes, fixed).
+            let (dev_count, dcn) = u32::unpack(input)?;
+            n += dcn;
+            let mut deviceid_list = onc_xdr::vec_with_capacity(dev_count as usize);
+            for _ in 0..dev_count {
+                let mut devid = [0u8; 16];
+                input.read_exact(&mut devid).map_err(onc_xdr::Error::Io)?;
+                n += 16;
+                deviceid_list.push(devid);
+            }
+            let (eof_raw, en) = u32::unpack(input)?;
+            n += en;
+            Ok((ResOpData::GetDeviceList { cookie, cookieverf, deviceid_list, eof: eof_raw != 0 }, n))
         },
 
         // Ops with complex/variable result unions that cannot be skipped

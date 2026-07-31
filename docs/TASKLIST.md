@@ -147,12 +147,14 @@ Operations across v4.0, v4.1, and v4.2 that return actionable recon information.
 
 Not built, not published, not on the critical path. Each arrives as a module inside `nfswolf` first and is promoted to a crate only if something outside the tool wants it. Full security analysis, wire types, attack chains, and implementation notes are in [FUTURE-RESEARCH.md](FUTURE-RESEARCH.md).
 
+**Blocked on research.** Each protocol below requires reading the spec (C702, Sun `.x` files, or reverse-engineering), understanding wire format edge cases, verifying behavior against real servers, and mapping the attack surface before writing wire types. [FUTURE-RESEARCH.md](FUTURE-RESEARCH.md) has preliminary analysis; implementation needs deeper protocol-level research per protocol.
+
 - [x] **Obtain X/Open CAE Specification C702.** Available at `ref/xopen-c702.pdf` (352 pages). HTML at `ref/pubs.opengroup.org/onlinepubs/009629799/`.
-- [ ] **`nfs-nlm` (program 100021).** Lock manipulation → write access, holder enumeration, `NLM_FREE_ALL` bulk lock release. C702 ch. 10/14.
-- [ ] **`nfs-nsm` (program 100024).** Callback coercion (`SM_MON`), lock release via spoofed reboot (`SM_NOTIFY`). C702 ch. 11.
-- [ ] **`nfs-rquota` (program 100011).** UID enumeration via quota oracle. Sun `rquota.x`.
-- [ ] **`nfs-acl` (program 100227).** Permission bypass beyond mode bits. No public spec.
-- [ ] **`nfs-nis` (program 100004/100007).** Credential store dump (`YPPROC_ALL`). Sun `yp.x`.
-- [ ] **`onc-rpcsec-gss` (RFC 2203, 5403, 7861).** Auth negotiation recon. Separate crate to avoid pulling Kerberos into `onc-rpc-client`.
-- [ ] **WebNFS public handle probe.** Filesystem access bypassing MOUNT. Uses existing NFS clients — no new crate needed. See FUTURE-RESEARCH.md.
-- [ ] **PCNFSD detection (program 150001).** Password oracle (`PCNFSD_AUTH`) and code execution (`PR_START`). Detection via portmapper DUMP. D030 spec.
+- [ ] **`nfs-nlm` (program 100021).** Lock manipulation → write access, holder enumeration, `NLM_FREE_ALL` bulk lock release. C702 ch. 10/14. *Needs: read C702 ch. 10/14, map all 24 v3 procedures, verify wire types against a live NLM server.*
+- [ ] **`nfs-nsm` (program 100024).** Callback coercion (`SM_MON`), lock release via spoofed reboot (`SM_NOTIFY`). C702 ch. 11. *Needs: read C702 ch. 11, verify SM_MON callback behavior, map NSM state model.*
+- [ ] **`nfs-rquota` (program 100011).** UID enumeration via quota oracle. Sun `rquota.x`. *Needs: locate definitive rquota.x, verify GETQUOTA wire format, test against rquotad.*
+- [ ] **`nfs-acl` (program 100227).** Permission bypass beyond mode bits. No public spec. *Needs: reverse-engineer wire format from Solaris/Linux implementations, document every constant as observed deviation.*
+- [ ] **`nfs-nis` (program 100004/100007).** Credential store dump (`YPPROC_ALL`). Sun `yp.x`. *Needs: read yp.x, verify YPPROC_ALL map dump format, test against ypserv.*
+- [ ] **`onc-rpcsec-gss` (RFC 2203, 5403, 7861).** Auth negotiation recon. Separate crate to avoid pulling Kerberos into `onc-rpc-client`. *Needs: read RFCs 2203/5403/7861, map OID table, verify SECINFO response parsing against Kerberos-enabled exports.*
+- [x] **WebNFS public handle probe.** Implemented in Phase 0 (try_webnfs_escape for v2/v3) and Phase 5 (PUTPUBFH + LOOKUP for v4).
+- [ ] **PCNFSD detection (program 150001).** Password oracle (`PCNFSD_AUTH`) and code execution (`PR_START`). Detection via portmapper DUMP. D030 spec. *Needs: read D030 spec, verify PCNFSD_AUTH XOR encoding, test against a pcnfsd instance (rare in modern environments).*

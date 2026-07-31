@@ -25,4 +25,8 @@ pub mod client;
 pub mod wire;
 
 pub use client::{Nfs4Client, Nfs4Error};
+#[cfg(feature = "v41")]
+pub use wire::NfsImplId4;
 pub use wire::{ArgOp, AttrRequest, CompoundArgs, CompoundBuilder, CompoundRes, DirEntry4, NFS4_PROC_COMPOUND, NFS4_PROGRAM as PROGRAM, NFS4_VERSION as VERSION, Nfs4Status, ResOp, ResOpData};
+#[cfg(feature = "v42")]
+pub use wire::{FATTR4_SEC_LABEL, SecLabel4};
