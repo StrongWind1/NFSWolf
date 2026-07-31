@@ -79,7 +79,7 @@ impl std::fmt::Display for PMAP_PROG {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{IPPROTO_TCP, IPPROTO_UDP, PMAP_PORT, PMAP_PROG, PROGRAM, VERSION, mapping};
     use nfswolf_xdr::{Pack, Unpack};
     use std::io::Cursor;
 

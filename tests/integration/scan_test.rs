@@ -47,8 +47,8 @@ use nfswolf_nfs3::MountClient;
 use nfswolf_nfs3::Nfs3Client;
 use nfswolf_nfs3::wire::mount::dirpath;
 use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3};
-use nfswolf_rpc::PortmapperClient;
 use nfswolf_rpc::transport::tokio::TokioIo;
+use nfswolf_rpcbind::PortmapperClient;
 use nfswolf_xdr::Opaque;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
@@ -164,7 +164,7 @@ async fn memfs_portmapper_responds_to_getport() {
 
     // PMAPPROC_GETPORT: query where NFS v3 is listening.
     // MemFs serves NFS on the same port it was bound to.
-    let nfs_port = pm.getport(100_003, 3, nfswolf_rpc::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
+    let nfs_port = pm.getport(100_003, 3, nfswolf_rpcbind::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
     assert_eq!(nfs_port, port, "portmapper must report NFS port matching server bind port");
 }
 

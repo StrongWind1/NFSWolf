@@ -1,10 +1,9 @@
-use crate::portmap::{PMAP_PROG, PROGRAM, VERSION, mapping, pmaplist};
-use nfswolf_xdr::{Pack, Unpack, Void};
-
 use crate::error::PortmapError;
-use crate::error::RpcError;
-use crate::rpc::RpcClient;
-use crate::transport::io::{AsyncRead, AsyncWrite};
+use crate::types::{PMAP_PROG, PROGRAM, VERSION, mapping, pmaplist};
+use nfswolf_rpc::RpcClient;
+use nfswolf_rpc::RpcError;
+use nfswolf_rpc::transport::io::{AsyncRead, AsyncWrite};
+use nfswolf_xdr::{Pack, Unpack, Void};
 
 /// Client for the portmapper service
 #[derive(Debug)]

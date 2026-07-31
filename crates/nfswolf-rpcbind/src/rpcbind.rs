@@ -7,12 +7,12 @@
 //!
 //! [RFC 1833]: https://www.rfc-editor.org/rfc/rfc1833
 
-use crate::error::RpcError;
-use crate::rpc::RpcClient;
-use crate::transport::io::{AsyncRead, AsyncWrite};
+use nfswolf_rpc::RpcClient;
+use nfswolf_rpc::RpcError;
+use nfswolf_rpc::transport::io::{AsyncRead, AsyncWrite};
 use nfswolf_xdr::{Pack, Unpack, Void};
 
-use super::PROGRAM;
+use crate::types::PROGRAM;
 
 /// RPCBPROC_GETADDR procedure number (rpcbind v3, RFC 1833 sec. 2.1).
 const RPCBPROC_GETADDR: u32 = 3;

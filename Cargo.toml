@@ -7,7 +7,8 @@
 #
 #   crates/nfswolf-xdr-derive -- #[derive(XdrCodec)] proc macro (RFC 4506)
 #   crates/nfswolf-xdr        -- XDR codec (RFC 4506)
-#   crates/nfswolf-rpc        -- ONC RPC v2, portmapper, AUTH_SYS (RFC 5531)
+#   crates/nfswolf-rpc        -- ONC RPC v2, AUTH_SYS (RFC 5531)
+#   crates/nfswolf-rpcbind    -- Portmapper v2 (RFC 1057) / rpcbind v3/v4 (RFC 1833)
 #   crates/nfswolf-nfs2       -- NFS v2 (RFC 1094)
 #   crates/nfswolf-nfs3       -- NFS v3 + MOUNT v3 (RFC 1813)
 #   crates/nfswolf-nfs4       -- NFS v4.0 COMPOUND (RFC 7530)
@@ -21,6 +22,7 @@ members = [
   "crates/nfswolf-xdr-derive",
   "crates/nfswolf-xdr",
   "crates/nfswolf-rpc",
+  "crates/nfswolf-rpcbind",
   "crates/nfswolf-mount",
   "crates/nfswolf-nfs2",
   "crates/nfswolf-nfs3",
@@ -39,6 +41,7 @@ repository = "https://github.com/StrongWind1/NFSWolf"
 nfswolf-xdr-derive = { version = "0.8.0", path = "crates/nfswolf-xdr-derive" }
 nfswolf-xdr = { version = "0.8.0", path = "crates/nfswolf-xdr" }
 nfswolf-rpc = { version = "0.8.0", path = "crates/nfswolf-rpc" }
+nfswolf-rpcbind = { version = "0.8.0", path = "crates/nfswolf-rpcbind" }
 nfswolf-mount = { version = "0.8.0", path = "crates/nfswolf-mount" }
 nfswolf-nfs2 = { version = "0.8.0", path = "crates/nfswolf-nfs2" }
 nfswolf-nfs3 = { version = "0.8.0", path = "crates/nfswolf-nfs3" }
@@ -87,6 +90,7 @@ serde_json = "1"
 # NFS protocol stack -- local crates, pure Rust, no C dependencies.
 nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
+nfswolf-rpcbind = { workspace = true }
 nfswolf-mount = { workspace = true }
 nfswolf-nfs2 = { workspace = true }
 nfswolf-nfs3 = { workspace = true }

@@ -1,7 +1,5 @@
-//! Error types for the RPC and portmapper layers.
+//! Error types for the RPC layer.
 
-mod portmap;
 mod rpc;
 
-pub use portmap::PortmapError;
 pub use rpc::RpcError;

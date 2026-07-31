@@ -685,6 +685,7 @@ dependencies = [
  "nfswolf-nfs3",
  "nfswolf-nfs4",
  "nfswolf-rpc",
+ "nfswolf-rpcbind",
  "nfswolf-xdr",
  "predicates",
  "proptest",
@@ -743,6 +744,14 @@ dependencies = [
  "fastrand",
  "nfswolf-xdr",
  "tokio",
+]
+
+[[package]]
+name = "nfswolf-rpcbind"
+version = "0.8.0"
+dependencies = [
+ "nfswolf-rpc",
+ "nfswolf-xdr",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-//! Portmapper client  --  wraps nfswolf_rpc::PortmapperClient for service enumeration.
+//! Portmapper client  --  wraps nfswolf_rpcbind::PortmapperClient for service enumeration.
 //!
 //! Exposes PMAPPROC_DUMP (all registered RPC services) and PMAPPROC_GETPORT
 //! (port resolution for NFS/mountd). Also measures UDP amplification factor
@@ -9,10 +9,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use nfswolf_rpc::PortmapperClient;
-use nfswolf_rpc::portmap::{self, IPPROTO_TCP};
 use nfswolf_rpc::transport::net::Connector as _;
 use nfswolf_rpc::transport::tokio::{TokioConnector, TokioIo};
+use nfswolf_rpcbind::{self as portmap, IPPROTO_TCP, PortmapperClient};
 
 /// RPC program numbers relevant to NFS infrastructure.
 /// NFSv2/v3/v4 server (program 100003, RFC 1057 S9).
