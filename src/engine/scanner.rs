@@ -483,6 +483,12 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         None
     };
 
+    // --- Stage 7b: RDMA presence detection ---
+    // Query rpcbind v3 GETADDR for NFS (100003) on "rdma" and "rdma6" netids
+    // (RFC 1833 sec. 2.1). Also probe TCP port 20049 (conventional NFS/RDMA port).
+    // RDMA bypasses the kernel TCP/IP stack and may evade host firewalls.
+    let rdma_detected = detect_rdma(ip, probe_timeout, portmap_reachable && portmap_reachability.has_tcp(), &job).await;
+
     // --- Stage 8: NFSv4 READDIR ---
     let has_v4 = nfs_ports_info.iter().any(|p| p.v4);
     let exports_v4 = if has_v4 {
@@ -500,7 +506,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // --- Stage 9: Assembly ---
     // No trailing stealth delay here: pacing is applied before each outbound
     // probe above, so the per-host burst is already spread across the scan.
-    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, rpc_services: dump_entries, exports_v2, exports_v3, exports_v4, mounts, hint, scan_duration: start.elapsed() })
+    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, rpc_services: dump_entries, exports_v2, exports_v3, exports_v4, mounts, hint, rdma_detected, scan_duration: start.elapsed() })
 }
 
 /// Non-blocking TCP probe: returns true if the port accepts connections within timeout.
@@ -602,4 +608,59 @@ async fn readdir_v4_pseudo_root(addr: SocketAddr, proxy: Option<&str>) -> anyhow
     let root_fh = client.get_root_fh().await?;
     let entries = client.list_dir(&root_fh).await?;
     Ok(entries.into_iter().map(|name| V4ExportEntry { path: name }).collect())
+}
+
+/// Detect RDMA transport availability for NFS.
+///
+/// Two independent signals:
+/// 1. rpcbind v3 GETADDR query for NFS (100003) with "rdma" or "rdma6" netid
+///    (RFC 1833 sec. 2.1) -- returns a non-empty universal address when NFS is
+///    registered on an RDMA transport.
+/// 2. TCP probe on port 20049, the conventional NFS/RDMA port.
+///
+/// RDMA bypasses the kernel's TCP/IP stack entirely, so NFS traffic over RDMA
+/// may not be subject to iptables/nftables host firewalls.
+async fn detect_rdma(ip: IpAddr, probe_timeout: Duration, rpcbind_reachable: bool, job: &ScanJob) -> bool {
+    // Signal 1: rpcbind GETADDR for RDMA netids.
+    if rpcbind_reachable {
+        let rpcbind_addr = SocketAddr::new(ip, 111);
+        for netid in ["rdma", "rdma6"] {
+            job.stealth.wait().await;
+            if let Ok(Ok(io)) = timeout(probe_timeout, connect_tcp_for_rpcbind(rpcbind_addr, job.proxy.as_deref())).await {
+                let mut rb = onc_rpcbind::RpcbindClient::new(io);
+                // Query NFS v3 on this netid; any non-empty address means RDMA is registered.
+                if let Ok(Ok(ref a)) = timeout(probe_timeout, rb.getaddr(100_003, 3, netid)).await
+                    && !a.is_empty()
+                {
+                    tracing::info!(netid, addr = %a, "RDMA transport detected via rpcbind GETADDR");
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Signal 2: TCP probe on the conventional NFS/RDMA port (20049).
+    let rdma_addr = SocketAddr::new(ip, 20049);
+    job.stealth.wait().await;
+    if is_port_open(rdma_addr, probe_timeout, job.proxy.as_deref()).await {
+        tracing::info!("NFS/RDMA port 20049 open");
+        return true;
+    }
+
+    false
+}
+
+/// Open a TCP connection to the rpcbind port, optionally through a proxy.
+///
+/// Shared helper for the RDMA detection path -- needs a fresh connection for
+/// each rpcbind query because `RpcbindClient` consumes the IO.
+async fn connect_tcp_for_rpcbind(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<TokioIo<TcpStream>> {
+    if let Some(p) = proxy {
+        let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+        let stream = crate::proto::conn::socks5_connect(proxy_addr, addr).await?;
+        Ok(TokioIo::new(stream))
+    } else {
+        let stream = TcpStream::connect(addr).await?;
+        Ok(TokioIo::new(stream))
+    }
 }

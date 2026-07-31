@@ -122,19 +122,9 @@ Renaming, metadata, testing, and semver preparation. Everything in this phase mu
 - [x] **Evaluate the existing `onc-rpc` crate as a dependency.** v0.3.3 covers types and serialization but NOT the transport seam, credential substitution, or PROG_MISMATCH range preservation. We keep our own.
 - [x] **Confirm `src/proto/rpc_probe.rs` is resolved.** Deleted in Phase 1. Scanner migrated to RpcClient.
 
-## Phase 4 — publish 8 crates
+## Phase 4 — ~~publish 8 crates~~ (removed)
 
-The irreversible step. `yank` hides a version, never releases a name.
-
-- [ ] **Publish `onc-xdr-derive`.** Proc-macro, no dependencies.
-- [ ] **Publish `onc-xdr`.** Depends on `onc-xdr-derive`.
-- [ ] **Publish `onc-rpc-client`.** Depends on `onc-xdr`.
-- [ ] **Publish `onc-rpcbind`.** Depends on `onc-rpc-client`.
-- [ ] **Publish `nfs-mount`.** Depends on `onc-rpc-client`.
-- [ ] **Publish `nfs-v2`.** Depends on `onc-xdr`, `onc-rpc-client`.
-- [ ] **Publish `nfs-v3`.** Depends on `onc-xdr`, `onc-rpc-client`.
-- [ ] **Publish `nfs-v4`.** Depends on `onc-xdr`.
-- [ ] **Update `nfswolf` to depend on published crates.** Replace `path` dependencies with crates.io versions. Removes `--git` install.
+Publishing to crates.io is out of scope. Distribution remains via GitHub releases and `cargo install --git`.
 
 ## Phase 5 — NFSv4 recon operations and cherry-picked high-value ops
 

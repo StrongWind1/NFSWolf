@@ -204,6 +204,14 @@ pub(crate) struct HostResult {
     /// Version range from the first PROG_MISMATCH reply (Hint column).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<VersionRange>,
+    /// RDMA transport detected via rpcbind GETADDR or port 20049 probe.
+    ///
+    /// RDMA (Remote Direct Memory Access) NFS bypasses the kernel's TCP/IP stack
+    /// and may not be subject to host-based firewalls or iptables rules.
+    /// Detected by querying rpcbind v3 GETADDR for "rdma"/"rdma6" netids
+    /// (RFC 1833 sec. 2.1) or probing TCP port 20049 (the conventional NFS/RDMA port).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rdma_detected: bool,
     /// Wall-clock time for all probes on this host.
     #[serde(with = "duration_ms")]
     pub scan_duration: Duration,

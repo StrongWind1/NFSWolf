@@ -1,8 +1,10 @@
 //! NFSv4 XDR types  --  RFC 7530.
 //!
-//! Minimal subset needed for nfswolf's security analysis: COMPOUND encoding,
-//! SECINFO, GETATTR, READDIR, and pseudo-FS mapping.
-//! Only the ~7 operations nfswolf actually uses are implemented.
+//! All 37 NFSv4.0 operations (ops 3-39) plus ILLEGAL (op 10044) are
+//! representable in `ArgOp` / `ResOpData`. The hot path (COMPOUND
+//! encoding, SECINFO, GETATTR, READDIR, pseudo-FS mapping) is fully
+//! typed; the remaining operations carry opaque payloads so every valid
+//! op code can be constructed, serialised, and round-tripped.
 //! All types implement onc_xdr::{Pack, Unpack}.
 
 // XDR type fields are wire-format values; individual docs would repeat names.
@@ -23,26 +25,100 @@ pub const NFS4_VERSION: u32 = 4;
 pub const NFS4_PROC_COMPOUND: u32 = 1;
 
 // --- NFSv4 operation codes (RFC 7530 S16) ---
-// NFSv4.0 defines operations in section 16 (not 18, which is RFC 5661/NFSv4.1).
+// NFSv4.0 defines operations 3-39 in section 16 (not 18, which is RFC 5661/NFSv4.1).
+// ILLEGAL is defined in S16.35 as 10044.
 
-/// PUTPUBFH  --  make the server's public (WebNFS) FH current (op 23, RFC 7530 S16.21).
-const OP_PUTPUBFH: u32 = 23;
-/// PUTROOTFH  --  make the server's root FH current (op 24, RFC 7530 S16.22).
-const OP_PUTROOTFH: u32 = 24;
-/// PUTFH  --  make an existing FH current (op 22, RFC 7530 S16.20).
-const OP_PUTFH: u32 = 22;
-/// LOOKUP  --  look up a component in the current FH (op 15, RFC 7530 S16.13).
-const OP_LOOKUP: u32 = 15;
+/// ACCESS  --  check access rights (op 3, RFC 7530 S16.1).
+const OP_ACCESS: u32 = 3;
+/// CLOSE  --  close file (op 4, RFC 7530 S16.2).
+const OP_CLOSE: u32 = 4;
+/// COMMIT  --  commit cached data (op 5, RFC 7530 S16.3).
+const OP_COMMIT: u32 = 5;
+/// CREATE  --  create a non-regular file object (op 6, RFC 7530 S16.4).
+const OP_CREATE: u32 = 6;
+/// DELEGPURGE  --  purge delegations awaiting recovery (op 7, RFC 7530 S16.5).
+const OP_DELEGPURGE: u32 = 7;
+/// DELEGRETURN  --  return delegation (op 8, RFC 7530 S16.6).
+const OP_DELEGRETURN: u32 = 8;
 /// GETATTR  --  retrieve file attributes (op 9, RFC 7530 S16.7).
 const OP_GETATTR: u32 = 9;
 /// GETFH  --  retrieve the current file handle (op 10, RFC 7530 S16.8).
 const OP_GETFH: u32 = 10;
-/// SECINFO  --  query auth flavors for a name (op 33, RFC 7530 S16.31).
-const OP_SECINFO: u32 = 33;
-/// READDIR  --  read directory entries with inline attributes (op 26, RFC 7530 S16.24).
-const OP_READDIR: u32 = 26;
+/// LINK  --  create link to a file (op 11, RFC 7530 S16.9).
+const OP_LINK: u32 = 11;
+/// LOCK  --  create lock (op 12, RFC 7530 S16.10).
+const OP_LOCK: u32 = 12;
+/// LOCKT  --  test for lock (op 13, RFC 7530 S16.11).
+const OP_LOCKT: u32 = 13;
+/// LOCKU  --  unlock file (op 14, RFC 7530 S16.12).
+const OP_LOCKU: u32 = 14;
+/// LOOKUP  --  look up a component in the current FH (op 15, RFC 7530 S16.13).
+const OP_LOOKUP: u32 = 15;
+/// LOOKUPP  --  look up parent directory (op 16, RFC 7530 S16.14).
+const OP_LOOKUPP: u32 = 16;
+/// NVERIFY  --  verify difference in attributes (op 17, RFC 7530 S16.15).
+const OP_NVERIFY: u32 = 17;
+/// OPEN  --  open a regular file (op 18, RFC 7530 S16.16).
+const OP_OPEN: u32 = 18;
+/// OPENATTR  --  open named attribute directory (op 19, RFC 7530 S16.17).
+const OP_OPENATTR: u32 = 19;
+/// OPEN_CONFIRM  --  confirm open (op 20, RFC 7530 S16.18).
+const OP_OPEN_CONFIRM: u32 = 20;
+/// OPEN_DOWNGRADE  --  reduce open file access (op 21, RFC 7530 S16.19).
+const OP_OPEN_DOWNGRADE: u32 = 21;
+/// PUTFH  --  make an existing FH current (op 22, RFC 7530 S16.20).
+const OP_PUTFH: u32 = 22;
+/// PUTPUBFH  --  make the server's public (WebNFS) FH current (op 23, RFC 7530 S16.21).
+const OP_PUTPUBFH: u32 = 23;
+/// PUTROOTFH  --  make the server's root FH current (op 24, RFC 7530 S16.22).
+const OP_PUTROOTFH: u32 = 24;
 /// READ  --  read file data (op 25, RFC 7530 S16.23).
 const OP_READ: u32 = 25;
+/// READDIR  --  read directory entries with inline attributes (op 26, RFC 7530 S16.24).
+const OP_READDIR: u32 = 26;
+/// READLINK  --  read symbolic link (op 27, RFC 7530 S16.25).
+const OP_READLINK: u32 = 27;
+/// REMOVE  --  remove filesystem object (op 28, RFC 7530 S16.26).
+const OP_REMOVE: u32 = 28;
+/// RENAME  --  rename filesystem object (op 29, RFC 7530 S16.27).
+const OP_RENAME: u32 = 29;
+/// RENEW  --  renew a lease (op 30, RFC 7530 S16.28).
+const OP_RENEW: u32 = 30;
+/// RESTOREFH  --  restore saved file handle (op 31, RFC 7530 S16.29).
+const OP_RESTOREFH: u32 = 31;
+/// SAVEFH  --  save current file handle (op 32, RFC 7530 S16.30).
+const OP_SAVEFH: u32 = 32;
+/// SECINFO  --  query auth flavors for a name (op 33, RFC 7530 S16.31).
+const OP_SECINFO: u32 = 33;
+/// SETATTR  --  set attributes (op 34, RFC 7530 S16.32).
+const OP_SETATTR: u32 = 34;
+/// SETCLIENTID  --  negotiate client ID (op 35, RFC 7530 S16.33).
+const OP_SETCLIENTID: u32 = 35;
+/// SETCLIENTID_CONFIRM  --  confirm client ID (op 36, RFC 7530 S16.34).
+const OP_SETCLIENTID_CONFIRM: u32 = 36;
+/// VERIFY  --  verify same attributes (op 37, RFC 7530 S16.35).
+const OP_VERIFY: u32 = 37;
+/// WRITE  --  write to file (op 38, RFC 7530 S16.36).
+const OP_WRITE: u32 = 38;
+/// RELEASE_LOCKOWNER  --  release lock-owner state (op 39, RFC 7530 S16.37).
+const OP_RELEASE_LOCKOWNER: u32 = 39;
+/// ILLEGAL  --  illegal operation (op 10044, RFC 7530 S16.38).
+const OP_ILLEGAL: u32 = 10044;
+
+// --- NFSv4.1 operation codes (RFC 5661 S18) ---
+
+/// EXCHANGE_ID  --  establish client identity (op 42, RFC 5661 S18.35).
+#[cfg(feature = "v41")]
+const OP_EXCHANGE_ID: u32 = 42;
+/// GETDEVICEINFO  --  retrieve pNFS device info (op 47, RFC 5661 S18.40).
+#[cfg(feature = "v41")]
+const OP_GETDEVICEINFO: u32 = 47;
+/// GETDEVICELIST  --  enumerate pNFS devices (op 48, RFC 5661 S18.41).
+#[cfg(feature = "v41")]
+const OP_GETDEVICELIST: u32 = 48;
+/// SECINFO_NO_NAME  --  get security info for current FH (op 52, RFC 5661 S18.45).
+#[cfg(feature = "v41")]
+const OP_SECINFO_NO_NAME: u32 = 52;
 
 // --- XDR helpers ---
 
@@ -124,26 +200,49 @@ impl Unpack for AttrRequest {
 
 /// A single NFSv4 operation inside a COMPOUND request.
 ///
-/// Only the operations nfswolf uses are represented  --  PUTPUBFH, PUTROOTFH, PUTFH,
-/// LOOKUP, GETATTR, GETFH, SECINFO, READDIR, READ.  Wire format is: 4-byte op code + op data.
+/// All 37 NFSv4.0 operations (ops 3-39) plus ILLEGAL (op 10044) are
+/// representable. The hot-path operations are fully typed; the stateful
+/// ops (OPEN, LOCK, CREATE, etc.) carry pre-encoded XDR payloads so
+/// every valid op code can be constructed and serialised without
+/// building out the full union nesting.
+///
+/// Wire format is: 4-byte op code + op-specific data.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ArgOp {
-    /// Set the current FH to the server's public (WebNFS) handle (RFC 7530 S16.21).
-    Putpubfh,
-    /// Set the current FH to the server's pseudo-root (RFC 7530 S16.22).
-    Putrootfh,
-    /// Set the current FH to a known handle (RFC 7530 S16.20).
-    Putfh(Vec<u8>),
-    /// Look up a single path component in the current directory (RFC 7530 S16.13).
-    Lookup(String),
-    /// Return attributes for the current FH (RFC 7530 S16.7).
+    // --- Fully typed operations (hot path) ---
+    /// Check access rights (op 3, RFC 7530 S16.1).
+    Access {
+        /// Bitmask of requested access checks (ACCESS4_READ, etc.).
+        access: u32,
+    },
+    /// Return attributes for the current FH (op 9, RFC 7530 S16.7).
     Getattr(AttrRequest),
-    /// Return the current file handle as opaque bytes (RFC 7530 S16.8).
+    /// Return the current file handle as opaque bytes (op 10, RFC 7530 S16.8).
     Getfh,
-    /// Query supported auth flavors for a named child (RFC 7530 S16.31).
-    Secinfo(String),
-    /// Read directory entries with inline attribute bitmaps (RFC 7530 S16.24).
+    /// Look up a single path component in the current directory (op 15, RFC 7530 S16.13).
+    Lookup(String),
+    /// Look up parent directory -- no arguments (op 16, RFC 7530 S16.14).
+    Lookupp,
+    /// Set the current FH to a known handle (op 22, RFC 7530 S16.20).
+    Putfh(Vec<u8>),
+    /// Set the current FH to the server's public (WebNFS) handle (op 23, RFC 7530 S16.21).
+    Putpubfh,
+    /// Set the current FH to the server's pseudo-root (op 24, RFC 7530 S16.22).
+    Putrootfh,
+    /// Read file data starting at `offset` (op 25, RFC 7530 S16.23).
+    ///
+    /// The anonymous stateid (all zeros) allows non-locked reads without OPEN.
+    /// Per RFC 7530 S9.1.4.3, seqid=0 and other=\[0;12\] identify the anonymous stateid.
+    Read {
+        /// 16-byte stateid: 4-byte seqid + 12-byte other (RFC 7530 S9.1.4.3).
+        stateid: [u8; 16],
+        /// Byte offset from the start of the file.
+        offset: u64,
+        /// Maximum bytes to return.
+        count: u32,
+    },
+    /// Read directory entries with inline attribute bitmaps (op 26, RFC 7530 S16.24).
     Readdir {
         /// Opaque resume cookie (0 for first call).
         cookie: u64,
@@ -156,30 +255,222 @@ pub enum ArgOp {
         /// Attributes to inline per entry.
         attr_request: AttrRequest,
     },
-    /// Read file data starting at `offset` (RFC 7530 S16.23).
+    /// Read symbolic link target -- no arguments (op 27, RFC 7530 S16.25).
+    Readlink,
+    /// Remove a filesystem object by name (op 28, RFC 7530 S16.26).
+    Remove {
+        /// Name of the entry to remove from the current directory.
+        target: String,
+    },
+    /// Rename a filesystem object (op 29, RFC 7530 S16.27).
     ///
-    /// The anonymous stateid (all zeros) allows non-locked reads without OPEN.
-    /// Per RFC 7530 S9.1.4.3, seqid=0 and other=\[0;12\] identify the anonymous stateid.
-    Read {
-        /// 16-byte stateid: 4-byte seqid + 12-byte other (RFC 7530 S9.1.4.3).
+    /// Saved FH is source directory, current FH is target directory.
+    Rename {
+        /// Old name in the saved-FH directory.
+        oldname: String,
+        /// New name in the current-FH directory.
+        newname: String,
+    },
+    /// Restore saved file handle as current (op 31, RFC 7530 S16.29).
+    Restorefh,
+    /// Save current file handle (op 32, RFC 7530 S16.30).
+    Savefh,
+    /// Query supported auth flavors for a named child (op 33, RFC 7530 S16.31).
+    Secinfo(String),
+
+    // --- Typed operations with simple arg structs ---
+    /// Close an opened file (op 4, RFC 7530 S16.2).
+    Close {
+        /// Sequence ID for the open-owner.
+        seqid: u32,
+        /// 16-byte open stateid (4-byte seqid + 12-byte other).
         stateid: [u8; 16],
-        /// Byte offset from the start of the file.
+    },
+    /// Commit cached data to stable storage (op 5, RFC 7530 S16.3).
+    Commit {
+        /// Byte offset to start flushing from.
         offset: u64,
-        /// Maximum bytes to return.
+        /// Number of bytes to flush (0 = flush to EOF).
         count: u32,
     },
+    /// Purge delegations awaiting recovery (op 7, RFC 7530 S16.5).
+    Delegpurge {
+        /// Client ID whose delegations to purge.
+        clientid: u64,
+    },
+    /// Return a delegation (op 8, RFC 7530 S16.6).
+    Delegreturn {
+        /// 16-byte delegation stateid.
+        stateid: [u8; 16],
+    },
+    /// Create a hard link (op 11, RFC 7530 S16.9).
+    ///
+    /// Saved FH is the source object, current FH is the target directory.
+    Link {
+        /// Name for the new link in the current directory.
+        newname: String,
+    },
+    /// Open named attribute directory (op 19, RFC 7530 S16.17).
+    Openattr {
+        /// Whether to create the named-attribute directory if absent.
+        createdir: bool,
+    },
+    /// Confirm an OPEN (op 20, RFC 7530 S16.18).
+    OpenConfirm {
+        /// 16-byte open stateid returned from the OPEN.
+        stateid: [u8; 16],
+        /// Sequence ID (must be OPEN seqid + 1).
+        seqid: u32,
+    },
+    /// Reduce open file access/deny modes (op 21, RFC 7530 S16.19).
+    OpenDowngrade {
+        /// 16-byte open stateid.
+        stateid: [u8; 16],
+        /// Sequence ID.
+        seqid: u32,
+        /// Reduced share access mode.
+        share_access: u32,
+        /// Reduced share deny mode.
+        share_deny: u32,
+    },
+    /// Renew a lease (op 30, RFC 7530 S16.28).
+    Renew {
+        /// Client ID whose lease to renew.
+        clientid: u64,
+    },
+    /// Confirm a client ID after SETCLIENTID (op 36, RFC 7530 S16.34).
+    SetclientidConfirm {
+        /// Client ID from the SETCLIENTID response.
+        clientid: u64,
+        /// 8-byte confirm verifier from the SETCLIENTID response.
+        verifier: [u8; 8],
+    },
+    /// Write data to a file (op 38, RFC 7530 S16.36).
+    Write {
+        /// 16-byte stateid (RFC 7530 S9.1.4.3).
+        stateid: [u8; 16],
+        /// Byte offset to start writing at.
+        offset: u64,
+        /// Stability level: 0 = UNSTABLE4, 1 = DATA_SYNC4, 2 = FILE_SYNC4.
+        stable: u32,
+        /// File data to write.
+        data: Vec<u8>,
+    },
+
+    // --- Opaque-payload operations (complex XDR unions) ---
+    //
+    // These carry pre-encoded argument bytes so every op code is representable
+    // without fully expanding the nested union types (open_claim4, locker4, etc.).
+    // The caller is responsible for encoding the payload correctly per the RFC.
+    /// Create a non-regular file object (op 6, RFC 7530 S16.4).
+    ///
+    /// Payload: pre-encoded `CREATE4args` body (createtype4 + component4 + fattr4).
+    Create(Vec<u8>),
+    /// Create a byte-range lock (op 12, RFC 7530 S16.10).
+    ///
+    /// Payload: pre-encoded `LOCK4args` body.
+    Lock(Vec<u8>),
+    /// Test for a byte-range lock (op 13, RFC 7530 S16.11).
+    ///
+    /// Payload: pre-encoded `LOCKT4args` body.
+    Lockt(Vec<u8>),
+    /// Unlock a byte-range lock (op 14, RFC 7530 S16.12).
+    ///
+    /// Payload: pre-encoded `LOCKU4args` body.
+    Locku(Vec<u8>),
+    /// Verify difference in attributes (op 17, RFC 7530 S16.15).
+    ///
+    /// Payload: pre-encoded `fattr4` (bitmap + attrvals).
+    Nverify(Vec<u8>),
+    /// Open a regular file (op 18, RFC 7530 S16.16).
+    ///
+    /// Payload: pre-encoded `OPEN4args` body.
+    Open(Vec<u8>),
+    /// Set attributes (op 34, RFC 7530 S16.32).
+    ///
+    /// Payload: pre-encoded `SETATTR4args` body (stateid4 + fattr4).
+    Setattr(Vec<u8>),
+    /// Negotiate a client ID (op 35, RFC 7530 S16.33).
+    ///
+    /// Payload: pre-encoded `SETCLIENTID4args` body (nfs_client_id4 + cb_client4 + callback_ident).
+    Setclientid(Vec<u8>),
+    /// Verify same attributes (op 37, RFC 7530 S16.35).
+    ///
+    /// Payload: pre-encoded `fattr4` (bitmap + attrvals).
+    Verify(Vec<u8>),
+    /// Release lock-owner state (op 39, RFC 7530 S16.37).
+    ///
+    /// Payload: pre-encoded `lock_owner4` (clientid + opaque owner).
+    ReleaseLockowner(Vec<u8>),
+    // --- NFSv4.1 operations (RFC 5661 S18) ---
+    /// Establish client identity (op 42, RFC 5661 S18.35).
+    ///
+    /// Payload: pre-encoded `EXCHANGE_ID4args` body.
+    /// Replaces SETCLIENTID in NFSv4.1. The response reveals the server's
+    /// implementation id (vendor, version string) and capability flags.
+    #[cfg(feature = "v41")]
+    ExchangeId(Vec<u8>),
+    /// Retrieve pNFS device info (op 47, RFC 5661 S18.40).
+    ///
+    /// Payload: pre-encoded `GETDEVICEINFO4args` body (deviceid + layout_type + maxcount).
+    /// Returns data-server addresses, including RDMA endpoints when the file layout
+    /// uses the NFSv4.1/files layout type.
+    #[cfg(feature = "v41")]
+    Getdeviceinfo(Vec<u8>),
+    /// Enumerate pNFS device IDs (op 48, RFC 5661 S18.41).
+    ///
+    /// Payload: pre-encoded `GETDEVICELIST4args` body (layout_type + maxdevices + cookie).
+    /// Lists all device IDs known to the server for a given layout type.
+    #[cfg(feature = "v41")]
+    Getdevicelist(Vec<u8>),
+    /// Get security info for the current FH's export (op 52, RFC 5661 S18.45).
+    ///
+    /// Unlike SECINFO (which takes a child name), SECINFO_NO_NAME queries the
+    /// security policies on the current file handle itself. The argument is a
+    /// single u32 style: 0 = SECINFO_STYLE4_CURRENT_FH, 1 = SECINFO_STYLE4_PARENT.
+    #[cfg(feature = "v41")]
+    SecinfoNoName {
+        /// 0 = current FH, 1 = parent directory.
+        style: u32,
+    },
+
+    /// Illegal operation sentinel (op 10044, RFC 7530 S16.38).
+    ///
+    /// Servers return NFS4ERR_OP_ILLEGAL for this. No arguments.
+    Illegal,
 }
 
 impl Pack for ArgOp {
     fn packed_size(&self) -> usize {
         match self {
-            Self::Putpubfh | Self::Putrootfh | Self::Getfh => 4, // only the opcode (4 bytes), no arguments
+            // No-argument ops: just the 4-byte opcode.
+            Self::Putpubfh | Self::Putrootfh | Self::Getfh | Self::Lookupp | Self::Readlink | Self::Restorefh | Self::Savefh | Self::Illegal => 4,
+
             Self::Putfh(fh) => 4 + opaque_packed_size(fh),
-            Self::Lookup(name) | Self::Secinfo(name) => 4 + onc_xdr::string_packed_size(name),
+            Self::Lookup(name) | Self::Secinfo(name) | Self::Remove { target: name } | Self::Link { newname: name } => 4 + onc_xdr::string_packed_size(name),
             Self::Getattr(attrs) => 4 + attrs.packed_size(),
             Self::Readdir { attr_request, .. } => 4 + 8 + 8 + 4 + 4 + attr_request.packed_size(),
-            // 4 (opcode) + 16 (stateid) + 8 (offset) + 4 (count)
-            Self::Read { .. } => 4 + 16 + 8 + 4,
+            // 4 (opcode) + 16 (stateid) + 8 (offset) + 4 (count) = 32
+            Self::Read { .. } | Self::OpenDowngrade { .. } => 4 + 16 + 8 + 4,
+            // 4 (opcode) + 4 (uint32)
+            Self::Access { .. } | Self::Openattr { .. } => 4 + 4,
+            // 4 (opcode) + 4 (seqid) + 16 (stateid) = 24
+            Self::Close { .. } | Self::OpenConfirm { .. } => 4 + 4 + 16,
+            Self::Commit { .. } => 4 + 8 + 4,
+            Self::Delegpurge { .. } | Self::Renew { .. } => 4 + 8,
+            // 4 (opcode) + 16 (stateid) = 4 + 8 + 8 = 20
+            Self::Delegreturn { .. } | Self::SetclientidConfirm { .. } => 4 + 16,
+            Self::Write { data, .. } => 4 + 16 + 8 + 4 + opaque_packed_size(data),
+            Self::Rename { oldname, newname } => 4 + onc_xdr::string_packed_size(oldname) + onc_xdr::string_packed_size(newname),
+
+            // Opaque-payload ops: opcode + raw bytes (already XDR-encoded by caller).
+            Self::Create(payload) | Self::Lock(payload) | Self::Lockt(payload) | Self::Locku(payload) | Self::Nverify(payload) | Self::Open(payload) | Self::Setattr(payload) | Self::Setclientid(payload) | Self::Verify(payload) | Self::ReleaseLockowner(payload) => 4 + payload.len(),
+
+            // v4.1 opaque-payload ops.
+            #[cfg(feature = "v41")]
+            Self::ExchangeId(payload) | Self::Getdeviceinfo(payload) | Self::Getdevicelist(payload) => 4 + payload.len(),
+            #[cfg(feature = "v41")]
+            Self::SecinfoNoName { .. } => 4 + 4,
         }
     }
 
@@ -187,6 +478,18 @@ impl Pack for ArgOp {
         match self {
             Self::Putpubfh => OP_PUTPUBFH.pack(out),
             Self::Putrootfh => OP_PUTROOTFH.pack(out),
+            Self::Getfh => OP_GETFH.pack(out),
+            Self::Lookupp => OP_LOOKUPP.pack(out),
+            Self::Readlink => OP_READLINK.pack(out),
+            Self::Restorefh => OP_RESTOREFH.pack(out),
+            Self::Savefh => OP_SAVEFH.pack(out),
+            Self::Illegal => OP_ILLEGAL.pack(out),
+
+            Self::Access { access } => {
+                let mut n = OP_ACCESS.pack(out)?;
+                n += access.pack(out)?;
+                Ok(n)
+            },
             Self::Putfh(fh) => {
                 let mut n = OP_PUTFH.pack(out)?;
                 n += pack_opaque(fh, out)?;
@@ -202,7 +505,6 @@ impl Pack for ArgOp {
                 n += attrs.pack(out)?;
                 Ok(n)
             },
-            Self::Getfh => OP_GETFH.pack(out),
             Self::Secinfo(name) => {
                 let mut n = OP_SECINFO.pack(out)?;
                 n += onc_xdr::pack_string(name, out)?;
@@ -225,8 +527,125 @@ impl Pack for ArgOp {
                 n += count.pack(out)?;
                 Ok(n)
             },
+            Self::Close { seqid, stateid } => {
+                let mut n = OP_CLOSE.pack(out)?;
+                n += seqid.pack(out)?;
+                out.write_all(stateid).map_err(onc_xdr::Error::Io)?;
+                n += 16;
+                Ok(n)
+            },
+            Self::Commit { offset, count } => {
+                let mut n = OP_COMMIT.pack(out)?;
+                n += offset.pack(out)?;
+                n += count.pack(out)?;
+                Ok(n)
+            },
+            Self::Delegpurge { clientid } => {
+                let mut n = OP_DELEGPURGE.pack(out)?;
+                n += clientid.pack(out)?;
+                Ok(n)
+            },
+            Self::Delegreturn { stateid } => {
+                let mut n = OP_DELEGRETURN.pack(out)?;
+                out.write_all(stateid).map_err(onc_xdr::Error::Io)?;
+                n += 16;
+                Ok(n)
+            },
+            Self::Link { newname } => {
+                let mut n = OP_LINK.pack(out)?;
+                n += onc_xdr::pack_string(newname, out)?;
+                Ok(n)
+            },
+            Self::Openattr { createdir } => {
+                let mut n = OP_OPENATTR.pack(out)?;
+                let v: u32 = u32::from(*createdir);
+                n += v.pack(out)?;
+                Ok(n)
+            },
+            Self::OpenConfirm { stateid, seqid } => {
+                let mut n = OP_OPEN_CONFIRM.pack(out)?;
+                out.write_all(stateid).map_err(onc_xdr::Error::Io)?;
+                n += 16;
+                n += seqid.pack(out)?;
+                Ok(n)
+            },
+            Self::OpenDowngrade { stateid, seqid, share_access, share_deny } => {
+                let mut n = OP_OPEN_DOWNGRADE.pack(out)?;
+                out.write_all(stateid).map_err(onc_xdr::Error::Io)?;
+                n += 16;
+                n += seqid.pack(out)?;
+                n += share_access.pack(out)?;
+                n += share_deny.pack(out)?;
+                Ok(n)
+            },
+            Self::Remove { target } => {
+                let mut n = OP_REMOVE.pack(out)?;
+                n += onc_xdr::pack_string(target, out)?;
+                Ok(n)
+            },
+            Self::Rename { oldname, newname } => {
+                let mut n = OP_RENAME.pack(out)?;
+                n += onc_xdr::pack_string(oldname, out)?;
+                n += onc_xdr::pack_string(newname, out)?;
+                Ok(n)
+            },
+            Self::Renew { clientid } => {
+                let mut n = OP_RENEW.pack(out)?;
+                n += clientid.pack(out)?;
+                Ok(n)
+            },
+            Self::SetclientidConfirm { clientid, verifier } => {
+                let mut n = OP_SETCLIENTID_CONFIRM.pack(out)?;
+                n += clientid.pack(out)?;
+                out.write_all(verifier).map_err(onc_xdr::Error::Io)?;
+                n += 8;
+                Ok(n)
+            },
+            Self::Write { stateid, offset, stable, data } => {
+                let mut n = OP_WRITE.pack(out)?;
+                out.write_all(stateid).map_err(onc_xdr::Error::Io)?;
+                n += 16;
+                n += offset.pack(out)?;
+                n += stable.pack(out)?;
+                n += pack_opaque(data, out)?;
+                Ok(n)
+            },
+
+            // Opaque-payload ops: opcode then raw pre-encoded bytes.
+            Self::Create(payload) => pack_opcode_payload(OP_CREATE, payload, out),
+            Self::Lock(payload) => pack_opcode_payload(OP_LOCK, payload, out),
+            Self::Lockt(payload) => pack_opcode_payload(OP_LOCKT, payload, out),
+            Self::Locku(payload) => pack_opcode_payload(OP_LOCKU, payload, out),
+            Self::Nverify(payload) => pack_opcode_payload(OP_NVERIFY, payload, out),
+            Self::Open(payload) => pack_opcode_payload(OP_OPEN, payload, out),
+            Self::Setattr(payload) => pack_opcode_payload(OP_SETATTR, payload, out),
+            Self::Setclientid(payload) => pack_opcode_payload(OP_SETCLIENTID, payload, out),
+            Self::Verify(payload) => pack_opcode_payload(OP_VERIFY, payload, out),
+            Self::ReleaseLockowner(payload) => pack_opcode_payload(OP_RELEASE_LOCKOWNER, payload, out),
+
+            // v4.1 opaque-payload ops.
+            #[cfg(feature = "v41")]
+            Self::ExchangeId(payload) => pack_opcode_payload(OP_EXCHANGE_ID, payload, out),
+            #[cfg(feature = "v41")]
+            Self::Getdeviceinfo(payload) => pack_opcode_payload(OP_GETDEVICEINFO, payload, out),
+            #[cfg(feature = "v41")]
+            Self::Getdevicelist(payload) => pack_opcode_payload(OP_GETDEVICELIST, payload, out),
+            #[cfg(feature = "v41")]
+            Self::SecinfoNoName { style } => {
+                let mut n = OP_SECINFO_NO_NAME.pack(out)?;
+                n += style.pack(out)?;
+                Ok(n)
+            },
         }
     }
+}
+
+/// Pack an opcode followed by a raw pre-encoded payload.
+fn pack_opcode_payload(opcode: u32, payload: &[u8], out: &mut impl Write) -> onc_xdr::Result<usize> {
+    let mut n = opcode.pack(out)?;
+    out.write_all(payload).map_err(onc_xdr::Error::Io)?;
+    n += payload.len();
+    Ok(n)
 }
 
 // --- CompoundArgs ---
@@ -263,6 +682,312 @@ impl Pack for CompoundArgs {
     }
 }
 
+// --- CompoundBuilder ---
+
+/// Chainable builder for NFSv4 COMPOUND operation sequences.
+///
+/// Construct via [`CompoundBuilder::new`], chain operations with the builder
+/// methods, and finish with [`build`](CompoundBuilder::build) to get a
+/// `Vec<ArgOp>` ready for [`CompoundArgs`] or a client's `compound()` method.
+///
+/// The builder carries no state beyond the op list -- it is a convenience
+/// layer over manual `Vec<ArgOp>` construction.
+#[derive(Debug, Clone, Default)]
+pub struct CompoundBuilder {
+    ops: Vec<ArgOp>,
+}
+
+impl CompoundBuilder {
+    /// Start a new builder with an empty operation sequence.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { ops: Vec::new() }
+    }
+
+    /// Consume the builder and return the operation list.
+    #[must_use]
+    pub fn build(self) -> Vec<ArgOp> {
+        self.ops
+    }
+
+    /// Append a raw `ArgOp` to the sequence.
+    #[must_use]
+    pub fn op(mut self, op: ArgOp) -> Self {
+        self.ops.push(op);
+        self
+    }
+
+    /// PUTROOTFH -- set the current FH to the server's pseudo-root (op 24).
+    #[must_use]
+    pub fn putrootfh(self) -> Self {
+        self.op(ArgOp::Putrootfh)
+    }
+
+    /// PUTPUBFH -- set the current FH to the server's public (WebNFS) handle (op 23).
+    #[must_use]
+    pub fn putpubfh(self) -> Self {
+        self.op(ArgOp::Putpubfh)
+    }
+
+    /// PUTFH -- set the current FH to a known handle (op 22).
+    #[must_use]
+    pub fn putfh(self, fh: Vec<u8>) -> Self {
+        self.op(ArgOp::Putfh(fh))
+    }
+
+    /// LOOKUP -- look up a single path component (op 15).
+    #[must_use]
+    pub fn lookup(self, name: &str) -> Self {
+        self.op(ArgOp::Lookup(name.to_owned()))
+    }
+
+    /// GETFH -- return the current file handle (op 10).
+    #[must_use]
+    pub fn getfh(self) -> Self {
+        self.op(ArgOp::Getfh)
+    }
+
+    /// GETATTR -- return attributes for the current FH (op 9).
+    #[must_use]
+    pub fn getattr(self, attrs: AttrRequest) -> Self {
+        self.op(ArgOp::Getattr(attrs))
+    }
+
+    /// SECINFO -- query auth flavors for a named child (op 33).
+    #[must_use]
+    pub fn secinfo(self, name: &str) -> Self {
+        self.op(ArgOp::Secinfo(name.to_owned()))
+    }
+
+    /// SETCLIENTID -- negotiate a client ID with callback address (op 35, RFC 7530 S16.33).
+    ///
+    /// Constructs the pre-encoded SETCLIENTID4args payload:
+    /// - `nfs_client_id4`: 8-byte verifier (random) + client name as opaque id
+    /// - `cb_client4`: callback program 0x40000000 + clientaddr4(netid="tcp", addr=callback_addr)
+    /// - `callback_ident`: 1
+    ///
+    /// `callback_addr` is the attacker-controlled universal address the server
+    /// will dial back to for delegation recalls (RFC 7530 S16.33.3). Format is
+    /// "h1.h2.h3.h4.p1.p2" for IPv4.
+    #[must_use]
+    pub fn setclientid(self, client_name: &str, callback_addr: &str) -> Self {
+        let payload = encode_setclientid(client_name, callback_addr);
+        self.op(ArgOp::Setclientid(payload))
+    }
+
+    /// SECINFO_NO_NAME -- query auth flavors for the current FH (op 52, RFC 5661 S18.45).
+    ///
+    /// `style`: 0 = SECINFO_STYLE4_CURRENT_FH, 1 = SECINFO_STYLE4_PARENT.
+    /// Unlike SECINFO (which takes a child name), this queries the security
+    /// policies on the current file handle itself.
+    #[cfg(feature = "v41")]
+    #[must_use]
+    pub fn secinfo_no_name(self, style: u32) -> Self {
+        self.op(ArgOp::SecinfoNoName { style })
+    }
+
+    /// EXCHANGE_ID -- establish client identity (op 42, RFC 5661 S18.35).
+    ///
+    /// Constructs the pre-encoded EXCHANGE_ID4args payload. The response reveals
+    /// the server's implementation id (vendor string, version) and capability flags
+    /// (pNFS support, migration, referrals).
+    #[cfg(feature = "v41")]
+    #[must_use]
+    pub fn exchange_id(self, client_name: &str) -> Self {
+        let payload = encode_exchange_id(client_name);
+        self.op(ArgOp::ExchangeId(payload))
+    }
+
+    /// GETDEVICEINFO -- retrieve pNFS device info (op 47, RFC 5661 S18.40).
+    ///
+    /// `device_id` is the 16-byte device ID, `layout_type` is the layout type
+    /// (1 = LAYOUT4_NFSV4_1_FILES). Returns data-server addresses including
+    /// any RDMA endpoints.
+    #[cfg(feature = "v41")]
+    #[must_use]
+    pub fn getdeviceinfo(self, device_id: &[u8; 16], layout_type: u32) -> Self {
+        let payload = encode_getdeviceinfo(device_id, layout_type);
+        self.op(ArgOp::Getdeviceinfo(payload))
+    }
+
+    /// GETDEVICELIST -- enumerate pNFS device IDs (op 48, RFC 5661 S18.41).
+    ///
+    /// `layout_type` is the layout type (1 = LAYOUT4_NFSV4_1_FILES).
+    /// Returns a list of device IDs that can be passed to GETDEVICEINFO.
+    #[cfg(feature = "v41")]
+    #[must_use]
+    pub fn getdevicelist(self, layout_type: u32) -> Self {
+        let payload = encode_getdevicelist(layout_type);
+        self.op(ArgOp::Getdevicelist(payload))
+    }
+
+    /// OPEN with OPEN4_SHARE_ACCESS_READ -- open a file for reading (op 18, RFC 7530 S16.16).
+    ///
+    /// Constructs the pre-encoded OPEN4args payload for a read-only open:
+    /// - `seqid`: 1 (first open in the sequence)
+    /// - `share_access`: OPEN4_SHARE_ACCESS_READ (1)
+    /// - `share_deny`: OPEN4_SHARE_DENY_NONE (0)
+    /// - `open_owner4`: clientid=0, owner="nfswolf"
+    /// - `openhow4`: OPEN4_NOCREATE (0)
+    /// - `open_claim4`: CLAIM_NULL (0) + filename
+    ///
+    /// Requires SETCLIENTID + SETCLIENTID_CONFIRM first, or the server rejects
+    /// with NFS4ERR_STALE_CLIENTID. For the "honest write test" use case, the
+    /// write probe can try OPEN with OPEN4_SHARE_ACCESS_WRITE instead.
+    #[must_use]
+    pub fn open_read(self, name: &str) -> Self {
+        let payload = encode_open_read(name);
+        self.op(ArgOp::Open(payload))
+    }
+}
+
+/// Pre-encode SETCLIENTID4args body (RFC 7530 S16.33).
+///
+/// Wire layout:
+///   nfs_client_id4: verifier(8 bytes) + id(opaque<NFS4_OPAQUE_LIMIT>)
+///   cb_client4: cb_program(u32) + cb_location(clientaddr4)
+///     clientaddr4: r_netid(string) + r_addr(string)
+///   callback_ident: u32
+fn encode_setclientid(client_name: &str, callback_addr: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(128);
+
+    // verifier: 8 bytes, use a deterministic value for reproducible probes.
+    // In production a random verifier prevents stale-clientid collisions, but
+    // for recon the determinism aids debugging.
+    buf.extend_from_slice(&[0x6E, 0x66, 0x73, 0x77, 0x6F, 0x6C, 0x66, 0x00]); // "nfswolf\0"
+
+    // client id: opaque<> with the supplied client name.
+    let name_bytes = client_name.as_bytes();
+    drop(pack_opaque(name_bytes, &mut buf));
+
+    // cb_program: 0x40000000 (conventional callback program number, RFC 7530 S16.33.5).
+    buf.extend_from_slice(&0x4000_0000u32.to_be_bytes());
+
+    // cb_location (clientaddr4): r_netid="tcp", r_addr=callback_addr.
+    drop(onc_xdr::pack_string("tcp", &mut buf));
+    drop(onc_xdr::pack_string(callback_addr, &mut buf));
+
+    // callback_ident: 1 (arbitrary non-zero value).
+    buf.extend_from_slice(&1u32.to_be_bytes());
+
+    buf
+}
+
+/// Pre-encode OPEN4args body for a read-only open (RFC 7530 S16.16).
+///
+/// Wire layout:
+///   seqid: u32
+///   share_access: u32 (OPEN4_SHARE_ACCESS_READ = 1)
+///   share_deny: u32 (OPEN4_SHARE_DENY_NONE = 0)
+///   open_owner4: clientid(u64) + owner(opaque<NFS4_OPAQUE_LIMIT>)
+///   openhow4: opentype4(u32=0 OPEN4_NOCREATE)
+///   open_claim4: claim(u32=0 CLAIM_NULL) + file(component4=XDR string)
+fn encode_open_read(name: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(96);
+
+    // seqid = 1 (first open in the sequence).
+    buf.extend_from_slice(&1u32.to_be_bytes());
+    // share_access = OPEN4_SHARE_ACCESS_READ (1, RFC 7530 S16.16.3).
+    buf.extend_from_slice(&1u32.to_be_bytes());
+    // share_deny = OPEN4_SHARE_DENY_NONE (0, RFC 7530 S16.16.3).
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    // open_owner4: clientid(u64=0) + owner(opaque<>="nfswolf").
+    // clientid=0 signals "use the current SETCLIENTID binding" on Linux knfsd.
+    buf.extend_from_slice(&0u64.to_be_bytes());
+    drop(pack_opaque(b"nfswolf", &mut buf));
+
+    // openhow4: opentype4 = OPEN4_NOCREATE (0).
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    // open_claim4: claim = CLAIM_NULL (0) + file = component4 (XDR string).
+    buf.extend_from_slice(&0u32.to_be_bytes());
+    drop(onc_xdr::pack_string(name, &mut buf));
+
+    buf
+}
+
+/// Pre-encode EXCHANGE_ID4args body (RFC 5661 S18.35).
+///
+/// Wire layout:
+///   eia_clientowner: co_verifier(8 bytes) + co_ownerid(opaque<NFS4_OPAQUE_LIMIT>)
+///   eia_flags: u32 (0 = no special capabilities requested)
+///   eia_state_protect: state_protect_how4(u32=0 SP4_NONE)
+///   eia_client_impl_id: nfs_impl_id4<1> (optional, 0-element array = absent)
+#[cfg(feature = "v41")]
+fn encode_exchange_id(client_name: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(64);
+
+    // co_verifier: 8 bytes (deterministic for reproducible probes).
+    buf.extend_from_slice(&[0x6E, 0x66, 0x73, 0x77, 0x6F, 0x6C, 0x66, 0x00]);
+
+    // co_ownerid: opaque<> with client name.
+    drop(pack_opaque(client_name.as_bytes(), &mut buf));
+
+    // eia_flags: 0 (no EXCHGID4_FLAG bits set -- pure recon, no pNFS/migration claims).
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    // eia_state_protect: SP4_NONE (0) -- no state protection negotiation.
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    // eia_client_impl_id: 0-element optional array (absent).
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    buf
+}
+
+/// Pre-encode GETDEVICEINFO4args body (RFC 5661 S18.40).
+///
+/// Wire layout:
+///   gdia_device_id: deviceid4 (16 bytes, fixed)
+///   gdia_layout_type: layouttype4 (u32)
+///   gdia_maxcount: u32 (max response size, 0 = server default)
+///   gdia_notify_types: bitmap4 (0-word bitmap = no notifications)
+#[cfg(feature = "v41")]
+fn encode_getdeviceinfo(device_id: &[u8; 16], layout_type: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32);
+
+    // deviceid4: 16 bytes fixed.
+    buf.extend_from_slice(device_id);
+
+    // layout_type.
+    buf.extend_from_slice(&layout_type.to_be_bytes());
+
+    // maxcount: 65536 (generous but bounded).
+    buf.extend_from_slice(&65536u32.to_be_bytes());
+
+    // notify_types bitmap: 0 words (no notifications requested).
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    buf
+}
+
+/// Pre-encode GETDEVICELIST4args body (RFC 5661 S18.41).
+///
+/// Wire layout:
+///   gdla_layout_type: layouttype4 (u32)
+///   gdla_maxdevices: u32 (max devices to return)
+///   gdla_cookie: u64 (0 for first call)
+///   gdla_cookieverf: verifier4 (8 bytes, all-zeros for first call)
+#[cfg(feature = "v41")]
+fn encode_getdevicelist(layout_type: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(24);
+
+    // layout_type.
+    buf.extend_from_slice(&layout_type.to_be_bytes());
+
+    // maxdevices: 256 (reasonable bound for recon).
+    buf.extend_from_slice(&256u32.to_be_bytes());
+
+    // cookie: 0 (first call).
+    buf.extend_from_slice(&0u64.to_be_bytes());
+
+    // cookieverf: all-zeros (first call).
+    buf.extend_from_slice(&[0u8; 8]);
+
+    buf
+}
+
 // --- CompoundRes ---
 
 /// A single directory entry returned by NFSv4 READDIR (RFC 7530 S16.24).
@@ -277,7 +1002,9 @@ pub struct DirEntry4 {
 /// Decoded payload from a successful NFSv4 operation result.
 ///
 /// Most operations produce no inline data beyond the status code.
-/// GETFH, READDIR, READ, and SECINFO carry operation-specific results.
+/// GETFH, READDIR, READ, SECINFO, ACCESS, READLINK, COMMIT, and WRITE
+/// carry operation-specific results that are decoded. Other ops' results
+/// are represented as `None`.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub enum ResOpData {
@@ -317,7 +1044,31 @@ pub enum ResOpData {
     /// 1 = AUTH_SYS, 6 = RPCSEC_GSS (Kerberos). No flavor 6 means
     /// the export accepts credential spoofing via AUTH_SYS (F-3.4).
     SecFlavors(Vec<u32>),
-    /// No result data  --  PUTPUBFH, PUTROOTFH, PUTFH, LOOKUP, GETATTR, etc.
+    /// ACCESS result: supported + access bitmasks (RFC 7530 S16.1).
+    Access {
+        /// Access rights the server can reliably verify.
+        supported: u32,
+        /// Access rights available to the requesting user.
+        access: u32,
+    },
+    /// Symbolic link target from READLINK (RFC 7530 S16.25).
+    Readlink(String),
+    /// Write verifier from COMMIT (RFC 7530 S16.3).
+    CommitVerf([u8; 8]),
+    /// WRITE result: bytes written, stability, verifier (RFC 7530 S16.36).
+    WriteRes {
+        /// Number of bytes actually written.
+        count: u32,
+        /// Stability level committed: 0 = UNSTABLE4, 1 = DATA_SYNC4, 2 = FILE_SYNC4.
+        committed: u32,
+        /// 8-byte write verifier for detecting server reboots.
+        writeverf: [u8; 8],
+    },
+    /// No result data  --  PUTPUBFH, PUTROOTFH, PUTFH, LOOKUP, LOOKUPP, REMOVE,
+    /// RENAME, CLOSE, DELEGPURGE, DELEGRETURN, LINK, OPENATTR, OPEN_CONFIRM,
+    /// OPEN_DOWNGRADE, RENEW, RESTOREFH, SAVEFH, SETCLIENTID_CONFIRM,
+    /// SETATTR, RELEASE_LOCKOWNER, ILLEGAL, and other ops with complex or
+    /// undecodable results.
     #[default]
     None,
 }
@@ -383,23 +1134,27 @@ impl Unpack for CompoundRes {
 /// wire format cannot be safely decoded  --  the caller's loop should stop
 /// at that point; all results collected before the error are valid.
 ///
-/// Wire formats per RFC 7530:
-/// - PUTPUBFH / PUTROOTFH / PUTFH / LOOKUP: no data (S16.21, S16.22, S16.20, S16.13)
-/// - GETFH: opaque<> file handle (S16.8)
-/// - GETATTR: bitmap + opaque<> attrvals (S16.7)
-/// - SECINFO: u32 array count + per-entry flavor/gss-info (S16.31)
-/// - READDIR: verifier + linked-list entries + eof (S16.24)
-/// - READ: bool eof + opaque<> data (S16.23)
+/// All 37 NFSv4.0 ops (3-39) plus ILLEGAL (10044) are handled. Ops with
+/// complex result unions (OPEN, LOCK, LOCKT, LOCKU, CREATE, SETCLIENTID,
+/// etc.) stop parsing because their variable-length nested structures
+/// cannot be skipped safely without a full XDR decoder for those types.
 fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result<(ResOpData, usize)> {
     match op_code {
-        // No result data beyond status.
-        OP_PUTPUBFH | OP_PUTROOTFH | OP_PUTFH | OP_LOOKUP => Ok((ResOpData::None, 0)),
+        // --- No result data beyond status ---
+        OP_PUTPUBFH | OP_PUTROOTFH | OP_PUTFH | OP_LOOKUP | OP_LOOKUPP | OP_RESTOREFH | OP_SAVEFH | OP_DELEGPURGE | OP_DELEGRETURN | OP_OPENATTR | OP_RENEW | OP_NVERIFY | OP_VERIFY | OP_RELEASE_LOCKOWNER | OP_ILLEGAL => Ok((ResOpData::None, 0)),
+
+        // ACCESS result: supported(u32) + access(u32) (RFC 7530 S16.1).
+        OP_ACCESS => {
+            let (supported, mut n) = u32::unpack(input)?;
+            let (access, an) = u32::unpack(input)?;
+            n += an;
+            Ok((ResOpData::Access { supported, access }, n))
+        },
 
         // GETFH result: opaque<> file handle (4-byte length + data + padding).
         OP_GETFH => {
             let (len, mut n) = u32::unpack(input)?;
             let len = len as usize;
-            // Do not pre-size from the untrusted length; read bounded by real bytes.
             let fh = onc_xdr::read_bytes(input, len)?;
             n += len;
             let pad = (4 - (len % 4)) % 4;
@@ -411,8 +1166,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         // GETATTR result: bitmap (u32 count + N words) + opaque<> attrvals.
         // We decode only FATTR4_FSID (attribute 8, RFC 7530 S5.8.1.9) when it is
         // the sole word-0 attribute requested, so the 16-byte fsid4 sits at the
-        // start of attrvals (the fsid_only request used by map_pseudo_fs). Any
-        // other attribute combination is not decoded and yields fsid = None.
+        // start of attrvals. Any other attribute combination yields fsid = None.
         OP_GETATTR => {
             let (bitmap_count, mut n) = u32::unpack(input)?;
             let mut bitmap_w0 = 0u32;
@@ -423,7 +1177,6 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
                 }
                 n += wn;
             }
-            // attrvals opaque<>: requested attributes XDR-encoded in bit order.
             let (attrval_len, ln) = u32::unpack(input)?;
             n += ln;
             let attrval_len = attrval_len as usize;
@@ -432,11 +1185,8 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             let pad = (4 - (attrval_len % 4)) % 4;
             onc_xdr::skip_pad(input, pad)?;
             n += pad;
-            // FATTR4_FSID is bit 8 of word 0; fsid4 = { major u64, minor u64 }.
-            // Only safe to read at offset 0 when no lower-numbered word-0
-            // attribute (bits 0..7) precedes it in the attrvals stream.
-            let fsid_bit: u32 = 1 << 8; // FATTR4_FSID = attribute 8, word 0
-            let lower_bits: u32 = fsid_bit - 1; // attributes 0..7 in word 0
+            let fsid_bit: u32 = 1 << 8;
+            let lower_bits: u32 = fsid_bit - 1;
             let fsid = if (bitmap_w0 & fsid_bit) != 0 && (bitmap_w0 & lower_bits) == 0 {
                 let major = attrvals.get(..8).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes);
                 let minor = attrvals.get(8..16).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes);
@@ -448,10 +1198,8 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         },
 
         // SECINFO result: variable-length array of secinfo4 entries.
-        // Each entry: u32 flavor.  If flavor == 6 (RPCSEC_GSS): oid(opaque<>) + qop(u32) + service(u32).
         OP_SECINFO => {
             let (arr_count, mut n) = u32::unpack(input)?;
-            // Clamp the speculative reservation: `arr_count` is attacker-controlled.
             let mut flavors = onc_xdr::vec_with_capacity(arr_count as usize);
             for _ in 0..arr_count {
                 let (flavor, fn_) = u32::unpack(input)?;
@@ -475,7 +1223,6 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             let (data_len, dn) = u32::unpack(input)?;
             n += dn;
             let data_len = data_len as usize;
-            // Do not pre-size from the untrusted length; read bounded by real bytes.
             let data = onc_xdr::read_bytes(input, data_len)?;
             n += data_len;
             let pad = (4 - (data_len % 4)) % 4;
@@ -484,15 +1231,12 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             Ok((ResOpData::Read { eof: eof_raw != 0, data }, n))
         },
 
-        // READDIR result: verifier[8] + linked-list { value_follows, cookie, name, fattr4 } + eof.
-        // We request AttrRequest::empty() so fattr4 = empty bitmap + empty attrvals.
+        // READDIR result: verifier[8] + linked-list entries + eof.
         OP_READDIR => {
-            // Skip cookieverf (8 bytes).
             let mut verifier = [0u8; 8];
             input.read_exact(&mut verifier).map_err(onc_xdr::Error::Io)?;
             let mut n = 8;
             let mut entries = Vec::new();
-            // XDR linked list: value_follows(u32) then entry, repeat.
             loop {
                 let (value_follows, vn) = u32::unpack(input)?;
                 n += vn;
@@ -503,7 +1247,6 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
                 n += cn;
                 let (name, nn) = onc_xdr::unpack_string(input)?;
                 n += nn;
-                // Skip fattr4: bitmap (u32 count + N u32 words) + opaque<> attrvals.
                 let (bitmap_count, bn) = u32::unpack(input)?;
                 n += bn;
                 for _ in 0..bitmap_count {
@@ -518,7 +1261,97 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             Ok((ResOpData::Readdir { cookieverf: verifier, entries, eof: eof_raw != 0 }, n))
         },
 
-        // Unknown or unimplemented op  --  caller should stop parsing here.
+        // READLINK result: linktext4 (= opaque string, RFC 7530 S16.25).
+        OP_READLINK => {
+            let (link, n) = onc_xdr::unpack_string(input)?;
+            Ok((ResOpData::Readlink(link), n))
+        },
+
+        // COMMIT result: verifier4 writeverf (8 bytes, RFC 7530 S16.3).
+        OP_COMMIT => {
+            let mut verf = [0u8; 8];
+            input.read_exact(&mut verf).map_err(onc_xdr::Error::Io)?;
+            Ok((ResOpData::CommitVerf(verf), 8))
+        },
+
+        // WRITE result: count(u32) + committed(u32) + writeverf(8 bytes).
+        OP_WRITE => {
+            let (count, mut n) = u32::unpack(input)?;
+            let (committed, cn) = u32::unpack(input)?;
+            n += cn;
+            let mut writeverf = [0u8; 8];
+            input.read_exact(&mut writeverf).map_err(onc_xdr::Error::Io)?;
+            n += 8;
+            Ok((ResOpData::WriteRes { count, committed, writeverf }, n))
+        },
+
+        // REMOVE result: change_info4 (bool atomic + u64 before + u64 after).
+        // Decoded as None since we don't surface change_info; must skip the bytes.
+        OP_REMOVE | OP_LINK => {
+            // change_info4: bool(4) + changeid4(8) + changeid4(8) = 20 bytes
+            let (_, mut n) = u32::unpack(input)?; // atomic
+            let (_, bn) = u64::unpack(input)?; // before
+            n += bn;
+            let (_, an) = u64::unpack(input)?; // after
+            n += an;
+            Ok((ResOpData::None, n))
+        },
+
+        // RENAME result: source_cinfo + target_cinfo (two change_info4).
+        OP_RENAME => {
+            let mut n = 0usize;
+            for _ in 0..2 {
+                let (_, an) = u32::unpack(input)?; // atomic
+                n += an;
+                let (_, bn) = u64::unpack(input)?; // before
+                n += bn;
+                let (_, cn) = u64::unpack(input)?; // after
+                n += cn;
+            }
+            Ok((ResOpData::None, n))
+        },
+
+        // SETATTR result: bitmap4 attrsset (RFC 7530 S16.32).
+        OP_SETATTR => {
+            let (bitmap_count, mut n) = u32::unpack(input)?;
+            for _ in 0..bitmap_count {
+                let (_, wn) = u32::unpack(input)?;
+                n += wn;
+            }
+            Ok((ResOpData::None, n))
+        },
+
+        // CLOSE / OPEN_CONFIRM / OPEN_DOWNGRADE / LOCKU result: stateid4 (16 bytes).
+        OP_CLOSE | OP_OPEN_CONFIRM | OP_OPEN_DOWNGRADE | OP_LOCKU => {
+            let mut stateid = [0u8; 16];
+            input.read_exact(&mut stateid).map_err(onc_xdr::Error::Io)?;
+            Ok((ResOpData::None, 16))
+        },
+
+        // SECINFO_NO_NAME result: same format as SECINFO (RFC 5661 S18.45.3).
+        #[cfg(feature = "v41")]
+        OP_SECINFO_NO_NAME => {
+            let (arr_count, mut n) = u32::unpack(input)?;
+            let mut flavors = onc_xdr::vec_with_capacity(arr_count as usize);
+            for _ in 0..arr_count {
+                let (flavor, fn_) = u32::unpack(input)?;
+                n += fn_;
+                flavors.push(flavor);
+                if flavor == 6 {
+                    // RPCSEC_GSS: oid opaque<> + qop u32 + service u32
+                    n += skip_opaque(input)?;
+                    let (_, qn) = u32::unpack(input)?;
+                    n += qn;
+                    let (_, sn) = u32::unpack(input)?;
+                    n += sn;
+                }
+            }
+            Ok((ResOpData::SecFlavors(flavors), n))
+        },
+
+        // Ops with complex/variable result unions that cannot be skipped
+        // without a full decoder, plus anything unknown -- stop parsing here.
+        // Results so far are valid.
         _ => Err(onc_xdr::Error::InvalidEnumValue(op_code)),
     }
 }
@@ -973,17 +1806,47 @@ mod tests {
     // --- Operation code constants (RFC 7530 S16) ---
 
     #[test]
+    #[expect(clippy::cognitive_complexity, reason = "flat list of assert_eq! checking all 38 opcodes, no real branching")]
     fn operation_codes_match_rfc7530() {
-        // RFC 7530 section 16 defines these operation codes.
-        assert_eq!(OP_PUTROOTFH, 24, "PUTROOTFH must be 24 (RFC 7530 S16.22)");
-        assert_eq!(OP_PUTFH, 22, "PUTFH must be 22 (RFC 7530 S16.20)");
-        assert_eq!(OP_PUTPUBFH, 23, "PUTPUBFH must be 23 (RFC 7530 S16.21)");
-        assert_eq!(OP_LOOKUP, 15, "LOOKUP must be 15 (RFC 7530 S16.13)");
+        // All 37 NFSv4.0 ops (3-39) + ILLEGAL (10044) per RFC 7530 S16.
+        assert_eq!(OP_ACCESS, 3, "ACCESS must be 3 (RFC 7530 S16.1)");
+        assert_eq!(OP_CLOSE, 4, "CLOSE must be 4 (RFC 7530 S16.2)");
+        assert_eq!(OP_COMMIT, 5, "COMMIT must be 5 (RFC 7530 S16.3)");
+        assert_eq!(OP_CREATE, 6, "CREATE must be 6 (RFC 7530 S16.4)");
+        assert_eq!(OP_DELEGPURGE, 7, "DELEGPURGE must be 7 (RFC 7530 S16.5)");
+        assert_eq!(OP_DELEGRETURN, 8, "DELEGRETURN must be 8 (RFC 7530 S16.6)");
         assert_eq!(OP_GETATTR, 9, "GETATTR must be 9 (RFC 7530 S16.7)");
         assert_eq!(OP_GETFH, 10, "GETFH must be 10 (RFC 7530 S16.8)");
-        assert_eq!(OP_SECINFO, 33, "SECINFO must be 33 (RFC 7530 S16.31)");
-        assert_eq!(OP_READDIR, 26, "READDIR must be 26 (RFC 7530 S16.24)");
+        assert_eq!(OP_LINK, 11, "LINK must be 11 (RFC 7530 S16.9)");
+        assert_eq!(OP_LOCK, 12, "LOCK must be 12 (RFC 7530 S16.10)");
+        assert_eq!(OP_LOCKT, 13, "LOCKT must be 13 (RFC 7530 S16.11)");
+        assert_eq!(OP_LOCKU, 14, "LOCKU must be 14 (RFC 7530 S16.12)");
+        assert_eq!(OP_LOOKUP, 15, "LOOKUP must be 15 (RFC 7530 S16.13)");
+        assert_eq!(OP_LOOKUPP, 16, "LOOKUPP must be 16 (RFC 7530 S16.14)");
+        assert_eq!(OP_NVERIFY, 17, "NVERIFY must be 17 (RFC 7530 S16.15)");
+        assert_eq!(OP_OPEN, 18, "OPEN must be 18 (RFC 7530 S16.16)");
+        assert_eq!(OP_OPENATTR, 19, "OPENATTR must be 19 (RFC 7530 S16.17)");
+        assert_eq!(OP_OPEN_CONFIRM, 20, "OPEN_CONFIRM must be 20 (RFC 7530 S16.18)");
+        assert_eq!(OP_OPEN_DOWNGRADE, 21, "OPEN_DOWNGRADE must be 21 (RFC 7530 S16.19)");
+        assert_eq!(OP_PUTFH, 22, "PUTFH must be 22 (RFC 7530 S16.20)");
+        assert_eq!(OP_PUTPUBFH, 23, "PUTPUBFH must be 23 (RFC 7530 S16.21)");
+        assert_eq!(OP_PUTROOTFH, 24, "PUTROOTFH must be 24 (RFC 7530 S16.22)");
         assert_eq!(OP_READ, 25, "READ must be 25 (RFC 7530 S16.23)");
+        assert_eq!(OP_READDIR, 26, "READDIR must be 26 (RFC 7530 S16.24)");
+        assert_eq!(OP_READLINK, 27, "READLINK must be 27 (RFC 7530 S16.25)");
+        assert_eq!(OP_REMOVE, 28, "REMOVE must be 28 (RFC 7530 S16.26)");
+        assert_eq!(OP_RENAME, 29, "RENAME must be 29 (RFC 7530 S16.27)");
+        assert_eq!(OP_RENEW, 30, "RENEW must be 30 (RFC 7530 S16.28)");
+        assert_eq!(OP_RESTOREFH, 31, "RESTOREFH must be 31 (RFC 7530 S16.29)");
+        assert_eq!(OP_SAVEFH, 32, "SAVEFH must be 32 (RFC 7530 S16.30)");
+        assert_eq!(OP_SECINFO, 33, "SECINFO must be 33 (RFC 7530 S16.31)");
+        assert_eq!(OP_SETATTR, 34, "SETATTR must be 34 (RFC 7530 S16.32)");
+        assert_eq!(OP_SETCLIENTID, 35, "SETCLIENTID must be 35 (RFC 7530 S16.33)");
+        assert_eq!(OP_SETCLIENTID_CONFIRM, 36, "SETCLIENTID_CONFIRM must be 36 (RFC 7530 S16.34)");
+        assert_eq!(OP_VERIFY, 37, "VERIFY must be 37 (RFC 7530 S16.35)");
+        assert_eq!(OP_WRITE, 38, "WRITE must be 38 (RFC 7530 S16.36)");
+        assert_eq!(OP_RELEASE_LOCKOWNER, 39, "RELEASE_LOCKOWNER must be 39 (RFC 7530 S16.37)");
+        assert_eq!(OP_ILLEGAL, 10044, "ILLEGAL must be 10044 (RFC 7530 S16.38)");
     }
 
     // --- Program/version constants ---
@@ -1440,20 +2303,64 @@ mod tests {
     fn packed_size_matches_actual_pack_for_all_ops() {
         // Every ArgOp variant's packed_size() must exactly match the bytes pack() writes.
         let ops: Vec<ArgOp> = vec![
+            // No-argument ops
             ArgOp::Putpubfh,
             ArgOp::Putrootfh,
             ArgOp::Getfh,
+            ArgOp::Lookupp,
+            ArgOp::Readlink,
+            ArgOp::Restorefh,
+            ArgOp::Savefh,
+            ArgOp::Illegal,
+            // Opaque FH
             ArgOp::Putfh(vec![0x01, 0x02, 0x03]),
             ArgOp::Putfh(vec![0x01, 0x02, 0x03, 0x04]),
+            // String-argument ops
             ArgOp::Lookup("passwd".to_owned()),
             ArgOp::Lookup("a".to_owned()),
             ArgOp::Secinfo("exports".to_owned()),
+            ArgOp::Remove { target: "old".to_owned() },
+            ArgOp::Link { newname: "newlink".to_owned() },
+            ArgOp::Rename { oldname: "src".to_owned(), newname: "dst".to_owned() },
+            // Bitmap
             ArgOp::Getattr(AttrRequest::empty()),
             ArgOp::Getattr(AttrRequest::fsid_only()),
+            // Read / Readdir
             ArgOp::Read { stateid: [0u8; 16], offset: 0, count: 1024 },
             ArgOp::Read { stateid: [0xFF; 16], offset: u64::MAX, count: u32::MAX },
             ArgOp::Readdir { cookie: 0, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() },
+            // Typed struct ops
+            ArgOp::Access { access: 0x3F },
+            ArgOp::Close { seqid: 1, stateid: [0xAA; 16] },
+            ArgOp::Commit { offset: 0, count: 0 },
+            ArgOp::Delegpurge { clientid: 42 },
+            ArgOp::Delegreturn { stateid: [0xBB; 16] },
+            ArgOp::Openattr { createdir: true },
+            ArgOp::Openattr { createdir: false },
+            ArgOp::OpenConfirm { stateid: [0xCC; 16], seqid: 2 },
+            ArgOp::OpenDowngrade { stateid: [0xDD; 16], seqid: 3, share_access: 1, share_deny: 0 },
+            ArgOp::Renew { clientid: 99 },
+            ArgOp::SetclientidConfirm { clientid: 100, verifier: [0xEE; 8] },
+            ArgOp::Write { stateid: [0u8; 16], offset: 4096, stable: 2, data: vec![0x41; 5] },
+            ArgOp::Write { stateid: [0u8; 16], offset: 0, stable: 0, data: vec![] },
+            // Opaque-payload ops (pre-encoded bodies)
+            ArgOp::Create(vec![0u8; 20]),
+            ArgOp::Lock(vec![0u8; 40]),
+            ArgOp::Lockt(vec![0u8; 28]),
+            ArgOp::Locku(vec![0u8; 36]),
+            ArgOp::Nverify(vec![0u8; 12]),
+            ArgOp::Open(vec![0u8; 60]),
+            ArgOp::Setattr(vec![0u8; 32]),
+            ArgOp::Setclientid(vec![0u8; 48]),
+            ArgOp::Verify(vec![0u8; 12]),
+            ArgOp::ReleaseLockowner(vec![0u8; 16]),
         ];
+        #[cfg(feature = "v41")]
+        let ops = {
+            let mut v = ops;
+            v.extend([ArgOp::ExchangeId(vec![0u8; 32]), ArgOp::Getdeviceinfo(vec![0u8; 28]), ArgOp::Getdevicelist(vec![0u8; 24]), ArgOp::SecinfoNoName { style: 0 }, ArgOp::SecinfoNoName { style: 1 }]);
+            v
+        };
         for op in &ops {
             let predicted = op.packed_size();
             let mut buf = Vec::new();
@@ -1662,5 +2569,431 @@ mod tests {
         assert_eq!(res.results[0].status, 0);
         assert_eq!(res.results[1].op_code, 15); // LOOKUP
         assert_eq!(res.results[1].status, 2); // NOENT
+    }
+
+    // =========================================================================
+    // New operation encoding tests (RFC 7530 S16)
+    // =========================================================================
+
+    #[test]
+    fn argop_access_encodes_opcode_3_and_mask() {
+        let op = ArgOp::Access { access: 0x3F };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 8);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 3);
+        assert_eq!(u32::from_be_bytes(buf[4..8].try_into().unwrap()), 0x3F);
+    }
+
+    #[test]
+    fn argop_close_encodes_seqid_and_stateid() {
+        let op = ArgOp::Close { seqid: 7, stateid: [0xAA; 16] };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 24);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 4);
+        assert_eq!(u32::from_be_bytes(buf[4..8].try_into().unwrap()), 7);
+        assert_eq!(&buf[8..24], &[0xAA; 16]);
+    }
+
+    #[test]
+    fn argop_commit_encodes_offset_and_count() {
+        let op = ArgOp::Commit { offset: 4096, count: 8192 };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 16);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 5);
+        assert_eq!(u64::from_be_bytes(buf[4..12].try_into().unwrap()), 4096);
+        assert_eq!(u32::from_be_bytes(buf[12..16].try_into().unwrap()), 8192);
+    }
+
+    #[test]
+    fn argop_delegpurge_encodes_clientid() {
+        let op = ArgOp::Delegpurge { clientid: 42 };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 12);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 7);
+        assert_eq!(u64::from_be_bytes(buf[4..12].try_into().unwrap()), 42);
+    }
+
+    #[test]
+    fn argop_delegreturn_encodes_stateid() {
+        let op = ArgOp::Delegreturn { stateid: [0xBB; 16] };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 20);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 8);
+        assert_eq!(&buf[4..20], &[0xBB; 16]);
+    }
+
+    #[test]
+    fn argop_link_encodes_newname() {
+        let op = ArgOp::Link { newname: "link".to_owned() };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        // 4 (opcode) + 4 (string len) + 4 ("link" = 4 bytes, no padding)
+        assert_eq!(n, 12);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 11);
+    }
+
+    #[test]
+    fn argop_lookupp_encodes_opcode_16() {
+        let mut buf = Vec::new();
+        let n = ArgOp::Lookupp.pack(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 16);
+    }
+
+    #[test]
+    fn argop_readlink_encodes_opcode_27() {
+        let mut buf = Vec::new();
+        let n = ArgOp::Readlink.pack(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 27);
+    }
+
+    #[test]
+    fn argop_remove_encodes_target_name() {
+        let op = ArgOp::Remove { target: "old".to_owned() };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 12);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 28);
+    }
+
+    #[test]
+    fn argop_rename_encodes_both_names() {
+        let op = ArgOp::Rename { oldname: "src".to_owned(), newname: "dst".to_owned() };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        // 4 (opcode) + 4+4 (src/3+pad) + 4+4 (dst/3+pad)
+        assert_eq!(n, 20);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 29);
+    }
+
+    #[test]
+    fn argop_renew_encodes_clientid() {
+        let op = ArgOp::Renew { clientid: 99 };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 12);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 30);
+    }
+
+    #[test]
+    fn argop_restorefh_encodes_opcode_31() {
+        let mut buf = Vec::new();
+        let n = ArgOp::Restorefh.pack(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 31);
+    }
+
+    #[test]
+    fn argop_savefh_encodes_opcode_32() {
+        let mut buf = Vec::new();
+        let n = ArgOp::Savefh.pack(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 32);
+    }
+
+    #[test]
+    fn argop_openattr_encodes_createdir_bool() {
+        let op = ArgOp::Openattr { createdir: true };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 8);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 19);
+        assert_eq!(u32::from_be_bytes(buf[4..8].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn argop_open_confirm_encodes_stateid_seqid() {
+        let op = ArgOp::OpenConfirm { stateid: [0xCC; 16], seqid: 2 };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 24);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 20);
+        assert_eq!(&buf[4..20], &[0xCC; 16]);
+        assert_eq!(u32::from_be_bytes(buf[20..24].try_into().unwrap()), 2);
+    }
+
+    #[test]
+    fn argop_open_downgrade_encodes_all_fields() {
+        let op = ArgOp::OpenDowngrade { stateid: [0xDD; 16], seqid: 3, share_access: 1, share_deny: 0 };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 32);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 21);
+    }
+
+    #[test]
+    fn argop_setclientid_confirm_encodes_clientid_verifier() {
+        let op = ArgOp::SetclientidConfirm { clientid: 100, verifier: [0xEE; 8] };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 20);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 36);
+        assert_eq!(u64::from_be_bytes(buf[4..12].try_into().unwrap()), 100);
+        assert_eq!(&buf[12..20], &[0xEE; 8]);
+    }
+
+    #[test]
+    fn argop_write_encodes_stateid_offset_stable_data() {
+        let data = vec![0x41, 0x42, 0x43]; // 3 bytes -> needs 1 pad
+        let op = ArgOp::Write { stateid: [0u8; 16], offset: 256, stable: 2, data };
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        // 4 (opcode) + 16 (stateid) + 8 (offset) + 4 (stable) + 4 (data len) + 4 (3 bytes + 1 pad)
+        assert_eq!(n, 40);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 38);
+    }
+
+    #[test]
+    fn argop_illegal_encodes_opcode_10044() {
+        let mut buf = Vec::new();
+        let n = ArgOp::Illegal.pack(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 10044);
+    }
+
+    #[test]
+    fn argop_opaque_payload_create_encodes_opcode_then_payload() {
+        let payload = vec![0xDE, 0xAD];
+        let op = ArgOp::Create(payload.clone());
+        let mut buf = Vec::new();
+        let n = op.pack(&mut buf).unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(u32::from_be_bytes(buf[0..4].try_into().unwrap()), 6);
+        assert_eq!(&buf[4..6], &payload);
+    }
+
+    // --- Response decoding for new ops ---
+
+    #[test]
+    fn compound_res_unpacks_access_result() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_ACCESS.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        0x3Fu32.pack(&mut wire).unwrap(); // supported
+        0x21u32.pack(&mut wire).unwrap(); // access
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        match &res.results[0].data {
+            ResOpData::Access { supported, access } => {
+                assert_eq!(*supported, 0x3F);
+                assert_eq!(*access, 0x21);
+            },
+            other => panic!("expected ResOpData::Access, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_res_unpacks_readlink_result() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_READLINK.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        onc_xdr::pack_string("/target/path", &mut wire).unwrap();
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        match &res.results[0].data {
+            ResOpData::Readlink(link) => assert_eq!(link, "/target/path"),
+            other => panic!("expected ResOpData::Readlink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_res_unpacks_commit_verifier() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_COMMIT.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        wire.extend_from_slice(&[0xAA; 8]); // writeverf
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        match &res.results[0].data {
+            ResOpData::CommitVerf(verf) => assert_eq!(verf, &[0xAA; 8]),
+            other => panic!("expected ResOpData::CommitVerf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_res_unpacks_write_result() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_WRITE.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        100u32.pack(&mut wire).unwrap(); // count
+        2u32.pack(&mut wire).unwrap(); // committed = FILE_SYNC4
+        wire.extend_from_slice(&[0xBB; 8]); // writeverf
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        match &res.results[0].data {
+            ResOpData::WriteRes { count, committed, writeverf } => {
+                assert_eq!(*count, 100);
+                assert_eq!(*committed, 2);
+                assert_eq!(writeverf, &[0xBB; 8]);
+            },
+            other => panic!("expected ResOpData::WriteRes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_res_unpacks_lookupp_ok() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_LOOKUPP.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        assert_eq!(res.results[0].op_code, OP_LOOKUPP);
+        assert!(matches!(res.results[0].data, ResOpData::None));
+    }
+
+    #[test]
+    fn compound_res_unpacks_remove_with_change_info() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_REMOVE.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        // change_info4: atomic=true, before=1, after=2
+        1u32.pack(&mut wire).unwrap();
+        1u64.pack(&mut wire).unwrap();
+        2u64.pack(&mut wire).unwrap();
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        assert_eq!(res.results[0].op_code, OP_REMOVE);
+        assert!(matches!(res.results[0].data, ResOpData::None));
+    }
+
+    #[test]
+    fn compound_res_unpacks_rename_with_two_change_infos() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_RENAME.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        // source change_info4
+        0u32.pack(&mut wire).unwrap();
+        10u64.pack(&mut wire).unwrap();
+        11u64.pack(&mut wire).unwrap();
+        // target change_info4
+        1u32.pack(&mut wire).unwrap();
+        20u64.pack(&mut wire).unwrap();
+        21u64.pack(&mut wire).unwrap();
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        assert_eq!(res.results[0].op_code, OP_RENAME);
+        assert!(matches!(res.results[0].data, ResOpData::None));
+    }
+
+    #[test]
+    fn compound_res_unpacks_close_stateid() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_CLOSE.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        wire.extend_from_slice(&[0xFF; 16]); // stateid4
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        assert_eq!(res.results[0].op_code, OP_CLOSE);
+        assert!(matches!(res.results[0].data, ResOpData::None));
+    }
+
+    #[test]
+    fn compound_res_unpacks_setattr_bitmap() {
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        1u32.pack(&mut wire).unwrap();
+        OP_SETATTR.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap(); // status OK
+        // attrsset bitmap: 2 words
+        2u32.pack(&mut wire).unwrap();
+        (1u32 << 8).pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap();
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        assert_eq!(res.results[0].op_code, OP_SETATTR);
+        assert!(matches!(res.results[0].data, ResOpData::None));
+    }
+
+    #[test]
+    fn compound_res_unpacks_no_data_ops() {
+        // RESTOREFH, SAVEFH, DELEGPURGE, DELEGRETURN, OPENATTR, RENEW,
+        // NVERIFY, VERIFY, RELEASE_LOCKOWNER, ILLEGAL all have no result data.
+        let no_data_ops = [OP_RESTOREFH, OP_SAVEFH, OP_DELEGPURGE, OP_DELEGRETURN, OP_OPENATTR, OP_RENEW, OP_NVERIFY, OP_VERIFY, OP_RELEASE_LOCKOWNER, OP_ILLEGAL];
+        for &op in &no_data_ops {
+            let mut wire = Vec::new();
+            0u32.pack(&mut wire).unwrap();
+            onc_xdr::pack_string("", &mut wire).unwrap();
+            1u32.pack(&mut wire).unwrap();
+            op.pack(&mut wire).unwrap();
+            0u32.pack(&mut wire).unwrap(); // status OK
+            let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+            assert_eq!(res.results.len(), 1, "op {op}: expected 1 result");
+            assert_eq!(res.results[0].op_code, op);
+            assert!(matches!(res.results[0].data, ResOpData::None), "op {op}: expected ResOpData::None");
+        }
+    }
+
+    #[test]
+    fn compound_res_multi_op_with_new_ops() {
+        // PUTROOTFH + LOOKUPP + ACCESS + READLINK + SAVEFH + GETFH
+        let mut wire = Vec::new();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("", &mut wire).unwrap();
+        6u32.pack(&mut wire).unwrap(); // 6 results
+        // PUTROOTFH OK
+        OP_PUTROOTFH.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap();
+        // LOOKUPP OK
+        OP_LOOKUPP.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap();
+        // ACCESS OK: supported=0x3F, access=0x01
+        OP_ACCESS.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap();
+        0x3Fu32.pack(&mut wire).unwrap();
+        0x01u32.pack(&mut wire).unwrap();
+        // READLINK OK: "/etc"
+        OP_READLINK.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap();
+        onc_xdr::pack_string("/etc", &mut wire).unwrap();
+        // SAVEFH OK
+        OP_SAVEFH.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap();
+        // GETFH OK + handle
+        OP_GETFH.pack(&mut wire).unwrap();
+        0u32.pack(&mut wire).unwrap();
+        pack_opaque(&[0xCA, 0xFE], &mut wire).unwrap();
+
+        let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
+        assert_eq!(res.results.len(), 6);
+        assert!(matches!(res.results[0].data, ResOpData::None)); // PUTROOTFH
+        assert!(matches!(res.results[1].data, ResOpData::None)); // LOOKUPP
+        match &res.results[2].data {
+            ResOpData::Access { supported, access } => {
+                assert_eq!(*supported, 0x3F);
+                assert_eq!(*access, 0x01);
+            },
+            other => panic!("expected Access, got {other:?}"),
+        }
+        match &res.results[3].data {
+            ResOpData::Readlink(link) => assert_eq!(link, "/etc"),
+            other => panic!("expected Readlink, got {other:?}"),
+        }
+        assert!(matches!(res.results[4].data, ResOpData::None)); // SAVEFH
+        match &res.results[5].data {
+            ResOpData::Fh(fh) => assert_eq!(fh.as_slice(), &[0xCA, 0xFE]),
+            other => panic!("expected Fh, got {other:?}"),
+        }
     }
 }

@@ -488,6 +488,11 @@ fn print_host_details(results: &[HostResult]) {
         // RPC services from portmapper DUMP (labelled with program names).
         print_rpc_services(r);
 
+        // RDMA transport advisory.
+        if r.rdma_detected {
+            println!("  {} RDMA transport available -- may bypass host firewalls", "[!]".bold().yellow());
+        }
+
         // Export list deduplication and display.
         print_exports(r);
 
@@ -682,6 +687,7 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
             "directory": c.directory,
         })).collect::<Vec<_>>()),
         "mounts_available": r.mounts.is_some(),
+        "rdma_detected": r.rdma_detected,
         "hint": r.hint.as_ref().map(ToString::to_string),
         "scan_duration_ms": u64::try_from(r.scan_duration.as_millis()).unwrap_or(u64::MAX),
     })
