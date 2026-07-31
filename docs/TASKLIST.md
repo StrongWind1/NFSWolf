@@ -18,7 +18,7 @@ Code changes in `src/` that fix parity gaps, error handling, and proxy bypasses.
 ### SOCKS5 proxy bypasses (ref: [SOCKS5 proxy](CRATE-DESIGN.md#socks5-proxy))
 
 - [x] **WebNFS public-handle check: use proxy.** Remove underscore prefix from `_proxy` parameter in `check_webnfs_public_handle` (`src/engine/analyzer.rs`), add `socks5_connect` branch for both the v3 and v2 WebNFS probes. Silent IP leak.
-- [ ] *V2 shell / escape / brute-handle proxy bypasses are fixed by the NFSv2 parity items above.*
+- [x] *V2 shell / escape / brute-handle proxy bypasses are fixed by the NFSv2 parity items above.*
 
 ### NFSv4 parity (ref: [NFSv2 parity — NFSv4 parity](CRATE-DESIGN.md#nfsv4-parity))
 
@@ -28,10 +28,10 @@ Code changes in `src/` that fix parity gaps, error handling, and proxy bypasses.
 
 - [x] **Fix `src/proto/auth.rs` DRC comment.** The comment says fresh stamps avoid DRC collisions. Verified against Linux 7.1.5: the kernel DRC keys on `xid + proc + addr + version + arg_len + checksum` — stamp is not in the key. The behavior (fresh stamps per encode) is fine to keep, but the stated reason is wrong. XID uniqueness is what matters; NFSWolf already uses `fastrand` for XID generation.
 - [x] **Owner override in credential ladder.** `nfsd_permission()` grants owner access regardless of mode bits (verified: `NFSD_MAY_OWNER_OVERRIDE` in `fs/nfsd/vfs.c`). `credential_ladder()` in `src/engine/credential.rs` always includes the file's owner UID unconditionally. Added C702 sec. 12.3.3 citation.
-- [ ] **Execute-implies-read in secrets-scan and analyzer.** `nfsd_permission()` allows READ on execute-only files for any user with execute permission (verified: falls back to `MAY_EXEC` check). Files with mode 0111 are readable via NFS. `secrets-scan` should try reading execute-only files. The analyzer should report this as a finding when detected.
-- [ ] **Metadata leak on NFS3ERR_ACCES.** Linux encodes `post_op_attr`/`wcc_data` on error paths (verified: `fs/nfsd/nfs3xdr.c`). Access-denied responses carry file size, mtime, uid, gid. The analyzer should drop to the wire layer for denied operations and harvest attributes from the failure arm — file metadata without file access. This is what CRATE-DESIGN.md's two-layer convention was designed for.
-- [ ] **WebNFS public handle probe in escape subcommand.** Try the all-zero 32-byte v2 handle and the zero-length v3 handle with multi-component LOOKUP path traversal (`../../../etc/passwd`). If the server returns a handle, filesystem access bypasses MOUNT. One LOOKUP call using existing `Nfs2Client`/`Nfs3Client`. Try this before the existing `FileHandleAnalyzer` escape. See [FUTURE-RESEARCH.md — WebNFS](FUTURE-RESEARCH.md#webnfs--filesystem-access-bypassing-mount).
-- [ ] **Null-string filename fingerprinting.** C702 says a null-string filename must return `NFS3ERR_ACCES`. Linux 7.1.5 knfsd rejects it at XDR decode with RPC-level `GARBAGE_ARGS` instead. Send a LOOKUP with a zero-length filename and classify the response: `NFS3ERR_ACCES` = spec-conformant implementation (likely Solaris/NetApp/FreeBSD), `GARBAGE_ARGS` = Linux knfsd, other = unknown. Cheap, unauthenticated server-implementation fingerprint. Add to the scanner/analyzer.
+- [x] **Execute-implies-read in secrets-scan and analyzer.** `nfsd_permission()` allows READ on execute-only files for any user with execute permission (verified: falls back to `MAY_EXEC` check). Files with mode 0111 are readable via NFS. `secrets-scan` now tries reading execute-only files. The analyzer reports when execute-only files are readable.
+- [x] **Metadata leak on NFS3ERR_ACCES.** Linux encodes `post_op_attr`/`wcc_data` on error paths (verified: `fs/nfsd/nfs3xdr.c`). Access-denied responses carry file size, mtime, uid, gid. The analyzer now harvests post_op_attr from denied operations and reports uid/gid/size/mtime on access denial.
+- [x] **WebNFS public handle probe in escape subcommand.** try_webnfs_escape attempts the all-zero 32-byte v2 handle and the zero-length v3 handle with multi-component LOOKUP path traversal before falling back to handle forging. One LOOKUP call using existing `Nfs2Client`/`Nfs3Client`.
+- [x] **Null-string filename fingerprinting.** Scanner sends LOOKUP with zero-length filename and classifies: NFS3ERR_ACCES = spec-conformant (Solaris/NetApp/FreeBSD), GARBAGE_ARGS = Linux knfsd, other = unknown. Added to scanner output.
 
 ### Error handling (ref: [Error taxonomy — current state vs. target](CRATE-DESIGN.md#current-state-vs-target))
 
@@ -49,23 +49,23 @@ Close the coverage gaps in the tier 1 crates. These are the floor under everythi
 
 ### Portmapper completion (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target))
 
-- [ ] **Implement `PMAPPROC_SET` (procedure 1).** Register an RPC service with the portmapper.
-- [ ] **Implement `PMAPPROC_UNSET` (procedure 2).** Unregister an RPC service.
-- [ ] **Implement `PMAPPROC_CALLIT` (procedure 5).** The amplification primitive behind `docs/findings/F-3.2-portmapper-amplification.md`. The tool reports this finding but currently cannot demonstrate it.
+- [x] **Implement `PMAPPROC_SET` (procedure 1).** Register an RPC service with the portmapper.
+- [x] **Implement `PMAPPROC_UNSET` (procedure 2).** Unregister an RPC service.
+- [x] **Implement `PMAPPROC_CALLIT` (procedure 5).** The amplification primitive behind `docs/findings/F-3.2-portmapper-amplification.md`.
 
 ### Program-number → name table (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target))
 
-- [ ] **Add `program_name(prog: u32) -> Option<&'static str>`.** `PortmapEntry.program` is a bare `u32`; NLM and statd registrations surface as unlabelled integers. The table belongs in the crate that owns the dump (`onc-rpcbind`).
-- [ ] **Add `known_programs() -> &'static [(u32, &'static str)]`.** Exposes the full table for scan output.
+- [x] **Add `program_name(prog: u32) -> Option<&'static str>`.** 10 well-known RPC programs. Wired into scanner and report output.
+- [x] **Add `known_programs() -> &'static [(u32, &'static str)]`.** Exposes the full table for scan output.
 
 ### Layer violations (ref: [Layer violations in the tree today](CRATE-DESIGN.md#layer-violations-in-the-tree-today))
 
-- [ ] **Absorb `src/proto/udp.rs` into `onc-rpc-client`.** 98 lines of RPC-over-UDP (RFC 1057 §10). RPC machinery, not policy. Belongs in the RPC crate beside the TCP transport.
-- [ ] **Resolve `src/proto/rpc_probe.rs`.** 266 lines of parallel RPC reply parsing defended by a stale comment (claims `RpcClient` drops `PROG_MISMATCH` range — it does not). Decide: absorb into `onc-rpc-client` as a lightweight probe transport, or delete and use `RpcClient` directly. Must be resolved before `onc-rpc-client` is published.
+- [x] **Absorb `src/proto/udp.rs` into `onc-rpc-client`.** RPC-over-UDP moved to `crates/nfswolf-rpc/src/transport/udp.rs`. `src/proto/udp.rs` now re-exports from the crate.
+- [x] **Resolve `src/proto/rpc_probe.rs`.** Deleted. RpcClient already preserves PROG_MISMATCH version ranges. Scanner migrated to use RpcClient directly. The workaround outlived the limitation it was written for.
 
 ### Derive macro tests (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [Testing](CRATE-DESIGN.md#testing))
 
-- [ ] **Add `trybuild` test suite to `nfswolf-xdr-derive`.** 484 lines of code generation, 0 unit tests, 131 derive sites. A bug in the generated `Pack` is a bug in every wire type simultaneously. Test compile-fail cases (invalid `#[xdr(...)]` attributes) and round-trip generated output.
+- [x] **Add `trybuild` test suite to `nfswolf-xdr-derive`.** 4 compile-fail test cases (missing attr, multi-field variant, named fields, union type) plus round-trip pass tests.
 
 ## Phase 2 — extract
 
