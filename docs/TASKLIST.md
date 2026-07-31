@@ -1,0 +1,168 @@
+# Crate design — task list
+
+Every outstanding work item from [CRATE-DESIGN.md](CRATE-DESIGN.md), organized by phase. Each item references the section it comes from. Phases are ordered by dependency — phase N must complete before phase N+1 starts, except where noted.
+
+## Phase 0 — binary-level fixes (no crate boundary changes)
+
+Code changes in `src/` that fix parity gaps, error handling, and proxy bypasses. These can ship as a normal release independent of any crate migration.
+
+### NFSv2 parity (ref: [NFSv2 parity](CRATE-DESIGN.md#nfsv2-parity--where-v2-and-v3-should-be-identical-but-are-not))
+
+- [x] **V2 shell: use shared helpers.** Replace raw `NfsMountClient::new()` + `PortmapClient::default_port()` + `TcpStream::connect` + `DirectTransport` in `run_nfs2_shell` (`src/cli/shell.rs`) with `make_mount_client(globals)` + `make_v2_client_with_hostname(...)`, yielding `Nfs2Client<PooledTransport>`. Remove the `--proxy not supported` and `--delay/--jitter not supported` warnings.
+- [x] **V2 shell identity change: `with_credential()`.** Replace the full reconnect path in `V2Ops::change_identity()` (`src/shell/v2.rs`) with `self.client.with_credential(cred, uid, gid)` — the same one-liner `V3Ops` uses. The reconnect path (`NfsMountClient::new()` + `TcpStream::connect` + new `DirectTransport`) disappears.
+- [x] **V2 escape: use `make_client_with_hostname`.** Replace raw `TcpStream::connect` + `DirectTransport` in `find_escape_v2` (`src/cli/escape.rs`) with the shared helper. Use `globals.hostname` instead of hardcoded `"nfswolf"`.
+- [x] **V2 brute-handle: use `make_client_with_hostname`.** Replace raw `TcpStream::connect` + `DirectTransport` in `sweep_inodes_v2` (`src/cli/brute_handle.rs`) with the shared helper. Use `globals.hostname` instead of hardcoded `"nfswolf"`.
+- [x] **`make_client_with_hostname` gains a version parameter.** Implemented as `make_v2_client_with_hostname` (separate function) with shared `make_pooled_transport` helper. Pool, circuit breaker, stealth, proxy, and credential handling are identical — only the client wrapper type differs.
+- [x] **V2: thread `--aux-gids`.** All v2 credentials now use `build_gid_list(globals.gid, &globals.aux_gids)` the same way v3 does.
+
+### SOCKS5 proxy bypasses (ref: [SOCKS5 proxy](CRATE-DESIGN.md#socks5-proxy))
+
+- [x] **WebNFS public-handle check: use proxy.** Remove underscore prefix from `_proxy` parameter in `check_webnfs_public_handle` (`src/engine/analyzer.rs`), add `socks5_connect` branch for both the v3 and v2 WebNFS probes. Silent IP leak.
+- [ ] *V2 shell / escape / brute-handle proxy bypasses are fixed by the NFSv2 parity items above.*
+
+### NFSv4 parity (ref: [NFSv2 parity — NFSv4 parity](CRATE-DESIGN.md#nfsv4-parity))
+
+- [ ] **Evaluate `Nfs4DirectClient` → `PooledTransport`.** NFSv4's `COMPOUND` is procedure 1 of program 100003 version 4 — it maps to `RpcTransport::call` directly. If `PooledTransport` is a drop-in, the reconnect path in `reconnect_with_auth`, the missing circuit breaker, and per-reconnect-only stamping all disappear.
+
+### Kernel-verified spec insights (ref: [C702 insights](FUTURE-RESEARCH.md#c702-insights-for-existing-nfs-implementation))
+
+- [x] **Fix `src/proto/auth.rs` DRC comment.** The comment says fresh stamps avoid DRC collisions. Verified against Linux 7.1.5: the kernel DRC keys on `xid + proc + addr + version + arg_len + checksum` — stamp is not in the key. The behavior (fresh stamps per encode) is fine to keep, but the stated reason is wrong. XID uniqueness is what matters; NFSWolf already uses `fastrand` for XID generation.
+- [x] **Owner override in credential ladder.** `nfsd_permission()` grants owner access regardless of mode bits (verified: `NFSD_MAY_OWNER_OVERRIDE` in `fs/nfsd/vfs.c`). `credential_ladder()` in `src/engine/credential.rs` always includes the file's owner UID unconditionally. Added C702 sec. 12.3.3 citation.
+- [ ] **Execute-implies-read in secrets-scan and analyzer.** `nfsd_permission()` allows READ on execute-only files for any user with execute permission (verified: falls back to `MAY_EXEC` check). Files with mode 0111 are readable via NFS. `secrets-scan` should try reading execute-only files. The analyzer should report this as a finding when detected.
+- [ ] **Metadata leak on NFS3ERR_ACCES.** Linux encodes `post_op_attr`/`wcc_data` on error paths (verified: `fs/nfsd/nfs3xdr.c`). Access-denied responses carry file size, mtime, uid, gid. The analyzer should drop to the wire layer for denied operations and harvest attributes from the failure arm — file metadata without file access. This is what CRATE-DESIGN.md's two-layer convention was designed for.
+- [ ] **WebNFS public handle probe in escape subcommand.** Try the all-zero 32-byte v2 handle and the zero-length v3 handle with multi-component LOOKUP path traversal (`../../../etc/passwd`). If the server returns a handle, filesystem access bypasses MOUNT. One LOOKUP call using existing `Nfs2Client`/`Nfs3Client`. Try this before the existing `FileHandleAnalyzer` escape. See [FUTURE-RESEARCH.md — WebNFS](FUTURE-RESEARCH.md#webnfs--filesystem-access-bypassing-mount).
+- [ ] **Null-string filename fingerprinting.** C702 says a null-string filename must return `NFS3ERR_ACCES`. Linux 7.1.5 knfsd rejects it at XDR decode with RPC-level `GARBAGE_ARGS` instead. Send a LOOKUP with a zero-length filename and classify the response: `NFS3ERR_ACCES` = spec-conformant implementation (likely Solaris/NetApp/FreeBSD), `GARBAGE_ARGS` = Linux knfsd, other = unknown. Cheap, unauthenticated server-implementation fingerprint. Add to the scanner/analyzer.
+
+### Error handling (ref: [Error taxonomy — current state vs. target](CRATE-DESIGN.md#current-state-vs-target))
+
+- [x] **`NfsStat` (v2): add `Unknown(u32)`.** Replace the `from_u32` mapping of unrecognised values to `Io`. Rule 3: unknowns must not lose the raw value.
+- [x] **Rename `NfsStat` → `Nfs2Stat`.** Consistency with `Nfs3Error`, `Nfs4Status`.
+- [x] **Rename `MountError::Denied` → `Status`.** Consistency with `Nfs2Error::Status`, `Nfs3Fault::Status`.
+- [x] **Remove blanket `From<E> for MountError<E>`.** Construct `MountError::Rpc(e)` explicitly. Blanket `From` lets `?` silently wrap errors the caller may have intended to inspect.
+- [x] **Drop `thiserror` from `Nfs3Error`.** Manual `Display`/`Error` impls, same as every other error type in the stack. Removes a proc-macro dependency from the protocol crate.
+- [x] **Add classification methods to `Nfs4Status`.** `is_permission_denied()`, `is_stale()`, `is_not_found()`, `is_ok()`, `is_transient()`. Implement `std::error::Error`.
+- [x] **Delete `is_permission_refusal` from `fuse.rs`.** Replace with `Nfs3Error::is_permission_denied`. The private function matches on raw `nfsstat3` wire variants and would not pick up new permission statuses added to `Nfs3Error`.
+
+## Phase 1 — foundation (library crate work)
+
+Close the coverage gaps in the tier 1 crates. These are the floor under everything — every crate above inherits their gaps. Worth doing on their own merits, independent of publishing.
+
+### Portmapper completion (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target))
+
+- [ ] **Implement `PMAPPROC_SET` (procedure 1).** Register an RPC service with the portmapper.
+- [ ] **Implement `PMAPPROC_UNSET` (procedure 2).** Unregister an RPC service.
+- [ ] **Implement `PMAPPROC_CALLIT` (procedure 5).** The amplification primitive behind `docs/findings/F-3.2-portmapper-amplification.md`. The tool reports this finding but currently cannot demonstrate it.
+
+### Program-number → name table (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target))
+
+- [ ] **Add `program_name(prog: u32) -> Option<&'static str>`.** `PortmapEntry.program` is a bare `u32`; NLM and statd registrations surface as unlabelled integers. The table belongs in the crate that owns the dump (`onc-rpcbind`).
+- [ ] **Add `known_programs() -> &'static [(u32, &'static str)]`.** Exposes the full table for scan output.
+
+### Layer violations (ref: [Layer violations in the tree today](CRATE-DESIGN.md#layer-violations-in-the-tree-today))
+
+- [ ] **Absorb `src/proto/udp.rs` into `onc-rpc-client`.** 98 lines of RPC-over-UDP (RFC 1057 §10). RPC machinery, not policy. Belongs in the RPC crate beside the TCP transport.
+- [ ] **Resolve `src/proto/rpc_probe.rs`.** 266 lines of parallel RPC reply parsing defended by a stale comment (claims `RpcClient` drops `PROG_MISMATCH` range — it does not). Decide: absorb into `onc-rpc-client` as a lightweight probe transport, or delete and use `RpcClient` directly. Must be resolved before `onc-rpc-client` is published.
+
+### Derive macro tests (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [Testing](CRATE-DESIGN.md#testing))
+
+- [ ] **Add `trybuild` test suite to `nfswolf-xdr-derive`.** 484 lines of code generation, 0 unit tests, 131 derive sites. A bug in the generated `Pack` is a bug in every wire type simultaneously. Test compile-fail cases (invalid `#[xdr(...)]` attributes) and round-trip generated output.
+
+## Phase 2 — extract
+
+Remove duplication by extracting crates that the target design calls for. Worth doing independently of publishing — phase 2 removes duplication that exists in the tree today.
+
+### `nfs-mount` extraction (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [crate 6 spec](CRATE-DESIGN.md#6-nfs-mount--rfc-1094-app-a-rfc-1813-app-i--program-100005--extract-from-nfs-v2-and-nfs-v3))
+
+- [ ] **Create `nfs-mount` crate.** MOUNT v1 lives in `nfswolf-nfs2`, MOUNT v3 in `nfswolf-nfs3`, with `PROGRAM = 100_005`, `dirpath`, and `name` declared twice. One crate, three MOUNT versions (v1, v2, v3), one `MountClient<T>` parameterised by version.
+- [ ] **Remove MOUNT code from `nfswolf-nfs2` and `nfswolf-nfs3`.** Both crates depend on `nfs-mount` instead of containing it.
+- [ ] **`MountedHandle` carries `auth_flavors`.** v3 MNT reply includes accepted auth flavours. `is_auth_sys_only()` answers the precondition every downstream finding depends on.
+
+### `onc-rpcbind` extraction (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [crate 4 spec](CRATE-DESIGN.md#4-onc-rpcbind--rfc-1833-rfc-1057-app-a--program-100000--extract-from-onc-rpc-client))
+
+- [ ] **Extract portmapper + RPCBIND from `nfswolf-rpc` into `onc-rpcbind`.** Currently modules of the RPC crate. Separate crate, depends on `onc-rpc-client`.
+
+### `Nfs2RawClient` (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [the completeness rule](CRATE-DESIGN.md#the-completeness-rule))
+
+- [ ] **Add `Nfs2RawClient<T>` to `nfs-v2`.** 22 wire types are exported with no way to send them. Violates the completeness rule. `Nfs2RawClient` takes wire types in and returns wire types out, mirroring `Nfs3Client`'s role in `nfs-v3`. The version of the protocol with no security negotiation at all (RFC 2623 §2.7) is the one most worth sending deliberate garbage at.
+
+## Phase 3 — prepare for publication
+
+Renaming, metadata, testing, and semver preparation. Everything in this phase must happen *before* the first `cargo publish` — crates.io names are permanent.
+
+### Rename (ref: [Crate inventory](CRATE-DESIGN.md#crate-inventory))
+
+- [ ] **Rename `nfswolf-xdr-derive` → `onc-xdr-derive`.**
+- [ ] **Rename `nfswolf-xdr` → `onc-xdr`.**
+- [ ] **Rename `nfswolf-rpc` → `onc-rpc-client`.**
+- [ ] **Rename `nfswolf-nfs2` → `nfs-v2`.**
+- [ ] **Rename `nfswolf-nfs3` → `nfs-v3`.**
+- [ ] **Rename `nfswolf-nfs4` → `nfs-v4`.**
+- [ ] **Update all `use`, `Cargo.toml` dependencies, and derive macro paths** (`::onc_xdr::` instead of `::nfswolf_xdr::`).
+
+### Metadata (ref: [docs.rs metadata](CRATE-DESIGN.md#docsrs-metadata))
+
+- [ ] **Add `keywords` and `categories` to all sub-crate `Cargo.toml` files.** Currently missing on all six. This is what makes a crate findable on crates.io.
+- [ ] **Add `[package.metadata.docs.rs]` block to all sub-crates.** `all-features = true` + `rustdoc-args = ["--cfg", "docsrs"]`.
+
+### Semver preparation (ref: [`#[non_exhaustive]` policy](CRATE-DESIGN.md#non_exhaustive-policy), [Versioning](CRATE-DESIGN.md#versioning-independent-not-lockstep))
+
+- [ ] **Add `#[non_exhaustive]` to every public enum.** `RpcError`, `Nfs3Error`, `Nfs4Status`, `AuthFlavor`, `auth_stat`, `Nfs2Stat`, `Nfs2FileType`, `nfsstat3`, `ftype3`, `mountstat3`, `ArgOp`, `ResOpData`, `Attr`, `PortmapError`, `MountError`, `Nfs2Error`, `Nfs3Fault`, `onc_xdr::Error`, `FileType`, `accept_stat`, `reject_stat`, `msg_type`, `reply_stat`. Must happen before first `cargo publish` — adding a variant to an exhaustive published enum is a semver-breaking change.
+- [ ] **Switch to independent versioning per crate.** Stop `version.workspace = true`. Each crate gets its own version, bumped only when it changes. `onc-xdr` should not emit releases because NFSv4 gained operations.
+- [ ] **Pre-1.0 README notice on every published crate.** Each crate's README states explicitly that the API is `0.x` and may change — cargo treats every minor bump as permitted-breaking, and the README says so in as many words rather than leaving it implied.
+
+### Testing and CI (ref: [Testing](CRATE-DESIGN.md#testing), [Feature matrix](CRATE-DESIGN.md#feature-matrix), [MSRV](CRATE-DESIGN.md#msrv))
+
+- [ ] **Golden-vector tests for every protocol crate.** Bytes captured from a real server, decoded and compared against expected structures. The only test that catches a codec that is self-consistently wrong (encode and decode wrong in the same direction). Round-trip tests do not catch this.
+- [ ] **`cargo hack --feature-powerset --no-dev-deps check` CI job.** Runs for every crate. Fourteen crates with unverified feature combinations is fourteen ways to ship something that does not compile.
+- [ ] **MSRV verification CI job.** A dedicated job that builds against the declared `rust-version` floor. An MSRV nothing checks drifts upward silently the first time someone uses a newer standard-library method.
+
+### Pre-publish preconditions (ref: [Migration — Phase 4](CRATE-DESIGN.md#migration), [Name availability](CRATE-DESIGN.md#name-availability))
+
+- [ ] **Re-check crates.io name availability.** Names are unreserved. `onc-rpc` was already taken by someone else. Re-run the check immediately before publishing.
+- [ ] **Evaluate the existing `onc-rpc` crate as a dependency.** v0.3.3, "types and fast serialisation." If it covers the transport seam, credential substitution, and `PROG_MISMATCH` range preservation, adopting it removes two crates from this design. This evaluation is a precondition, not a conclusion.
+- [ ] **Confirm `src/proto/rpc_probe.rs` is resolved.** Cannot publish `onc-rpc-client` while the binary carries 266 lines of parallel RPC parsing.
+
+## Phase 4 — publish 8 crates
+
+The irreversible step. `yank` hides a version, never releases a name.
+
+- [ ] **Publish `onc-xdr-derive`.** Proc-macro, no dependencies.
+- [ ] **Publish `onc-xdr`.** Depends on `onc-xdr-derive`.
+- [ ] **Publish `onc-rpc-client`.** Depends on `onc-xdr`.
+- [ ] **Publish `onc-rpcbind`.** Depends on `onc-rpc-client`.
+- [ ] **Publish `nfs-mount`.** Depends on `onc-rpc-client`.
+- [ ] **Publish `nfs-v2`.** Depends on `onc-xdr`, `onc-rpc-client`.
+- [ ] **Publish `nfs-v3`.** Depends on `onc-xdr`, `onc-rpc-client`.
+- [ ] **Publish `nfs-v4`.** Depends on `onc-xdr`.
+- [ ] **Update `nfswolf` to depend on published crates.** Replace `path` dependencies with crates.io versions. Removes `--git` install.
+
+## Phase 5 — NFSv4 recon operations and cherry-picked high-value ops
+
+Operations across v4.0, v4.1, and v4.2 that return actionable recon information. The v4.1 operations (`EXCHANGE_ID`, `SECINFO_NO_NAME`, `GETDEVICEINFO`, `GETDEVICELIST`) need the `v41` feature on `nfs-v4`. `SETCLIENTID` and `OPEN` are v4.0. `FATTR4_SEC_LABEL` is v4.2.
+
+(ref: [Scope boundaries — operations worth cherry-picking](CRATE-DESIGN.md#operations-worth-cherry-picking-from-excluded-protocols))
+
+- [ ] **`EXCHANGE_ID` (op 42, v4.1, RFC 8881 §18.35).** `eir_server_impl_id` carries implementor DNS domain, product name, and build date. Unauthenticated vendor and version fingerprinting, better than any banner.
+- [ ] **`SECINFO_NO_NAME` (op 52, v4.1, RFC 8881 §18.45).** Security flavours for the current filehandle without needing a filename. Strictly better than v4.0's `SECINFO`.
+- [ ] **`GETDEVICEINFO` (op 47, v4.1, RFC 8881 §18.40).** pNFS device addressing — data-server IP addresses, per-mirror servers under flex files (RFC 8435).
+- [ ] **`GETDEVICELIST` (op 48, v4.1, RFC 8881 §18.41).** Enumerates every storage device behind the filesystem. Maps the backend storage network from a client position — lateral-movement reconnaissance.
+- [ ] **`SETCLIENTID` (op 35, v4.0, RFC 7530 §16.33).** Takes a callback address the client chooses and the server dials back. Outbound-connection coercion primitive from an unauthenticated position.
+- [ ] **`OPEN` (op 18, v4.0, RFC 7530 §16.16).** The honest write test. `ACCESS` is advisory and reports what the server believes; `OPEN` reports what it will actually permit.
+- [ ] **`FATTR4_SEC_LABEL` (attr 80, v4.2, RFC 7862 §12.2.4).** The MAC label as an attribute read — the server's SELinux policy and enforcement mode. Feeds `docs/findings/F-4.5-selinux-label-bypass.md`.
+- [ ] **Public filehandle + multi-component LOOKUP.** `PUTPUBFH` is already implemented. The v2/v3 public handles and multi-component lookup (RFC 2054 §5, §6) are not — a path-traversal primitive: a single lookup carrying a whole path against a well-known handle, bypassing per-component checks on implementations that mishandle it.
+- [ ] **RDMA presence detection.** No implementation needed — an rpcbind `GETADDR` with netid `rdma`/`rdma6`, or port 20049. Worth reporting because RDMA commonly bypasses host firewalls and has weaker access control than the TCP path.
+- [ ] **Wire remaining v4.0 operations (28 of 37 missing).** `ArgOp` currently has 9 operations. The full v4.0 set is 37 (RFC 7530). Every operation should be representable even if not driven.
+
+## Tier 3 — deferred (sideband protocols)
+
+Not built, not published, not on the critical path. Each arrives as a module inside `nfswolf` first and is promoted to a crate only if something outside the tool wants it. Full security analysis, wire types, attack chains, and implementation notes are in [FUTURE-RESEARCH.md](FUTURE-RESEARCH.md).
+
+- [x] **Obtain X/Open CAE Specification C702.** Available at `ref/xopen-c702.pdf` (352 pages). HTML at `ref/pubs.opengroup.org/onlinepubs/009629799/`.
+- [ ] **`nfs-nlm` (program 100021).** Lock manipulation → write access, holder enumeration, `NLM_FREE_ALL` bulk lock release. C702 ch. 10/14.
+- [ ] **`nfs-nsm` (program 100024).** Callback coercion (`SM_MON`), lock release via spoofed reboot (`SM_NOTIFY`). C702 ch. 11.
+- [ ] **`nfs-rquota` (program 100011).** UID enumeration via quota oracle. Sun `rquota.x`.
+- [ ] **`nfs-acl` (program 100227).** Permission bypass beyond mode bits. No public spec.
+- [ ] **`nfs-nis` (program 100004/100007).** Credential store dump (`YPPROC_ALL`). Sun `yp.x`.
+- [ ] **`onc-rpcsec-gss` (RFC 2203, 5403, 7861).** Auth negotiation recon. Separate crate to avoid pulling Kerberos into `onc-rpc-client`.
+- [ ] **WebNFS public handle probe.** Filesystem access bypassing MOUNT. Uses existing NFS clients — no new crate needed. See FUTURE-RESEARCH.md.
+- [ ] **PCNFSD detection (program 150001).** Password oracle (`PCNFSD_AUTH`) and code execution (`PR_START`). Detection via portmapper DUMP. D030 spec.
