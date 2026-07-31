@@ -15,6 +15,7 @@ Spec reference: X/Open CAE C702 "XNFS, Version 3W" is at `ref/xopen-c702.pdf` (3
 - [NFS_ACL — permission bypass beyond mode bits](#nfs_acl--permission-bypass-beyond-mode-bits)
 - [RPCSEC_GSS — auth negotiation recon](#rpcsec_gss--auth-negotiation-recon)
 - [C702 insights for existing NFS implementation](#c702-insights-for-existing-nfs-implementation) — permission model quirks, DRC, write verifier oracle, portmapper CALLIT, external citations
+- [Cross-protocol attack chains](#cross-protocol-attack-chains) — multi-protocol sequences combining sideband RPC programs with NFS for compound exploitation
 - [Crate inventory](#crate-inventory)
 - [Detection without implementation](#detection-without-implementation)
 
@@ -45,6 +46,117 @@ Spec reference: X/Open CAE C702 "XNFS, Version 3W" is at `ref/xopen-c702.pdf` (3
 **NFSWolf integration:** Fits into the `escape` subcommand as a first-try before handle forging. Cheaper than `FileHandleAnalyzer` — no filesystem fingerprinting, no inode guessing, one RPC call. Fall back to the existing ext4/xfs/btrfs escape if the server rejects the public handle. `Nfs2Client` and `Nfs3Client` already have LOOKUP — the only new thing is constructing the public handle constant.
 
 **What NFSWolf has today:** `PUTPUBFH` for NFSv4 (already in `crates/nfswolf-nfs4/src/wire.rs`). No v2/v3 public handle probe. The `check_webnfs_public_handle` function in `src/engine/analyzer.rs` exists but has a proxy bypass bug (documented in CRATE-DESIGN.md's SOCKS5 section).
+
+### Wire format (C702 Appendix E, pp 307-316; RFC 2054/2055)
+
+WebNFS does not define new RPC procedures or a new program number. It extends the existing NFSv2 and NFSv3 LOOKUP procedures with two mechanisms: (1) well-known public filehandle constants that replace the MOUNT protocol's role of providing an initial handle, and (2) multi-component path encoding in the LOOKUP filename argument when that argument is directed at the public filehandle. Everything runs over the standard NFS program (100003) on port 2049 (C702 ssE.3, p. 307).
+
+**Transport (C702 ssE.2, p. 307):** TCP first, UDP fallback. The spec mandates that a WebNFS client "must first attempt to connect to its server with a TCP connection" and fall back to UDP only if the TCP connection is refused (p. 307). The client assumes port 2049 for both transports and must not contact the portmapper unless port 2049 is unresponsive on both TCP and UDP (C702 ssE.3, p. 307).
+
+**Authentication:** The spec does not mandate a specific auth flavor for public handle operations. AUTH_SYS (AUTH_UNIX) is the default. AUTH_NONE is valid for public handle access on some implementations -- the spec's security model is weaker than standard NFS because it explicitly waives the reserved-port check (see below), and the public handle is designed for unauthenticated browser access. The spec says nothing to prevent AUTH_NONE from being used with public filehandle LOOKUPs.
+
+#### Public filehandle constants (C702 ssE.5, pp 308)
+
+The public filehandle is a reserved filehandle value with well-known encoding per NFS version. The server recognizes it as a signal to enable MCL semantics rather than treating it as a normal directory handle (C702 ssE.5, p. 308).
+
+**NFSv2 (C702 ssE.5.1, p. 308):** 32 bytes, all zero. On the wire this is the fixed `fhandle` opaque -- 32 bytes of `0x00`, no length prefix (NFSv2 handles are fixed-size):
+
+```
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+```
+
+**NFSv3 (C702 ssE.5.2, p. 308):** Zero-length `nfs_fh3`. The wire encoding is just the 4-byte XDR length field set to zero, with no data bytes following:
+
+```
+00 00 00 00
+```
+
+This is distinct from the v2 encoding: a v2 public handle is 32 zero bytes (a valid-looking handle that happens to be all zeros), while a v3 public handle is a zero-length opaque (an explicitly empty handle). This distinction matters for version detection -- see error semantics below.
+
+**NFSv4 (RFC 7530 ss16.21):** `PUTPUBFH` (op 23) in a COMPOUND request. No wire-level handle constant -- the operation itself semantically places the public filehandle in the current filehandle slot. Already implemented in NFSWolf's `nfswolf-nfs4` crate.
+
+#### Multi-component LOOKUP encoding (C702 ssE.6, pp 309-310)
+
+MCL is supported *only* for LOOKUP requests directed at the public filehandle (p. 309). A standard LOOKUP against a non-public handle must still use single-component filenames. The MCL path is carried in the normal LOOKUP `filename` argument (NFSv2: the `name` field of `diropargs`; NFSv3: the `name` field of `diropargs3`).
+
+Two path encodings are defined, distinguished by the first byte of the filename:
+
+**Canonical path (first byte is ASCII, C702 ssE.6.1, p. 309):** A hierarchical slash-separated path using printable US-ASCII. The escaping rules are:
+
+| Character | Encoding | Notes |
+|-----------|----------|-------|
+| `/` within a component | `%2f` | literal slash in a filename, not a path separator (p. 309) |
+| non-ASCII byte | `%xx` | 2-digit hex code, same as RFC 1738 percent-encoding (p. 309) |
+| literal `%` not introducing a hex code | `%25` | disambiguates from escape sequences (p. 309) |
+
+Path evaluation depends on the first character:
+
+- **Leading `/` = absolute from server root** (p. 309): The canonical path is evaluated starting from the server's filesystem root directory, not from the public filehandle's directory. Example: `LOOKUP FH=0x0 "/etc/shadow"` resolves `/etc/shadow` from the server root.
+- **No leading `/` = relative to public filehandle's directory** (p. 309): The path is evaluated relative to whatever directory the server administrator attached the public filehandle to. Example: if the public filehandle points to `/export/data`, then `LOOKUP FH=0x0 "secrets/key"` resolves `/export/data/secrets/key`.
+- **Empty path = lookup for "."** (p. 309): If the url-path is omitted, the client must send an MCL for the pathname `"."` (dot), which returns the filehandle for the public filehandle's directory itself.
+
+**Native path (first byte is 0x80, C702 ssE.6.1, pp 309-310):** The byte `0x80` (non-ASCII) is a prefix flag; the remaining bytes are a path in the server's native pathname syntax, bypassing canonical escaping entirely. This is designed for servers whose native path separator is not `/`. The spec's example (p. 310):
+
+```
+Canonical:  LOOKUP FH=0x0 "/a/b/c"      (slash-separated)
+Native:     LOOKUP FH=0x0 0x80 "a:b:c"  (server uses : as separator)
+```
+
+The `0x80` prefix is the first byte of the LOOKUP `filename` argument. The server strips it and interprets the remainder as a raw server pathname. For UNIX-like servers, native and canonical forms are equivalent (both use `/`), but the native form skips percent-decoding.
+
+**`..` traversal in MCL (C702 ssE.7.3, pp 312-313):** The spec's own worked example shows cross-export traversal using `..` in an MCL path:
+
+```
+LOOKUP 0x0  "../that/file"
+LOOKUP 0x0  "/export/that/file"
+```
+
+Both paths attempt to reach a file in `/export/that` when the public filehandle is associated with `/export/this`. The spec states that MOUNT-only-checking servers "cannot return a filehandle without an assurance that the client's use of this filehandle will be authorized" and therefore "must return an error" (p. 313). However, servers that check client access per-request (rather than relying solely on MOUNT) "can return filehandles for paths that span exports" (p. 313) -- these servers are explicitly permitted to resolve cross-export `..` traversals. No canonicalization algorithm is mandated by the spec; the server is free to resolve `..` however it sees fit.
+
+#### Error semantics (C702 ssE.9, p. 315; ssE.10, p. 316)
+
+**Public handle rejection (p. 315):** If the server returns `NFS3ERR_STALE`, `NFS3ERR_INVAL`, or `NFS3ERR_BADHANDLE` in response to a LOOKUP with the public filehandle, the server does not support WebNFS. The client must fall back to the portmapper + MOUNT protocol path. For NFSWolf, these three errors on a public-handle LOOKUP are a negative fingerprint: the server definitely does not support WebNFS.
+
+- `NFS3ERR_STALE` (70): The server treated the public handle as a real handle lookup and found no matching inode/generation. Common response from servers that have never heard of WebNFS.
+- `NFS3ERR_BADHANDLE` (10001): The server recognized the handle format as invalid. This is the expected response from NFSv3 servers that reject the zero-length handle outright.
+- `NFS3ERR_INVAL` (22): The server considered the LOOKUP arguments invalid. Some servers return this instead of BADHANDLE for a zero-length handle.
+
+**Version fallback (p. 315):** If the server returns `RPC PROG_MISMATCH`, the client should retry with a v2 public filehandle (32 zero bytes). The first LOOKUP attempt should always be NFSv3.
+
+**Cross-export errors (pp 312-313):** When a multi-component path or embedded symlink crosses into a different exported filesystem, the behavior depends on the server's access-checking model:
+
+- MOUNT-only servers: must return an error (the spec does not specify which `nfsstat` code; in practice, `NFS3ERR_ACCES` or `NFS3ERR_STALE`).
+- Per-request-checking servers: may return a valid filehandle for the cross-export destination. The client can then use that handle for subsequent operations, subject to per-call access checks.
+
+**Non-exported path errors (p. 309, p. 311):** If the path identifies a file or directory that is not in any exported filesystem, the server "must return an error" (p. 311). The spec does not specify the error code. If the path reaches an exported filesystem through an unexported intermediate directory, the behavior is implementation-defined: the spec's example (p. 314) shows that `LOOKUP 0x0 "export"` returns an error (unexported dir) while `LOOKUP 0x0 "export/foo"` returns a valid handle (the destination `/export/foo` is exported, even though `/export` is not).
+
+#### Security notes from the spec (C702 ssE.4, p. 308; ssE.7.3, pp 312-313)
+
+**Reserved-port waiver (C702 ssE.4, p. 308):** "WebNFS clients are not required to use reserved ports. This means that a WebNFS server must not check the originating port for requests to filesystems which are made available to WebNFS clients." This explicitly waives the reserved-port check (`insecure` in Linux export options, `resvport` in Solaris) for WebNFS-enabled exports. The security implication: any unprivileged user process on any machine can send NFS requests to a WebNFS-enabled export, removing the weak-but-nonzero barrier that port < 1024 checks provide against credential spoofing.
+
+**MOUNT-only-checking admission (C702 ssE.7.3, pp 312-313):** The spec explicitly acknowledges the broken implementation pattern: "Many NFS server implementations rely on the MOUNT protocol for checking access to exported filesystems, and their NFS server does no access checking. The NFS server assumes that the filehandle does double duty: identifying a file as well as being a security token." WebNFS bypasses MOUNT entirely, so on these servers, obtaining a filehandle via the public handle + MCL gives unrestricted access -- the filehandle *is* the authorization, and no MOUNT ACL check ever ran.
+
+**No portmapper required (C702 ssE.3, p. 307):** WebNFS clients connect directly to port 2049 without querying the portmapper. This means WebNFS access works even when the portmapper (port 111) is firewalled, making it harder to detect and harder to filter. A firewall rule blocking port 111 does not prevent WebNFS access.
+
+#### NFSv2 WebNFS procedure: no new procedure number (RFC 2054 ss5-6; C702 ssE.6, p. 309)
+
+RFC 2054 (WebNFS Client Specification for NFSv2) does **not** define a new `NFSPROC_LOOKUP_MULTI` or any other new procedure. WebNFS reuses the existing `NFSPROC_LOOKUP` (procedure 4, program 100003, version 2) unchanged. The multi-component behavior is triggered by the *filehandle*, not the procedure number: when the server receives a LOOKUP with the public filehandle (32 zero bytes), it interprets the filename argument as a multi-component path. When the same LOOKUP is used with any other filehandle, it expects a single component as usual. The same applies to NFSv3 per RFC 2055: `NFSPROC3_LOOKUP` (procedure 3) is reused unchanged.
+
+This means NFSWolf does not need to implement any new RPC procedure to probe for WebNFS. The existing `Nfs2Client::lookup()` and `Nfs3Client` LOOKUP are sufficient -- the only new wire-level construct is the public filehandle constant itself.
+
+#### Implementation variations
+
+| Server | WebNFS support | Notes |
+|--------|---------------|-------|
+| **Solaris** (2.6+, 1997) | Full | Canonical implementation. Sun developed WebNFS. `share -F nfs -o public` sets the public filehandle root. Supports MCL (canonical and native), export-spanning paths (per-request access checks), and `..` traversal. The reference implementation for all C702 Appendix E semantics. |
+| **Linux knfsd** | None | Never implemented. No `CONFIG_NFSD_WEBNFS` kernel option was ever merged. The kernel NFS server does not recognize the all-zero v2 handle or zero-length v3 handle as public filehandle constants. v3 zero-length handle returns `NFS3ERR_BADHANDLE`; v2 all-zero handle returns `NFS3ERR_STALE` (or `NFSERR_STALE` in v2 terms). This makes a WebNFS probe a reliable negative fingerprint: if the public handle is rejected, the server is almost certainly Linux. |
+| **NetApp ONTAP** | Optional | ONTAP supports WebNFS public handles. Controlled via `nfs.webnfs.enable` (7-mode) or `vserver nfs modify -v3-webnfs-enabled` (C-mode). Default is disabled. When enabled, the public filehandle root is configurable. |
+| **FreeBSD** | None | FreeBSD's kernel NFS server (`nfsd`) does not implement WebNFS public handles. Same rejection behavior as Linux -- zero-length v3 handle returns `NFS3ERR_BADHANDLE`. |
+| **OpenBSD / NetBSD** | None | No WebNFS support in either kernel NFS server. |
+| **illumos** (OpenSolaris derivatives) | Full | Inherited from Solaris. Same `share -o public` configuration. SmartOS, OmniOS, and other illumos distributions retain full WebNFS support. |
+
+**Fingerprinting value:** Since Linux and FreeBSD (the two most common NFS server platforms today) both reject public handles with distinctive error codes, a WebNFS probe doubles as an OS/platform fingerprint. A successful public-handle LOOKUP strongly suggests Solaris/illumos or a NetApp filer with WebNFS explicitly enabled -- both high-value targets in enterprise environments.
 
 ---
 
@@ -798,6 +910,40 @@ The NSM state number is a bare integer with these properties:
 
 **NFSWolf integration:** Same UID-sweep pattern as `uid-spray`, but via RQUOTA instead of NFSv3 ACCESS. Useful on servers where NFS denies everything but RQUOTA is unrestricted.
 
+### Security analysis
+
+#### UID enumeration oracle mechanics
+
+GETQUOTA's response discriminates between existing and non-existing UIDs through three distinct signals:
+
+**Status code oracle.** The `qr_status` return value is the primary discriminant. `Q_OK` confirms the UID has a quota entry. `Q_NOQUOTA` is ambiguous -- it can mean the UID does not exist or that quotas are simply not configured for it. `Q_EPERM` is a weak positive: the server recognized the UID as meaningful enough to deny the request, which on most implementations means the UID exists in the local password database or NSS chain. The combination of `Q_OK` with `rq_curblocks > 0` or `rq_curfiles > 0` is the strongest confirmation that a UID exists and is actively using disk resources.
+
+**Field-level information leaks.** When `Q_OK` is returned, every field in the `rquota` struct leaks something:
+
+- `rq_curblocks` reveals the UID's current disk usage. A non-zero value proves the user is actively storing data. Large values (relative to `rq_bhardlimit`) indicate power users or service accounts with heavy I/O -- higher-priority targets for credential escalation because their files are more likely to contain sensitive data.
+- `rq_curfiles` reveals the inode count. A UID with thousands of files is likely running a service (database, web app, mail spool) or has a deep home directory tree. Both patterns correlate with credentials, config files, and keys.
+- `rq_bsize` leaks filesystem type. ext4 uses 4096. XFS uses 512 (block accounting in 512-byte sectors). ZFS uses 1024. BTRFS uses 4096. This narrows the escape strategy in `FileHandleAnalyzer` before even running the NFS escape: if RQUOTA says `bsize=512`, it is almost certainly XFS, and the XFS handle format should be tried first.
+- `rq_bhardlimit` and `rq_bsoftlimit` reveal administrator intent. A UID with very high limits (or no limits, reported as 0) is likely a service account or privileged user. A UID with tight limits is likely a regular user.
+- `rq_btimeleft` and `rq_ftimeleft` are non-zero only when the UID is currently over soft quota. This is a real-time activity indicator -- the user is actively writing data right now.
+
+**Timing analysis.** On Linux `rpc.rquotad`, response time does not meaningfully differ between existing and non-existing UIDs. The quota lookup is a direct `quotactl(Q_GETQUOTA)` syscall regardless of UID existence -- the kernel checks the on-disk quota file (or in-memory cache) and returns `ESRCH` (mapped to `Q_NOQUOTA`) for missing entries at roughly the same speed as a cache-hit lookup. There is no observable timing side-channel in practice. Solaris behaves similarly -- the quota subsystem is synchronous and the lookup cost is dominated by disk I/O for the first access, then cached. Timing-based enumeration is not viable against current implementations.
+
+**Rate limiting.** No known `rpc.rquotad` implementation enforces rate limiting on GETQUOTA calls. Linux `rpc.rquotad` dispatches every request synchronously with no per-client throttling, no connection tracking, and no request counter. The RPC layer (rpcbind/portmapper) does not rate-limit either. A UID sweep of the full 16-bit range (65536 queries) completes in seconds over TCP. The only practical limit is the portmapper's `securenets` or firewall rules blocking access to the RQUOTA port entirely.
+
+#### Interaction with NFS
+
+**Prioritizing UIDs for uid-spray.** RQUOTA results directly feed the credential ladder. Instead of blindly sweeping UIDs 0-65535, RQUOTA lets NFSWolf build a ranked list: UIDs with `Q_OK` and `rq_curblocks > 0` are confirmed active. Sorting by `rq_curblocks` descending puts the most active users first -- these are the UIDs most likely to own readable files on the NFS export. This is strictly better than the current `uid-spray` approach of linear UID scanning, which wastes time on system accounts and dormant users.
+
+**curblocks/curfiles as activity ranking.** The most active users (highest `rq_curblocks` and `rq_curfiles`) are the best targets for credential escalation because: (a) they have the most files, increasing the probability of finding sensitive data; (b) they are more likely to have recently-modified files with credentials, SSH keys, or application secrets; (c) their GID memberships are more likely to grant access to shared directories. NFSWolf's `credential_ladder_with()` should accept RQUOTA-derived rankings as an input source alongside READDIRPLUS-harvested identities.
+
+**RQUOTA on exports where NFS ACCESS is denied.** RQUOTA operates on a filesystem path, not on an NFS file handle. The `rpc.rquotad` daemon is a separate process from `nfsd` with its own access control (or lack thereof). In practice, `rpc.rquotad` performs no export-level ACL check -- it accepts any path that names a local filesystem with quotas enabled, regardless of whether the caller has NFS mount access to the export containing that path. This means RQUOTA can enumerate UIDs on filesystems the attacker cannot mount via NFS. The path argument in `getquota_args.gqa_pathp` is interpreted locally by `rpc.rquotad`, so the attacker needs to guess (or know from `showmount -e`) the server-side mount point (e.g., `/home`, `/export`). The NFS export path usually matches or is a subdirectory of the quota-enabled filesystem, so the export path from MOUNT EXPORT is a reasonable guess for the RQUOTA path argument.
+
+#### v2 group quota: group membership without NIS
+
+RQUOTA v2's `RQUOTA_GRPQUOTA` type extends the oracle to GIDs. The same sweep pattern applies: iterate GIDs 0-65535 with `gqa_type = RQUOTA_GRPQUOTA` and look for `Q_OK` responses. This reveals which GIDs have quota entries, meaning which groups exist and are actively used.
+
+The security value is that group existence and activity is leaked without needing NIS access. On a system where NIS is not running (or is firewalled), RQUOTA v2 is an alternative path to group enumeration. Combined with v2 user quota results, an attacker can build a partial map of user-to-group relationships: if UID 1000 and GID 100 both have active quotas on the same filesystem, and READDIRPLUS on the NFS export shows files owned by uid=1000/gid=100, the UID is a member of that GID. This feeds directly into `uid-spray`'s GID parameter -- instead of guessing GIDs, the attacker can assert known-valid GIDs in AUTH_SYS credentials.
+
 ### Wire format (Sun rquota.x)
 
 No RFC exists. The canonical source is Sun's `rquota.x` XDR file, distributed with SunOS/Solaris and adopted unchanged by Linux (`include/uapi/linux/sunrpc/` and `fs/nfsd/`) and FreeBSD. The wire format has been stable since the original Sun publication and is identical across all known implementations.
@@ -923,6 +1069,54 @@ program RQUOTAPROG {
 Other useful maps: `group.byname` (group membership), `hosts.byname` (network topology), `netgroup` (export ACL groups), `mail.aliases`.
 
 **NFSWolf integration:** Detection via portmapper DUMP (programs 100004, 100007). Domain name discovery via `ypbind` or from NIS domain in RPC broadcast responses. Full map dump as an explicit opt-in command.
+
+### Security analysis
+
+#### Domain name discovery methods
+
+The NIS domain name is the single gatekeeper to every map in the credential store. Without it, `YPPROC_ALL` returns `YP_NODOM`. Four independent discovery methods exist:
+
+**ypbind DOMAIN procedure.** `YPBINDPROC_DOMAIN` (program 100007, proc 1) takes a `domainname` argument and returns either a binding (ypserv IP + port) or failure. This is a domain-name oracle: iterate candidate domain names and check which ones return `YPBIND_SUCC_VAL`. Common candidates: the hostname's domain component, the DNS domain, short company names, "nis", "yp", lowercase variants of the FQDN. A successful response also leaks the ypserv IP and port, which may be on a different host than the one running ypbind.
+
+**RPC broadcast for ypbind.** Sending an RPC broadcast (via portmapper `CALLIT` or direct broadcast to the ypbind port) with `YPPROC_DOMAIN_NONACK` reveals the domain name indirectly: `DOMAIN_NONACK` replies only on success, so any host that answers a broadcast for a given domain name confirms that domain exists on the network. This is noisier than unicast but discovers the domain without knowing it in advance -- the attacker broadcasts a list of guesses and collects which ones get responses. The responding hosts' IP addresses also reveal which machines are NIS clients.
+
+**/etc/defaultdomain on NFS-exported filesystems.** On systems where NFS exports include `/etc` (or the root filesystem), the NIS domain name is stored in plaintext in `/etc/defaultdomain` (Solaris, illumos) or `/etc/yp.conf` (Linux, contains `domain <name> server <addr>`). If the attacker already has NFS read access to the target's `/etc`, the domain name is a single file read away. This is common in environments where the NFS server is also the NIS server -- the same machine exports its own `/etc`.
+
+**NIS domain in portmapper DUMP output.** Some older ypserv implementations (notably SunOS 4.x) register their NIS program with the portmapper using a service name that includes the domain name. This is not standard behavior and modern implementations do not do it, but legacy systems may leak the domain in the `DUMP` output. More reliably, the ypserv source address in a `DUMP` response narrows the search: if ypserv is registered, the domain name is on that host, and `/var/yp/` (or the `ypwhich -m` output) contains the active domain name.
+
+#### Map exploitation beyond passwd.byname
+
+`passwd.byname` is the obvious target, but NIS serves dozens of maps, many with direct value for NFS attacks:
+
+**group.byname** returns entries in the format `groupname:x:gid:member1,member2,...`. This gives the attacker a complete GID-to-membership mapping. For `uid-spray`, this is transformative: instead of asserting arbitrary GIDs in AUTH_SYS credentials, the attacker knows exactly which GIDs to pair with which UIDs. A file owned by `gid=100` with mode `0640` is readable by any UID that appears in group 100's member list. Dumping `group.byname` and cross-referencing with `passwd.byname` produces a complete credential matrix for AUTH_SYS forging.
+
+**hosts.byname** maps hostnames to IP addresses. This reveals internal network topology: which hosts exist, their naming conventions, and their IP ranges. For NFS attacks, the hostnames in NFS export ACLs (from `showmount -e`) may reference NIS hostnames. If an export is restricted to `rw=fileserver.internal`, dumping `hosts.byname` reveals that `fileserver.internal` is `10.1.2.3`, and the attacker knows which source IP to spoof (or which machine to compromise) to satisfy the ACL.
+
+**netgroup** is the most NFS-relevant map after `passwd.byname`. NFS exports using `@netgroup` ACLs (e.g., `/export -access=@trusted`) delegate membership to the NIS netgroup map. Dumping `netgroup` reveals exactly which `(host, user, domain)` triples are authorized for each netgroup. This directly maps to which hostnames and users can mount which exports, without needing to brute-force the export ACL. If the attacker can add themselves to a netgroup (via `YPPROC_XFR` poisoning on a compromised master, or via NFS write access to the NIS map files on a co-located server), they gain access to every export that references that netgroup.
+
+**mail.aliases** maps alias names to recipient addresses. Service account aliases (e.g., `root: admin@corp.com`, `oracle: dba-team@corp.com`) reveal which human accounts map to which service identities. An alias like `backup: backupuser` confirms that `backupuser` exists as a local account and is the identity behind the `backup` service -- a credential target.
+
+**services.byname** maps service names to port numbers. While mostly informational, it reveals which services the NIS domain expects to run, confirming attack surface. A `services.byname` entry for `nfsd 2049/tcp` on a host that does not appear in `showmount -e` output may indicate a misconfigured or secondary NFS server.
+
+**protocols.byname** maps protocol names to numbers. Purely informational in most cases, but exotic protocol entries may indicate unusual network configurations.
+
+**ethers.byaddr** maps MAC addresses to hostnames. This is layer-2 topology information: which physical or virtual NICs correspond to which hosts. On networks where MAC-based filtering exists, this information is directly actionable. Even without MAC filtering, it reveals which hosts are on the same broadcast domain.
+
+#### YPPROC_ALL vs YPPROC_FIRST/NEXT
+
+Both methods produce the same result (every key/value pair in the map), but their network profiles differ:
+
+**YPPROC_ALL** sends one RPC request and receives a single streaming response containing all entries. For `passwd.byname` on a domain with 500 users, this is 1 outbound packet and one TCP stream in response. It is faster (one round trip, no per-entry latency) and simpler to implement. The downside is that the single large response is conspicuous: a bulk transfer of `passwd.byname` is a distinctive network signature, and IDS rules for NIS map theft specifically look for `YPPROC_ALL` calls against credential maps.
+
+**YPPROC_FIRST/NEXT** sends one `FIRST` call followed by N-1 `NEXT` calls, each returning one key/value pair. For 500 users, this is 500 RPC exchanges. Each individual call is small and looks like a normal NIS client lookup. The aggregate traffic is higher, but each packet is indistinguishable from a legitimate `ypcat`-style enumeration or a client performing normal name resolution.
+
+**Stealth tradeoff:** `YPPROC_FIRST/NEXT` is stealthier per-call but generates far more RPC traffic. If the target monitors per-source RPC call counts (as `rpcbind --getstat` tracks), 500 calls from one source in rapid succession is itself suspicious. With NFSWolf's `StealthConfig` delays between calls, `FIRST/NEXT` can be spread over time to look like organic lookups, but this increases total enumeration time from seconds to minutes. `YPPROC_ALL` is faster but creates a single unmistakable event. The right choice depends on the target's monitoring: against a system with NIS-specific IDS signatures, `FIRST/NEXT` with stealth delays; against a system with only aggregate traffic monitoring, `YPPROC_ALL` is fine.
+
+#### NIS+ vs NIS
+
+NIS+ (program 100300, `rpc.nisd`) is the successor to NIS, deployed primarily on Solaris 2.x through Solaris 10. It does have real authentication via RPCSEC_GSS (specifically Diffie-Hellman key exchange using `AUTH_DES`, later Kerberos via `AUTH_KERB`). NIS+ tables are individually access-controlled: each table, column, and entry has an owner, group, and permission bits (analogous to file permissions). Reading `passwd.org_dir` (the NIS+ equivalent of `passwd.byname`) requires credentials that satisfy the table's ACL.
+
+In practice, NIS+ deployments are vanishingly rare today. Sun deprecated NIS+ in Solaris 9 (2002) and removed it entirely in Solaris 11 (2011). No other vendor ever adopted it. The authentication model, while superior to NIS, was complex enough that many Solaris administrators ran NIS+ in "NIS compatibility mode" (`niscompat`), which accepted unauthenticated NIS protocol queries against NIS+ tables -- defeating the authentication entirely. If NFSWolf encounters program 100300 in a portmapper dump, it should flag the presence and note the `niscompat` risk, but full NIS+ client implementation is not worth the effort given the extinct deployment base.
 
 ### Wire format (Sun yp.x)
 
@@ -1183,6 +1377,38 @@ These are the maps with direct security value for NFS attacks. Map names are cas
 Every constant in this protocol would be an observed deviation — documented as such, with the reverse-engineering method recorded in the crate.
 
 **NFSWolf integration:** Detection via portmapper. `GETACL` against files the mode bits say should be inaccessible — any ACL entry granting access beyond the mode bits is a finding.
+
+### Security analysis
+
+#### Specific bypass scenarios
+
+POSIX ACLs can grant access that mode bits deny. These are the concrete cases where NFSWolf's current mode-bit-only analysis produces false negatives:
+
+**File with mode 0600 but ACL grants read to gid=42.** The mode bits say only the owner can read/write. But an ACL entry `ACL_GROUP gid=42 perm=r--` grants read access to any process whose supplementary groups include GID 42. The `ACL_MASK` entry limits the effective permission: `effective = entry.perm & mask.perm`. If the mask is `rwx` (common when the administrator used `setfacl -m g:42:r`), the full read permission applies. NFSWolf currently sees mode 0600 and skips this file during `secrets-scan` unless the current credential is the owner. With GETACL, NFSWolf would discover that GID 42 also has read access, and the credential ladder could try a UID with GID 42 as a supplementary group.
+
+**Directory with mode 0700 but ACL grants traverse to gid=100.** A directory with mode 0700 is owner-only by mode bits. But `ACL_GROUP gid=100 perm=--x` grants execute (traverse) permission to GID 100 members. Traverse permission on a directory allows `LOOKUP` into it, which is the prerequisite for accessing any file inside. NFSWolf's recursive `secrets-scan` and `suid-scan` stop at directories where mode bits deny traverse to the current credential. With GETACL data, NFSWolf would know to try GID 100's credentials to enter this directory and scan its contents.
+
+**Default ACL inheritance.** When a directory has a default ACL (`NFS_DFACL`), every new file and subdirectory created inside it inherits the default ACL as its access ACL. The inheriting file's creator may not be aware that the default ACL grants wider access than they intended. For example: a directory `/export/shared` has default ACL `ACL_GROUP gid=200 perm=rw-`. A user creates `/export/shared/secrets.txt` with `umask 077`, expecting mode 0600 (owner-only). The file gets mode 0600 in its mode bits, but the inherited ACL grants read/write to GID 200. The creator sees `0600` in `ls -l` and believes the file is protected. This is a systemic false sense of security: every file created in a directory with a permissive default ACL is wider-open than its mode bits indicate. NFSWolf should flag directories with default ACLs that grant access beyond `ACL_OTHER` as a finding, because every file created inside them silently inherits that access.
+
+#### Interaction with NFSv3 ACCESS
+
+**Does ACCESS reflect ACL entries or only mode bits?** The answer is implementation-dependent, and the gap between implementations is itself the vulnerability.
+
+**Linux knfsd: ACCESS checks POSIX ACLs.** On Linux, the NFSv3 ACCESS procedure calls `nfsd_permission()` in `fs/nfsd/vfs.c`, which calls `inode_permission()`, which calls `generic_permission()` in `fs/namei.c`. `generic_permission()` calls `posix_acl_permission()` (via `check_acl`), which evaluates the full POSIX ACL if one exists. This means on Linux, ACCESS results do reflect ACL entries -- if an ACL grants read to GID 42, ACCESS with GID 42 in supplementary groups returns `ACCESS3_READ`. NFSWolf's current ACCESS-based probing catches ACL-granted access on Linux servers, even without explicit GETACL support.
+
+**Solaris: ACCESS checks ACLs natively.** Solaris NFS server evaluates ACLs as part of the standard VFS access check. Like Linux, ACCESS results on Solaris reflect ACL grants. The behavior is the same: ACCESS is ACL-aware.
+
+**The gap: NFSWolf's current analysis misses the intelligence.** Even though ACCESS on Linux/Solaris reflects ACL-granted permissions, NFSWolf currently cannot distinguish between "ACCESS succeeded because mode bits allow it" and "ACCESS succeeded because an ACL entry grants it." Without GETACL data, NFSWolf cannot report which specific UID or GID has been granted an exception. This matters because: (a) the credential ladder cannot target ACL-granted UIDs/GIDs specifically -- it has to discover them by brute-force through `uid-spray`; (b) the analyzer cannot report "mode bits say 0600 but ACL grants read to GID 42" as a finding, because it never learns about GID 42; (c) the `secrets-scan` output cannot distinguish owner access from ACL-granted access, so the user cannot assess which credentials are alternatives vs requirements.
+
+#### GETACL as a reconnaissance tool
+
+GETACL reveals identity information that no other NFS procedure exposes:
+
+**ACL entries reference UIDs/GIDs that may not own any files.** READDIRPLUS harvests UIDs and GIDs from file ownership (`uid` and `gid` fields in `fattr3`). The credential ladder and `uid-spray` use these as candidate identities. But an ACL can grant access to a UID or GID that owns zero files on the export. For example, an administrator grants `ACL_USER uid=5000 perm=r--` on `/export/finance/reports/` so that the auditor (UID 5000) can read financial reports. The auditor never creates files, so READDIRPLUS never sees UID 5000 in any file's owner field. `uid-spray` scanning the range 0-65535 would eventually try UID 5000, but without RQUOTA or GETACL data, there is no way to prioritize it. GETACL reveals UID 5000 as a specifically-privileged identity worth trying immediately.
+
+**ACL entries reveal high-value credential targets.** The presence of an `ACL_USER` or `ACL_GROUP` entry means an administrator deliberately granted an exception. These exceptions are rarely random -- they represent specific access requirements. A file with `ACL_USER uid=3001 perm=rwx` on a directory containing deployment scripts strongly implies UID 3001 is a deployment service account. A directory with `ACL_GROUP gid=500 perm=r-x` on a configuration directory implies GID 500 is an operations group. These identities are higher-value targets than the file owners themselves, because the ACL entries represent intentional trust relationships that are likely replicated across the system.
+
+**Comprehensive GETACL sweep.** The optimal reconnaissance pattern is: (a) READDIRPLUS to enumerate all files and their owner UIDs/GIDs; (b) GETACL on every file and directory to extract ACL-referenced UIDs/GIDs; (c) merge both sets, deduplicate, and rank by frequency of appearance; (d) feed the ranked list into the credential ladder. This produces a strictly better candidate set than READDIRPLUS alone, because it captures identities that have been granted access but do not own files. The cost is one additional RPC call (GETACL) per file, which doubles the enumeration traffic but requires no credential escalation -- GETACL typically succeeds with the same credentials as GETATTR.
 
 ### Wire format (observed, no spec)
 
@@ -1637,6 +1863,194 @@ X/Open's "File System and Scheduling Utilities" (P521, `ref/archive.opengroup.or
 - `root=` default is **empty** (root-squash by default)
 - Removing a client from `access=` is **not retroactive** — already-mounted clients keep access until unmount. Only `exportfs -u` triggers STALE.
 - Narrowing `root=`/`rw=` membership takes effect **immediately** — no grace period.
+
+### Write verifier as reboot oracle — exploitation details (C702 ss12.3.11, pp. 193-194; ss12.4.0 NFSPROC3_WRITE, pp. 212-214; ss12.4.0 NFSPROC3_COMMIT, pp. 251-253)
+
+The existing subsection confirms the `writeverf3` changes on server reboot and documents the HA failover distinction. This subsection adds practical exploitation techniques.
+
+**Polling for verifier changes.** The `verf` field is an 8-byte opaque cookie returned by both WRITE and COMMIT (C702 ss12.4.0, pp. 213, 251). C702 states: "This cookie must be consistent during a single instance of the NFS Version 3 protocol server and must be unique between instances of the NFS Version 3 protocol server, where uncommitted data may be lost" (p. 213). The cheapest probe is a zero-byte COMMIT: `COMMIT(file, offset=0, count=0)` flushes everything and returns `verf` in `COMMIT3resok.verf` (p. 251). C702 explicitly says "It is not an error for there to be nothing to flush on the server" (p. 252), so this probe succeeds even when no prior UNSTABLE WRITE was issued. Alternatively, a zero-count WRITE (`WRITE(file, offset=0, count=0, stable=FILE_SYNC)`) also returns `verf` and "will succeed and return a count of zero, barring errors due to permission checking" (p. 212). Both probes require only a valid file handle and appropriate permissions -- no data is written.
+
+**HA failover detection.** C702 ss12.3.11 (pp. 193-194) explicitly documents the two HA cases: "If the high availability server implementation does not use a shared-memory scheme, then the *verf* must change on failover, since the unsynchronised data is not available to the second processor." Conversely, "In a shared-memory high availability server implementation, the *verf* would not need to change because the server would still have the cached data available to it to be flushed." This is a binary fingerprint: stable verifier across failover = shared-memory HA (active-active or shared-storage active-passive). Changed verifier = non-shared failover (the standby has no access to cached data). An attacker polling `verf` can distinguish these architectures without any other recon -- the verifier transition pattern during a failover event is definitive.
+
+**Verifier-based uptime estimation.** C702 suggests the `verf` value should be "the time that the server was booted or the time the server was last started (if restarting the server without a reboot results in lost buffers)" (p. 214). Linux knfsd uses a SipHash of the timestamp, so the raw value is not a readable timestamp. However, verifier *stability* is the signal: a stable `verf` across multiple polling intervals proves the NFS server process has not restarted. A change proves it has. Periodic polling (e.g., once per minute) establishes a lower bound on uptime and detects restarts within the polling interval. Combined with `rpcbind GETTIME` (which returns the server's epoch clock), the polling interval brackets the reboot time.
+
+**NFSWolf integration.** The `verf` value is already available in `WRITE3resok` and `COMMIT3resok` via the `nfswolf-nfs3` crate. A reboot oracle would store the baseline `verf` on first COMMIT and compare on subsequent calls. The zero-count COMMIT probe is the preferred polling method -- it requires `--allow-write` for the initial WRITE that establishes the baseline, but the polling COMMITs themselves are read-only (they flush already-committed data). The HA fingerprint is a side effect of the same comparison logic.
+
+### DRC replay window — practical exploitation (C702 ss12.3.4, pp. 191-192; ss7.1.3, p. 70)
+
+The existing subsection documents the DRC wipe on reboot and the partition-induced replay. This subsection adds the mechanics of triggering and exploiting the replay window.
+
+**Replay matching requirements.** C702 ss4.1.3 (p. 44) describes the DRC key as the RPC transaction ID (XID). Linux's actual implementation uses a compound key (xid + proc + client_addr + version + arg_len + arg_checksum), as documented in the existing subsection. For a replay to match a previous DRC entry, the retransmitted request must arrive from the same source address with the same XID and procedure number. After a reboot, however, there are no DRC entries to match at all -- the cache is empty (`kvzalloc` in `fs/nfsd/nfscache.c`), so every request with a previously-used XID is processed as new.
+
+**Which operations are dangerous to replay.** C702 ss12.3.4 (p. 191) distinguishes idempotent from non-idempotent operations and explicitly names the destructive cases. Non-idempotent operations whose replay has destructive side effects include: REMOVE (proc 12, p. 228 -- "this is generally a non-idempotent operation"; a replayed REMOVE after the target was recreated deletes the new file), RENAME (proc 14, p. 232 -- "this is possibly a non-idempotent operation"; a replayed RENAME after the destination was recreated overwrites it), RMDIR (proc 13, p. 230 -- same as REMOVE for directories), and CREATE with `UNCHECKED` mode (proc 8, p. 216 -- replaying truncates the recreated file). WRITE (proc 7) with `stable=FILE_SYNC` or `DATA_SYNC` is technically idempotent (same data at same offset), but a replayed WRITE after the file contents changed overwrites the new data with old data -- destructive in practice. C702 warns of "a truncate operation causing lost writes" (p. 191) as an explicit example.
+
+**Network partition scenario.** C702 ss12.3.4 (pp. 191-192) documents this explicitly: "A network partition can cause a cache entry to be reused before a client receives a reply for the corresponding request. If this happens, the duplicate request will be processed as a new one, possibly with destructive side effects." The scenario: client sends REMOVE, the reply is lost due to partition, the DRC entry is evicted to make room for new entries, the client retransmits, and the "duplicate" REMOVE is processed as new -- potentially deleting a file that was recreated in the interim. No reboot is needed for this case; the DRC simply needs to cycle through enough entries to evict the original.
+
+**DRC fill timing.** The post-reboot replay window closes when the DRC fills with new entries. Linux's DRC size defaults to `num_drc_entries` (scaled to available memory; typically 1024-16384 entries on modern systems). Under normal NFS load, the cache fills within seconds to minutes depending on client activity. Under light load (e.g., a single dormant mount), the window may persist for hours. An attacker who detects a reboot via the write verifier oracle has a time-bounded window: the fewer active clients, the longer the window stays open. Replaying a captured REMOVE/RENAME/RMDIR XID from before the reboot within this window processes it as a new destructive operation.
+
+**Interaction with the write verifier oracle.** The write verifier change (ss12.3.11) and the DRC wipe (ss12.3.4) are two effects of the same event (server restart). Detecting one confirms the other. The attack sequence from Chain 7 (Cross-protocol attack chains) uses the verifier as the trigger: poll COMMIT, detect verifier change, immediately replay captured destructive XIDs before the DRC refills.
+
+### Locking architecture security implications (C702 ch. 9, pp. 117-125; ch. 10, pp. 127-128)
+
+C702 Chapter 9 describes how NFS file locking works through the cooperation of two sideband protocols (NLM and NSM) that are entirely separate from NFS itself. The security implications arise from this separation and from the advisory-only nature of the locks.
+
+**Advisory-only model: locks are suggestions, not enforcement.** C702 ss9.1.1 (p. 117) defines NLM locking as "advisory X/Open CAE file and record locking" whose use is "strongly encouraged but not mandatory." The NLM section header (ss10, p. 127, already cited in the NLM section of this document) confirms: NLM locks are never enforced by the filesystem. An NFS client that issues READ or WRITE directly -- bypassing the local NLM entirely -- is completely unconstrained by any lock held by any other client. NFSWolf's shell `read`/`write` commands use raw NFS procedures, never NLM, so they inherently bypass all advisory locks on the target file. No additional implementation is needed to exploit this; it is the default behavior.
+
+**NFS operations ignore locks entirely.** The NFS protocol (programs 100003 v2/v3) and the NLM protocol (program 100021) are separate RPC programs with separate procedure namespaces. There is no cross-reference: NFSPROC3_WRITE does not check whether an NLM lock exists on the target byte range, and NLM_LOCK does not prevent a subsequent NFS WRITE. C702 ss9.2 (p. 119) describes the interaction as being between "the user process" and "the local NLM" via "a user-level API or system call such as the XSI fcntl()." The NFS server has no involvement in the locking decision. Appendix D ss D.2 (p. 302) confirms that `fcntl()` F_SETLK triggers NLM_LOCK to "the remote NLM" -- not to the NFS server. The lock and the I/O travel through completely independent protocol paths.
+
+**Grace period exploitation.** C702 ss9.2.1 (p. 119) describes the grace period: "The grace period is an implementation-dependent time during which the NLM implementation will only accept requests to re-establish locks or shares that were in effect at the time of the crash. During this period any other lock or share requests will be returned with a status indicating that the NLM is in the grace period and is not accepting new requests." C702 ss10.1.2 (p. 127) specifies this as approximately 45 seconds. During this window: (1) new lock requests from legitimate clients are denied with `LCK_DENIED_GRACE_PERIOD`, breaking write coordination, (2) NFS READ/WRITE operations continue unimpeded because NFS ignores NLM entirely, and (3) an attacker who detects the reboot (via write verifier change or NSM notification) knows the exact window during which legitimate clients cannot establish new locks. Files that were previously protected by advisory locks are accessible without coordination for the duration of the grace period.
+
+**Lock authentication: caller_name is the only identity.** C702 ss9.2.1 (p. 119) describes the locking interaction: the NLM_LOCK request "includes the name of the host to be monitored" via `caller_name` in the `nlm_lock` structure (ss10.2, p. 130). This `caller_name` is the sole identity key for lock ownership -- it is a self-asserted string up to 1024 bytes (ss10.2, p. 128, `LM_MAXSTRLEN`). No binding exists between `caller_name` and the RPC source address, AUTH_SYS `machinename`, or any cryptographic identity. C702 ss9.2.2 (p. 120) for non-monitored locks makes this worse: "the personal computer client must inform the server NLM when it has been rebooted so it can discard all locks and file shares held for the client" via NLM_FREE_ALL -- with the hostname as the only credential. An attacker who knows (or guesses) a legitimate client's hostname can release all its locks with a single NLM_FREE_ALL call.
+
+### Server-side implementation guidelines with security impact (C702 ss12.3, pp. 189-194; Appendix A, pp. 271-283)
+
+C702 ss12.3 provides implementation guidance for NFSv3 servers. Several guidelines have direct security implications for NFSWolf's attack surface.
+
+**Silly rename reveals active files (C702 ss12.3.1, p. 189; Appendix A ss A.8, pp. 275-276).** When a client deletes a file that is still open, the NFS client "can do some tricks such as renaming the file on remove (to a hidden name), and only physically deleting it on close" (ss12.3.1, p. 189). Appendix A ss A.8 (pp. 275-276) elaborates: "the client will rename the file to a temporary file" and "it is common practice for the client to pick a name starting with a period (.) in the same directory as the original file." The Linux NFS client uses the naming convention `.nfsXXXXXXXXXXXXXXXX` (hex-encoded inode number + generation counter). These files are visible in READDIR/READDIRPLUS output and reveal three things to an attacker: (1) which files are actively in use (the original was deleted but a process still has it open), (2) the inode number of the original file (encoded in the `.nfs` name on Linux clients), and (3) which directories have active write operations (silly-renamed files only appear when a delete races with an open). NFSWolf's `secrets-scan` could flag `.nfs*` entries as indicators of active file usage. The silly-renamed file is still readable via its handle -- the rename is a namespace operation, not a permission change.
+
+**Caching policies are undefined (C702 ss12.3.10, p. 193).** "The NFS Version 3 protocol does not define a policy for caching on the client or server. In particular, there is no support for strict cache consistency between a client and server, nor between different clients." This means attribute caches (mode bits, uid, gid) on the server have no mandated expiration. NFSWolf's `credential_ladder()` makes decisions based on file attributes (mode bits from GETATTR/READDIRPLUS). If the server returns cached attributes, the ladder may operate on stale mode bits -- e.g., a file whose permissions were recently tightened may still appear world-readable in the server's attribute cache. C702 Appendix A ss A.5 (p. 273) confirms: "Information in a client's attribute and access caches becomes inaccurate when the attributes of a file on the server are changed." The MountedFileSystem attributes `ACRegMin`, `ACRegMax`, `ACDirMin`, `ACDirMax` (ss2.4.2, p. 15) control client-side cache timeouts, but the *server's* internal attribute cache is not bounded by these parameters. On the server side, Linux knfsd does not cache attributes independently -- it reads them from the VFS on each call -- but other implementations (NetApp, Solaris) may cache aggressively.
+
+**Filesystem ID stability and handle invalidation (C702 ss12.3.1, pp. 189-190).** C702 notes that "both NFS Version 2 protocol and NFS Version 3 protocol implementations do not typically let clients cross a server's mount point" (p. 190). When a server re-exports a filesystem or the underlying storage changes, the `fsid` in `fattr3` may change. An `fsid` change invalidates all cached handles for that filesystem -- the client must re-MOUNT and re-LOOKUP from the export root. For NFSWolf, an unexpected `fsid` change in a GETATTR response (compared to the value received at MOUNT time) is a signal that the server's storage topology changed. This could indicate a failover event, a filesystem re-export, or administrative intervention. The `FileHandleAnalyzer` already uses `fsid` for OS/FS fingerprinting; tracking `fsid` stability over time adds a change-detection capability.
+
+**Filename character handling and path traversal (C702 ss12.3.5, p. 192; ss12.2.4, pp. 188-189; Appendix A ss A.15.6, p. 281).** C702 ss12.3.5 (p. 192) states: "Server implementations of NFS Version 3 protocol will frequently impose restrictions on the names that can be created. Many servers will also forbid the use of names that contain certain characters, such as the path component separator used by the server operating system." Appendix A ss A.15.6 (p. 281) adds: "A server may have an implementation-specific set of characters that it does not allow in file names." Case handling is also implementation-defined: "some server implementations do not preserve character case when creating an object" and "some server implementations may ignore case distinctions for lookup operations" (p. 281). This means LOOKUP with mixed-case names may succeed on case-insensitive servers (Windows NFS, NetApp NTFS volumes) when it would fail on case-sensitive ones (Linux ext4). For path traversal: the NFS protocol transmits filenames as raw opaque byte strings. The interpretation of bytes above 0x7F is server-specific -- there is no mandated charset. A filename containing bytes that decode to `../` in one encoding but are treated as a single multibyte character in another could traverse directories on charset-mismatched servers. C702 provides no guidance on charset normalization; the risk is entirely implementation-dependent.
+
+**Server access control model divergence (C702 Appendix A ss A.15.7, pp. 281-282).** "The server may use an access model other than the traditional UNIX mode bits, for example, Access Control Lists. In this case the mode bits reported by the client need not accurately represent the permissions on a file" (p. 281). With NFSv2, "the client relies on the mode bits to determine whether a given process has access to a given file. If the mode bits are sufficiently inaccurate, the client may deny access to a process even though the request would succeed on the server" (p. 281). Conversely, "the client may grant access based on the mode bits, only to have the request denied by the server" (p. 282). With NFSv3, "the client can ask the server whether a particular access request should be granted" via ACCESS (p. 282). This directly validates NFSWolf's existing design rule (CLAUDE.md rule 5): "ACCESS is advisory" -- but C702 goes further by documenting that even the mode bits returned by GETATTR may be a lossy projection of the actual server access model. The credential ladder's mode-bit pruning (`mode & 0o007 == 0` skips service accounts) can be wrong in both directions: overly aggressive (ACLs grant access that mode bits don't show) and insufficiently aggressive (mode bits show access that ACLs deny). The NFS_ACL sideband protocol (program 100227, documented earlier in this file) is the only way to get the real access model.
+
+### Client-side vulnerabilities documented by C702 (Appendix A ss A.5-A.9, pp. 273-277; ss12.3.1, p. 189)
+
+C702 Appendix A catalogs semantic differences between local and NFS filesystems that create exploitable client-side behaviors. These affect legitimate NFS clients, not NFSWolf itself -- but they are attack surface NFSWolf can exploit against clients mounted on the same export.
+
+**Client attribute caching: stale permissions (C702 Appendix A ss A.5, pp. 273-274).** "Functions such as stat() may return incorrect information if the client's attribute cache is inaccurate" (p. 274). The attribute cache holds mode, uid, gid, size, and timestamps. C702 ss A.5.1 (p. 274) documents two failure modes: (1) "Access to a file on the server may be denied because the attributes in the client caches are more restrictive than the attributes on the server" -- a recently chmod'd file stays inaccessible to the client until the cache expires, and (2) "If the attributes in the client caches are less restrictive than the attributes on the server, functions such as open() may succeed, but functions like read() or write() may fail" -- the client grants access based on stale permissive attributes, only to get `NFS3ERR_ACCES` from the server. For an attacker who can write to the export (`--allow-write`): changing a file's permissions via SETATTR takes effect on the server immediately, but other clients' attribute caches may continue showing the old permissions for seconds to minutes. This means a privilege escalation via SETATTR (e.g., `chmod 0777`) is invisible to other clients' access-check caches, reducing the detection window.
+
+**Client handle caching: stale handles (C702 Appendix A ss A.6.2, p. 275).** "Another function of the stateless behaviour of NFS is that the server cannot prevent the deletion of a file that is open by a process on a client system and is not open by a process on the server. When this occurs, the next client request which refers to the file will be rejected with the XNFS-specific error [ESTALE]." If a client has a cached handle for a file that was deleted and recreated (with a new inode number), the stale handle returns `NFS3ERR_STALE`, forcing the client to re-LOOKUP. The security implication: an attacker who deletes and recreates a file (e.g., `/etc/cron.d/job`) controls the new file's content. Clients with stale handles get ESTALE, re-LOOKUP, and then operate on the attacker's replacement file. The timing window is the client's LOOKUP cache timeout.
+
+**Silly rename reveals file activity (C702 ss12.3.1, p. 189; Appendix A ss A.8, pp. 275-276).** Already detailed in the server-side section above. From the client-side perspective: "It is common practice to have an entry in the XNFS server's crontab database to regularly delete these lingering temporary files" (p. 276). This means: (1) the crontab entry itself is a target (modifying it via NFS WRITE disables cleanup), (2) `.nfs*` files that persist after their creating client disconnects indicate a client crash (the client failed to clean up), and (3) reading the `.nfs*` file's content recovers the data the original process was working with at the time of deletion -- potentially including credentials, database records, or configuration being edited.
+
+**Data caching: read of old data (C702 Appendix A ss A.9.2, p. 276).** "The information in the buffer cache may be inaccurate and not reflect the latest changes to a file. Therefore, the read() function may not get the latest contents of a file." An attacker who writes to a file via NFS (using a different UID or from a different source) may find that other clients continue reading the old cached version for a bounded period. This cuts both ways: a defender's monitoring scripts running on NFS may not see an attacker's modifications until the cache expires, and an attacker reading a recently-modified file (e.g., a password change) may get stale data. C702 ss A.9.3 (p. 276) adds: "it is impossible to guarantee that any arbitrary multi-byte read or write will be atomic" -- no atomicity guarantee means TOCTOU races are inherent in the protocol.
+
+**No protection for in-use executables (C702 Appendix A ss A.7, p. 275).** "If an executable file stored on an XNFS server is being executed on a client system, there is no mechanism that prevents the file from being deleted, truncated, or overwritten (for example, via remove(), fopen(), truncate() or write()). The execution of the program may be terminated if this occurs." The error `[ETXTBSY]` is "never returned by a function operating on a remote file over NFS" (p. 275). An attacker with write access to an export can overwrite a binary that is being executed by another client -- the executing client may crash or, depending on the paging model, start executing attacker-controlled code as new pages are faulted in from the now-modified file. This is a code execution primitive on any client executing binaries from an NFS export.
+
+---
+
+## Cross-protocol attack chains
+
+These chains combine sideband protocols with NFS operations. Each chain is an ordered sequence of steps across multiple RPC programs, exploiting the AUTH_SYS trust model that all of them share. Every step uses an existing NFSWolf capability or a Tier 3 protocol documented elsewhere in this file. The chains are ordered by attack impact: credential theft and write access first, then recon amplification and evasion.
+
+### Chain 1: NIS -> NFS credential theft
+
+Turns a portmapper DUMP into a fully targeted NFS attack with real credentials instead of brute-force guessing.
+
+1. Detect NIS via portmapper DUMP (program 100004 `ypserv` / program 100007 `ypbind`). NFSWolf's scanner already enumerates portmapper — NIS surfaces as a side effect.
+2. Discover the NIS domain name. Two paths: (a) `YPBINDPROC_DOMAIN` (program 100007, proc 1) returns the bound domain, or (b) read `/etc/defaultdomain` via an already-accessible NFS export.
+3. `YPPROC_ALL` (program 100004, proc 8) on map `passwd.byname` dumps the full credential store: username, uid, gid, home directory, login shell. AUTH_NONE is sufficient on most deployments — NIS has no per-map access control.
+4. `YPPROC_ALL` on map `group.byname` dumps group memberships: group name, gid, member list. This gives the exact supplementary groups each uid belongs to.
+5. `YPPROC_ALL` on map `netgroup` reveals which hostnames belong to which netgroup names. NFS exports using `@netgroup` syntax in their ACLs (e.g., `/etc/exports: /data @trusted_hosts(rw)`) are now crackable — the attacker knows which hostnames to spoof.
+6. Feed the real uid/gid pairs into NFSWolf's `credential_ladder` as observed identities. `uid-spray` becomes a targeted dictionary attack (dozens of real uids) instead of a blind sweep across 0-65535.
+7. With netgroup membership known, `--hostname` spoofing targets the exact netgroup name needed to pass the export ACL. Even though knfsd checks TCP source IP (not `auth_unix.machinename`) for export ACLs, the netgroup data reveals which *machines* to pivot through.
+
+**Prerequisites:** Network access to portmapper (TCP/UDP 111) and the NIS server port. No NFS export access needed for steps 1-5.
+**Detection difficulty:** Low. NIS queries are logged by few deployments. `YPPROC_ALL` is indistinguishable from a legitimate NIS client sync.
+**NFSWolf implementation status:** Step 1 is implemented (portmapper DUMP). Steps 2-7 require NIS client procedures (Tier 3, program 100004). The `credential_ladder` integration point (step 6) is implemented and accepts external identity lists via `credential_ladder_with()`.
+
+### Chain 2: NSM -> NLM -> NFS write access
+
+Weaponizes the statd/lockd trust relationship to release locks and write to coordinated files.
+
+1. `MNTPROC_DUMP` (program 100005, proc 2) to harvest connected client hostnames and their mounted exports. Already implemented in NFSWolf (`NfsMountClient::dump_clients()`).
+2. `NLM_TEST` (program 100021, proc 1) against file handles on the target export. On `LCK_DENIED`, the response leaks `nlm_holder { exclusive, uppid, oh, l_offset, l_len }` — the lock holder's PID, owner handle, and exact byte range. No prior lock or MOUNT needed; file handle possession is sufficient.
+3. Two lock-release paths, choose based on stealth requirements:
+   - **Targeted:** `SM_NOTIFY` (program 100024, proc 6) with a spoofed `mon_name` matching the target client's hostname and a changed `state` value. The NFS server's local statd receives the notification and tells lockd the client rebooted, triggering lock release for that client only. One UDP datagram, no authentication.
+   - **Bulk:** `NLM_FREE_ALL` (program 100021, proc 23) with the target client's `caller_name`. Releases every lock and share reservation held by that hostname. Also one UDP datagram, no authentication, returns void.
+4. NFS `WRITE` (program 100003, proc 7 for v3) to the now-unlocked files. Requires `--allow-write` in NFSWolf. The advisory locks are gone; the legitimate client's write coordination is broken.
+5. Optional cleanup: `NLM_LOCK` (proc 2) with the attacker's own `caller_name` to re-establish a lock, preventing the legitimate client from detecting the gap via its next lock attempt.
+
+**Prerequisites:** Network access to NFS, NLM, and NSM ports. File handle for the target file (via MOUNT or handle forging). `--allow-write` flag.
+**Detection difficulty:** Medium. `SM_NOTIFY` is a normal part of statd recovery — a single spoofed notification blends with legitimate reboots. `NLM_FREE_ALL` is more distinctive but logged by few deployments. The subsequent NFS WRITE is indistinguishable from any other write.
+**NFSWolf implementation status:** Step 1 is implemented (`dump_clients`). Steps 2-5 require NLM and NSM client procedures (Tier 3, programs 100021 and 100024). NFS WRITE is implemented.
+
+### Chain 3: RQUOTA -> targeted uid-spray
+
+Uses the quota subsystem as a faster UID enumeration oracle than NFS ACCESS-based spraying.
+
+1. `RQUOTAPROC_GETQUOTA` (program 100011, proc 1) sweep across a UID range. Each call returns `rquota { bsize, rq_active, rq_bhardlimit, rq_bsoftlimit, rq_curblocks, rq_fhardlimit, rq_fsoftlimit, rq_curfiles }` or `Q_NOQUOTA`. The sweep is faster than NFS ACCESS-based uid-spray because RQUOTA is a single RPC call per UID with no file handle needed — no MOUNT, no LOOKUP chain.
+2. UIDs with `rq_active=TRUE` and `rq_curblocks > 0` are confirmed active users with data on the filesystem. These are high-priority targets for credential escalation.
+3. `rq_curfiles` count reveals which users have the most files — a proxy for "most interesting target" when prioritizing uid-spray order.
+4. Feed the discovered UIDs into `credential_ladder_with()` as observed identities. The ladder now tries real, active UIDs first instead of walking common service accounts or brute-forcing.
+5. For UIDs with quotas near their limits (`rq_curblocks` close to `rq_bhardlimit`), the attacker knows a WRITE as that UID will fail with `NFS3ERR_DQUOT` — skip those UIDs for write operations.
+
+**Prerequisites:** Network access to the RQUOTA service port (obtained via portmapper). No NFS export access needed.
+**Detection difficulty:** Low. RQUOTA queries are rarely logged. A sweep looks like a quota management tool checking allocations.
+**NFSWolf implementation status:** None. RQUOTA is Tier 3 (program 100011). The `credential_ladder_with()` integration point is implemented.
+
+### Chain 4: NFS_ACL -> hidden permission discovery
+
+Reveals access paths that NFSWolf's current mode-bit analysis cannot see.
+
+1. NFS `ACCESS` (program 100003, proc 4 for v3) on a target file reports "denied" based on mode bits — the file appears inaccessible to the current uid/gid.
+2. `GETACL` (program 100227, proc 1) on the same file retrieves the POSIX ACL. The ACL may contain entries like `group:developers:rw-` that grant access to a specific GID not visible in the file's mode bits. ACLs are a superset of mode bits — the mode bits show only the owning user, owning group, and other; ACLs can grant access to arbitrary additional users and groups.
+3. `uid-spray` with the GID from the ACL entry (via `credential_ladder_with()` seeded with the discovered GID) grants access to the file despite mode bits saying denied.
+4. This bypasses NFSWolf's current mode-bit-based pruning in `credential_ladder()`. The ladder's optimization that skips service-account rungs when `mode & 0o007 == 0` is wrong in the presence of ACLs — the file may have no "other" access but an ACL granting access to a specific group. The chain exposes a real gap in the current credential escalation logic.
+
+**Prerequisites:** File handle for the target file. Network access to the NFS_ACL service (program 100227, usually co-located with NFS on port 2049).
+**Detection difficulty:** Low. `GETACL` is a normal administrative operation. The subsequent `uid-spray` is the detectable step.
+**NFSWolf implementation status:** NFS ACCESS is implemented. GETACL requires the NFS_ACL protocol (Tier 3, program 100227). The credential ladder gap (mode-bit pruning ignoring ACLs) is a real limitation of the current `credential_ladder()` implementation.
+
+### Chain 5: WebNFS -> MOUNT bypass -> full filesystem
+
+Combines the WebNFS public filehandle with AUTH_SYS credential forging to access exports without ever touching the MOUNT protocol.
+
+1. Construct the public filehandle: zero-length `nfs_fh3` for v3, all-zero 32 bytes for v2. Send `NFSPROC3_LOOKUP` (proc 3) with the public handle and a multi-component path (MCL) like `../../../etc/passwd`. NFSWolf's existing `Nfs3Client` LOOKUP is sufficient — the only new construct is the handle constant.
+2. If the server returns a valid file handle: the server supports WebNFS, and the export ACL check that MOUNT enforces was never executed. The file handle is a bearer token — it works with any AUTH_SYS credential.
+3. Combine with `uid-spray`: try the public handle LOOKUP under multiple AUTH_SYS identities. Even if the initial LOOKUP succeeds only for uid 0, the returned handle works with any uid (bearer token property, RFC 1094 ss2.3.3).
+4. No MOUNT means no `auth_flavors` negotiation. On servers that only check auth flavor at MOUNT time (the "MOUNT-only-checking" pattern C702 ssE.7.3 explicitly warns about), AUTH_SYS works even on exports configured with `sec=krb5`. The server never ran the MOUNT procedure that would have enforced Kerberos.
+5. If step 1 fails with `NFS3ERR_STALE`, `NFS3ERR_BADHANDLE`, or `NFS3ERR_INVAL`: WebNFS is not supported. Fall back to the existing `escape` subcommand (ext4/xfs/btrfs handle forging via `FileHandleAnalyzer`).
+
+**Prerequisites:** Network access to NFS port 2049. No portmapper needed (WebNFS spec mandates direct port 2049 connection). No MOUNT access needed.
+**Detection difficulty:** Medium. The zero-length/all-zero handle is distinctive in packet captures, but no standard NFS monitoring tool flags it. The MCL path with `..` components is more suspicious but only visible in deep packet inspection.
+**NFSWolf implementation status:** The v4 `PUTPUBFH` is implemented in `nfswolf-nfs4`. The v2/v3 public handle probe is not implemented. `check_webnfs_public_handle` exists in `src/engine/analyzer.rs` but has a proxy bypass bug (documented in CRATE-DESIGN.md). The existing LOOKUP procedures in `Nfs2Client` and `Nfs3Client` are sufficient for the wire-level probe — only the handle constant and MCL path construction are missing.
+
+### Chain 6: PCNFSD -> authenticated NFS access
+
+Turns a legacy print server into a password oracle that feeds NFS credential forging.
+
+1. Detect PCNFSD via portmapper DUMP (program 150001). NFSWolf's scanner already enumerates portmapper.
+2. `PCNFSD_AUTH` (program 150001, proc 1) with candidate username/password. The password is "obfuscated" with XOR 0x5b + AND 0x7f — trivially reversible, published in-spec (D030 ss6.4.2.1). On success (`AUTH_RES_OK`), the server returns the real uid/gid for that user.
+3. Fail-open mode: even on authentication failure, `AUTH_RES_FAKE` returns a synthesized but usable uid/gid. The spec explicitly sanctions this as a valid response — the server hands back an identity the client "may use if it wishes" (D030 p. 96). Some deployments always return `AUTH_RES_FAKE` instead of `AUTH_RES_FAIL`.
+4. Use the obtained uid/gid as the AUTH_SYS credential for NFS operations. The uid/gid from `PCNFSD_AUTH` is a real, verified identity — not a guess. Set it via `AuthSys::with_groups()` and proceed with normal NFS operations.
+5. Combine with NIS `passwd.byname` dump (Chain 1): the username list from NIS feeds a `PCNFSD_AUTH` brute-force. NIS gives the usernames; PCNFSD validates which passwords are weak. The uid/gid from either source feeds NFS.
+6. `PCNFSD_PR_INIT` (proc 2) returns a spool directory path as a bonus — it reveals the server's filesystem layout, which helps target `escape` path traversal.
+
+**Prerequisites:** Network access to portmapper and the PCNFSD service port (UDP). The target must be running pcnfsd (rare on modern systems, persistent on legacy SunOS/Solaris/illumos PC-NFS gateways).
+**Detection difficulty:** Low. PCNFSD has no audit logging in any known implementation. The XOR obfuscation defeats casual packet sniffing but not any real monitoring. Brute-force attempts are limited only by UDP round-trip time.
+**NFSWolf implementation status:** Step 1 is implemented (portmapper DUMP for program 150001 detection). Steps 2-6 require PCNFSD client procedures (Tier 3, program 150001). The AUTH_SYS credential injection point (step 4) is fully implemented.
+
+### Chain 7: Write verifier -> DRC replay window
+
+Uses the NFSv3 write verifier as a reboot oracle, then exploits the empty duplicate request cache after a reboot.
+
+1. Issue NFS `WRITE` (program 100003, proc 7, `UNSTABLE` stability) followed by `COMMIT` (proc 21) with `--allow-write`. Record the write verifier from the COMMIT response. The write verifier is a server-generated 8-byte value that changes on reboot (C702 ss12.3.11; Linux generates it via SipHash of current timestamp in `nfsd_reset_write_verifier_locked()`).
+2. Periodically re-issue COMMIT and compare the returned verifier to the saved value. A changed verifier means the server rebooted — the write verifier is a reboot oracle.
+3. During the post-reboot window: the DRC (duplicate request cache) is wiped. Linux's DRC is pure RAM (`kvzalloc` + `KMEM_CACHE` in `fs/nfsd/nfscache.c`), reallocated fresh on every `nfsd_startup_net()`. No backing store, no persistence.
+4. Previously-deduplicated destructive calls (`REMOVE` proc 12, `RENAME` proc 14, `RMDIR` proc 13) can now be replayed. Before the reboot, the DRC would have returned the cached result for a retransmitted XID. After the reboot, the DRC is empty — the server processes the "retransmission" as a new request with destructive side effects.
+5. Combine with NSM (Chain 2): `SM_SIMU_CRASH` (program 100024, proc 4 — a debugging procedure that most statd implementations leave enabled) triggers the local NSM to send `SM_NOTIFY` to all monitored peers, cascading lock recovery across the cluster. This creates a window of lock-free access (NLM grace period, ~45 seconds per C702 ss10.1.2) alongside the DRC replay window — two independent coordination mechanisms are disrupted simultaneously.
+
+**Prerequisites:** `--allow-write` flag. Active NFS session with at least one prior WRITE+COMMIT (to establish the verifier baseline). For step 5: network access to the target's NSM port.
+**Detection difficulty:** High. The write verifier check is an ordinary COMMIT call. DRC replay is indistinguishable from a legitimate client retransmission after a network partition. `SM_SIMU_CRASH` is the most detectable step — it is a debugging procedure with no legitimate production use.
+**NFSWolf implementation status:** NFS WRITE and COMMIT are implemented. The write verifier comparison logic is not implemented as a reboot oracle. DRC replay exploitation is not implemented. NSM `SM_SIMU_CRASH` requires the NSM client (Tier 3, program 100024).
+
+### Chain 8: Metadata leak -> targeted file discovery
+
+Exploits the NFSv3 spec requirement that failed operations return attributes, turning access denials into a full directory map.
+
+1. NFS `LOOKUP` (program 100003, proc 3) or `ACCESS` (proc 4) on guessed paths. When the target exists but access is denied, the response carries `post_op_attr` in the failure arm: `fattr3 { type, mode, nlink, uid, gid, size, used, rdev, fsid, fileid, atime, mtime, ctime }`. C702 ss12.2.3 (p. 188) mandates this: "implementors are strongly encouraged to return as much attribute data as possible upon failure." Linux knfsd (`fs/nfsd/nfs3xdr.c`) encodes `post_op_attr` on both success and error paths.
+2. The denied response leaks: file size (`size`), modification time (`mtime`), owner (`uid`, `gid`), inode number (`fileid`), file type (`type`). This is full `stat()` output on a file the attacker cannot read.
+3. Systematically probe common paths (`/etc/shadow`, `/etc/krb5.keytab`, `/root/.ssh/id_rsa`, database data directories) to map the directory structure and file ownership. `NFS3ERR_NOENT` means the file does not exist; `NFS3ERR_ACCES` means it exists and the attributes are in the response.
+4. Feed the discovered owner UIDs into `credential_ladder_with()` for targeted escalation. The file's `uid` from the denied response tells the ladder exactly which identity to try first.
+5. File sizes reveal which files are worth targeting. A `/etc/shadow` of 2KB vs a database file of 500MB drives prioritization. `mtime` reveals recency — recently modified files are more likely to contain current credentials.
+
+**Prerequisites:** File handle for a parent directory (via MOUNT or handle forging). The target files must exist on the export.
+**Detection difficulty:** Low. LOOKUP and ACCESS are the most common NFS operations. The access-denied responses are never logged by standard NFS server configurations. The attacker's probing is indistinguishable from a misconfigured client.
+**NFSWolf implementation status:** LOOKUP and ACCESS are fully implemented. The `post_op_attr` extraction from failure responses is partially implemented — the `Nfs3Result::Err` arm carries the failure data, but `flatten()` in the domain API discards it. Recovering the attributes from the failure arm is a code change in `nfswolf-nfs3`, not a new protocol. The `credential_ladder_with()` integration point is implemented.
 
 ---
 
