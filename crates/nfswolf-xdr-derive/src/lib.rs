@@ -482,3 +482,11 @@ pub fn derive_xdr_codec(input: TokenStream) -> TokenStream {
 
     result.into()
 }
+
+// Dev-dependencies (nfswolf_xdr, trybuild) are visible to the lib test target
+// but only used from the integration test binary in tests/derive.rs.
+#[cfg(test)]
+mod _dev_dep_anchors {
+    use nfswolf_xdr as _;
+    use trybuild as _;
+}

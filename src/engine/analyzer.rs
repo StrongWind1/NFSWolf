@@ -51,6 +51,12 @@ pub(crate) struct AnalysisResult {
     pub host: String,
     pub timestamp: String,
     pub os_guess: Option<String>,
+    /// Server implementation fingerprint from null-filename LOOKUP probe.
+    ///
+    /// RFC 1813 sec. 3.3.3 requires NFS3ERR_ACCES for a zero-length filename,
+    /// but Linux knfsd rejects it at the XDR layer with RPC GARBAGE_ARGS.
+    /// The divergence is a cheap, unauthenticated implementation discriminator.
+    pub impl_fingerprint: Option<String>,
     pub nfs_versions: Vec<String>,
     pub exports: Vec<ExportAnalysis>,
     pub findings: Vec<Finding>,
@@ -93,6 +99,29 @@ pub(crate) struct FileAccessTest {
     pub via_escape: bool,
 }
 
+/// Metadata harvested from an NFS3ERR_ACCES or NFS3ERR_PERM denial response.
+///
+/// Linux knfsd populates `post_op_attr` in error responses (fs/nfsd/nfs3xdr.c).
+/// RFC 1813 sec. 3.3 "strongly encourages" servers to return as much attribute
+/// data as possible on failure, so servers routinely disclose uid, gid, size,
+/// mode, and timestamps for files the caller cannot access. This feeds the
+/// credential ladder: knowing the file owner lets the attacker craft a targeted
+/// AUTH_SYS credential instead of brute-forcing.
+struct LeakedMetadata {
+    /// Which NFS operation leaked the metadata (e.g. "LOOKUP", "READ").
+    operation: &'static str,
+    /// Path or component that triggered the denial.
+    path: String,
+    /// Owner UID from the leaked `post_op_attr`.
+    uid: u32,
+    /// Owner GID from the leaked `post_op_attr`.
+    gid: u32,
+    /// File size in bytes from the leaked `post_op_attr`.
+    size: u64,
+    /// POSIX permission mode bits from the leaked `post_op_attr`.
+    mode: u32,
+}
+
 /// A single NFSv4 access control entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Nfs4Ace {
@@ -128,7 +157,8 @@ pub(crate) struct SquashProbeResult {
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use nfswolf_nfs3::wire::{cookieverf3, sattr3};
+use nfswolf_nfs3::wire::{LOOKUP3args, Nfs3Option, Nfs3Result, READ3args, cookieverf3, diropargs3, filename3, nfsstat3, sattr3};
+use nfswolf_xdr::Opaque;
 
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus};
 use crate::proto::auth::{AuthSys, Credential};
@@ -245,8 +275,18 @@ impl Analyzer {
         check_export_acls(&exports, &mut findings);
 
         let mut export_analyses: Vec<ExportAnalysis> = Vec::new();
+        let mut impl_fingerprint: Option<String> = None;
         for entry in &exports {
             let ea = self.analyze_export(config, addr, entry, &mut findings).await;
+            // Run the null-filename fingerprint probe once, on the first
+            // export that mounted successfully (non-empty handle).
+            if impl_fingerprint.is_none()
+                && !ea.file_handle.is_empty()
+                && let Ok(fh) = FileHandle::from_hex(&ea.file_handle)
+            {
+                let probe_client = self.build_export_client(addr, entry);
+                impl_fingerprint = Some(check_null_filename_fingerprint(&probe_client, &fh).await);
+            }
             export_analyses.push(ea);
         }
 
@@ -254,11 +294,31 @@ impl Analyzer {
         // check, backed by the auth flavors collected per export above.
         check_plaintext_transport(&export_analyses, &mut findings);
 
+        // Linux knfsd execute-implies-read: nfsd_permission() unconditionally adds
+        // NFSD_MAY_OWNER_OVERRIDE to every file-open check, which falls back to
+        // MAY_EXEC when READ is denied on a regular file (C702 sec. 12.3.3). Files
+        // with mode 0111 (execute-only) are therefore readable via NFS by anyone
+        // with execute permission. Emit once per host when Linux knfsd is detected.
+        check_execute_implies_read(impl_fingerprint.as_deref(), &mut findings);
+
         // OS guess from first valid handle.
         let os_guess = export_analyses.iter().find_map(|ea| if ea.file_handle.is_empty() { None } else { FileHandle::from_hex(&ea.file_handle).ok() });
         let os_string = os_guess.map(|fh| check_os_fingerprint(&fh));
 
-        Ok(AnalysisResult { host: config.host.clone(), timestamp, os_guess: os_string, nfs_versions: version_strings, exports: export_analyses, findings })
+        Ok(AnalysisResult { host: config.host.clone(), timestamp, os_guess: os_string, impl_fingerprint, nfs_versions: version_strings, exports: export_analyses, findings })
+    }
+
+    /// Build a pool-backed NFSv3 client for the given export.
+    ///
+    /// Shares pool / circuit / proxy / hostname / aux-gids with the analyzer
+    /// so every per-export probe uses the same connection infrastructure.
+    fn build_export_client(&self, addr: SocketAddr, entry: &ExportEntry) -> Arc<Nfs3Client> {
+        let uid = self.nfs3.uid();
+        let gid = self.nfs3.gid();
+        let gids = crate::cli::probe::build_gid_list(gid, &self.aux_gids);
+        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &self.hostname));
+        let key = PoolKey { host: addr, export: entry.path.clone(), uid, gid };
+        Arc::new(Nfs3Client::new(PooledTransport::new(Arc::clone(&self.pool), key, Arc::clone(&self.circuit), self.stealth.clone(), cred, ReconnectStrategy::Persistent)))
     }
 
     /// Analyze a single export: mount it, run per-export checks, return the result.
@@ -281,17 +341,10 @@ impl Analyzer {
         // Shares self.pool / self.circuit (the pool keys on (host, export, uid, gid) so
         // different exports get different connection slots automatically), and inherits
         // the proxy, hostname, and aux-gids the operator supplied.
-        let export_nfs3 = {
-            let uid = self.nfs3.uid();
-            let gid = self.nfs3.gid();
-            let gids = crate::cli::probe::build_gid_list(gid, &self.aux_gids);
-            let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &self.hostname));
-            let key = PoolKey { host: addr, export: entry.path.clone(), uid, gid };
-            // Inherit the configured stealth pacing so every per-export probe RPC
-            // (escape, btrfs, nohide, symlink, squash writes, file-access reads)
-            // honours --delay/--jitter (Critical Design Rule 10).
-            Arc::new(Nfs3Client::new(PooledTransport::new(Arc::clone(&self.pool), key, Arc::clone(&self.circuit), self.stealth.clone(), cred, ReconnectStrategy::Persistent)))
-        };
+        // Inherits the configured stealth pacing so every per-export probe RPC
+        // (escape, btrfs, nohide, symlink, squash writes, file-access reads)
+        // honours --delay/--jitter (Critical Design Rule 10).
+        let export_nfs3 = self.build_export_client(addr, entry);
 
         let fh = mount_res.handle;
         ea.file_handle = fh.to_hex();
@@ -381,6 +434,7 @@ impl Analyzer {
             Some(root) => (root, true),
             None => (&fh, false),
         };
+        let mut all_metadata_leaks: Vec<LeakedMetadata> = Vec::new();
         for path in &config.test_paths {
             // Aggregate every credential that read this path into ONE F-1.3 finding
             // rather than emitting a near-identical finding per GID -- the default
@@ -390,7 +444,7 @@ impl Analyzer {
             let mut first_preview: Option<String> = None;
             for &uid in &config.test_uids {
                 for &gid in &config.test_gids {
-                    let test = probe_file_access(&export_nfs3, probe_root, path, uid, gid, via_escape).await;
+                    let (test, leaks) = probe_file_access(&export_nfs3, probe_root, path, uid, gid, via_escape).await;
                     if test.readable {
                         readable_creds.push(format!("uid={uid} gid={gid}"));
                         if first_preview.is_none() {
@@ -398,6 +452,7 @@ impl Analyzer {
                         }
                     }
                     ea.file_access_tests.push(test);
+                    all_metadata_leaks.extend(leaks);
                 }
             }
             if !readable_creds.is_empty() {
@@ -421,6 +476,33 @@ impl Analyzer {
                     Severity::Critical,
                 ));
             }
+        }
+
+        // F-5.6: Metadata disclosed on access denial (RFC 1813 sec. 3.3).
+        // Deduplicate by (operation, path) so repeated credential probes against
+        // the same component do not inflate the evidence list.
+        if !all_metadata_leaks.is_empty() {
+            all_metadata_leaks.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.operation.cmp(b.operation)));
+            all_metadata_leaks.dedup_by(|a, b| a.path == b.path && a.operation == b.operation);
+            let evidence_lines: Vec<String> = all_metadata_leaks.iter().map(|l| format!("{} on {}: uid={}, gid={}, size={}, mode={:#o}", l.operation, l.path, l.uid, l.gid, l.size, l.mode)).collect();
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-5.6",
+                    title: "Metadata disclosed on access denial",
+                    desc: "The server returned file attributes (uid, gid, size, mode) in \
+                           the post_op_attr of NFS3ERR_ACCES/NFS3ERR_PERM denial responses. \
+                           RFC 1813 sec. 3.3 encourages returning attribute data on failure; \
+                           Linux knfsd always does (fs/nfsd/nfs3xdr.c). This discloses \
+                           ownership and size of files the caller cannot read, enabling \
+                           targeted credential selection for the UID/GID that owns the file.",
+                    evidence: &evidence_lines.join("; "),
+                    remediation: "No server-side mitigation exists short of patching nfsd to \
+                                  suppress post_op_attr on permission denials. Use sec=krb5p \
+                                  to prevent unauthenticated callers from reaching the denial path.",
+                    export: Some(&entry.path),
+                },
+                Severity::Low,
+            ));
         }
 
         ea
@@ -496,6 +578,46 @@ fn check_export_acls(exports: &[ExportEntry], findings: &mut Vec<Finding>) {
             ));
         }
     }
+}
+
+/// Flag execute-implies-read on Linux knfsd.
+///
+/// Linux knfsd's `nfsd_permission()` unconditionally adds `NFSD_MAY_OWNER_OVERRIDE`
+/// to every file-open permission check. When READ is denied on a regular file,
+/// the code falls back to checking `MAY_EXEC` -- if execute permission exists, READ
+/// is allowed (C702 sec. 12.3.3). This means any file with mode `0111` (or any
+/// execute bit set without the corresponding read bit) is readable via NFS by
+/// anyone with execute permission. The behavior applies to every NFSv3 READ
+/// because NFSD_MAY_OWNER_OVERRIDE is added unconditionally.
+///
+/// Emitted once per host at Info severity when the null-filename fingerprint
+/// identifies the server as Linux knfsd.
+fn check_execute_implies_read(impl_fingerprint: Option<&str>, findings: &mut Vec<Finding>) {
+    let is_linux_knfsd = impl_fingerprint.is_some_and(|fp| fp.contains("Linux knfsd"));
+    if !is_linux_knfsd {
+        return;
+    }
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-1.1",
+            title: "Execute-implies-read: execute-only files are readable via NFS on Linux knfsd",
+            desc: "Linux knfsd's nfsd_permission() unconditionally adds NFSD_MAY_OWNER_OVERRIDE \
+                   to every file-open check. When READ is denied on a regular file, it falls back \
+                   to MAY_EXEC -- if execute permission exists, READ succeeds (C702 sec. 12.3.3). \
+                   Files with execute-only permissions (e.g., mode 0111) are readable by any NFS \
+                   client with execute access. This expands the readable file set beyond what \
+                   mode bits indicate, potentially exposing secrets in execute-only scripts or \
+                   binaries.",
+            evidence: "Server fingerprinted as Linux knfsd (null-filename -> GARBAGE_ARGS). \
+                       Execute-implies-read is a compile-time behavior in nfsd_permission(), \
+                       not a runtime option.",
+            remediation: "Do not rely on removing read permission to protect NFS-exported files. \
+                          Use Kerberos (sec=krb5p) or filesystem ACLs to restrict access. \
+                          Remove execute permission from files that should not be readable.",
+            export: None,
+        },
+        Severity::Info,
+    ));
 }
 
 /// Flag plaintext NFS transport when no RPCSEC_GSS privacy is advertised (F-3.1).
@@ -865,43 +987,67 @@ fn check_handle_entropy(fh: &FileHandle, export_path: &str, findings: &mut Vec<F
     }
 }
 
-/// Probe whether a specific file is readable with given uid/gid credentials.
+/// Probe whether a specific file is readable with given uid/gid credentials,
+/// harvesting any metadata the server leaks in denial responses.
 ///
-/// Walks the path components via LOOKUP starting from `root_fh`, then attempts READ
-/// on the final file. `root_fh` is the export root, or the confirmed filesystem-root
-/// escape handle when `via_escape` is set (F-1.3 shadow is only reachable post-escape).
-/// Returns a FileAccessTest recording whether the read succeeded and a preview.
-async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, uid: u32, gid: u32, via_escape: bool) -> FileAccessTest {
+/// Uses raw wire-level LOOKUP and READ instead of the domain API so the
+/// `post_op_attr` from failure arms (`LOOKUP3resfail.dir_attributes`,
+/// `READ3resfail.file_attributes`) is captured. Linux knfsd populates these
+/// even on NFS3ERR_ACCES / NFS3ERR_PERM (fs/nfsd/nfs3xdr.c), disclosing uid,
+/// gid, size, and mode for files the caller cannot access (RFC 1813 sec. 3.3).
+async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, uid: u32, gid: u32, via_escape: bool) -> (FileAccessTest, Vec<LeakedMetadata>) {
     let mut result = FileAccessTest { path: path.to_owned(), uid, gid, readable: false, preview: None, via_escape };
+    let mut leaks: Vec<LeakedMetadata> = Vec::new();
 
     // Create a client with the specified credentials so the server sees
     // the correct uid/gid for permission checks.
     let test_client = nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], "nfswolf")), uid, gid);
 
-    // Walk path components, starting from root_fh.
-    let fh = walk_path(&test_client, root_fh, path).await;
-    let Some(target_fh) = fh else {
-        return result;
-    };
-
-    // Attempt READ of up to 128 bytes.
-
-    if let Ok(chunk) = test_client.read_at(&target_fh, 0, 128).await {
-        result.readable = true;
-        result.preview = Some(String::from_utf8_lossy(&chunk.data).chars().take(64).collect());
-    }
-
-    result
-}
-
-/// Walk a slash-separated path using LOOKUP, starting from root_fh.
-/// Returns the file handle of the final component, or None on any error.
-async fn walk_path(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str) -> Option<FileHandle> {
+    // Walk path components using raw LOOKUP to capture failure-arm metadata.
     let mut current = root_fh.clone();
+    let mut walked = String::new();
     for component in path.split('/').filter(|c| !c.is_empty()) {
-        current = nfs3.resolve(&current, component).await.ok()?.0;
+        let args = LOOKUP3args { what: diropargs3 { dir: current.to_nfs_fh3(), name: filename3(Opaque::owned(component.as_bytes().to_vec())) } };
+        match test_client.lookup(&args).await {
+            Ok(Nfs3Result::Ok(ok)) => {
+                current = FileHandle::from_nfs_fh3(&ok.object);
+                if !walked.is_empty() {
+                    walked.push('/');
+                }
+                walked.push_str(component);
+            },
+            Ok(Nfs3Result::Err((status, fail))) => {
+                // Harvest leaked attrs from the denial's post_op_attr (RFC 1813 sec. 3.3.3).
+                if matches!(status, nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM)
+                    && let Nfs3Option::Some(ref attrs) = fail.dir_attributes
+                {
+                    let leaked_path = if walked.is_empty() { component.to_owned() } else { format!("{walked}/{component}") };
+                    leaks.push(LeakedMetadata { operation: "LOOKUP", path: leaked_path, uid: attrs.uid, gid: attrs.gid, size: attrs.size, mode: attrs.mode });
+                }
+                return (result, leaks);
+            },
+            Err(_) => return (result, leaks),
+        }
     }
-    Some(current)
+
+    // Attempt READ using the raw wire call to capture failure-arm metadata.
+    let read_args = READ3args { file: current.to_nfs_fh3(), offset: 0, count: 128 };
+    match test_client.read(&read_args).await {
+        Ok(Nfs3Result::Ok(ok)) => {
+            result.readable = true;
+            result.preview = Some(String::from_utf8_lossy(ok.data.0.as_ref()).chars().take(64).collect());
+        },
+        Ok(Nfs3Result::Err((status, fail))) => {
+            if matches!(status, nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM)
+                && let Nfs3Option::Some(ref attrs) = fail.file_attributes
+            {
+                leaks.push(LeakedMetadata { operation: "READ", path: path.to_owned(), uid: attrs.uid, gid: attrs.gid, size: attrs.size, mode: attrs.mode });
+            }
+        },
+        Err(_) => {},
+    }
+
+    (result, leaks)
 }
 
 /// Format OS and filesystem fingerprint as a human-readable string.
@@ -1301,6 +1447,51 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
             },
             Severity::High,
         ));
+    }
+}
+
+// --- Null-filename server fingerprint ---
+
+/// Fingerprint the NFS server implementation by sending a zero-length filename LOOKUP.
+///
+/// RFC 1813 sec. 3.3.3 says LOOKUP with a null-string filename must return
+/// NFS3ERR_ACCES.  Linux knfsd rejects the request at the XDR decode layer
+/// before the NFS procedure runs, surfacing as RPC GARBAGE_ARGS instead.
+/// This one-call divergence is an unauthenticated, cheap implementation
+/// discriminator:
+///   - NFS3ERR_ACCES  -> spec-conformant (Solaris, NetApp, FreeBSD)
+///   - GARBAGE_ARGS   -> Linux knfsd (XDR-level rejection)
+///   - other NFS status / RPC error -> unknown / atypical implementation
+async fn check_null_filename_fingerprint(nfs3: &Nfs3Client, root_fh: &FileHandle) -> String {
+    use nfswolf_rpc::RpcError;
+
+    // Construct LOOKUP with a zero-length filename against the export root.
+    let args = LOOKUP3args { what: diropargs3 { dir: root_fh.to_nfs_fh3(), name: filename3(Opaque::borrowed(b"")) } };
+
+    match nfs3.lookup(&args).await {
+        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES, _))) => {
+            // Spec-conformant: server parsed the XDR and returned the mandated
+            // status for a null-string filename (RFC 1813 sec. 3.3.3).
+            "Spec-conformant (null-filename -> NFS3ERR_ACCES)".to_owned()
+        },
+        Ok(Nfs3Result::Err((status, _))) => {
+            // Server parsed the XDR but returned a different NFS error.
+            format!("Unknown (null-filename -> {status:?})")
+        },
+        Ok(Nfs3Result::Ok(_)) => {
+            // Server accepted a zero-length filename LOOKUP -- very unusual.
+            "Unknown (null-filename LOOKUP succeeded)".to_owned()
+        },
+        Err(RpcError::GarbageArgs) => {
+            // Linux knfsd: the XDR decoder rejects the zero-length filename
+            // before the NFS LOOKUP procedure runs.
+            "Linux knfsd (null-filename -> GARBAGE_ARGS)".to_owned()
+        },
+        Err(e) => {
+            // Transport or other RPC-level failure -- not diagnostic.
+            tracing::debug!("null-filename fingerprint probe failed: {e}");
+            format!("Indeterminate ({e})")
+        },
     }
 }
 

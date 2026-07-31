@@ -22,7 +22,7 @@ const PROG_YPSERV: u32 = 100_004;
 /// NIS ypbind (program 100007).
 const PROG_YPBIND: u32 = 100_007;
 /// One entry returned by PMAPPROC_DUMP.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct PortmapEntry {
     /// RPC program number.
     pub program: u32,

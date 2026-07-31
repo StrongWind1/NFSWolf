@@ -20,6 +20,9 @@ pub(crate) fn render(results: &[AnalysisResult], title: &str, out: &mut dyn Writ
         if let Some(os) = &result.os_guess {
             writeln!(out, "- **OS:** {}", md_escape_text(os))?;
         }
+        if let Some(fp) = &result.impl_fingerprint {
+            writeln!(out, "- **Server impl:** {}", md_escape_text(fp))?;
+        }
         writeln!(out, "- **NFS versions:** {}", result.nfs_versions.join(", "))?;
         writeln!(out)?;
 

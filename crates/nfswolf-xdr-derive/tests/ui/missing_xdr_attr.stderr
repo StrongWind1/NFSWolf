@@ -1,0 +1,7 @@
+error: proc-macro derive panicked
+ --> tests/ui/missing_xdr_attr.rs:4:10
+  |
+4 | #[derive(XdrCodec)]
+  |          ^^^^^^^^
+  |
+  = help: message: Complex enum variant 'Variant' must have #[xdr(value)] attribute

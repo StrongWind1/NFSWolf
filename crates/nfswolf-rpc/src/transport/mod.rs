@@ -13,6 +13,7 @@ pub mod direct;
 pub mod io;
 pub mod net;
 pub mod tokio;
+pub mod udp;
 
 pub use call::RpcTransport;
 pub use direct::DirectTransport;

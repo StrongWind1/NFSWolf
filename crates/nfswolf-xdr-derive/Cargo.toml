@@ -17,5 +17,9 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full"] }
 
+[dev-dependencies]
+nfswolf-xdr = { workspace = true }
+trybuild = "1"
+
 [lints]
 workspace = true

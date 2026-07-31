@@ -18,6 +18,9 @@ pub(crate) fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow:
         if let Some(os) = &result.os_guess {
             writeln!(out, "  OS: {}", sanitize_control(os))?;
         }
+        if let Some(fp) = &result.impl_fingerprint {
+            writeln!(out, "  Server impl: {}", sanitize_control(fp))?;
+        }
         writeln!(out, "  NFS versions: {}", result.nfs_versions.join(", "))?;
         writeln!(out)?;
 

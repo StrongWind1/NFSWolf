@@ -82,6 +82,7 @@ mod tests {
             host: "192.168.1.1".to_owned(),
             timestamp: "2025-01-01T00:00:00Z".to_owned(),
             os_guess: Some("Linux/Ext4".to_owned()),
+            impl_fingerprint: None,
             nfs_versions: vec!["NFSv3".to_owned()],
             exports: vec![ExportAnalysis { path: "/export".to_owned(), allowed_hosts: vec!["*".to_owned()], auth_methods: vec!["1".to_owned()], writable: false, no_root_squash: None, escape_possible: false, file_handle: "01020304".to_owned(), file_access_tests: Vec::new(), nfs4_acls: Vec::new() }],
             findings,

@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::proto::mount::{ExportEntry, MountedClient};
+use crate::proto::portmap::PortmapEntry;
 
 // --- Target specification ---------------------------------------------------
 
@@ -196,6 +197,8 @@ pub(crate) struct HostResult {
     pub exports_v3: Option<Vec<ExportEntry>>,
     /// NFSv4 top-level pseudo-FS entries.  `None` = v4 unreachable or READDIR failed.
     pub exports_v4: Option<Vec<V4ExportEntry>>,
+    /// All RPC services from PMAPPROC_DUMP.  Empty if portmapper was unreachable.
+    pub rpc_services: Vec<PortmapEntry>,
     /// Connected clients from MOUNT DUMP.  `None` = DUMP unavailable.
     pub mounts: Option<Vec<MountedClient>>,
     /// Version range from the first PROG_MISMATCH reply (Hint column).

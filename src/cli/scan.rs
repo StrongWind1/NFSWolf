@@ -274,6 +274,22 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 let v2_flag = if note.contains("NFSv2") { " --nfs-version 2" } else { "" };
                 println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
+            Ok(EscapeOutcome::WebNfs { public_handle, version }) => {
+                escaped += 1;
+                let hex = public_handle.to_hex();
+                println!();
+                println!("{}", crate::output::status_ok(&format!("{}:{} WebNFS escape (NFS{version}) -- public handle accepted, MOUNT bypass", res.host, res.export)));
+                if hex.is_empty() {
+                    crate::output::print_handle("Public handle", "(zero-length)");
+                } else {
+                    crate::output::print_handle("Public handle", &hex);
+                }
+                let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
+                let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
+                let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
+                let v2_flag = if *version == "v2" { " --nfs-version 2" } else { "" };
+                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+            },
             Ok(EscapeOutcome::StaleNoRoot) => {
                 println!("  {}", format!("{}:{}  handle valid but root not found (raise `escape --max-root-scan`)", res.host, res.export).dimmed());
             },
@@ -469,6 +485,9 @@ fn print_host_details(results: &[HostResult]) {
             println!("{}", r.ip);
         }
 
+        // RPC services from portmapper DUMP (labelled with program names).
+        print_rpc_services(r);
+
         // Export list deduplication and display.
         print_exports(r);
 
@@ -479,6 +498,44 @@ fn print_host_details(results: &[HostResult]) {
             let entries: Vec<String> = mounts.iter().map(|m| format!("{}:{}", m.hostname, m.directory)).collect();
             println!("  Clients: {}", entries.join(", "));
         }
+    }
+}
+
+/// Print discovered RPC services with human-readable program names.
+///
+/// Groups entries by (program, port) and shows each with versions and transport.
+/// Uses `nfswolf_rpc::portmap::program_name` to resolve the program number;
+/// unknown programs are shown as their bare number.
+fn print_rpc_services(r: &HostResult) {
+    if r.rpc_services.is_empty() {
+        return;
+    }
+
+    // Deduplicate into (program, port) -> (name, versions, protocols) groups.
+    // Using a BTreeMap so output is sorted by (program, port).
+    let mut groups: std::collections::BTreeMap<(u32, u16), (Vec<u32>, bool, bool)> = std::collections::BTreeMap::new();
+    for entry in &r.rpc_services {
+        let key = (entry.program, entry.port);
+        let slot = groups.entry(key).or_insert_with(|| (Vec::new(), false, false));
+        if !slot.0.contains(&entry.version) {
+            slot.0.push(entry.version);
+        }
+        if entry.protocol == nfswolf_rpc::portmap::IPPROTO_TCP {
+            slot.1 = true;
+        }
+        if entry.protocol == nfswolf_rpc::portmap::IPPROTO_UDP {
+            slot.2 = true;
+        }
+    }
+
+    println!("  RPC services:");
+    for ((prog, port), (versions, tcp, udp)) in &groups {
+        let name = nfswolf_rpc::portmap::program_name(*prog).unwrap_or("unknown");
+        let proto = port_proto_str(*tcp, *udp);
+        let mut vers = versions.clone();
+        vers.sort_unstable();
+        let ver_str: String = vers.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+        println!("    {prog:<8}{name:<14}v{ver_str:<8}{port}/{proto}");
     }
 }
 
@@ -599,6 +656,13 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
             "tcp": p.tcp,
             "udp": p.udp,
             "versions": p.versions,
+        })).collect::<Vec<_>>(),
+        "rpc_services": r.rpc_services.iter().map(|e| serde_json::json!({
+            "program": e.program,
+            "program_name": nfswolf_rpc::portmap::program_name(e.program),
+            "version": e.version,
+            "protocol": if e.protocol == nfswolf_rpc::portmap::IPPROTO_TCP { "tcp" } else if e.protocol == nfswolf_rpc::portmap::IPPROTO_UDP { "udp" } else { "other" },
+            "port": e.port,
         })).collect::<Vec<_>>(),
         "exports": {
             "v2": r.exports_v2.as_ref().map(|v| v.iter().map(|e| serde_json::json!({

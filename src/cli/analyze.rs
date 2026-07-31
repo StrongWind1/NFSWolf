@@ -229,6 +229,9 @@ fn print_result(r: &AnalysisResult) {
         let versions = r.nfs_versions.join(", ");
         println!("  {}  {}  |  {}  {}", "OS:".dimmed(), os, "NFS:".dimmed(), versions);
     }
+    if let Some(fp) = &r.impl_fingerprint {
+        println!("  {}  {}", "Impl:".dimmed(), fp);
+    }
     println!("  {}  {}", "Timestamp:".dimmed(), r.timestamp);
     println!();
 

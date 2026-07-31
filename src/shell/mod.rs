@@ -1190,7 +1190,14 @@ impl<O: ShellOps> NfsShell<O> {
             let lower = entry.name.to_ascii_lowercase();
             if SECRET_PATTERNS.iter().any(|pat| lower.contains(pat)) {
                 let size = entry.info.as_ref().map_or(0, |a| a.size);
-                Some(format!("{} {path}  ({size} bytes)", "[!] potential secret:".yellow().bold()))
+                let mode = entry.info.as_ref().map_or(0, |a| a.mode);
+                // nfsd_permission() allows READ on execute-only regular files
+                // (C702 sec. 12.3.3): NFSD_MAY_OWNER_OVERRIDE is unconditionally
+                // added to every file-open check, so any user with execute
+                // permission can READ the file despite mode bits denying it.
+                let exec_implies_read = (mode & 0o111 != 0) && (mode & 0o444 == 0);
+                let suffix = if exec_implies_read { "  [execute-implies-read: readable via NFS despite mode]" } else { "" };
+                Some(format!("{} {path}  ({size} bytes  {:04o}){suffix}", "[!] potential secret:".yellow().bold(), mode & 0o7777))
             } else {
                 None
             }

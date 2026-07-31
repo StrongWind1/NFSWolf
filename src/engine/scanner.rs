@@ -24,6 +24,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use ipnet::IpNet;
+use nfswolf_rpc::RpcClient;
+use nfswolf_rpc::RpcError;
+use nfswolf_rpc::transport::tokio::TokioIo;
+use nfswolf_xdr::Void;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -32,8 +36,8 @@ use tokio::time::timeout;
 use crate::engine::scan_types::{HostResult, MountPortInfo, NfsPortInfo, PortReachability, TargetSpec, V4ExportEntry, VersionRange};
 use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs4::compound::Nfs4DirectClient;
+use crate::proto::nfs4::types::{ArgOp, CompoundArgs, CompoundRes};
 use crate::proto::portmap::PortmapClient;
-use crate::proto::rpc_probe::probe_nfs_versions_tcp;
 use crate::util::stealth::StealthConfig;
 
 /// Output from `scan_range` -- results plus metadata about the scan.
@@ -368,22 +372,12 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         }
         let addr = SocketAddr::new(ip, port_info.port);
         job.stealth.wait().await;
-        let (v2_res, v3_res, v4_res) = probe_nfs_versions_tcp(addr, probe_timeout, job.proxy.as_deref()).await;
-
-        port_info.v2 = v2_res.is_accepted();
-        port_info.v3 = v3_res.is_accepted();
-        // For v4: any valid COMPOUND response (even non-zero NFS4 status) confirms v4.
-        port_info.v4 = v4_res.is_accepted();
-
-        // Capture first PROG_MISMATCH range for the Hint column.
+        let (v2, v3, v4, tcp_hint) = probe_nfs_versions_tcp(addr, probe_timeout, job.proxy.as_deref()).await;
+        port_info.v2 = v2;
+        port_info.v3 = v3;
+        port_info.v4 = v4;
         if hint.is_none() {
-            if let Some(r) = v2_res.mismatch_range() {
-                hint = Some(r.clone());
-            } else if let Some(r) = v3_res.mismatch_range() {
-                hint = Some(r.clone());
-            } else if let Some(r) = v4_res.mismatch_range() {
-                hint = Some(r.clone());
-            }
+            hint = tcp_hint;
         }
     }
 
@@ -396,26 +390,18 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             let addr = SocketAddr::new(ip, port_info.port);
             if !port_info.v2 {
                 job.stealth.wait().await;
-                let r = crate::proto::rpc_probe::probe_nfs_null_udp(addr, 2, probe_timeout).await;
-                if r.is_accepted() {
-                    port_info.v2 = true;
-                }
-                if hint.is_none()
-                    && let Some(range) = r.mismatch_range()
-                {
-                    hint = Some(range.clone());
+                match nfswolf_rpc::transport::udp::call_rpc_udp::<Void, Void>(addr, 100_003, 2, 0, &Void, probe_timeout).await {
+                    Ok(Void) => port_info.v2 = true,
+                    Err(RpcError::ProgMismatch { low, high }) if hint.is_none() => hint = Some(VersionRange { low, high }),
+                    Err(_) => {},
                 }
             }
             if !port_info.v3 {
                 job.stealth.wait().await;
-                let r = crate::proto::rpc_probe::probe_nfs_null_udp(addr, 3, probe_timeout).await;
-                if r.is_accepted() {
-                    port_info.v3 = true;
-                }
-                if hint.is_none()
-                    && let Some(range) = r.mismatch_range()
-                {
-                    hint = Some(range.clone());
+                match nfswolf_rpc::transport::udp::call_rpc_udp::<Void, Void>(addr, 100_003, 3, 0, &Void, probe_timeout).await {
+                    Ok(Void) => port_info.v3 = true,
+                    Err(RpcError::ProgMismatch { low, high }) if hint.is_none() => hint = Some(VersionRange { low, high }),
+                    Err(_) => {},
                 }
             }
         }
@@ -514,7 +500,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // --- Stage 9: Assembly ---
     // No trailing stealth delay here: pacing is applied before each outbound
     // probe above, so the per-host burst is already spread across the scan.
-    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, exports_v2, exports_v3, exports_v4, mounts, hint, scan_duration: start.elapsed() })
+    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, rpc_services: dump_entries, exports_v2, exports_v3, exports_v4, mounts, hint, scan_duration: start.elapsed() })
 }
 
 /// Non-blocking TCP probe: returns true if the port accepts connections within timeout.
@@ -525,6 +511,81 @@ async fn is_port_open(addr: SocketAddr, probe_timeout: Duration, proxy: Option<&
     } else {
         timeout(probe_timeout, TcpStream::connect(addr)).await.is_ok_and(|r| r.is_ok())
     }
+}
+
+/// Probe all three NFS versions on a single TCP connection to `addr`.
+///
+/// Sends NULL v2, NULL v3, and COMPOUND(PUTROOTFH) for v4 sequentially over one
+/// TCP connection so only one connect is needed.  Returns `(v2, v3, v4, hint)`.
+/// The hint is the first PROG_MISMATCH version range seen, if any.
+async fn probe_nfs_versions_tcp(addr: SocketAddr, probe_timeout: Duration, proxy: Option<&str>) -> (bool, bool, bool, Option<VersionRange>) {
+    let connect_result = if let Some(p) = proxy {
+        let Ok(proxy_addr) = crate::proto::conn::parse_proxy_addr(p) else {
+            return (false, false, false, None);
+        };
+        timeout(probe_timeout, crate::proto::conn::socks5_connect(proxy_addr, addr)).await
+    } else {
+        timeout(probe_timeout, TcpStream::connect(addr)).await
+    };
+
+    let stream = match connect_result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::debug!("connect to {addr}: {e}");
+            return (false, false, false, None);
+        },
+        Err(_) => {
+            tracing::debug!("connect to {addr}: timeout");
+            return (false, false, false, None);
+        },
+    };
+
+    let mut client = RpcClient::new(TokioIo::new(stream));
+    let mut hint: Option<VersionRange> = None;
+
+    // Classifies an RPC result as accepted / PROG_MISMATCH / other failure.
+    // On connection-fatal errors, returns `Err(())` to signal that subsequent
+    // probes on this socket should be skipped.
+    let classify = |result: Result<Void, RpcError>, hint: &mut Option<VersionRange>| -> Result<bool, ()> {
+        match result {
+            Ok(Void) => Ok(true),
+            Err(RpcError::ProgMismatch { low, high }) => {
+                if hint.is_none() {
+                    *hint = Some(VersionRange { low, high });
+                }
+                Ok(false)
+            },
+            Err(ref e) if e.is_connection_reusable() => Ok(false),
+            Err(_) => Err(()),
+        }
+    };
+
+    // NULL v2: program 100003, version 2, proc 0
+    let Ok(v2) = classify(client.call::<Void, Void>(100_003, 2, 0, &Void).await, &mut hint) else {
+        return (false, false, false, hint);
+    };
+
+    // NULL v3: program 100003, version 3, proc 0
+    let Ok(v3) = classify(client.call::<Void, Void>(100_003, 3, 0, &Void).await, &mut hint) else {
+        return (v2, false, false, hint);
+    };
+
+    // COMPOUND v4: program 100003, version 4, proc 1.
+    // NotFullyParsed means v4 is supported but the reply had trailing bytes
+    // we couldn't decode -- still a positive v4 confirmation.
+    let v4_args = CompoundArgs { tag: String::new(), minorversion: 0, ops: vec![ArgOp::Putrootfh] };
+    let v4 = match client.call::<CompoundArgs, CompoundRes>(100_003, 4, 1, &v4_args).await {
+        Ok(_) | Err(RpcError::NotFullyParsed { .. }) => true,
+        Err(RpcError::ProgMismatch { low, high }) => {
+            if hint.is_none() {
+                hint = Some(VersionRange { low, high });
+            }
+            false
+        },
+        Err(_) => false,
+    };
+
+    (v2, v3, v4, hint)
 }
 
 /// Enumerate top-level NFSv4 pseudo-FS entries via COMPOUND([PUTROOTFH, READDIR]).
