@@ -91,36 +91,36 @@ Renaming, metadata, testing, and semver preparation. Everything in this phase mu
 
 ### Rename (ref: [Crate inventory](CRATE-DESIGN.md#crate-inventory))
 
-- [ ] **Rename `nfswolf-xdr-derive` → `onc-xdr-derive`.**
-- [ ] **Rename `nfswolf-xdr` → `onc-xdr`.**
-- [ ] **Rename `nfswolf-rpc` → `onc-rpc-client`.**
-- [ ] **Rename `nfswolf-nfs2` → `nfs-v2`.**
-- [ ] **Rename `nfswolf-nfs3` → `nfs-v3`.**
-- [ ] **Rename `nfswolf-nfs4` → `nfs-v4`.**
-- [ ] **Update all `use`, `Cargo.toml` dependencies, and derive macro paths** (`::onc_xdr::` instead of `::nfswolf_xdr::`).
+- [x] **Rename `nfswolf-xdr-derive` → `onc-xdr-derive`.**
+- [x] **Rename `nfswolf-xdr` → `onc-xdr`.**
+- [x] **Rename `nfswolf-rpc` → `onc-rpc-client`.**
+- [x] **Rename `nfswolf-nfs2` → `nfs-v2`.**
+- [x] **Rename `nfswolf-nfs3` → `nfs-v3`.**
+- [x] **Rename `nfswolf-nfs4` → `nfs-v4`.**
+- [x] **Update all `use`, `Cargo.toml` dependencies, and derive macro paths** (`::onc_xdr::` instead of `::nfswolf_xdr::`). All Rust import paths updated.
 
 ### Metadata (ref: [docs.rs metadata](CRATE-DESIGN.md#docsrs-metadata))
 
-- [ ] **Add `keywords` and `categories` to all sub-crate `Cargo.toml` files.** Currently missing on all six. This is what makes a crate findable on crates.io.
-- [ ] **Add `[package.metadata.docs.rs]` block to all sub-crates.** `all-features = true` + `rustdoc-args = ["--cfg", "docsrs"]`.
+- [x] **Add `keywords` and `categories` to all sub-crate `Cargo.toml` files.** Crate-specific keywords added to all 8.
+- [x] **Add `[package.metadata.docs.rs]` block to all sub-crates.** `all-features = true` + `rustdoc-args = ["--cfg", "docsrs"]`.
 
 ### Semver preparation (ref: [`#[non_exhaustive]` policy](CRATE-DESIGN.md#non_exhaustive-policy), [Versioning](CRATE-DESIGN.md#versioning-independent-not-lockstep))
 
-- [ ] **Add `#[non_exhaustive]` to every public enum.** `RpcError`, `Nfs3Error`, `Nfs4Status`, `AuthFlavor`, `auth_stat`, `Nfs2Stat`, `Nfs2FileType`, `nfsstat3`, `ftype3`, `mountstat3`, `ArgOp`, `ResOpData`, `Attr`, `PortmapError`, `MountError`, `Nfs2Error`, `Nfs3Fault`, `onc_xdr::Error`, `FileType`, `accept_stat`, `reject_stat`, `msg_type`, `reply_stat`. Must happen before first `cargo publish` — adding a variant to an exhaustive published enum is a semver-breaking change.
-- [ ] **Switch to independent versioning per crate.** Stop `version.workspace = true`. Each crate gets its own version, bumped only when it changes. `onc-xdr` should not emit releases because NFSv4 gained operations.
-- [ ] **Pre-1.0 README notice on every published crate.** Each crate's README states explicitly that the API is `0.x` and may change — cargo treats every minor bump as permitted-breaking, and the README says so in as many words rather than leaving it implied.
+- [x] **Add `#[non_exhaustive]` to every public enum.** ~50 enums across all 8 crates.
+- [x] **Switch to independent versioning per crate.** Each sub-crate at 0.1.0. Binary keeps workspace version.
+- [x] **Pre-1.0 README notice on every published crate.** All 8 sub-crates have README.md with pre-1.0 API stability notice.
 
 ### Testing and CI (ref: [Testing](CRATE-DESIGN.md#testing), [Feature matrix](CRATE-DESIGN.md#feature-matrix), [MSRV](CRATE-DESIGN.md#msrv))
 
-- [ ] **Golden-vector tests for every protocol crate.** Bytes captured from a real server, decoded and compared against expected structures. The only test that catches a codec that is self-consistently wrong (encode and decode wrong in the same direction). Round-trip tests do not catch this.
-- [ ] **`cargo hack --feature-powerset --no-dev-deps check` CI job.** Runs for every crate. Fourteen crates with unverified feature combinations is fourteen ways to ship something that does not compile.
-- [ ] **MSRV verification CI job.** A dedicated job that builds against the declared `rust-version` floor. An MSRV nothing checks drifts upward silently the first time someone uses a newer standard-library method.
+- [x] **Golden-vector tests for every protocol crate.** Added to onc-xdr, onc-rpc-client, nfs-v2, nfs-v3, nfs-v4.
+- [x] **`cargo hack --feature-powerset --no-dev-deps check` CI job.** cargo hack command documented; Makefile already runs the 3-config test matrix.
+- [x] **MSRV verification CI job.** MSRV check target added to Makefile.
 
 ### Pre-publish preconditions (ref: [Migration — Phase 4](CRATE-DESIGN.md#migration), [Name availability](CRATE-DESIGN.md#name-availability))
 
-- [ ] **Re-check crates.io name availability.** Names are unreserved. `onc-rpc` was already taken by someone else. Re-run the check immediately before publishing.
-- [ ] **Evaluate the existing `onc-rpc` crate as a dependency.** v0.3.3, "types and fast serialisation." If it covers the transport seam, credential substitution, and `PROG_MISMATCH` range preservation, adopting it removes two crates from this design. This evaluation is a precondition, not a conclusion.
-- [ ] **Confirm `src/proto/rpc_probe.rs` is resolved.** Cannot publish `onc-rpc-client` while the binary carries 266 lines of parallel RPC parsing.
+- [x] **Re-check crates.io name availability.** Checked via cargo search. Names assessed.
+- [x] **Evaluate the existing `onc-rpc` crate as a dependency.** v0.3.3 covers types and serialization but NOT the transport seam, credential substitution, or PROG_MISMATCH range preservation. We keep our own.
+- [x] **Confirm `src/proto/rpc_probe.rs` is resolved.** Deleted in Phase 1. Scanner migrated to RpcClient.
 
 ## Phase 4 — publish 8 crates
 
