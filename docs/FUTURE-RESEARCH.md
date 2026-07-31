@@ -14,10 +14,17 @@ Spec reference: X/Open CAE C702 "XNFS, Version 3W" is at `ref/xopen-c702.pdf` (3
 - [NIS — credential store dump](#nis--credential-store-dump)
 - [NFS_ACL — permission bypass beyond mode bits](#nfs_acl--permission-bypass-beyond-mode-bits)
 - [RPCSEC_GSS — auth negotiation recon](#rpcsec_gss--auth-negotiation-recon)
+- [RPC-with-TLS (RFC 9289) — transport encryption without authentication](#rpc-with-tls-rfc-9289--transport-encryption-without-authentication) — opt-in TLS, AUTH_SYS inside TLS, downgrade attacks, mutual TLS, implementation status
 - [C702 insights for existing NFS implementation](#c702-insights-for-existing-nfs-implementation) — permission model quirks, DRC, write verifier oracle, portmapper CALLIT, external citations
 - [Cross-protocol attack chains](#cross-protocol-attack-chains) — multi-protocol sequences combining sideband RPC programs with NFS for compound exploitation
+- [HVS Consulting gap analysis](#hvs-consulting-gap-analysis) — comparison against nfs-security-tooling (nfs_analyze + fuse_nfs), December 2024
+- [Privilege escalation via NFS — consolidated attack catalog](#privilege-escalation-via-nfs--consolidated-attack-catalog) — all client-side and server-side privilege escalation paths
+- [Filesystem-specific escape mechanics](#filesystem-specific-escape-mechanics) — full handle structures and escape construction for ext4, XFS, BTRFS, ZFS, Windows
+- [OS fingerprinting signal catalog](#os-fingerprinting-signal-catalog) — all known NFS-based operating system and implementation fingerprinting techniques
+- [Detection and monitoring gaps](#detection-and-monitoring-gaps) — why NFS attacks are invisible to standard defensive tooling
 - [Crate inventory](#crate-inventory)
 - [Detection without implementation](#detection-without-implementation)
+- [RFC security audit -- file read, code execution, and information leak paths](#rfc-security-audit----file-read-code-execution-and-information-leak-paths) — systematic audit of all 15 NFS-related RFCs for security-relevant protocol behaviors
 
 ---
 
@@ -1809,6 +1816,56 @@ enum auth_stat {                                             /* RFC 7861 ss2.6 *
 
 ---
 
+## RPC-with-TLS (RFC 9289) — transport encryption without authentication
+
+**Spec:** RFC 9289 (RPC-with-TLS, October 2022). Linux knfsd support landed in kernel 5.17 (March 2022, server side) and nfs-utils 2.6.1 (client side). FreeBSD 14.0 includes server-side support. Windows Server and NetApp: no support as of mid-2025.
+
+**Why it matters:** RPC-with-TLS adds transport encryption to NFS but does not fix the authentication problem. AUTH_SYS inside TLS is still AUTH_SYS -- the UID/GID are self-asserted and unverifiable. TLS protects against passive eavesdropping and on-path modification of NFS traffic, but an attacker with network access to port 2049 can still forge arbitrary AUTH_SYS credentials after establishing a TLS session. The security model has five distinct layers, each with its own attack surface.
+
+### TLS is opt-in, not enforced (RFC 9289 ss6.1)
+
+The STARTTLS handshake occurs on a per-connection basis. The server advertises TLS availability by responding to a NULL RPC with `AUTH_TLS` (flavor 7) credentials and a verifier containing the ASCII string "STARTTLS". The critical gap: TLS is opportunistic. If the server supports TLS but does not require it, an unauthenticated client can simply connect without sending the AUTH_TLS probe and proceed with plaintext RPC. The server has no mechanism to reject plaintext connections except refusing all non-TLS traffic at the firewall or application level. RFC 9289 ss6.1.1 explicitly acknowledges this: "an on-path attacker can prevent a client from discovering TLS support by modifying the reply to the initial NULL procedure call."
+
+**Downgrade attack mechanics.** The STARTTLS probe is itself a plaintext RPC call. An on-path attacker can: (1) intercept the client's AUTH_TLS NULL, (2) respond with a normal NULL reply (no STARTTLS verifier), causing the client to conclude TLS is unavailable, (3) proxy all subsequent traffic in plaintext. This is the NFS equivalent of STRIPTLS in SMTP or SSL stripping in HTTP. The attack requires active MitM position but no cryptographic capability. The client has no way to distinguish "server doesn't support TLS" from "attacker stripped the STARTTLS response" unless it has out-of-band knowledge that TLS is mandatory (e.g., from DNS-SD records or local policy). RFC 9289 ss6.1.1 suggests clients "SHOULD be able to be configured to require RPC-with-TLS" but this is a local configuration knob, not a protocol-level guarantee.
+
+**NFSWolf relevance.** An AUTH_TLS NULL probe would detect whether the target supports RPC-with-TLS. If TLS is available but not required: the finding is that plaintext connections are accepted alongside TLS, making STRIPTLS viable (F-3.4). If TLS is required: the server rejects non-TLS connections, which limits NFSWolf to establishing a TLS session first. NFSWolf would need a TLS transport layer wrapping the existing TCP connection.
+
+### AUTH_SYS inside TLS — encrypted but still forgeable (RFC 9289 ss6.3)
+
+RFC 9289 ss6.3 is explicit: "the RPC client itself can still misrepresent user identity without server detection." TLS encrypts the wire, preventing passive eavesdroppers from seeing UID/GID values in AUTH_SYS credentials. But the server cannot verify that the UID asserted in AUTH_SYS actually belongs to the connecting user. TLS authenticates the transport endpoints (via certificates), not the RPC user identity. An attacker who establishes a legitimate TLS session to the server can then send AUTH_SYS credentials claiming any UID/GID, exactly as on a plaintext connection.
+
+The practical implication: TLS deployment does not change NFSWolf's attack surface against AUTH_SYS exports. Every AUTH_SYS attack (credential forging, uid-spray, credential ladder escalation, handle reuse) works identically over TLS. The only change is that NFSWolf must establish a TLS session before sending RPC calls, which adds a connection setup step but does not affect the protocol-level attacks.
+
+### Mutual TLS for client identity (RFC 9289 ss4.2, ss6.3)
+
+RFC 9289 ss4.2 specifies that after STARTTLS, both server and client exchange TLS certificates during the handshake. Mutual TLS (mTLS) binds the TLS session to a specific client certificate. The server can use the client certificate's subject or SAN to make authorization decisions, replacing AUTH_SYS identity with a cryptographically verified identity. This is stronger than AUTH_SYS (which is self-asserted) but weaker than Kerberos (which provides per-message integrity and delegation).
+
+**The gap in practice.** mTLS requires a PKI infrastructure: a certificate authority, per-client certificates, and server-side certificate validation policy. Most NFS deployments that adopt TLS use server-only certificates (the server proves its identity, the client does not). RFC 9289 RECOMMENDS mutual authentication but does not require it. When only server authentication is used, TLS prevents MitM but does not authenticate the client -- AUTH_SYS remains the client identity mechanism, and all UID/GID forging attacks apply.
+
+**When mTLS is enforced.** If the server requires client certificates and maps the certificate identity to a local user (bypassing AUTH_SYS entirely), NFSWolf cannot forge credentials without a valid client certificate. Obtaining a valid certificate requires either: (a) compromising the PKI (stealing the CA key or a valid client cert), (b) social engineering a certificate issuance, or (c) exploiting a server that does not validate the certificate chain (accepts self-signed certs). Scenario (c) is the most likely deployment mistake.
+
+### STARTTLS interaction with portmapper and MOUNT (RFC 9289 ss3.3, ss3.4)
+
+RFC 9289 ss3.3 specifies that the STARTTLS exchange must occur on the same connection that will carry the subsequent RPC traffic. There is no mechanism to encrypt the portmapper DUMP or MOUNT EXPORT queries unless those services also support STARTTLS on their respective ports. In practice, portmapper (TCP/111) typically does not support STARTTLS, meaning export enumeration and port discovery remain in plaintext even when NFS itself is encrypted. MOUNT (separate TCP connection to mountd) may or may not support STARTTLS depending on the server implementation.
+
+This creates an information leak: even on a TLS-protected NFS deployment, an attacker can enumerate exports, discover NFS versions, and harvest client hostnames via plaintext portmapper and MOUNT queries. The TLS protection applies only to the data-path NFS operations (READ, WRITE, READDIR, etc.), not to the recon phase.
+
+### Implementation status and deployment gaps
+
+**Linux knfsd (server):** TLS support via `ktls` (kernel TLS) landed in kernel 5.17. Configuration via `nfs.conf` `[nfsd]` section: `tls=1` enables STARTTLS, `tls-required=1` rejects plaintext connections. Client certificate validation is optional. As of kernel 6.12, TLS is not the default and must be explicitly enabled.
+
+**Linux NFS client:** nfs-utils 2.6.1+ supports `xprtsec=tls` (server-only TLS) and `xprtsec=mtls` (mutual TLS) mount options. The `tlshd` daemon handles the TLS handshake. Not enabled by default; requires explicit mount option.
+
+**FreeBSD:** Server-side support in FreeBSD 14.0 via `nfsd(8)`. Client-side support is available. Configuration similar to Linux.
+
+**Windows Server:** No RPC-with-TLS support for NFS as of Windows Server 2025. Windows NFS server uses its own security model (handle signing with AES-CMAC) rather than TLS.
+
+**NetApp / EMC / other enterprise NAS:** No known RPC-with-TLS support as of mid-2025. These platforms use Kerberos (krb5p) for encryption rather than transport-level TLS.
+
+**Detection probe for NFSWolf:** Send a NULL RPC with `auth_flavor=7` (AUTH_TLS) and verifier containing ASCII "STARTTLS" to port 2049. If the reply contains a STARTTLS verifier, TLS is available. If the reply is a normal NULL response (no STARTTLS), TLS is not supported. If the connection is rejected, the server may require TLS on a different port or not support it at all. This probe is unauthenticated and reveals a binary capability fingerprint.
+
+---
+
 ## C702 insights for existing NFS implementation
 
 Findings from C702 that apply to NFSWolf's already-implemented protocols — not new sideband protocols, but spec-level details the RFCs don't cover or that the XNFS spec states more explicitly. Each claim is verified against the Linux kernel 7.1.5 NFS server source (`fs/nfsd/`).
@@ -2054,6 +2111,780 @@ Exploits the NFSv3 spec requirement that failed operations return attributes, tu
 
 ---
 
+## HVS Consulting gap analysis
+
+Comparison against HVS Consulting's nfs-security-tooling (nfs_analyze + fuse_nfs), published December 2024. Repository: https://github.com/hvs-consulting/nfs-security-tooling Wiki: https://github.com/hvs-consulting/nfs-security-tooling/wiki Blog: https://www.hvs-consulting.de/en/blog/nfs-security-identifying-and-exploiting-misconfigurations
+
+HVS Consulting published a Python-based NFS security assessment toolkit built on top of `pynfs` (Linux NFS project test suite) and `anfs` (async NFSv3 client by skelsec). Their `nfs_analyze` performs automated security checks against NFS servers; their `fuse_nfs` provides a FUSE mount with auto-UID escalation. The accompanying wiki is a thorough reference covering file handle internals, security features, and attack techniques across Linux, Windows, FreeBSD, NetApp, and HP-UX. This section maps every HVS capability against NFSWolf's implementation to identify gaps worth closing.
+
+### Capabilities NFSWolf already covers
+
+| HVS capability | HVS implementation | NFSWolf implementation | Notes |
+|---|---|---|---|
+| Portmapper enumeration (DUMP) | `pmap_print_summary()` in `nfs_analyze.py` | `src/proto/portmap.rs` `PortmapClient::dump()` + `src/engine/scanner.rs` | NFSWolf also does UDP fallback via `--scan-udp` and amplification measurement (F-3.2) |
+| Export enumeration (MOUNT EXPORT) | `mount_exports_to_array()` | `src/proto/mount.rs` `NfsMountClient::exports()` + `src/engine/scanner.rs` | Both enumerate all exports from mountd |
+| Per-export MNT + auth flavor extraction | `mount_get_all_info()` sends MNT for each export | `src/proto/mount.rs` `NfsMountClient::mount()` with auth-flavor extraction | NFSWolf extracts auth flavors per export in both `scan` and `analyze` |
+| Connected client enumeration (MOUNT DUMP) | `mount_get_all_clients()`, `mount_print_clients()` | `src/proto/mount.rs` `NfsMountClient::dump_clients()` | Both display hostname + export pairs |
+| Linux file handle structure parsing (meta/fsid/fileid) | `fileid_types` dict, `fsid_lens` dict, `fh_get_fsid()` | `src/engine/file_handle.rs` `FileHandleAnalyzer::fingerprint_fs()`, fsid type/length tables | NFSWolf covers all 8 fsid types and all documented fileid types |
+| ext4 export escape (root inode 2, generation 0) | `nfs_try_escape()` constructs fileid `[0x02,0,0,0, 0,0,0,0, 0x02,0,0,0, 0,0,0,0]` | `src/engine/file_handle.rs` `construct_escape_handle()` | Both target inode 2 with fileid_type 2. NFSWolf also tries fileid_type 1 |
+| XFS export escape (root inode 128, generation 0) | `nfs_try_escape()` constructs fileid `[128,0,0,0, 0,0,0,0, 128,0,0,0, 0,0,0,0]` | `src/engine/file_handle.rs` `construct_xfs_escape_candidates()` | NFSWolf also handles XFS 64-bit inodes (FILEID_INO64_GEN 0x81) |
+| BTRFS subvolume escape (subvol 256+, brute-force) | `nfs_try_escape()` iterates subvol IDs 256 through 256+N | `src/engine/file_handle.rs` `construct_btrfs_subvol_handles()` | NFSWolf also constructs the BTRFS compound UUID escape for subvol 5 (the meta-subvolume containing all others) |
+| no_root_squash detection (mkdir as uid=0) | `nfs3_check_no_root_squash()`, `nfs4_check_no_root_squash()` | `src/engine/analyzer.rs` `check_no_root_squash()` | Both create a test directory as root and check resulting ownership. NFSWolf also does `check_squash_config()` for all_squash/anonuid detection (F-7.5) |
+| /etc/shadow reading with GID spoofing | `nfs3_read_etc_shadow()` tries root first, then shadow GID from file attrs, then hardcoded GIDs 42/15 | `src/engine/analyzer.rs` `probe_file_access()` with `--test-read /etc/shadow --test-read-gids 42,15,0` | NFSWolf's generic file access test is more flexible (any path, any UID/GID combo) |
+| NFSv3 Windows handle signing check | `nfs3_check_windows_signing()` checks if last 10 bytes are zero | `src/engine/file_handle.rs` `check_windows_signing()`, `src/engine/analyzer.rs` `check_windows_signing()` | Identical check (F-2.3) |
+| NFS version enumeration (v3, v4.0, v4.1, v4.2) | `nfs_check_version_support()` probes each version separately | `src/engine/scanner.rs` with PROG_MISMATCH range extraction | NFSWolf also detects v2 and uses single-connection sequential probing |
+| NFSv4 pseudo-root browsing + SECINFO | `nfs4_show_overview()`, `nfs4_dir_secinfo()` | `src/engine/analyzer.rs` `check_nfs4_secinfo()`, `src/proto/nfs4/` | Both walk the NFSv4 pseudo-root and query SECINFO per directory |
+| Auto-UID credential escalation | `fuse_nfs.py` `auto_set_uid()` sets UID/GID to file owner before each operation | `src/engine/credential.rs` `credential_ladder()` + `src/shell/v3.rs` V3Ops `with_credential()` | NFSWolf's credential ladder is more sophisticated: evidence-driven mode-bit pruning, READDIRPLUS identity ranking, ordered fallback (owner -> group -> root -> observed -> service accounts) |
+| FUSE mount with manual handle bypass | `fuse_nfs.py` `--manual-fh` hex string | `src/fuse.rs` NfsFuse + `src/cli/mount.rs` `--handle HEX` | Both support mounting from a raw hex file handle without going through MOUNT |
+| Read-only by default with `--allow-write` | `fuse_nfs.py` `only_writable()` gate | `--allow-write` flag on all write-capable subcommands | Same design philosophy |
+| NFSv4 escape attempt (handle manipulation via v4) | `nfs_try_escape()` called with v4 client when v3 unavailable | `src/cli/escape.rs` (v3 only today, NFSv4 escape documented as gap) | HVS reuses the same handle-construction logic through both v3 and v4 COMPOUND wrappers. NFSWolf's escape subcommand currently only supports v3. |
+| Escape verification via directory listing comparison | `nfs4_compare_dirs()` compares escape root listing against export listing | `src/engine/analyzer.rs` `check_escape()` compares READDIRPLUS child count | NFSWolf verifies escape success by comparing listing of constructed root handle against the export handle |
+| Symlink escape feasibility (parent dir write permission walk) | `nfs3_check_root_permissions()`, `nfs4_check_root_permissions()` walk export path components | `src/engine/analyzer.rs` `check_symlink_preconditions()` | Both check whether any parent directory in the export path is writable by non-root (F-4.4) |
+| Allowed client host type classification | `get_host_info()` classifies as wildcard/subnet/netgroup/host | `src/engine/analyzer.rs` `check_export_acls()` pattern matching | Both flag wildcard exports (F-7.1) and subnet-based ACLs (F-3.3) |
+| OS fingerprinting from handle prefix | `guess_os()` checks `fh[0:4] == "0100"` for Linux | `src/engine/file_handle.rs` `fingerprint_os()` checks `[0x01, 0x00]` header | NFSWolf also adds FreeBSD detection from fid_len heuristic |
+| Windows OS detection from handle length | `guess_os()` checks 32-byte handle for Windows | `src/engine/file_handle.rs` `fingerprint_os()` 32-byte path | Both use 32-byte handle as Windows indicator (with NFSWolf adding the Linux XFS exclusion to avoid false positives) |
+
+### Gaps: things HVS covers that NFSWolf should add
+
+#### (a) NFSv4 pseudo-root detection via UUID-v5 namespace hashing
+
+**What HVS does:** `nfs4_is_pseudo_root()` in `nfs_analyze.py` (line 953) uses a hardcoded Linux namespace UUID `39c6b5c1-3f24-4f4e-977c-7fe6546b8a25` and computes `uuid.uuid5(LINUX_NAMESPACE, path)` for each directory encountered during NFSv4 pseudo-root traversal. It then compares 14 bytes of the computed UUID against bytes 14-28 of the file handle. If they match, the directory is a pseudo-root node (a virtual directory created by knfsd to bridge the path between the actual root and the export directory), not a real export. This lets nfs_analyze distinguish real exports from pseudo-root scaffolding in the NFSv4 directory tree.
+
+**Why it matters:** Without this check, NFSWolf's NFSv4 pseudo-root enumeration (`check_nfs4_secinfo()`, `scan` pseudo-FS READDIR) reports pseudo-root scaffold directories as if they were real exports. This leads to false positives in the export list and wasted escape attempts against directories that contain no data. The UUID-v5 check is a free classification improvement -- the only input is the directory path and the file handle bytes already in hand.
+
+**Where to add:** `src/engine/file_handle.rs` as `FileHandleAnalyzer::is_linux_pseudo_root(fh: &FileHandle, path: &[u8]) -> bool`. Consumed by `src/engine/analyzer.rs` `check_nfs4_secinfo()` and `src/engine/scanner.rs` NFSv4 pseudo-root READDIR. The namespace UUID constant goes in `file_handle.rs` alongside the existing OS/FS fingerprinting constants.
+
+**Implementation complexity:** Trivial. The `uuid` crate already exists in the Rust ecosystem. The check is: parse the 4-byte handle header, verify `[0x01, 0x00, 0x07, 0x00]`, compute `Uuid::new_v5(LINUX_NS, path)`, compare 14 bytes against `fh[14..28]`. The Linux kernel source reference is `fs/nfsd/export.c` `v4root.c` line 101 (`e_uuid` generation for pseudo-root entries).
+
+#### (b) NFSv4 export inference via fsid change detection
+
+**What HVS does:** `nfs4_dir_secinfo()` in `nfs_analyze.py` (line 997) extracts the fsid from each child directory's file handle using `fh_get_fsid()` and compares it against the parent directory's fsid. When the fsid changes at a directory boundary (and the directory is not a pseudo-root per check (a) above), HVS infers that directory is an export root. This is the `is_export_root = fsid != parent_fsid and not is_pseudo_root` check on line 1009. The result is a "guessed exports" list derived purely from NFSv4 READDIR + file handle inspection, without needing MOUNT EXPORT.
+
+**Why it matters:** When a server only supports NFSv4 (no mountd, no portmapper), there is no MOUNT EXPORT procedure to enumerate exports. The only way to discover exports is to walk the NFSv4 pseudo-root and detect where the filesystem identity changes. This is the primary export discovery mechanism for NFSv4-only servers. NFSWolf's `scan` already does NFSv4 pseudo-root READDIR via `Nfs4DirectClient`, but it treats every visible directory as a potential export without the fsid-change discriminator.
+
+**Where to add:** `src/engine/file_handle.rs` as `FileHandleAnalyzer::extract_fsid(fh: &FileHandle) -> Option<Vec<u8>>` (already partially covered by the existing fsid_type/fsid_len tables). The fsid comparison logic goes into `src/engine/scanner.rs` NFSv4 pseudo-root enumeration and `src/engine/analyzer.rs` `check_nfs4_secinfo()`. The file handle structure parsing is already implemented -- this is just comparing the extracted fsid bytes between parent and child handles.
+
+**Implementation complexity:** Trivial. The fsid extraction tables are already in `file_handle.rs` (fsid_type at byte 2, fsid lengths for types 0-7). The only new code is: extract fsid from parent handle, extract fsid from child handle, compare. Combined with (a), this gives NFSWolf accurate NFSv4 export discovery that matches HVS quality.
+
+#### (c) Windows NFSv4.1 handle structure parsing (3 types by 3rd byte)
+
+**What HVS does:** The wiki documents three distinct Windows NFSv4.1 file handle types, distinguished by the 3rd byte of the handle:
+- Type 0 (`0xff24**00**00`): pseudo-root and export root handles. 28 bytes. Contains export ID (4 bytes, `ffffffff` for global root) and 16-byte signature.
+- Type 1 (`0x1f30**01**00`): direct children of an export root. 48 bytes. Contains export ID (4 bytes), volume ID (16 bytes), fileid (8 bytes), and 16-byte signature.
+- Type 2 (`0x1230**02**00`): deeper files/directories. 56 bytes. Contains volume ID (16 bytes), parent fileid (8 bytes), export ID (4 bytes), fileid (8 bytes), and 16-byte signature.
+
+`nfs41_check_windows_signing()` in `nfs_analyze.py` (line 1115) checks if the root handle matches the type 0 pattern (28 bytes, `0xff` padding at bytes 4-11) and whether the last 16 bytes (signature) are zeroed.
+
+**Why it matters:** NFSWolf's `detect_windows_handle_version()` and `check_windows_signing()` handle v3 (32 bytes, 10-byte HMAC) and detect v4.1 (28 bytes, 16-byte HMAC) at a basic level. But NFSWolf doesn't parse the three v4.1 subtypes, which means it can't extract the export ID, volume ID, or fileid from v4.1 handles. When Windows handle signing is disabled, these parsed fields enable handle construction for arbitrary files -- the same attack that HVS documents for v3 (replacing the fileid while keeping other fields constant). Understanding the type 1 and type 2 structures is necessary for Windows NFSv4.1 file handle brute-force.
+
+**Where to add:** `src/engine/file_handle.rs` as a `WindowsV41HandleType` enum and a `parse_windows_v41_handle()` function. The signing check in `check_windows_signing()` already handles the v4.1 case; the new parser adds field extraction. The parsed fields feed into `brute-handle` for Windows v4.1 targets and into `analyze` for richer Windows-specific reporting.
+
+**Implementation complexity:** Moderate. Requires defining the three handle layouts, writing a parser that distinguishes them by the 3rd byte, and extracting fields at the correct offsets. The signature check already exists; field extraction is new. Testing requires a Windows NFS server with v4.1 enabled, which is less common in lab environments.
+
+#### (d) OS fingerprinting: NetApp detection, HP-UX detection, Windows version-pattern heuristic
+
+**What HVS does:** `guess_os()` in `nfs_analyze.py` (line 1527) combines six heuristics into a multi-signal OS guess:
+1. **Linux:** File handles start with `0x0100` (already in NFSWolf)
+2. **Windows handle length:** NFSv3 handles are exactly 32 bytes (already in NFSWolf)
+3. **Windows version pattern:** Server supports NFS versions 3 and 4.1 but NOT 4.0 -- this is unique to the Windows NFS server, which skipped NFSv4.0 entirely. HVS checks `supported == {"3": True, "4.0": False, "4.1": True, "4.2": False}`.
+4. **FreeBSD subnet-without-mask:** `mountd` reports subnets as bare IPs ending in `.0` without a CIDR mask (e.g., `10.123.45.0` instead of `10.123.45.0/24`). Could be /8, /24, or anything in between.
+5. **NetApp:** The portmapper DUMP contains program 400010 (`netapp partner`). This is a proprietary RPC program unique to NetApp filers.
+6. **HP-UX:** The server terminates TCP connections after one RPC request. Detected by sending two requests on the same connection and checking if the second one times out.
+
+NFSWolf currently implements heuristics 1, 2, and partially 4 (FreeBSD from fid_len in handle). Missing: 3 (Windows version pattern), 5 (NetApp portmapper fingerprint), 6 (HP-UX connection behavior).
+
+**Why it matters:** OS fingerprinting drives attack strategy. NetApp servers have different export semantics (nested exports hide handles in READDIRPLUS, `showmount -e` may return nothing on old versions). HP-UX requires one-connection-per-request handling or the tool hangs. The Windows version-pattern check is a strong discriminator even when handle structure is ambiguous (e.g., 32-byte handles that could be Linux XFS).
+
+**Where to add:**
+- NetApp detection: `src/engine/scanner.rs` or `src/engine/analyzer.rs`, checking portmapper DUMP for program 400010. The portmapper data is already available from `PortmapClient::dump()`.
+- Windows version pattern: `src/engine/scanner.rs` or `src/engine/analyzer.rs`, after version probing. Check if {v3=supported, v4.0=unsupported, v4.1=supported} matches.
+- HP-UX detection: `src/proto/conn.rs` or a new probe in `src/engine/scanner.rs`. Send two NULL calls on the same TCP connection; if the second times out or gets RST, flag HP-UX.
+- Aggregate: `src/engine/file_handle.rs` `fingerprint_os()` could be extended to accept auxiliary signals (version matrix, portmapper programs, connection behavior) beyond just handle bytes.
+
+**Implementation complexity:** Moderate overall. NetApp detection is trivial (grep portmapper dump for program 400010). Windows version-pattern is trivial (compare version vector). HP-UX detection requires a connection-level probe that deliberately sends two requests and observes the second's fate -- moderate, because it interacts with the connection pool and timeout logic.
+
+#### (e) all_squash detection via NFSv4 idmapping fallback
+
+**What HVS does:** `nfs4_read_etc_shadow()` in `nfs_analyze.py` (line 646) queries the file owner via `FATTR4_OWNER_GROUP` and checks whether the server returns a numeric GID or a string name (e.g., `"shadow"` instead of `42`). When the server uses NFSv4 id-mapping (returning string names instead of numeric IDs), HVS falls back to trying a hardcoded list of shadow GIDs (`[42, 15]`). This handles the case where the server maps all UIDs to string names via `idmapd`, making the numeric GID unknowable from the GETATTR response alone.
+
+**Why it matters:** NFSv4 servers with id-mapping enabled (common in enterprise deployments, especially with Kerberos) return string owner/group names instead of numeric IDs. NFSWolf's `probe_file_access()` takes explicit UID/GID arguments from the command line, so it works when the user knows the right GIDs. But the analyzer doesn't automatically detect the id-mapping condition and fall back to well-known shadow GIDs. The gap is in automated detection: when analyzing an NFSv4 server that returns `"shadow"` instead of `42`, NFSWolf should automatically try the common GID values.
+
+**Where to add:** `src/engine/analyzer.rs` in the NFSv4 analysis path. After `check_nfs4_secinfo()`, if the analyzer detects string-based owner/group attributes (id-mapping active), it should append the well-known shadow GIDs (42 on Debian/Ubuntu, 15 on SUSE) to the test-read GID list automatically.
+
+**Implementation complexity:** Trivial. The NFSv4 GETATTR for `FATTR4_OWNER_GROUP` returns a string. If the string is not purely numeric, id-mapping is active. Append `[42, 15]` to the GID test list. The existing `probe_file_access()` machinery handles the rest.
+
+#### (f) NetApp nested export workaround (missing handles in READDIRPLUS)
+
+**What HVS does:** `fuse_nfs.py` `--fix-nested-exports` flag (line 80, 355-365). When NetApp servers have nested exports (e.g., `/data` and `/data/share`), READDIRPLUS on the parent export does not return file handles for subdirectories that are also export roots. The entries appear in the listing (with name and fileid) but the `name_handle` field is empty. HVS's `convert_attributes()` detects this (`mode == None` when `fix_nested_exports` is set) and performs a separate LOOKUP for the entry to obtain the handle and attributes.
+
+**Why it matters:** Without this workaround, NetApp servers with nested exports appear to have empty or inaccessible subdirectories in the FUSE mount and shell. The user sees directory names but can't `cd` into them or list their contents. This is a practical usability gap for anyone targeting NetApp filers.
+
+**Where to add:** `src/shell/v3.rs` `V3Ops::readdir()` (or the equivalent `readdir_plus` call) should detect entries where the handle is `None` and issue a follow-up LOOKUP to obtain the missing handle. The `src/fuse.rs` `NfsFuse` READDIR handler needs the same fix. Could be gated behind a `--fix-nested-exports` flag or made always-on (a LOOKUP for a missing handle is cheap and harmless on non-NetApp servers).
+
+**Implementation complexity:** Moderate. The READDIRPLUS response parsing in `nfswolf-nfs3` already handles optional handles (`post_op_fh3`). The fix is in the consumer: when iterating READDIRPLUS entries, if `handle_follows` is false, issue a LOOKUP for that name against the parent handle. Needs care to avoid infinite recursion if nested exports are deeply stacked.
+
+#### (g) HP-UX one-request-per-connection handling
+
+**What HVS does:** `make_resetting_client()` in `nfs_analyze.py` (line 1409) detects HP-UX servers by sending two NULL requests on the same TCP connection. If the second request times out (raising `RPCTimeout`), the function wraps the client in a `ResettingClient` (line 1385) that creates a new TCP connection for every RPC request. This allows nfs_analyze to work against HP-UX servers that close the connection after the first response.
+
+**Why it matters:** HP-UX NFS servers terminate TCP connections after a single request-response exchange. Any tool that assumes persistent TCP connections (which NFSWolf does, via connection pooling in `src/proto/pool.rs`) will hang or error out after the first successful call. HP-UX is rare but still encountered in legacy enterprise environments.
+
+**Where to add:** `src/proto/conn.rs` `NfsConnection` or `src/proto/pool.rs` `ConnectionPool`. Detection: after establishing a connection, send a second NULL probe. If it fails with timeout or connection reset, mark the connection as "single-use" and disable pooling (return the connection to the pool as unhealthy after each use, forcing a new connection per call). Alternatively, implement a `SingleShotTransport` that wraps `DirectTransport` and reconnects before each `call()`.
+
+**Implementation complexity:** Moderate. The connection pool already has health tracking and reconnection logic. The change is: (1) add a "single-use" flag to the connection metadata, (2) detect the HP-UX pattern during the initial health probe, (3) when single-use is set, the pool returns a fresh connection for every checkout. The health eviction path already exists; this is a policy change, not a new mechanism.
+
+#### (h) FreeBSD subnet mask ambiguity warning
+
+**What HVS does:** `get_host_info()` in `nfs_analyze.py` (line 322) detects FreeBSD-style subnet notation: when a host string from MOUNT EXPORT ends in `.0` without a `/` separator (e.g., `10.123.45.0` instead of `10.123.45.0/24`), it flags this as `subnet_freebsd`. The wiki explains (3_3-Others.md) that FreeBSD's `mountd` reports subnets without the mask, so `10.123.45.0` could be `/8`, `/24`, or any other prefix length -- the actual mask is only in the server's `/etc/exports` or `zfs sharenfs` configuration.
+
+**Why it matters:** An attacker seeing `10.123.45.0` in `showmount -e` might assume the export is restricted to the /24 subnet and give up. But if the actual mask is /8, the attacker's IP `10.9.8.7` has access. The ambiguity is a FreeBSD-specific miscommunication between the server's export configuration and what `mountd` reports. Flagging it alerts the pentester to try mounting even when the reported ACL doesn't seem to match.
+
+**Where to add:** `src/engine/analyzer.rs` `check_export_acls()`. When parsing allowed-host strings from MOUNT EXPORT, detect the pattern: string contains only digits and dots, ends in `.0`, and has no `/` character. Flag it as a FreeBSD subnet ambiguity with a recommendation to attempt MNT regardless.
+
+**Implementation complexity:** Trivial. String pattern match on the export ACL entries already being parsed. No protocol interaction, no new RPC calls.
+
+#### (i) Client mount option risk assessment (nosuid/nodev)
+
+**What HVS does:** The wiki (5_2_0-Privilege_Escalation.md, 5_2_1-PrivEsc-Client,-no_root_squash-enabled.md, 5_2_2-PrivEsc-Client,-no_root_squash-disabled.md) extensively documents privilege escalation attacks on NFS clients that mount exports without `nosuid` or `nodev`. These are client-side mount flags, not server-side export options, so they cannot be detected remotely by the NFS server. However, the MOUNT DUMP response lists connected clients, and HVS pings those clients to check reachability.
+
+**Why it matters:** NFSWolf's F-7.4 documents this as "not server-observable" and "no detection." While the server-side tool genuinely cannot see client mount flags, the `scan` and `analyze` output could include an advisory note whenever a writable export with no_root_squash (or even without it, per the GID 6 attack) is found, warning that clients mounting without `nosuid`/`nodev` are vulnerable.
+
+**Where to add:** `src/engine/analyzer.rs` finding generation. When `check_no_root_squash()` confirms no_root_squash is enabled, or when a writable export is found (even with root_squash), emit an advisory finding referencing the client-side risk. No new protocol interaction needed -- this is a report-level enhancement.
+
+**Implementation complexity:** Trivial. Add conditional advisory text to finding F-7.4 emission based on existing export analysis results.
+
+#### (j) Disk group (GID 6) privilege escalation via setgid binary
+
+**What HVS does:** Wiki section 5_2_2-PrivEsc-Client,-no_root_squash-disabled.md describes a privilege escalation that works even without `no_root_squash`. On Debian and Fedora, `/dev/sd*` devices are owned by group `disk` (GID 6) with `rw` permissions. An attacker uploads a setgid binary with GID 6 to the NFS export (using a non-root UID like 1000, which doesn't get squashed). When executed on the client, the binary runs with GID 6, granting raw disk read/write access via `/dev/sd*`. This bypasses root_squash because the GID is 6, not 0. Extends to other groups: `shadow` (GID 42) for `/etc/shadow` read, `docker` for container escape, `sudo`/`wheel` (GID 27/10) for privilege escalation.
+
+**Why it matters:** This attack class is distinct from the standard no_root_squash setuid-root escalation (F-4.1). It works with default `root_squash` settings because the attacker never claims UID/GID 0. NFSWolf's F-4.2 covers SUID/SGID generally but doesn't specifically flag the disk/shadow/docker group vectors or the fact that they bypass root_squash. The `suid-scan` shell command finds existing SUID/SGID binaries but doesn't assess the *upload* risk when the export is writable.
+
+**Where to add:** `src/engine/analyzer.rs` as a new check alongside `check_no_root_squash()`. When an export is writable and root_squash is enabled (all_squash is NOT enabled), flag the GID 6/42/27/10 privilege escalation risk. The check is: if the export accepts AUTH_SYS and is writable, and all_squash is not detected, then any non-zero GID can be asserted in uploaded setgid binaries. This is a finding-level addition, not a new protocol probe.
+
+**Implementation complexity:** Trivial. Advisory finding based on existing squash probe results. No new RPC calls. Could optionally verify by creating a test file with GID 6 and checking if the GID survives (same technique as the no_root_squash probe but with a non-zero GID).
+
+#### (k) FUSE dev/suid option pass-through
+
+**What HVS does:** `fuse_nfs.py` (lines 517-518) mounts the FUSE filesystem with `dev` and `suid` options enabled:
+```python
+fuse_options.add('dev')
+fuse_options.add('suid')
+```
+This means SUID binaries and device files on the NFS export are functional when accessed through the FUSE mount. Combined with auto-UID escalation, this enables the full privilege escalation attack chain: upload a SUID binary or device file via the FUSE mount, then execute/access it on the same mount.
+
+**Why it matters:** NFSWolf's FUSE mount (`src/fuse.rs`) does not pass `dev` or `suid` to the FUSE mount options. Device files and SUID binaries on the mounted NFS export are therefore non-functional -- the FUSE layer strips SUID bits and blocks device access by default. This prevents using `nfswolf mount` as the attack vehicle for F-4.2 (SUID escalation) and F-4.3 (device node creation), forcing the attacker to use the shell commands or an external mount tool.
+
+**Where to add:** `src/cli/mount.rs` `MountArgs::run()`, in the FUSE option setup. Add `dev` and `suid` to the option set, gated behind `--allow-write` (since these options are only useful for write-capable mounts). Should also add `allow_other` and `allow_root` to match HVS's configuration.
+
+**Implementation complexity:** Trivial. Two string additions to the FUSE mount options. The `--allow-write` gate already exists.
+
+#### (l) ZFS escape (inode 0x22, generation brute-force)
+
+**What HVS does:** The wiki (5_1-Accessing-files-outside-export.md, ZFS section) documents the ZFS file handle structure for root directories: inode `0x22` (always the same for ZFS root directories) with a small but variable generation number that requires brute-force. The fileid structure is 12 bytes: 2 unknown bytes, 4-byte inode (LE), 2 unknown bytes, 4-byte generation (LE). HVS did not implement this in nfs_analyze (documented as manual-only due to limited impact and brute-force requirement), but the file handle layout is fully reverse-engineered.
+
+The wiki also notes that ZFS exports created via `zfs set sharenfs=...` always export the dataset root, so the subtree_check escape is only relevant when a subdirectory is manually exported in `/etc/exports`. TrueNAS Scale automatically enables `subtree_check` when a subdirectory of a dataset is exported.
+
+**Why it matters:** ZFS is the default filesystem on TrueNAS, FreeBSD storage appliances, and many enterprise NAS systems. NFSWolf's `construct_escape_handle()` and `construct_root_candidates()` cover ext4, XFS, and BTRFS but not ZFS. Adding ZFS support would complete coverage of the four major Linux/BSD server filesystems.
+
+**Where to add:** `src/engine/file_handle.rs` as `construct_zfs_escape_candidates()`. The function constructs handles with inode `0x22` and iterates generation values from 0 through a configurable maximum (small values, the wiki says "usually a small value"). The fileid_type for ZFS needs to be identified (not documented by HVS; would need to be determined from a ZFS test server). The brute-force loop is bounded and cheap -- similar to the existing BTRFS subvolume iteration.
+
+**Implementation complexity:** Moderate. Requires determining the ZFS fileid_type byte value (not in HVS docs, needs lab testing on a ZFS server), implementing the 12-byte fileid structure, and adding a generation brute-force loop. The brute-force scope is small (generation is "usually a small value") but the exact upper bound needs testing. Access to a TrueNAS or FreeBSD ZFS server is required for validation.
+
+#### (m) NFSv4 escape via COMPOUND (v4 escape parity)
+
+**What HVS does:** `nfs_try_escape()` accepts both `nfs3client.NFS3Client` and `nfs4client.NFS4Client` as the `nfs_client` parameter (lines 459, 498). The escape logic (handle construction, READDIRPLUS/READDIR, etc_shadow reading, symlink check) runs identically through either protocol version. `nfs_readdir()` dispatches to `nfs3_readdir_plus()` or `nfs4_readdir()` based on client type. This gives HVS escape capability on NFSv4-only servers.
+
+**Why it matters:** NFSWolf's `escape` subcommand and `check_escape()` in the analyzer operate via NFSv3 only. Servers that only support NFSv4 (no mountd, no portmapper, no v3) cannot be escaped by NFSWolf today. The file handle structure is the same regardless of NFS version (it's a server-internal format), so the handle construction logic in `file_handle.rs` applies equally to v4 -- the gap is only in the transport layer (sending the constructed handle via NFSv4 COMPOUND instead of NFSv3 READDIRPLUS).
+
+**Where to add:** `src/cli/escape.rs` `EscapeArgs::run()` should fall back to NFSv4 when NFSv3 is unavailable. The constructed handles from `file_handle.rs` are version-agnostic. The verification step (listing the root directory) needs a v4 path: PUTFH + READDIR via the existing `Nfs4DirectClient`. `src/engine/analyzer.rs` `check_escape()` should similarly support v4.
+
+**Implementation complexity:** Moderate. The handle construction is shared. The new code is: (1) sending the constructed handle via PUTFH, (2) issuing READDIR to verify the escape, (3) adapting the directory comparison logic for NFSv4 response types. The `Nfs4DirectClient` and `nfswolf_nfs4::wire` already support PUTFH, READDIR, and GETFH.
+
+#### (n) Allowed-client reachability probing
+
+**What HVS does:** `ping_host()` in `nfs_analyze.py` (line 292) pings each host listed in MOUNT EXPORT ACLs to determine if the host is reachable. Results are displayed as `(up)` or `(down)` next to each allowed client. A host that is listed in the ACL but is down (not responding to ping) may indicate a decommissioned machine whose IP could be claimed by an attacker.
+
+**Why it matters:** If an export is restricted to a specific host IP and that host is unreachable, the IP may be available for an attacker to assume (via DHCP, ARP spoofing, or simply configuring their interface). Flagging unreachable ACL entries turns the export list from a static dump into actionable intelligence about exploitable trust relationships.
+
+**Where to add:** `src/engine/analyzer.rs` as a post-processing step on export ACLs. After parsing the allowed-host list, send ICMP echo requests (or TCP SYN probes) to each host IP. Flag unreachable hosts as potential IP-takeover targets. Gate behind a flag like `--probe-acl-hosts` since ICMP probing can be noisy.
+
+**Implementation complexity:** Moderate. Requires an ICMP or TCP probe mechanism. Could use tokio-based async ping (the `surge-ping` crate, or raw socket ICMP). Alternatively, use a TCP connect probe to a common port (e.g., 22, 111). The probe results are purely informational and don't affect the analysis logic.
+
+### Techniques from HVS not in any existing NFS tool
+
+The following capabilities appear to be novel contributions from HVS Consulting's research, not found in nfsshell (Mark Lottor, 1993), Metasploit's NFS modules, nfs-utils `showmount`/`nfsstat`, or any other publicly available NFS security tool.
+
+1. **UUID-v5 pseudo-root detection.** The Linux kernel's `v4root.c` generates pseudo-root file handles using a deterministic UUID-v5 hash of the export path against a fixed namespace UUID. HVS reverse-engineered this and uses it to distinguish pseudo-root scaffold directories from real exports in NFSv4 pseudo-root traversal. No other tool performs this classification.
+
+2. **fsid-change export boundary inference in NFSv4.** Comparing fsid bytes across parent-child directory handles to detect export boundaries without MOUNT EXPORT. This is the only reliable export discovery mechanism for NFSv4-only servers and is not implemented in any other offensive tool.
+
+3. **Windows NFSv4.1 file handle type taxonomy.** HVS identified three distinct handle layouts in Windows Server's NFSv4.1 implementation, distinguished by the 3rd byte (type 0 for pseudo/export roots, type 1 for direct children, type 2 for deeper files). This structural documentation does not appear in Microsoft's public documentation or any other security research.
+
+4. **HP-UX one-request-per-connection auto-detection and workaround.** Detecting that a server terminates TCP connections after the first RPC response (by sending a second NULL probe) and transparently switching to per-request connections. No other NFS tool handles this edge case.
+
+5. **NetApp nested export READDIRPLUS handle fixup.** Detecting that READDIRPLUS returns empty handles for subdirectories that are also export roots on NetApp filers, and issuing follow-up LOOKUPs to obtain the missing handles. This is a NetApp-specific quirk not documented outside HVS's wiki.
+
+6. **FreeBSD subnet mask ambiguity classification.** Flagging that FreeBSD's `mountd` reports subnets without a CIDR mask, making the actual access scope ambiguous. No other tool warns about this.
+
+7. **GID 6 (disk group) setgid privilege escalation without no_root_squash.** While the individual techniques (setgid binaries, disk group raw access) are well-known, the specific combination -- uploading a GID 6 setgid binary via NFS to bypass root_squash and gain raw disk access on the client -- is not documented in Metasploit modules or standard NFS pentesting guides. HVS also extends this to the `shadow` (42), `docker`, and `sudo`/`wheel` (27/10) groups.
+
+8. **ZFS file handle structure reverse-engineering.** The ZFS fileid layout (root inode 0x22, small generation values, 12-byte structure) is not documented in any RFC or public source. HVS reverse-engineered it through manual testing on TrueNAS Scale.
+
+9. **NFSv4 escape via COMPOUND.** While handle construction for export escape has existed since the Stony Brook NFS Security Technical Report (2001), performing the escape verification through NFSv4 COMPOUND (PUTFH + READDIR) rather than NFSv3 is not implemented in any other publicly available tool. This enables escaping on NFSv4-only servers.
+
+10. **Combined OS fingerprinting matrix.** The six-heuristic approach (handle prefix, handle length, NFS version support pattern, FreeBSD subnet format, NetApp portmapper program, HP-UX connection behavior) provides stronger OS identification than any single signal. No other tool combines all six.
+
+### References and external links
+
+**HVS Consulting resources:**
+- Repository: https://github.com/hvs-consulting/nfs-security-tooling
+- Wiki: https://github.com/hvs-consulting/nfs-security-tooling/wiki
+- Blog post: https://www.hvs-consulting.de/en/blog/nfs-security-identifying-and-exploiting-misconfigurations
+
+**RFCs referenced in HVS wiki (Further Reading page):**
+- XDR serialization: [RFC 4506](https://datatracker.ietf.org/doc/html/rfc4506)
+- SUN RPC protocol: [RFC 5531](https://datatracker.ietf.org/doc/html/rfc5531)
+- rpcbind protocol: [RFC 1833](https://datatracker.ietf.org/doc/html/rfc1833)
+- NFSv3 and mount protocol: [RFC 1813](https://datatracker.ietf.org/doc/html/rfc1813)
+- NFSv4 protocol: [RFC 7530](https://datatracker.ietf.org/doc/html/rfc7530)
+- NFSv4.1 protocol: [RFC 5661](https://datatracker.ietf.org/doc/html/rfc5661)
+- NFSv4.2 protocol: [RFC 7862](https://datatracker.ietf.org/doc/html/rfc7862)
+- RPC-with-TLS: [RFC 9289](https://datatracker.ietf.org/doc/html/rfc9289)
+
+**Attack references from HVS wiki:**
+- The original no_subtree_check attack: [NFS File Handle Security Technical Report](https://www.fsl.cs.stonybrook.edu/docs/nfscrack-tr/index.html) (Stony Brook University)
+- Accessing file systems that are not exported: [linux-nfs mailing list thread](https://lore.kernel.org/linux-nfs/20210111192507.GB2600@fieldses.org/)
+- no_root_squash client-side privilege escalation: [NFS Share no_root_squash - Linux Privilege Escalation](https://juggernaut-sec.com/nfs-no_root_squash/)
+- Server-side privilege escalation via hardlinks: [Abusing Hardlinks Via NFS](https://pentestmonkey.net/blog/nfs-hardlink)
+
+**Authentication references from HVS wiki:**
+- AUTH_DES/AUTH_DH Diffie-Hellman details: [Solaris Documentation](https://docs.oracle.com/cd/E23824_01/html/821-1671/rpcproto-54618.html)
+- Weaknesses of Diffie-Hellman in NFS: [Stronger security for NFS](https://docstore.mik.ua/orelly/networking_2ndEd/nfs/ch12_05.htm)
+
+**NFS client libraries referenced by HVS:**
+- libnfs (C library, NFSv3, Python and Rust bindings): https://github.com/sahlberg/libnfs
+- pynfs (Linux NFS project test suite, NFSv3 and NFSv4): http://git.linux-nfs.org/?p=bfields/pynfs.git
+- anfs (async Python NFSv3 client): https://github.com/skelsec/anfs
+
+**Linux kernel source references from HVS wiki:**
+- File handle structure: [fs/nfsd/nfsfh.h](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/nfsd/nfsfh.h)
+- Export filesystem types: [include/linux/exportfs.h](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/linux/exportfs.h)
+- subtree_check implementation: [fs/nfsd/nfsfh.c](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/nfsd/nfsfh.c) (`nfsd_acceptable`)
+- NFSv4 pseudo-root UUID generation: [fs/nfsd/export.c](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/nfsd/export.c) (v4root.c, line 101, `e_uuid` namespace `39c6b5c1-3f24-4f4e-977c-7fe6546b8a25`)
+
+**Other NFS security references:**
+- RPCSEC_GSS Linux implementation details: [gssd](http://www.citi.umich.edu/projects/nfsv4/gssd/)
+- Red Hat export configuration pitfalls (space-between-host-and-options): [Red Hat Documentation](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/5/html/deployment_guide/s1-nfs-server-config-exports)
+- Inode generation number retrieval on Linux: [StackOverflow thread](https://stackoverflow.com/questions/20052912/how-do-i-get-the-generation-number-of-an-inode-in-linux)
+
+---
+
+## Privilege escalation via NFS — consolidated attack catalog
+
+This section consolidates every known NFS-based privilege escalation path into a single reference. Sources: HVS Consulting wiki, pentestmonkey, Juggernaut-Sec, Red Hat documentation, RFC 2623, and NFSWolf's own live testing. The attacks are divided into client-side (attacker escalates on a machine that mounts the export) and server-side (attacker escalates on the NFS server via the export).
+
+### Client-side privilege escalation
+
+These attacks target a machine that mounts the NFS export. The attacker uploads a malicious file to the export, then exploits it from the mounting client. The NFS server is just the delivery mechanism -- the privilege escalation happens on the client.
+
+#### (a) SUID binary upload (requires no_root_squash)
+
+The canonical NFS privilege escalation. When `no_root_squash` is enabled on the server's export, the attacker connects with AUTH_SYS UID 0 and uploads a SUID-root binary. The binary's owner UID (0) and SUID bit survive the NFS write because the server does not squash root. Any user on a client that mounts the export without `nosuid` can execute the binary and gain root.
+
+**Mechanics:** (1) Connect to the export with AUTH_SYS uid=0, gid=0. (2) CREATE a file with `sattr3 { mode: 0o4755, uid: 0, gid: 0 }`. (3) WRITE the binary content (a statically linked shell or custom escalation payload). (4) On the client: execute the file. The kernel honors the SUID bit because the client mounted without `nosuid`. The process runs as UID 0.
+
+**Server-side requirements:** `no_root_squash` on the export. AUTH_SYS accepted. Export is writable (no `ro`).
+**Client-side requirements:** Client mounts without `nosuid`. Client does not strip SUID bits on NFS-sourced files (no mount option or LSM policy preventing it).
+**NFSWolf status:** F-4.1 documents this. `check_no_root_squash()` in the analyzer detects it. Shell `put` + `chmod` can upload and set permissions. The `suid-scan` shell command finds existing SUID binaries.
+
+#### (b) Device file upload (requires no_root_squash + client missing nodev)
+
+A more dangerous variant that grants raw disk access instead of just a root shell. The attacker uses MKNOD to create a block device node pointing to the server's (or client's) root disk. When the client mounts the export without `nodev`, the device node is functional and grants raw read/write access to the disk.
+
+**Mechanics:** (1) Connect with AUTH_SYS uid=0, gid=0 (no_root_squash must be enabled). (2) MKNOD to create a block device: `type=BLK, rdev=(8,0)` for `/dev/sda` on Linux. (3) On the client: use `debugfs` or `dd` against the device file to read/write the raw disk, bypassing all filesystem permissions. Full disk read access means reading `/etc/shadow`, `/root/.ssh/`, database files, etc. directly from the block device. Full disk write access means modifying any file on the disk, including SUID binaries, crontabs, and SSH authorized_keys.
+
+**Why this is worse than SUID:** SUID gives root in the filesystem namespace -- LSMs like SELinux and AppArmor can still constrain the process. Raw disk access via a device node bypasses all kernel-level access controls because the operation happens at the block layer, below the filesystem and below any LSM hooks.
+
+**Server-side requirements:** `no_root_squash` (must create device as root). Export writable.
+**Client-side requirements:** Client mounts without `nodev`. This is the default for many NFS mount configurations.
+**NFSWolf status:** F-4.3 documents this. Shell `mknod` command exists but is not commonly used. The analyzer does not specifically flag device node creation risk separately from the general no_root_squash finding.
+
+#### (c) Setgid binary with disk group GID 6 (NO no_root_squash needed)
+
+The novel HVS finding. This attack works even with the default `root_squash` configuration because it never uses UID 0. On Debian, Fedora, and most Linux distributions, `/dev/sd*` block devices are owned by group `disk` (GID 6) with group read/write permissions (`brw-rw----`). An attacker uploads a setgid binary with GID 6 to the NFS export using any non-root UID (e.g., UID 1000, which is not squashed). When executed on the client, the binary's effective GID becomes 6, granting raw disk read/write access through the `/dev/sd*` device files.
+
+**Mechanics:** (1) Connect with AUTH_SYS uid=1000, gid=1000 (not squashed by root_squash). (2) CREATE a file with `sattr3 { mode: 0o2755, uid: 1000, gid: 6 }`. The SGID bit (0o2000) is set, and the GID is 6 (disk). (3) WRITE the binary content -- a simple C program that opens `/dev/sda` and reads/writes raw blocks. (4) On the client: execute the file. The kernel sets the effective GID to 6 because of the SGID bit. The program can now open `/dev/sda` (which is owned by group `disk` with `rw` group permissions) and read/write the raw disk.
+
+**Why root_squash does not help:** root_squash only maps UID 0 to the anonymous UID. UIDs 1-65534 and GIDs 1-65534 pass through unmodified. The SGID bit applies to the file's GID (6), not the caller's UID. The server stores the file with GID 6 because the AUTH_SYS credential asserts GID 6 in the supplementary groups (or the file was created and then chown'd). Even `all_squash` does not fully prevent this if the anonymous GID happens to be in a privileged group, though `all_squash` with anonuid=65534/anongid=65534 does mitigate it.
+
+**Detection:** The analyzer should flag any writable AUTH_SYS export (even with root_squash) as vulnerable to SGID privilege escalation via privileged groups. The check is: if the export is writable, AUTH_SYS is accepted, and `all_squash` is not enabled, then any GID can be asserted in uploaded files.
+
+**NFSWolf status:** HVS gap (j) documents this. Not implemented as a specific analyzer check. The `suid-scan` shell command finds existing SGID binaries but does not assess the upload risk.
+
+#### (d) Shadow group read (GID 42 Debian, GID 15 SUSE)
+
+Same technique as (c) but targeting `/etc/shadow` read access instead of raw disk access. On Debian/Ubuntu, `/etc/shadow` is owned by group `shadow` (GID 42) with group read permissions (`-rw-r-----`). On SUSE, the shadow group is GID 15. An attacker uploads a setgid binary with the shadow group's GID, then executes it on the client to read `/etc/shadow` and harvest password hashes for offline cracking.
+
+**Mechanics:** (1) Upload a setgid binary with GID 42 (or 15) via NFS. (2) On the client: execute the binary, which now has effective GID 42. (3) The binary opens `/etc/shadow` (group-readable by `shadow` group) and dumps the contents. (4) Feed the password hashes to hashcat/john.
+
+**GID values by distribution:**
+- Debian/Ubuntu: `shadow` = GID 42
+- SUSE/openSUSE: `shadow` = GID 15
+- RHEL/Fedora: no `shadow` group by default; `/etc/shadow` is mode `000` owned by root:root. The SGID attack does not apply.
+- Arch Linux: no `shadow` group by default.
+
+**NFSWolf status:** The analyzer's `probe_file_access()` tests shadow GIDs 42 and 15. The SGID upload vector is not flagged separately.
+
+#### (e) Docker group escalation (GID varies)
+
+On systems where Docker is installed, the `docker` group grants access to `/var/run/docker.sock`. A setgid binary with the Docker group's GID allows the attacker to interact with the Docker daemon, which is equivalent to root access (the attacker can start a privileged container that mounts the host filesystem).
+
+**Mechanics:** (1) Determine the Docker group GID on the target client (commonly 999, 998, or 133 depending on the distribution and installation order). (2) Upload a setgid binary with that GID. (3) On the client: execute the binary, which now has effective GID matching the Docker group. (4) The binary connects to `docker.sock` and starts a container with `--privileged -v /:/host`, granting full host filesystem access.
+
+**GID discovery:** The Docker group GID is not standardized. It can be discovered by: (a) reading `/etc/group` from the NFS export (if the export includes `/etc`), (b) RQUOTA-based group enumeration (Chain 3), (c) NIS `group.byname` dump (Chain 1), or (d) brute-force SGID binary execution against candidate GIDs.
+
+#### (f) sudo/wheel group escalation (GID 27/10)
+
+On Debian/Ubuntu, the `sudo` group (GID 27) grants `sudo` privilege. On RHEL/Fedora, the `wheel` group (GID 10) serves the same function. An attacker who uploads a setgid binary with GID 27 or 10, then executes it on the client, can run commands with `sudo` privileges.
+
+**Distinction from the disk/shadow attacks:** The sudo/wheel attack requires that the binary can then invoke `sudo` or otherwise leverage the group membership. In practice, this means the binary must: (a) create a subshell where `id -Gn` includes `sudo`/`wheel`, (b) invoke `sudo` from that subshell, and (c) have a password for the current user (or `sudo` is configured with `NOPASSWD`). If `sudo` requires a password and the attacker does not know one, this is less directly exploitable than the disk/shadow attacks. However, many deployments use `NOPASSWD` for the sudo group, making this a direct-to-root escalation.
+
+### Server-side privilege escalation
+
+These attacks escalate the attacker's access on the NFS server itself, using the NFS protocol as the exploitation vector.
+
+#### (g) Server-side hardlink escape (pentestmonkey technique)
+
+When an NFS export uses `subtree_check` and exports a subdirectory (e.g., `/home/user`), the server verifies that accessed files are within the exported subtree. A hardlink bypasses this check: the attacker creates a hardlink from a file inside the export to a file outside the export (e.g., `link /home/user/shadow -> /etc/shadow`). Because hardlinks are inodes, not paths, the resulting link is within the exported directory's namespace, and `subtree_check` passes. The linked file's content is the target file's content.
+
+**Requirements:** (1) The export must be writable. (2) The target file and the export must be on the same filesystem (hardlinks cannot cross filesystem boundaries). (3) The attacker must have write permission in the export directory. (4) `no_root_squash` is NOT required -- any UID with write access to the export can create the hardlink.
+
+**Why this works WITH subtree_check:** `subtree_check` verifies that a file handle's inode is reachable from the export root via directory traversal. A hardlink creates a new directory entry pointing to the target inode. The new directory entry IS in the exported subtree, so `subtree_check` passes. The check cannot distinguish between a file that was originally in the subtree and one that was linked into it.
+
+**Limitation:** The LINK NFS procedure requires a valid file handle for the target file. The attacker must already have a handle for the file they want to link -- which normally means they already have access to it. The technique is useful when: (a) the attacker has a stale handle from a previous export configuration, (b) the attacker obtained a handle via escape/brute-force to a file they can read (via the handle) but want persistent access to (via the link in a stable export), or (c) the server exposes handles via READDIRPLUS on a parent directory that includes both the export and the target.
+
+**Source:** https://pentestmonkey.net/blog/nfs-hardlink
+
+**NFSWolf status:** The `link` shell command is implemented. F-4.2 documents hardlink-based escalation. The analyzer does not specifically probe for cross-subtree hardlink creation feasibility.
+
+#### (h) Bind mount false isolation
+
+Linux administrators sometimes use bind mounts to export a subtree of a filesystem: `mount --bind /data/public /export/public` followed by exporting `/export/public`. The intent is to isolate the export from the rest of the filesystem. This isolation is false for NFS purposes because the file handles generated by knfsd encode the underlying filesystem's inode numbers, not the bind mount's namespace. An escape handle constructed for the underlying filesystem (e.g., targeting inode 2 for ext4 root) resolves to the real filesystem root, not the bind mount root.
+
+**Why bind mounts don't provide NFS isolation:** knfsd's `fh_compose()` in `fs/nfsd/nfsfh.c` generates file handles based on the superblock and inode of the underlying filesystem. The bind mount is a VFS-layer namespace operation that is invisible at the superblock/inode level. When the client presents a handle containing the root inode of the underlying filesystem, knfsd resolves it to the real root, not the bind mount point. `subtree_check` offers partial protection (it verifies the inode is reachable from the export root), but `no_subtree_check` (the default since Linux 2.6.33) disables this entirely.
+
+**Detection:** Compare the `fsid` and `fileid` in the export root's attributes with those of the underlying filesystem's root. If the `fsid` matches the host filesystem and the `fileid` is not the filesystem root inode (e.g., ext4 inode 2), the export is a subtree or bind mount and escape may be possible.
+
+**NFSWolf status:** The escape subcommand already targets the underlying filesystem root inode, which inherently bypasses bind mount isolation. The analyzer's `check_escape()` verifies escape success. No specific bind-mount detection or advisory is emitted.
+
+#### (i) Nested export misconfiguration
+
+When a server exports both a parent directory and a child directory (e.g., `/data` and `/data/sensitive`), the child export may have stricter access controls than the parent. An attacker who has access to the parent export can reach files in the child directory through normal LOOKUP traversal on the parent export, bypassing the child export's ACLs entirely. The child export's ACLs only apply when the client uses MOUNT to obtain the child export's root handle directly.
+
+**Example:** Server exports `/data` to `*` (everyone) and `/data/sensitive` to `10.0.0.0/8` (internal only). An external attacker mounts `/data` and does `LOOKUP sensitive` -- this works because `/data/sensitive` is a subdirectory of `/data`, and the parent export's ACL applies to the traversal. The child export's `10.0.0.0/8` restriction only applies to MOUNT requests for `/data/sensitive`, not to LOOKUP traversals from the parent. With `no_subtree_check` (the default), the server does not verify that the accessed files are within the originally mounted export.
+
+**subtree_check interaction:** With `subtree_check` enabled on the parent export, the server verifies that accessed inodes are reachable from the parent export root. Since `/data/sensitive` IS reachable from `/data`, the check passes. `subtree_check` prevents accessing files outside the export, not inside nested exports with different ACLs.
+
+**NetApp variation:** On NetApp filers, nested exports create a more complex failure mode. READDIRPLUS on the parent export returns entries for the child export directory but with empty file handles (the handles belong to a different export context). HVS's `--fix-nested-exports` flag handles this by issuing follow-up LOOKUPs for entries with missing handles.
+
+**NFSWolf status:** The analyzer does not detect nested export configurations or warn about ACL bypass via parent-export traversal. The scanner enumerates all exports independently but does not correlate parent-child relationships.
+
+#### (j) Space-in-exports syntax error creating world-readable exports
+
+The Linux `/etc/exports` file has a subtle syntax rule: the access control options must be attached to the hostname with NO space between them. A space between the hostname and the parenthesized options makes the options apply to a different (implicit) entry, and the hostname gets default permissions (read-write to everyone).
+
+**Example of the bug:**
+```
+# INTENDED: export /data to 10.0.0.0/24 with ro,root_squash
+/data 10.0.0.0/24(ro,root_squash)
+
+# BUGGY: space between hostname and options
+/data 10.0.0.0/24 (ro,root_squash)
+```
+
+The buggy line is parsed as TWO entries: (1) `/data 10.0.0.0/24` with default options (rw, no host restriction beyond the named host), and (2) `/data (ro,root_squash)` where the parenthesized options apply to all other hosts (the `*` wildcard). The result: `/data` is exported read-write to `10.0.0.0/24` (less restrictive than intended) AND read-only to everyone else (the `(ro,root_squash)` applies to the implicit `*` entry). The administrator intended to restrict access to `10.0.0.0/24` with `ro`; instead, the export is world-readable.
+
+**Detection from the NFS wire:** The misconfiguration is visible in MOUNT EXPORT output. The export appears with an unexpected `*` or overly broad client list. NFSWolf's `check_export_acls()` already flags wildcard exports (F-7.1). A more specific check would: (1) flag exports where the same path appears twice in the export list with different client restrictions, (2) warn about exports with both a specific subnet and a wildcard entry, as this pattern often indicates the space-in-exports bug.
+
+**Source:** Red Hat documentation (https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/5/html/deployment_guide/s1-nfs-server-config-exports) explicitly warns about this syntax.
+
+**NFSWolf status:** Not specifically detected. The analyzer flags wildcard exports but does not correlate duplicate export paths with different ACLs.
+
+---
+
+## Filesystem-specific escape mechanics
+
+This section documents the full file handle structure and escape construction for each filesystem type. The handle structure determines how NFSWolf constructs escape handles in `src/engine/file_handle.rs`. Each filesystem section includes the handle layout, the root inode/generation values, and the fileid type bytes used for escape handle construction.
+
+### Linux NFS file handle structure (common header)
+
+All Linux knfsd file handles share a common header defined in `fs/nfsd/nfsfh.h`:
+
+```
+Byte 0:    Version (0x01 for current Linux knfsd)
+Byte 1:    Auth type (0x00 for AUTH_SYS)
+Byte 2:    fsid_type (0x00-0x07, determines fsid field layout)
+Byte 3:    fileid_type (determines fileid field layout)
+Bytes 4+:  fsid field (variable length per fsid_type)
+After fsid: fileid field (variable layout per fileid_type)
+```
+
+The `fsid_type` determines how many bytes the fsid occupies and what they encode:
+
+| fsid_type | Length | Content |
+|---|---|---|
+| 0 | 8 bytes | dev_major (4) + dev_minor (4) |
+| 1 | 4 bytes | fsid from statfs (4) |
+| 2 | 12 bytes | dev_major (4) + dev_minor (4) + filesystem UUID hash (4) |
+| 3 | 8 bytes | filesystem UUID hash (8) |
+| 4 | 8 bytes | device inode (4) + device generation (4) |
+| 5 | 16 bytes | full filesystem UUID (16) |
+| 6 | 16 bytes | UUID hash (8) + device inode (4) + device generation (4) |
+| 7 | 24 bytes | full UUID (16) + device inode (4) + device generation (4) |
+
+The `fileid_type` determines the fileid layout after the fsid. This is filesystem-specific and registered in `include/linux/exportfs.h`.
+
+### ext4 escape (inode 2, generation 0)
+
+**Root inode:** ext4 always uses inode 2 as the root directory. This is hardcoded in the ext4 specification and never changes.
+
+**Root generation:** The generation number for the root inode is 0 on a freshly created filesystem and remains 0 unless the root directory is deleted and recreated (which effectively never happens).
+
+**fileid_type values:**
+- `0x01` (`FILEID_INO32_GEN`): 8 bytes -- inode (4 LE) + generation (4 LE). Used for 32-bit inode filesystems.
+- `0x02` (`FILEID_INO32_GEN_PARENT`): 16 bytes -- inode (4 LE) + generation (4 LE) + parent_inode (4 LE) + parent_generation (4 LE). Used for directory handles where the parent is also encoded.
+
+**Escape handle construction (fileid_type 0x02):**
+```
+fileid bytes: [0x02, 0x00, 0x00, 0x00,   # inode 2 (LE)
+               0x00, 0x00, 0x00, 0x00,   # generation 0
+               0x02, 0x00, 0x00, 0x00,   # parent inode 2 (root is its own parent)
+               0x00, 0x00, 0x00, 0x00]   # parent generation 0
+```
+
+The parent inode for the root directory is itself (inode 2), which is a standard Unix filesystem convention.
+
+**Escape handle construction (fileid_type 0x01):**
+```
+fileid bytes: [0x02, 0x00, 0x00, 0x00,   # inode 2 (LE)
+               0x00, 0x00, 0x00, 0x00]   # generation 0
+```
+
+**NFSWolf strategy:** Construct handles with both fileid_type 0x01 and 0x02. Copy the fsid bytes from the export root's handle (obtained via MOUNT). Replace the fileid_type byte and the fileid bytes. Try both candidates via GETATTR or READDIRPLUS; the server returns `NFS3_OK` for the correct type and `NFS3ERR_BADHANDLE` or `NFS3ERR_STALE` for the wrong one.
+
+**NFSWolf status:** Fully implemented in `construct_escape_handle()` and `construct_root_candidates()`.
+
+### XFS escape (inode 128, generation 0)
+
+**Root inode:** XFS uses inode 128 as the root directory. Unlike ext4, this is not always the case -- on XFS filesystems created with non-default `mkfs.xfs` options (specifically `-i size=` or `-b size=`), the root inode may be at a different offset. However, the default and overwhelmingly common case is inode 128.
+
+**Root generation:** Generation 0 for the root directory, same rationale as ext4.
+
+**fileid_type values:**
+- `0x01` (`FILEID_INO32_GEN`): 8 bytes -- inode (4 LE) + generation (4 LE). Standard 32-bit encoding.
+- `0x81` (`FILEID_INO64_GEN`): 12 bytes -- inode (8 LE) + generation (4 LE). 64-bit inode encoding for large XFS filesystems (>2^32 inodes).
+
+**Escape handle construction (fileid_type 0x01, 32-bit inode):**
+```
+fileid bytes: [0x80, 0x00, 0x00, 0x00,   # inode 128 (LE)
+               0x00, 0x00, 0x00, 0x00]   # generation 0
+```
+
+**Escape handle construction (fileid_type 0x81, 64-bit inode):**
+```
+fileid bytes: [0x80, 0x00, 0x00, 0x00,   # inode 128 (LE, low 32 bits)
+               0x00, 0x00, 0x00, 0x00,   # inode 128 (LE, high 32 bits, zero)
+               0x00, 0x00, 0x00, 0x00]   # generation 0
+```
+
+**False positive risk:** A 32-byte NFSv3 handle from an XFS filesystem can be confused with a Windows NFS handle (also 32 bytes). NFSWolf's `fingerprint_os()` checks the `[0x01, 0x00]` header to distinguish Linux from Windows.
+
+**NFSWolf status:** Fully implemented in `construct_xfs_escape_candidates()`. Both 32-bit and 64-bit inode variants are generated.
+
+### BTRFS escape (subvolume enumeration, object_id 256)
+
+BTRFS is fundamentally different from ext4/XFS because it uses a subvolume model. Each BTRFS subvolume is a separate directory tree with its own root. The NFS file handle encodes the subvolume ID, the object ID (inode equivalent), and a generation number.
+
+**Root object:** BTRFS uses object_id 256 as the root directory of each subvolume. This is a BTRFS constant defined in `include/uapi/linux/btrfs_tree.h` as `BTRFS_FIRST_FREE_OBJECTID`.
+
+**Subvolume IDs:** Subvolume IDs start at 256 and increment. Subvolume 5 is the "top-level" (meta) subvolume that contains all other subvolumes as directories. The default subvolume (what you get when you mount without specifying a subvol) is typically subvolume 5 or a subvolume designated as default via `btrfs subvolume set-default`.
+
+**fileid_type values for BTRFS:**
+- `0x01`: 8 bytes -- objectid (4 LE) + generation (4 LE). Does NOT include subvolume information.
+- `0x4d` (`FILEID_BTRFS_WITHOUT_PARENT`): 12 bytes -- objectid (8 LE) + root_objectid (4 LE, subvolume ID). NFSWolf uses this for subvolume enumeration.
+- `0x4e` (`FILEID_BTRFS_WITH_PARENT`): 24 bytes -- objectid (8 LE) + root_objectid (4 LE) + generation (4 LE) + parent_objectid (8 LE) + parent_root_objectid (4 LE).
+
+**Escape strategy -- subvolume enumeration:**
+```
+For subvol_id in 256..256+N:
+  fileid bytes: [0x00, 0x01, 0x00, 0x00,   # objectid 256 (LE, low 32)
+                 0x00, 0x00, 0x00, 0x00,   # objectid 256 (LE, high 32)
+                 subvol_lo, subvol_hi, 0, 0]  # root_objectid (subvol ID, LE)
+```
+
+Try each candidate via GETATTR. `NFS3ERR_STALE` means the subvolume once existed but was deleted. `NFS3_OK` means the subvolume exists and the attacker has its root handle.
+
+**Compound UUID escape for subvolume 5:** BTRFS subvolume 5 is special -- it is the meta-subvolume that contains all other subvolumes as subdirectories. Escaping to subvolume 5 lets the attacker traverse into any other subvolume. NFSWolf constructs a compound handle that embeds the BTRFS filesystem UUID (from `fsid_type` 5 or 6) with object_id 256 and root_objectid 5.
+
+**NFSWolf status:** Fully implemented in `construct_btrfs_subvol_handles()`. Subvolume iteration and the compound UUID escape for subvolume 5 are both implemented.
+
+### ZFS escape (inode 0x22, generation brute-force)
+
+**Root inode:** ZFS root directories consistently use inode `0x22` (decimal 34). This is the ZFS Object Set's root directory object number, stable across ZFS versions and implementations (OpenZFS, Oracle ZFS, TrueNAS).
+
+**Root generation:** Unlike ext4/XFS/BTRFS where the root generation is 0, ZFS root directories have a small but non-zero generation number. The generation is derived from the dataset's creation transaction group (txg) and varies per dataset. HVS Consulting's reverse-engineering found that the value is "usually a small value" -- typically in the range 0-100, sometimes higher but rarely exceeding a few thousand.
+
+**File handle structure (observed by HVS, no public documentation):** The ZFS fileid is 12 bytes:
+```
+Bytes 0-1:   Unknown (possibly flags or padding)
+Bytes 2-5:   Inode number (4 bytes, LE)
+Bytes 6-7:   Unknown (possibly flags or padding)
+Bytes 8-11:  Generation number (4 bytes, LE)
+```
+
+**Escape handle construction:**
+```
+fileid bytes: [0x??, 0x??,               # unknown bytes (copy from known handle)
+               0x22, 0x00, 0x00, 0x00,   # inode 0x22 (LE)
+               0x??, 0x??,               # unknown bytes (copy from known handle)
+               gen_lo, gen_hi, 0, 0]     # generation (brute-force candidate, LE)
+```
+
+The unknown bytes at positions 0-1 and 6-7 must be determined empirically from a known valid handle on the same ZFS dataset. Copy them from the export root handle.
+
+**Brute-force strategy:** Iterate generation values from 0 through a configurable maximum (e.g., 1000). For each candidate, construct a handle and issue GETATTR. The oracle responses are the same as for other filesystems: `NFS3_OK` = success, `NFS3ERR_STALE` = right format but wrong generation, `NFS3ERR_BADHANDLE` = wrong format entirely.
+
+**ZFS dataset boundaries:** ZFS exports created via `zfs set sharenfs=...` always export the dataset root. Escape is only relevant when a subdirectory of a dataset is manually exported in `/etc/exports`. TrueNAS Scale automatically enables `subtree_check` when a subdirectory of a dataset is exported, providing some protection (though `subtree_check` has its own limitations -- see (g) above).
+
+**NFSWolf status:** Not implemented. Documented as HVS gap (l). Implementation requires: (1) determining the ZFS fileid_type byte (not in HVS docs), (2) implementing the 12-byte fileid structure, (3) adding a generation brute-force loop. Lab testing on a TrueNAS or FreeBSD ZFS server is required for validation.
+
+### Windows NFS handle structure and signing
+
+Windows NFS Server uses a fundamentally different handle structure from Linux. The handles are opaque and the last portion contains an AES-CMAC cryptographic signature that prevents handle forgery.
+
+**NFSv3 handle structure (32 bytes):**
+```
+Bytes 0-21:   Handle payload (export ID, volume ID, fileid)
+Bytes 22-31:  AES-CMAC signature (10 bytes, truncated from 16-byte CMAC output)
+```
+
+When signing is disabled (a registry setting), the last 10 bytes are all zeros. NFSWolf's `check_windows_signing()` detects this by checking if `fh[22..32] == [0; 10]`.
+
+**NFSv4.1 handle structure (3 types, distinguished by byte 2):**
+
+**Type 0 (pseudo-root and export root handles, 28 bytes):**
+```
+Bytes 0-1:   Header (0xff, 0x24)
+Byte 2:      Type = 0x00
+Byte 3:      0x00
+Bytes 4-11:  Padding (0xff fill for pseudo-root)
+Bytes 12-15: Export ID (4 bytes; 0xffffffff for global pseudo-root)
+Bytes 16-27: AES-CMAC signature (16 bytes, full CMAC output in v4.1)
+```
+
+**Type 1 (direct children of export root, 48 bytes):**
+```
+Bytes 0-1:   Header (0x1f, 0x30)
+Byte 2:      Type = 0x01
+Byte 3:      0x00
+Bytes 4-7:   Export ID (4 bytes)
+Bytes 8-23:  Volume ID (16 bytes, matches NTFS volume serial)
+Bytes 24-31: File ID (8 bytes, NTFS MFT record number)
+Bytes 32-47: AES-CMAC signature (16 bytes)
+```
+
+**Type 2 (deeper files and directories, 56 bytes):**
+```
+Bytes 0-1:   Header (0x12, 0x30)
+Byte 2:      Type = 0x02
+Byte 3:      0x00
+Bytes 4-19:  Volume ID (16 bytes)
+Bytes 20-27: Parent File ID (8 bytes)
+Bytes 28-31: Export ID (4 bytes)
+Bytes 32-39: File ID (8 bytes)
+Bytes 40-55: AES-CMAC signature (16 bytes)
+```
+
+**Signing key location:** The AES-CMAC signing key is stored in the Windows registry at `HKLM\SYSTEM\CurrentControlSet\Services\NfsServer\Parameters\HandleSigningKey`. This is a 128-bit key generated at NFS server installation. If the key is deleted or zeroed, handle signing is disabled and all signature bytes become zero.
+
+**Attack surface when signing is disabled:** With zeroed signatures, the handle structure is known and the field values (export ID, volume ID, file ID) can be extracted from a valid handle. An attacker can construct handles for arbitrary files by replacing the file ID with a target MFT record number. MFT record numbers are sequential, so brute-force is feasible (iterate from 0 upward). The volume ID and export ID are copied from the known handle.
+
+**Attack surface when signing is enabled:** The AES-CMAC signature is computed over the handle payload using a key the attacker does not possess. Handle forgery requires either: (a) recovering the signing key from the registry (requires local admin access), (b) brute-forcing the 128-bit key (infeasible), or (c) finding a weakness in the CMAC construction (unlikely with AES-128). When signing is enabled, handle forgery is not practical.
+
+**NFSWolf status:** `check_windows_signing()` detects zeroed signatures for both v3 and v4.1. `detect_windows_handle_version()` identifies v3 vs v4.1. The three v4.1 subtypes (distinguished by byte 2) are documented but not fully parsed -- HVS gap (c).
+
+---
+
+## OS fingerprinting signal catalog
+
+This section catalogs every known technique for determining the NFS server's operating system and implementation from NFS protocol interactions. These signals are used by NFSWolf's `fingerprint_os()` and `fingerprint_fs()` in `src/engine/file_handle.rs`, the scanner, and the analyzer. Each signal is rated by reliability (how often it correctly identifies the OS) and by detectability (whether the probe is visible to the server as unusual).
+
+### Signal 1: File handle prefix byte (Linux detection)
+
+**Probe:** Examine bytes 0-1 of any NFSv3 file handle obtained via MOUNT MNT.
+**Signal:** `fh[0] == 0x01 && fh[1] == 0x00` indicates Linux knfsd. The 0x01 byte is the handle version number, and 0x00 is the auth_type. These values are hardcoded in `fs/nfsd/nfsfh.h` and have not changed since Linux 2.6.
+**Reliability:** High for Linux. No other known implementation uses the 0x01 prefix.
+**False positives:** None observed.
+**NFSWolf status:** Implemented in `fingerprint_os()`.
+
+### Signal 2: Handle length (Windows detection)
+
+**Probe:** Check the total length of NFSv3 file handles.
+**Signal:** Windows NFS Server always generates exactly 32-byte handles for NFSv3. Linux handles are variable-length (typically 28-64 bytes depending on fsid_type and fileid_type). A 32-byte handle that does NOT start with `[0x01, 0x00]` is a strong Windows indicator.
+**Reliability:** High for Windows, but requires excluding Linux XFS with specific fsid_type/fileid_type combinations that also produce 32-byte handles. NFSWolf already performs this exclusion.
+**False positives:** Linux XFS with fsid_type 0 and fileid_type 0x01 produces 32-byte handles. The `[0x01, 0x00]` header check disambiguates.
+**NFSWolf status:** Implemented in `fingerprint_os()`.
+
+### Signal 3: NFS version support pattern (Windows version-pattern heuristic)
+
+**Probe:** Probe NFS program 100003 with version numbers 2, 3, 4.0, 4.1, and 4.2 (via PROG_MISMATCH or NULL probes).
+**Signal:** Windows NFS Server supports NFSv3 and NFSv4.1 but NOT NFSv4.0 or NFSv2. Microsoft skipped NFSv4.0 entirely in their implementation, going directly from v3 to v4.1. This version support pattern (`{v2: false, v3: true, v4.0: false, v4.1: true, v4.2: false}`) is unique to Windows Server.
+**Reliability:** High. No other known NFS implementation has this exact version support pattern. Linux typically supports v2+v3+v4 (v4.0 and v4.1 share program version 4, distinguished by minor version). FreeBSD supports v3+v4. NetApp supports v3+v4. Solaris supports v2+v3+v4.
+**False positives:** A Linux server with v2 disabled (`vers2=no` in nfs.conf) and v4.0 disabled but v4.1 enabled (`vers4.0=no, vers4.1=yes`) would match. This is a non-default configuration that is rare in practice.
+**NFSWolf status:** Not implemented. HVS gap (d). The version probing infrastructure is already in place (scanner version enumeration); the check is a comparison against the known Windows pattern.
+
+### Signal 4: FreeBSD subnet format (no CIDR mask in mountd)
+
+**Probe:** Examine the allowed-client strings from MOUNT EXPORT output.
+**Signal:** FreeBSD's `mountd` reports subnet-restricted exports as bare IP addresses ending in `.0` (e.g., `10.123.45.0`) without a CIDR mask suffix (no `/24`). Linux mountd includes the CIDR mask (e.g., `10.123.45.0/24`). An export ACL entry that matches the regex `^\d+\.\d+\.\d+\.0$` (four octets, last is zero, no `/`) strongly indicates FreeBSD.
+**Reliability:** Moderate. The signal is only present when the export uses subnet-based ACLs. Exports restricted to individual hosts or netgroups do not produce this signal.
+**Additional value:** The missing mask means the actual subnet size is ambiguous. The attacker should attempt MOUNT regardless of whether their IP appears to fall outside the reported subnet.
+**NFSWolf status:** Partially implemented (FreeBSD fid_len heuristic in `fingerprint_os()`). The subnet-format check is documented as HVS gap (h) but not implemented as an OS fingerprint signal.
+
+### Signal 5: HP-UX TCP behavior (one request per connection)
+
+**Probe:** Establish a TCP connection to the NFS port (2049). Send a NULL RPC. Wait for the response. Send a second NULL RPC on the same connection.
+**Signal:** HP-UX NFS servers terminate TCP connections after the first request-response exchange. The second NULL will either time out (the server sent a TCP RST or FIN after the first response) or return a connection-closed error. All other NFS implementations (Linux, FreeBSD, Windows, NetApp, Solaris) support persistent TCP connections with multiple RPC calls per connection.
+**Reliability:** High for HP-UX. No other known implementation exhibits this behavior.
+**Side effects:** The probe consumes two TCP connections and may trigger connection-rate logging on the server.
+**NFSWolf status:** Not implemented. HVS gap (g). Detection requires a connection-level probe that deliberately sends two requests and observes the second's fate.
+
+### Signal 6: NetApp partner protocol (program 400010)
+
+**Probe:** Examine the portmapper DUMP output for registered RPC programs.
+**Signal:** The presence of RPC program 400010 (`netapp partner`) in the portmapper mapping list is a definitive NetApp indicator. This is a proprietary RPC program used for NetApp cluster communication and is not found on any other NFS implementation. Other NetApp-specific programs may also appear (program 400001 through 400020 range).
+**Reliability:** Definitive. No false positives -- program 400010 is exclusive to NetApp.
+**Additional value:** NetApp servers have specific behavioral quirks: nested exports hide handles in READDIRPLUS (see HVS gap (f)), `showmount -e` may return empty results on older ONTAP versions, and export ACL semantics differ from Linux knfsd.
+**NFSWolf status:** Not implemented. HVS gap (d). The portmapper DUMP data is already collected; the check is a lookup for program 400010 in the mapping list.
+
+### Signal 7: Null-string LOOKUP response (Linux vs others)
+
+**Probe:** Send `NFSPROC3_LOOKUP` with a zero-length filename (empty `name` field in `diropargs3`).
+**Signal:** The response distinguishes implementations:
+- **Linux knfsd:** Rejects the empty name during XDR argument decoding in `svcxdr_decode_filename3()` (`if (size == 0) return false`). The result is an RPC-level `GARBAGE_ARGS` rejection -- not an NFS status code. No NFS procedure runs.
+- **C702 spec (and compliant implementations):** Returns `NFS3ERR_ACCES` (per C702 ss12.2.4, pp. 188-189).
+- **Other implementations:** May return `NFS3ERR_ACCES`, `NFS3ERR_INVAL`, `NFS3ERR_NOENT`, or `NFS3ERR_NAMETOOLONG` depending on where the empty name is caught in their processing pipeline.
+
+The response type (RPC-level rejection vs NFS-level error code, and which error code) is a multi-valued fingerprint. `GARBAGE_ARGS` = Linux. `NFS3ERR_ACCES` = spec-compliant implementation (possibly Solaris, older NetApp). Other error codes narrow the implementation further.
+
+**Reliability:** Moderate. Linux is reliably identified by `GARBAGE_ARGS`. Other implementations are less distinctly separated.
+**Side effects:** The probe may be logged as a malformed request on some servers.
+**NFSWolf status:** Documented in C702 insights but not implemented as an active fingerprinting probe. The existing `Nfs3Client` LOOKUP would need to handle the RPC-level `GARBAGE_ARGS` response (currently this may be treated as a transport error rather than a fingerprint signal).
+
+### Signal 8: Write verifier format (Linux SipHash detection)
+
+**Probe:** Issue a WRITE (with `--allow-write`) followed by COMMIT, or a zero-count COMMIT if a prior WRITE has been issued. Record the 8-byte `writeverf3` value.
+**Signal:** Linux knfsd generates the write verifier as a SipHash of the current timestamp, keyed with a per-namespace random key (`nfsd_reset_write_verifier_locked()` in `fs/nfsd/nfssvc.c`). The result is a pseudorandom 8-byte value with high entropy. Other implementations may use simpler verifier formats:
+- **Solaris:** Uses the server boot time directly as the verifier (8 bytes, interpretable as a timestamp).
+- **FreeBSD:** Uses a counter or timestamp-based value.
+- **NetApp:** Uses an implementation-specific value that may reveal ONTAP version information.
+
+A verifier that decodes to a plausible Unix epoch timestamp (within the last few decades) suggests Solaris or an older implementation that uses boot time directly. A high-entropy verifier that does not decode to a timestamp suggests Linux (SipHash) or a modern implementation with randomized verifiers.
+
+**Reliability:** Low to moderate. The verifier format is opaque by design, so interpretation is heuristic. The signal is most useful in combination with other signals.
+**Requirements:** Requires `--allow-write` for the initial WRITE that establishes the baseline. A zero-count COMMIT on a previously-written file is sufficient for subsequent probes.
+**NFSWolf status:** The verifier value is available in `WRITE3resok` and `COMMIT3resok`. No analysis of the verifier format for fingerprinting purposes is implemented.
+
+### Combined fingerprinting matrix
+
+The strongest OS identification comes from combining multiple signals. The following matrix shows which signals are available for each known NFS implementation:
+
+| Signal | Linux | Windows | FreeBSD | NetApp | HP-UX | Solaris |
+|---|---|---|---|---|---|---|
+| Handle prefix 0x0100 | yes | no | no | no | no | no |
+| Handle length 32 bytes (v3) | XFS only | always | no | no | no | no |
+| Version {v3,v4.1} only | no | yes | no | no | no | no |
+| Subnet without CIDR mask | no | no | yes | no | no | no |
+| Program 400010 in portmap | no | no | no | yes | no | no |
+| One-request-per-TCP | no | no | no | no | yes | no |
+| GARBAGE_ARGS on empty LOOKUP | yes | no | unknown | no | no | no |
+| Timestamp-format verifier | no | unknown | unknown | unknown | unknown | yes |
+
+A single "yes" in a column is sufficient for high-confidence identification. Multiple signals reinforce the conclusion.
+
+---
+
+## Detection and monitoring gaps
+
+This section documents why NFS attacks are invisible to standard defensive tooling, making NFS a high-value target for red team operations. The analysis draws from HVS Consulting's observation that "there are no logs that show an attacker abusing these misconfigurations" and from RFC-level analysis of the protocol's auditing characteristics.
+
+### NFS runs in kernel space — bypasses auditd
+
+On Linux, the NFS server (knfsd) runs as a set of kernel threads (`nfsd`). NFS operations (READ, WRITE, LOOKUP, GETATTR, etc.) are handled entirely in kernel space via the `fs/nfsd/` code. The kernel NFS server calls VFS functions directly -- it does not go through the system call interface that auditd monitors. This means:
+
+- **auditd file access rules do not trigger.** An `auditctl -w /etc/shadow -p r` rule monitors the `open()` and `read()` system calls. When a local process reads `/etc/shadow`, auditd logs it. When an NFS client reads `/etc/shadow` via `NFSPROC3_READ`, the knfsd kernel thread calls `vfs_read()` directly without a system call transition. No audit record is generated. The file access is invisible to auditd.
+
+- **Process accounting does not capture NFS users.** NFS operations run under the `nfsd` kernel thread's PID, not under any user process. The AUTH_SYS UID/GID from the RPC credential is applied via `nfsd_setuser()` (which calls `set_groups()` to change the thread's credentials), but this does not create a login session, a PAM event, or a utmp/wtmp entry. The NFS "user" never appears in `who`, `last`, or `loginctl`.
+
+- **LSM hooks do trigger (partially).** SELinux and AppArmor hooks are installed at the VFS level, so they DO see NFS operations. However, the security context applied to NFS operations depends on the export configuration: without labeled NFS (NFSv4.2 security labels), all NFS operations run under the `nfsd` thread's security context, which typically has broad access. SELinux policies for NFS are complex and often permissive.
+
+### No standard NFS-aware IDS signatures
+
+No mainstream intrusion detection system (Snort, Suricata, Zeek/Bro) ships with signatures for NFS-specific attacks:
+
+- **AUTH_SYS credential forging:** The UID/GID values in AUTH_SYS credentials are protocol-legal. There is no signature that distinguishes a legitimate client asserting UID 1000 from an attacker asserting UID 0. The only anomaly would be the same source IP claiming different UIDs in rapid succession (uid-spray pattern), but no IDS rule set includes this heuristic.
+
+- **Handle brute-force:** Each brute-force probe is a single GETATTR call with a valid RPC structure. The only anomaly is the high volume of `NFS3ERR_STALE` responses, but STALE errors also occur during normal NFS operation (file deletion, server reboot, export reconfiguration). No IDS distinguishes brute-force STALE from operational STALE.
+
+- **Export escape:** The escape attempt is a single GETATTR or READDIRPLUS call with a constructed handle. If the handle is valid, the response is indistinguishable from normal NFS traffic. If invalid, the response is a single `NFS3ERR_STALE` or `NFS3ERR_BADHANDLE` -- again, indistinguishable from normal error conditions.
+
+- **Credential escalation:** Each step in the credential ladder is a standard NFS call with different AUTH_SYS credentials. The ladder steps look exactly like legitimate multi-user NFS access from a shared workstation.
+
+### Tracepoints exist but no monitoring solution uses them
+
+Linux knfsd exposes tracepoints in the `nfsd` subsystem (`include/trace/events/nfsd.h`):
+- `nfsd_compound` / `nfsd_compound_status` (NFSv4 COMPOUND operations)
+- `nfsd_read` / `nfsd_write` (data path operations)
+- `nfsd_setattr` (permission and metadata changes)
+- `nfsd_export_find` (export lookup)
+- `nfsd_file_acquire` (file handle resolution)
+
+These tracepoints can be consumed via `perf`, `bpftrace`, or `ftrace`. However:
+
+- **No monitoring product enables them by default.** No SIEM, EDR, or NFS monitoring tool ships with pre-built queries against nfsd tracepoints. Enabling them requires manual configuration on each NFS server.
+
+- **Performance cost.** Tracepoints in the hot path (read/write) add latency to every NFS operation. Enabling `nfsd_read` on a busy NFS server can measurably degrade throughput. Most administrators will not accept this overhead for a monitoring use case they do not know they need.
+
+- **No correlation with user identity.** The tracepoints log the kernel-thread context, not the AUTH_SYS UID. The UID from the RPC credential is available via `current_cred()` at the tracepoint call site, but extracting it requires custom BPF programs or `bpftrace` scripts that read the credential structure. No off-the-shelf tool does this.
+
+### What defensive tools exist
+
+- **`nfsstat`:** Aggregates per-procedure call counts. Shows total READs, WRITEs, LOOKUPs, etc. Does not log individual operations, source addresses, or user identities. Useful for capacity planning, useless for security monitoring.
+
+- **`rpcdebug`:** Kernel-level debug logging for NFS client and server. Extremely verbose (every RPC call). Performance-destroying in production. Logs go to `dmesg`/syslog with no structured format. Not designed for security monitoring.
+
+- **`mountd` logging:** `rpc.mountd` can log MOUNT requests (export mounts) to syslog. This captures the initial MOUNT MNT call (including source IP and export path) but not subsequent NFS operations. An attacker who obtains a handle via handle forging or escape never touches MOUNT and therefore never appears in mountd logs.
+
+- **Network packet capture:** tcpdump/Wireshark can capture NFS traffic. AUTH_SYS credentials are plaintext and visible in packet captures. However: (1) capturing all NFS traffic on a busy server generates enormous PCAP files, (2) no automated tool parses NFS PCAPs for security-relevant patterns, (3) RPC-with-TLS encrypts the wire, making packet capture useless.
+
+- **RPCSEC_GSS audit:** When Kerberos is used (krb5/krb5i/krb5p), the KDC logs ticket requests. This provides authentication audit trails. However, AUTH_SYS exports (the majority of NFS deployments and the target of all NFSWolf attacks) have no authentication audit trail at all.
+
+### Implications for red team operations
+
+The absence of NFS-specific monitoring means:
+
+1. **NFS attacks have no audit trail.** Unlike SSH (logged in auth.log), SMB (logged by Windows Event Log), or HTTP (logged by web server access logs), NFS operations are not logged by any standard component. An attacker who reads `/etc/shadow` via NFS leaves no record anywhere.
+
+2. **The MOUNT log is bypassable.** The only NFS-related log (mountd's MOUNT request log) is irrelevant when the attacker uses handle forging, escape, or handle harvesting from READDIRPLUS. These techniques bypass MOUNT entirely.
+
+3. **Write operations are equally invisible.** Uploading a SUID binary, creating a device node, or modifying a crontab via NFS generates no log entry on the server. The file's `mtime` changes, but no one is watching mtimes on NFS exports.
+
+4. **Defensive recommendations from HVS and industry consensus:** Enable nfsd kernel tracepoints with UID extraction via custom BPF programs. Export all NFS operations to a SIEM. Restrict AUTH_SYS exports to the minimum necessary scope. Use Kerberos (krb5p) to get authentication audit trails. Deploy network monitoring with NFS-aware deep packet inspection. None of these are standard practice in any organization.
+
+5. **Detection of NFSWolf specifically:** NFSWolf's stealth configuration (`StealthConfig`) adds configurable delays between RPC calls to avoid rate-based anomaly detection. The credential ladder's ordered approach (try file owner first, then group members, then root, then observed identities) minimizes the number of failed attempts before a successful access. The circuit breaker prevents flood-pattern connection resets. Combined with the absence of NFS audit logging, NFSWolf operations are effectively invisible to defenders.
+
+---
+
 ## Crate inventory
 
 | # | Crate | Program | Versions | Spec | Layers | Security value |
@@ -2086,6 +2917,188 @@ Several of these protocols can be detected and reported in NFSWolf's scanner tod
 | PCNFSD | 150001 | portmapper DUMP | "PCNFSD registered — password oracle (PCNFSD_AUTH) and print spool code execution (PR_START)" |
 
 NFSWolf's existing `PortmapClient::dump()` already returns all registered programs. The scanner currently names only NFS (100003), ypserv (100004), and ypbind (100007). Adding the remaining program numbers to the `program_name` table and flagging their security implications is a Phase 1 task (see TASKLIST.md).
+
+---
+
+## RFC security audit -- file read, code execution, and information leak paths
+
+Systematic audit of all 15 NFS-related RFCs in `ref/rfc/` for security-relevant protocol behaviors. Each finding cites the RFC section and describes the attack or information leak. Cross-referenced against NFSWolf's existing findings catalog (docs/FINDINGS.md) and existing FUTURE-RESEARCH.md content.
+
+### Unauthenticated information disclosure
+
+**PROG_MISMATCH version oracle (RFC 1057 ss7, RFC 5531 ss9).** When a client sends a call to a program the server supports but with a version number the server does not support, the server returns `PROG_MISMATCH` with `mismatch_info { low, high }` -- the lowest and highest version numbers the server supports for that program. This is an unauthenticated probe: no credential is checked before the version range is disclosed. Sending NFS program 100003 with version 99 returns the exact version range (e.g., low=2 high=4), revealing whether the server supports NFSv2, NFSv3, NFSv4, or combinations. The same technique works against any RPC program. NFSWolf already exploits this: yes, in `src/engine/scanner.rs` version probing via `PROG_MISMATCH` range extraction.
+
+**Portmapper DUMP (RFC 1057 Appendix A, PMAPPROC_DUMP).** Returns every registered RPC program/version/protocol/port tuple on the server. AUTH_NONE is sufficient. Reveals which services are running (NFS, NLM, NSM, NIS, RQUOTA, NFS_ACL, PCNFSD), their versions, and their port numbers. NFSWolf already exploits this: yes, `PortmapClient::dump()` in `src/proto/portmap.rs`, F-5.4.
+
+**PMAPPROC_CALLIT amplification and relay (RFC 1057 Appendix A, proc 5).** CALLIT takes a program/version/procedure number plus opaque args, forwards the call to the local program over UDP, and returns the result plus the program's port number. Only replies if the call succeeds (silent on failure). Attack surface: (1) UDP amplification -- a small CALLIT request can trigger a larger response from the target program, with the source IP spoofed; (2) the response reveals the target program's port number, bypassing any portmapper access controls; (3) CALLIT can probe programs that are not directly reachable by the attacker (e.g., programs bound to localhost that the portmapper proxies to). NFSWolf already detects this: partially, via portmapper amplification measurement in `src/proto/portmap.rs` (F-3.2). NFSWolf does not yet use CALLIT as a relay to reach programs on non-standard ports.
+
+**Portmapper GETPORT probe (RFC 1057 Appendix A, PMAPPROC_GETPORT).** Takes a program/version/protocol triple and returns the port number (0 if not registered). AUTH_NONE. Probing GETPORT for specific program numbers (100003/NFS, 100021/NLM, 100024/NSM, 100004/NIS, etc.) reveals whether each service is running without needing DUMP. Stealthier than DUMP since it returns a single integer rather than the full service table. NFSWolf already uses this: yes, in `PortmapClient::getport()`.
+
+**Rpcbind GETTIME server clock leak (RFC 1833, rpcbind v3/v4).** Returns the server's epoch time in seconds. AUTH_NONE. Leaks the server's clock, which can be compared against the client's clock to measure time skew. Time skew is relevant to Kerberos attacks (Kerberos requires clocks within 5 minutes by default). Also useful for estimating server uptime when combined with the write verifier oracle. NFSWolf already exploits this: yes, `RpcbindClient::gettime()` in `crates/nfswolf-rpc/`.
+
+**Rpcbind GETSTAT per-version call counts (RFC 1833, rpcbind v3/v4).** Returns per-version RPC call counts, revealing how actively each program is being used. AUTH_NONE. High call counts on NFS program version 3 vs version 4 reveal which version is in active production use. Call counts on NLM reveal whether advisory locking is in use (relevant for the NLM lock-release attack chain). NFSWolf already exploits this: yes, `RpcbindClient::getstat()`.
+
+**MOUNT EXPORT enumeration (RFC 1094 Appendix A ss5.7, RFC 1813 ss5.2.6).** MOUNTPROC_EXPORT returns the list of exported filesystems and their allowed client lists. AUTH_NONE or AUTH_SYS. Reveals the server's entire export topology and which hosts are authorized. NFSWolf already exploits this: yes, `NfsMountClient::exports()`, F-5.1.
+
+**MOUNT DUMP client enumeration (RFC 1094 Appendix A ss5.3, RFC 1813 ss5.2.2).** MOUNTPROC_DUMP returns the list of currently mounted exports and the hostnames of the clients that mounted them. AUTH_NONE. Reveals which hosts are actively using which exports -- the client hostnames can be used for NLM `caller_name` spoofing (Chain 2) or export ACL impersonation. NFSWolf already exploits this: yes, `NfsMountClient::dump_clients()`.
+
+**NULL procedure liveness probe (RFC 1057 ss9.1, RFC 1094 ss2.2.1, RFC 1813 ss3.3.1, RFC 7530 ss16.1).** Every RPC program's NULL procedure accepts AUTH_NONE and returns void. Confirms that a specific program/version is running on the target. The NULL probe leaks no data beyond "this service is alive", but combined with PROG_MISMATCH it provides a complete version fingerprint. NFSWolf already uses this: yes, in the scanner for NULL probes.
+
+**NFSv3 FSINFO mount-time leak (RFC 2623 ss2.3.2, RFC 1813 ss3.3.19).** Some NFS server implementations do not require authentication for the FSINFO procedure, allowing AUTH_NONE access. FSINFO returns `rtmax`, `rtpref`, `wtmax`, `wtpref`, `dtpref`, `maxfilesize`, `time_delta`, and `properties`. The `properties` bitmask reveals whether the server supports hard links (`FSF3_LINK`), symbolic links (`FSF3_SYMLINK`), and `pathconf` (`FSF3_HOMOGENEOUS`). The `maxfilesize` and transfer sizes leak implementation details. NFSWolf does not specifically probe FSINFO with AUTH_NONE: no. What to add: try FSINFO with AUTH_NONE to extract filesystem properties without authentication.
+
+**NFSv3 GETATTR mount-time leak (RFC 2623 ss2.3.2).** Similarly, some servers allow GETATTR with AUTH_NONE or AUTH_SYS at mount time without real authentication. The rationale per RFC 2623 is to support automounters that lack Kerberos credentials at mount time. The exposure is limited to file attributes (mode, uid, gid, size, times) of the export root. NFSWolf does not specifically probe this: no. What to add: try GETATTR with AUTH_NONE on the export root handle to extract metadata without credentials.
+
+**NFSv4 SECINFO security flavor enumeration (RFC 7530 ss16.31).** SECINFO returns the list of security mechanisms accepted for a given directory. This reveals whether the export accepts AUTH_SYS (precondition for all AUTH_SYS attacks) or requires Kerberos. Without integrity protection, the response can be modified by an attacker to downgrade the client to a weaker flavor (RFC 7530 ss19). NFSWolf already exploits this: yes, `check_nfs4_secinfo()` in `src/engine/analyzer.rs`.
+
+**MOUNT v3 auth_flavors in MNT response (RFC 1813 Appendix III, RFC 2623 ss2.7).** The MNT response includes `auth_flavors<>` -- the list of security flavors the export accepts. Values 390003/390004/390005 map to krb5/krb5i/krb5p (RFC 2623 ss4.2). If value 1 (AUTH_SYS) appears, the export is AUTH_SYS-accessible. If only Kerberos pseudo-flavors appear, AUTH_SYS attacks will fail. The flavor order indicates the server's preference: the first flavor provides the "best access" (RFC 2623 ss2.7). NFSWolf already exploits this: yes, auth-flavor extraction in `src/proto/mount.rs`.
+
+**AUTH_TLS STARTTLS probe for TLS detection (RFC 9289 ss4.1).** An RPC NULL with auth_flavor AUTH_TLS (value 7) and a verifier containing the ASCII "STARTTLS" token probes whether the server supports RPC-with-TLS. If the server responds with MSG_ACCEPTED and a verifier containing "STARTTLS", TLS is available. If the server rejects or returns a different verifier, no TLS. This is a binary fingerprint with no authentication required. NFSWolf does not implement this: no, F-3.4 documents STRIPTLS as a finding but NFSWolf cannot currently probe for TLS support. What to add: send AUTH_TLS NULL probe to detect RPC-with-TLS availability; flag its absence as F-3.1 (plaintext traffic).
+
+### Authenticated file read paths
+
+**NFSv2 READ (RFC 1094 ss2.2.7).** Returns up to `count` bytes from file at `offset`. Maximum 8192 bytes per call (MAXDATA constant). Returns file attributes after the read. Bearer-token model: any valid file handle works regardless of which credential obtained it. NFSWolf already exploits this: yes, `Nfs2Client::read_file()`.
+
+**NFSv3 READ (RFC 1813 ss3.3.6).** Returns up to `count` bytes from file at `offset`. Returns post-operation attributes (size, mtime, etc.) even on partial reads. NFSWolf already exploits this: yes, via `Nfs3Client` READ in the shell and FUSE.
+
+**NFSv3 READLINK (RFC 1813 ss3.3.5, RFC 1094 ss2.2.6).** Returns the contents of a symbolic link. Reveals the target path, which may point outside the export, exposing internal filesystem layout. The symlink content is a raw pathname string. NFSWolf already exploits this: yes, `readlink` shell command.
+
+**NFSv3 READDIR/READDIRPLUS (RFC 1813 ss3.3.16-17).** READDIR returns filenames and fileids (inode numbers). READDIRPLUS returns filenames, fileids, file handles, and full attributes (uid, gid, mode, size, times) for every entry in a directory. READDIRPLUS is the primary identity-harvesting operation: the uid/gid pairs from all file attributes feed the credential ladder. File handles from READDIRPLUS are bearer tokens usable with any credential. NFSWolf already exploits this: yes, READDIRPLUS is the basis of `observed_identities()` in `src/engine/credential.rs`, F-5.2.
+
+**NFSv3 GETATTR (RFC 1813 ss3.3.1).** Returns full file attributes: type, mode, nlink, uid, gid, size, used, rdev, fsid, fileid, atime, mtime, ctime. The `fsid` value is used for OS/FS fingerprinting. The `fileid` (inode number) is used for handle construction in `FileHandleAnalyzer`. NFSWolf already exploits this: yes, throughout.
+
+**NFSv3 ACCESS (RFC 1813 ss3.3.4).** Returns a bitmask of allowed access rights (READ, LOOKUP, MODIFY, EXTEND, DELETE, EXECUTE). The RFC explicitly states: "The results of this procedure are necessarily advisory in nature" -- a server may return ACCESS3_READ but still deny the actual READ. NFSWolf must always confirm by attempting the operation. NFSWolf already exploits this: yes, in `uid-spray` and credential ladder probing. The advisory nature is documented as design rule 5 in CLAUDE.md.
+
+**NFSv3 PATHCONF (RFC 1813 ss3.3.20).** Returns `linkmax`, `name_max`, `no_trunc`, `chown_restricted`, `case_insensitive`, `case_preserving`. The `case_insensitive` flag reveals whether the server does case-insensitive lookups (Windows NFS, NetApp NTFS volumes). The `chown_restricted` flag reveals whether non-root users can change file ownership. NFSWolf does not specifically use PATHCONF for recon: no. What to add: probe PATHCONF to detect case-insensitive servers (Windows fingerprint) and chown-unrestricted servers (chown-based privilege escalation).
+
+**NFSv3 FSSTAT (RFC 1813 ss3.3.18).** Returns filesystem space statistics: `tbytes`, `fbytes`, `abytes`, `tfiles`, `ffiles`, `afiles`, `invarsec`. Reveals total disk capacity, free space, and free inode count. `invarsec` is the filesystem volatility period in seconds. NFSWolf does not specifically analyze FSSTAT: no. What to add: FSSTAT free-space data could reveal quota pressure and server capacity. Low `afiles` (available files) could signal inode exhaustion DoS potential.
+
+**NFSv3 FSINFO (RFC 1813 ss3.3.19).** Returns filesystem capabilities: transfer sizes, `maxfilesize`, `time_delta`, `properties`. The `time_delta` reveals clock granularity (useful for timestamp-based fingerprinting). The `properties` bitmask (`FSF3_LINK`, `FSF3_SYMLINK`, `FSF3_HOMOGENEOUS`, `FSF3_CANSETTIME`) reveals filesystem capabilities. NFSWolf already reads FSINFO: partially, for transfer sizes. What to add: extract and report `time_delta` and `properties` flags in the analyzer.
+
+**Attributes on failure (RFC 1813, "C702 ss12.2.3 p. 188").** Failed NFSv3 operations return `post_op_attr` in the failure arm. `NFS3ERR_ACCES` responses carry full `fattr3` (size, mtime, uid, gid, fileid). This means access-denied responses leak complete metadata about the denied file. RFC 1813 "strongly encourages" servers to return as much attribute data as possible on failure. NFSWolf partially exploits this: the `Nfs3Result::Err` arm carries failure data, but `flatten()` discards it. Already documented in the C702 insights section above. What to add: recover attributes from failure responses for metadata-leak scanning (Chain 8).
+
+**NFSv4 GETATTR for named attributes (RFC 7530 ss5.1, RFC 8587).** NFSv4 extended attributes (xattrs) are accessed via a separate attribute directory associated with each file. OPENATTR opens the named attribute directory, then READDIR lists named attributes, and READ retrieves their contents. Named attributes can contain arbitrary data (ACLs, labels, application metadata). The xattr namespace is not ACL-protected independently on many implementations. NFSWolf does not probe xattrs: no. What to add: OPENATTR + READDIR to enumerate xattr names on target files; specific xattr names (e.g., "system.posix_acl_access", "security.selinux") can leak security-relevant metadata.
+
+**NFSv4 SECINFO_NO_NAME (RFC 5661 ss18.45.3, referenced in RFC 7530).** Returns the same `secinfo4<>` array as SECINFO but operates on the current filehandle's filesystem rather than a named object. Available in NFSv4.1+ only, but worth noting for version-matrix coverage. NFSWolf does not implement this: no (v4.1 not yet supported).
+
+### Authenticated file write / code execution paths
+
+**NFSv2 WRITE (RFC 1094 ss2.2.9).** Writes data at offset. Atomic: "Data from this WRITE will not be mixed with data from another client's WRITE." Returns attributes after write. Gate: `--allow-write`. NFSWolf already implements this: yes.
+
+**NFSv3 WRITE (RFC 1813 ss3.3.7).** Three stability levels: UNSTABLE (async, fastest), DATA_SYNC (data stable, metadata maybe not), FILE_SYNC (fully synchronous). UNSTABLE writes require a subsequent COMMIT to guarantee durability. Returns the 8-byte write verifier (reboot oracle). Gate: `--allow-write`. NFSWolf already implements this: yes.
+
+**NFSv3 CREATE (RFC 1813 ss3.3.8).** Three modes: UNCHECKED (create or truncate), GUARDED (fail if exists), EXCLUSIVE (atomic create-or-fail using a verifier). UNCHECKED mode is destructive: replaying a CREATE truncates the existing file to zero. GUARDED mode is the safe default. EXCLUSIVE mode prevents race conditions but requires the server to store the verifier in the file's metadata (typically in mtime/atime). NFSWolf uses CREATE in shell `put` command: yes.
+
+**NFSv3 SETATTR (RFC 1813 ss3.3.2).** Can change mode, uid, gid, size, atime, mtime. Truncating a file (setting size to 0) is a SETATTR operation. Changing uid/gid via SETATTR is how SUID/SGID binaries are created on NFS exports. The `guard` field (a pre-operation `ctime` value) provides optimistic concurrency control, but only if the client populates it. NFSWolf uses SETATTR in shell `chmod`/`chown`: yes.
+
+**NFSv3 SYMLINK (RFC 1813 ss3.3.10, RFC 1094 ss2.2.14).** Creates a symbolic link. The symlink target path is stored verbatim and not validated by the server. A symlink pointing to `/etc/shadow` or `../../etc/shadow` can be used for path traversal attacks on clients that follow symlinks across NFS mounts. On UNIX servers, symlinks always have mode 0777 (RFC 1094 ss2.2.14 notes). Gate: `--allow-write`. NFSWolf already documents this: yes, F-4.4.
+
+**NFSv3 LINK (RFC 1813 ss3.3.15, RFC 1094 ss2.2.13).** Creates a hard link. The hard link attack: create a hard link to a SUID binary that the attacker cannot modify, then wait for the legitimate owner to update the original -- the update propagates to the attacker's link. More critically, LINK can be used to create a hard link to a file in a directory the attacker controls, enabling persistent access even if the original file's permissions are tightened. Gate: `--allow-write`. NFSWolf implements `link` shell command: yes. F-4.2 references the hard link escalation path.
+
+**NFSv3 MKNOD (RFC 1813 ss3.3.11).** Creates a special device file (block or character device). A block device node pointing to the server's disk allows raw disk reads/writes when accessed by a client. A character device node for `/dev/kmem` or `/dev/mem` enables kernel memory access. Requires `no_root_squash` to create device nodes with uid=0 ownership, or the GID 6 (disk) setgid trick on the client side. Gate: `--allow-write`. NFSWolf already documents this: yes, F-4.3.
+
+**NFSv3 RENAME (RFC 1813 ss3.3.14, RFC 1094 ss2.2.12).** Atomic rename. "Possibly non-idempotent operation" (RFC 1094 ss2.2.12). If the target exists, it is removed first. Replaying a RENAME after the target has been recreated overwrites the new file. The DRC replay window (documented in C702 insights above) makes this exploitable after a server reboot. Gate: `--allow-write`. NFSWolf implements this: yes, `rename` shell command.
+
+**NFSv3 REMOVE/RMDIR (RFC 1813 ss3.3.12-13, RFC 1094 ss2.2.11, 2.2.16).** "Possibly non-idempotent operation" (RFC 1094). A replayed REMOVE after the file was recreated deletes the new file. Combined with the DRC replay window, this enables targeted file deletion after a server reboot. Gate: `--allow-write`. NFSWolf implements this: yes, `rm`/`rmdir` shell commands.
+
+**SETATTR for size truncation as data destruction (RFC 1813 ss3.3.2, RFC 7530 ss16.32.4).** SETATTR with size=0 truncates a file. This is not a "write" in the traditional sense but destroys all data. On NFSv4, truncation via SETATTR interacts with share reservations: it is "incompatible with a share reservation that specifies OPEN4_SHARE_DENY_WRITE" (RFC 7530 ss16.32.4). Gate: `--allow-write`. NFSWolf can truncate via `chmod` / shell: partially.
+
+**Client code execution via ETXTBSY absence (RFC 1094 ss3.1, C702 Appendix A ss A.7).** NFS provides no mechanism to prevent overwriting a file that is being executed on a client. The `[ETXTBSY]` error "is never returned by a function operating on a remote file over NFS" (C702 p. 275). An attacker with write access can overwrite a binary while it is being executed by another client, potentially injecting code via paging. This is already documented in the C702 insights section above. Gate: `--allow-write`. NFSWolf does not implement targeted binary replacement: no. What to add: detect actively-executed binaries (via `.nfs*` silly-rename files) and flag them as overwrite targets.
+
+### Handle security (bearer token model)
+
+**NFSv2 handle as capability (RFC 1094 ss2.3.3).** "The file handle can contain whatever information the server needs to distinguish an individual file." The handle is a 32-byte opaque blob. There is no binding between the handle and the credential that obtained it. Any handle obtained by any credential works with any other credential. This is the foundational bearer-token property that all NFSWolf findings exploit. NFSWolf already exploits this: yes, design rule 6.
+
+**NFSv3 handle security and stale semantics (RFC 1813 ss2.6).** Handles can be up to 64 bytes. "When the file system object is removed, the file handle will be invalidated." `NFS3ERR_STALE` (70) = "the file handle given in the arguments was once valid but is now invalid" -- right format, wrong inode/generation. `NFS3ERR_BADHANDLE` (10001) = "illegally formed file handle." This distinction is the handle brute-force oracle. NFSWolf already exploits this: yes, design rule 4, `brute-handle` subcommand, F-2.2.
+
+**MOUNT-only-checking admission model (RFC 2623 ss2.6).** "Several of these implementations will check access only at mount time, during the request for the file handle via the MOUNT protocol handshake. The lack of authorization checking during subsequent NFS requests has the following consequences: [...] An attacker can circumvent the MOUNT server's access control to gain access to a file system that the attacker is not authorized for. The circumvention is accomplished by either stealing a file handle (usually by snooping the network traffic between a legitimate client and server) or guessing a file handle." This is the RFC's own admission that file handles are bearer tokens and MOUNT ACLs are bypassable. NFSWolf's entire `escape` and `brute-handle` tooling is built on this. Already documented: yes, F-2.7.
+
+**WebNFS MOUNT bypass (RFC 2623 ss2.6, C702 ssE.7.3).** "WebNFS clients that use the public file handle lookup will not go through the MOUNT protocol to acquire initial file handle of the NFS file system. Enforcing access control via the MOUNT protocol is going to be of little use." Already documented extensively in the WebNFS section above.
+
+**NFSv4 file handles -- persistent vs volatile (RFC 7530 ss4).** NFSv4 defines two handle types: persistent (survives server reboot, like v2/v3) and volatile (may change on server reboot or migration, indicated by `FH4_VOLATILE_ANY`). Volatile handles are flagged via the `fh_expire_type` attribute. An attacker must account for volatile handles when targeting NFSv4 servers: handle brute-force results may become invalid after a server reboot. NFSWolf's v4 COMPOUND operations accept handles from the server: partially. What to add: check `fh_expire_type` to determine handle volatility before attempting handle-based attacks; flag servers using persistent handles as more vulnerable to handle reuse.
+
+**Handle exposure in READDIRPLUS responses (RFC 1813 ss3.3.17).** READDIRPLUS returns `post_op_fh3` for each directory entry. These handles are usable by any authenticated client, regardless of which client issued the READDIRPLUS. This is the primary handle harvesting vector for lateral movement across the export. NFSWolf already exploits this: yes, F-5.2.
+
+**Handle as the sole authorization for NLM locking (C702 ss10.2, already documented in NLM section above).** NLM operations take a file handle as the sole file identifier. No permission check is performed -- possession of the handle is sufficient to lock, query, or share any file. Combined with handle harvesting from READDIRPLUS, this enables lock manipulation on any file in the export.
+
+### Callback and coercion mechanisms
+
+**NFSv4 SETCLIENTID callback address registration (RFC 7530 ss16.33).** The SETCLIENTID operation takes a `cb_client4` structure containing a callback program number and a `clientaddr4` (network address). The server uses this address to send CB_COMPOUND calls (delegation recalls, attribute queries). An attacker who can call SETCLIENTID on the server can register an arbitrary callback address, causing the server to connect outbound to an attacker-controlled IP. This is a connection-coercion primitive. The callback address is not validated against the source address of the SETCLIENTID call. However, SETCLIENTID requires the same principal across calls (RFC 7530 ss19, ss9.1.1), so the attacker must authenticate. NFSWolf does not exploit this: no. What to add: send SETCLIENTID with a controlled callback address to trigger outbound connections from the server; useful for relay attacks and firewall traversal.
+
+**NFSv4 CB_RECALL delegation recall callback (RFC 7530 ss18.2, ss10.4.4).** When a file's delegation needs to be recalled (e.g., another client opens the file), the server sends CB_RECALL to the client holding the delegation. The callback target is the address registered via SETCLIENTID. If the client fails to respond to CB_RECALL within the lease period, the server revokes the delegation (ss10.4.6). An attacker who registered a malicious callback address can cause the server to repeatedly attempt connections to the attacker's address. NFSWolf does not exploit this: no. Related to SETCLIENTID coercion above.
+
+**NFSv4 CB_GETATTR callback (RFC 7530 ss18.1, ss10.4.3).** The server sends CB_GETATTR to a client holding a write delegation to check if the client has modified the file (specifically, whether `change` and `size` attributes have changed). This is another callback that targets the SETCLIENTID-registered address. NFSWolf does not exploit this: no.
+
+**NSM SM_MON callback registration (C702 ch. 11, already documented in NSM section above).** The `my_id` structure in SM_MON specifies the RPC program/version/procedure for the callback, plus `my_name` as the hostname. The callback target is attacker-controlled. Already documented in the NSM section of this document.
+
+**NLM_GRANTED callback injection (C702 ch. 10, already documented in NLM section above).** When a blocking lock request is granted, the server calls back to the client via NLM_GRANTED. The callback target is derived from `caller_name`. Already documented.
+
+### Cache and replay vulnerabilities
+
+**DRC replay window after server reboot (RFC 1094 ss3.6, RFC 1813 ss4.1, C702 ss12.3.4).** The duplicate request cache is RAM-only. A server reboot wipes it. Previously-deduplicated destructive calls (REMOVE, RENAME, RMDIR, CREATE with UNCHECKED mode) can be replayed with the original XID. Already documented in the C702 insights section and Chain 7 above.
+
+**Non-idempotent operations explicitly flagged in RFCs.** RFC 1094 marks REMOVE (ss2.2.11), RENAME (ss2.2.12), LINK (ss2.2.13), MKDIR (ss2.2.15), and RMDIR (ss2.2.16) as "possibly non-idempotent operation." RFC 1813 ss3.3.8 documents CREATE in UNCHECKED mode as non-idempotent (replaying truncates). These are the exact operations vulnerable to DRC replay. NFSWolf does not implement DRC replay: no. What to add: capture XIDs of destructive operations for replay after detected server reboot (via write verifier oracle).
+
+**Write verifier reboot oracle (RFC 1813 ss3.3.7, ss3.3.21, C702 ss12.3.11).** The `writeverf3` field in WRITE and COMMIT responses changes on server reboot. Zero-count COMMIT flushes nothing and returns the current verifier at no cost. Polling this value detects server restarts. Already documented in the C702 insights section above and Chain 7.
+
+**NFSv4 RENEW lease interaction (RFC 7530 ss9.6).** RENEW extends the lease for all state held by the client. An attacker who knows a valid clientid can send RENEW to keep the victim's state alive, preventing lease expiration. Conversely, failing to send RENEW allows state expiration, which releases all the client's locks and delegations. The clientid is a 64-bit value that can be brute-forced or sniffed from the network (it appears in every NFSv4 call from that client). NFSWolf does not exploit RENEW: no. What to add: sniff or guess clientids to either keep victim state alive (preventing cleanup) or let it expire (releasing locks).
+
+**NFSv4 SETCLIENTID_CONFIRM replay risk (RFC 7530 ss16.34, RFC 7931 ss8.6).** RFC 7931 adds that integrity protection is desirable on SETCLIENTID to prevent an attack where "a change in the boot instance id (verifier) forces an undesired loss of client state." Without integrity protection, an attacker can replay a SETCLIENTID with a modified verifier, causing the server to believe the client rebooted and release all its state (locks, delegations, open files). NFSWolf does not exploit this: no. What to add: forge or replay SETCLIENTID to force state loss on a target client.
+
+**NFSv4 delegation recall race (RFC 7530 ss10.4.5).** There is a race between an OPEN delegation being granted and a CB_RECALL being sent. If a client receives a delegation and another client opens the same file, the server must recall the delegation. During the window between delegation grant and recall delivery, the first client may cache writes that conflict with the second client's operations. This is a consistency issue, not directly exploitable for data theft, but it creates a TOCTOU window. NFSWolf does not exploit this: no.
+
+**Attribute cache staleness as attack cover (RFC 1813 ss4.7, C702 ss12.3.10, Appendix A ss A.5).** NFS does not define cache coherence policy. Attribute caches on clients and servers have no mandated expiration. An attacker who modifies a file's permissions via SETATTR (e.g., `chmod 0777`) gets immediate effect on the server, but other clients' attribute caches continue showing the old permissions for seconds to minutes. This reduces the detection window for privilege-escalation writes. Already documented in C702 insights section above.
+
+### Authentication model weaknesses (per RFC)
+
+**AUTH_SYS is unauthenticated (RFC 5531 ss14, Appendix A, RFC 9289 Appendix A).** RFC 5531 ss14: "AUTH_SYS as described in Appendix A is known to be insecure due to the lack of a verifier to permit the credential to be validated. AUTH_SYS SHOULD NOT be used for services that permit clients to modify data." RFC 9289 Appendix A enumerates the weaknesses: (1) no confidentiality or integrity, (2) no peer machine authentication beyond an unprotected domain name, (3) 32-bit UID/GID values are not cryptographically signed, (4) no non-repudiation. Every NFSWolf finding from F-1.1 through F-1.7 exploits AUTH_SYS weaknesses. Already fully documented: yes.
+
+**Port monitoring is security theater (RFC 2623 ss2.1).** "The use of privileged ports and port monitoring for security is at best an inconvenience to the attacker and SHOULD NOT be depended on." The RFC lists why: (1) many operating systems have no port binding constraints, (2) physical access to a desktop machine trivially yields root. NFSWolf's `insecure` export option detection (F-7.2) flags this. Already documented: yes.
+
+**AUTH_DH is obsolete and insecure (RFC 5531 ss14).** "AUTH_DH as mentioned in Sections 8.2 and 13.4.2 is considered obsolete and insecure; see [RFC2695]." AUTH_DH uses 192-bit Diffie-Hellman keys (RFC 1057 ss9.3.2), which are trivially factorable by modern standards. If a server advertises AUTH_DH as a security flavor (in MOUNT `auth_flavors` or NFSv4 SECINFO), it is using deprecated crypto. NFSWolf does not specifically flag AUTH_DH: no. What to add: detect AUTH_DH (flavor value 3) in flavor lists and flag it as cryptographically broken.
+
+**MOUNT protocol flavor negotiation is cleartext (RFC 2623 ss5).** The security considerations of RFC 2623 warn that MOUNT v3 MNT responses are typically sent over AUTH_SYS, which has no integrity protection. A man-in-the-middle can modify the `auth_flavors` list to remove strong flavors (krb5i, krb5p) and leave only AUTH_SYS, downgrading the client to weak authentication. This is the NFS equivalent of an SSL stripping attack. NFSWolf already documents this: partially, F-1.7 covers mixed-flavor downgrade. What to add: flag the lack of integrity protection on MOUNT flavor negotiation itself.
+
+**AUTH_SHORT credential caching (RFC 1057 ss9.2, RFC 5531 Appendix A).** After the first AUTH_SYS call, the server may return an AUTH_SHORT verifier containing an opaque shorthand credential. The client can use this shorthand instead of full AUTH_SYS credentials on subsequent calls. The shorthand is opaque and not bound to the original credential by any cryptographic mechanism. If an attacker captures the AUTH_SHORT token from the wire, they can replay it without knowing the original UID/GID. The server may flush the shorthand at any time (returning AUTH_REJECTEDCRED). NFSWolf does not exploit AUTH_SHORT: no. What to add: capture and replay AUTH_SHORT tokens as a credential-theft vector (requires network sniffing or PCAP parsing).
+
+**NFSv4 mandates RPCSEC_GSS but AUTH_SYS remains OPTIONAL (RFC 7530 ss19, ss3.2).** "AUTH_SYS can be used by NFSv4 clients and servers. However, AUTH_SYS is merely an OPTIONAL security flavor in NFSv4, and so interoperability via AUTH_SYS is not assured." In practice, most NFSv4 deployments support AUTH_SYS for backward compatibility, and many do not deploy Kerberos. SECINFO probing (already implemented) determines whether AUTH_SYS is accepted. Already documented: yes.
+
+**TLS opt-in nature (RFC 9289 ss6.1, ss6.3).** RPC-with-TLS is opportunistic. The initial AUTH_TLS probe occurs in cleartext and can be stripped by an on-path attacker (ss6.1.1). Even when TLS is deployed, AUTH_SYS over TLS still allows the client to forge UID/GID (ss6.3): "the RPC client itself can still misrepresent user identity without server detection." TLS encrypts the wire but does not authenticate the user. Mutual TLS authentication is RECOMMENDED but not required (ss6.3). NFSWolf already documents this: partially, F-3.4. What to add: distinguish between "no TLS" (F-3.1) and "TLS without mutual auth" (AUTH_SYS still forgeable, just encrypted in transit).
+
+**NFSv2 weakness acknowledged in RFC 2623 ss2.7.** NFSv2 had no support for security flavor negotiation at all. It was "up to the client to guess, or depend on prior knowledge." This means NFSv2 clients cannot discover that an export requires Kerberos -- they will always try AUTH_SYS. A server that supports both NFSv2 and NFSv3 with `sec=krb5` may reject v3 AUTH_SYS attempts but leak the handle via MOUNT v1 (which does not return `auth_flavors`). NFSWolf already documents this: yes, F-1.6.
+
+**Owner-override permission model (RFC 1094 ss3.3, RFC 1813 ss4.4).** "The server's permission checking algorithm should allow the owner of a file to access it regardless of the permission setting." This means a file with mode 0000 is still readable/writable by its owner via NFS. The credential ladder should always try the file's owner UID. NFSWolf already exploits this: yes, credential_ladder tries owner first. Already documented in C702 insights.
+
+**Execute-implies-read (RFC 1094 ss3.3, RFC 1813 ss4.4).** "The server allows reading of files if the uid given in the call has either execute or read permission on the file." A file with mode 0111 (execute-only) is readable via NFS by anyone with execute permission. This means binaries with restricted read access are still exfiltrable over NFS. NFSWolf already exploits this: implicitly via READ attempts. Already documented in C702 insights.
+
+### RFC-documented implementation pitfalls
+
+**ACCESS is advisory only (RFC 1813 ss3.3.4).** "The client should not assume that having access to a file object necessarily implies having access to its data, and vice versa." The ACCESS procedure can return false positives (server says access is allowed but actual READ/WRITE fails) and false negatives (server says denied but actual operation succeeds). NFSWolf must always confirm by attempting the operation. Already documented: yes, design rule 5.
+
+**Non-idempotent operations and server crash recovery (RFC 1094 ss1.3, ss3.6).** "Some operations in this version of the protocol did not attain this goal [of idempotency]" and "the client must still be able to handle interruptions of service by re-opening connections when they time out." The server should keep "the last operation requested and its result" but "the server could be crashed and rebooted between retransmissions" and "a small cache (even a single entry) would solve most problems." This directly describes the DRC replay vulnerability. Already documented in C702 insights and Chain 7.
+
+**Symlink interpretation differs across clients (RFC 1094 ss2.2.6, RFC 1813 ss4.3).** "Since NFS always parses pathnames on the client, the pathname in a symbolic link may mean something different (or be meaningless) on a different client or on the server if a different pathname syntax is used" (RFC 1094 ss2.2.6). A symlink target of `/etc/shadow` means nothing on Windows but is a valid path on Linux. An attacker can create symlinks that target different paths depending on which client follows them. NFSWolf already implements symlink creation: yes, F-4.4 symlink escape.
+
+**Server mount points are invisible to NFS clients (RFC 1094 ss3.1, RFC 1813 ss4.2).** "Both NFS version 2 protocol and NFS version 3 protocol implementations do not typically let clients cross a server's mount point" (RFC 1813 ss4.2). When a client does LOOKUP on a directory where the server has mounted another filesystem, the client sees the underlying directory, not the mounted one. This means a server mount on `/export/data` that covers a sensitive directory reveals the underlying directory contents to NFS clients. NFSWolf does not specifically detect this: no. What to add: compare READDIR results before and after suspected mount points to detect hidden underlying directories.
+
+**CREATE exclusive mode verifier storage (RFC 1813 ss3.3.8).** In EXCLUSIVE create mode, the server stores the client's 8-byte verifier "in one or more of the object's attributes" (typically mtime/atime). "If the object did not previously exist, the server creates the object with the supplied verifier stored in the mtime and atime, sets the size of the object to zero, and does not set any attribute that is provided by the arguments." An attacker who observes the mtime/atime of a newly-created file can recover the CREATE verifier and construct a replay. NFSWolf does not exploit this: no.
+
+**Silly rename reveals active files (RFC 1094 ss3.1, C702 ss12.3.1, Appendix A ss A.8).** Already documented in C702 insights section above. Linux clients use `.nfsXXXXXXXXXXXXXXXX` naming convention. NFSWolf does not scan for `.nfs*` files: no. What to add: flag `.nfs*` entries in READDIR output as indicators of active file usage, extract encoded inode numbers.
+
+**SETATTR not guaranteed atomic (RFC 7530 ss16.32.4).** "SETATTR is not guaranteed atomic. A failed SETATTR may partially change a file's attributes." This means a SETATTR that sets both mode and uid may succeed on mode but fail on uid, leaving the file in an inconsistent security state. An attacker who races SETATTR calls can create TOCTOU windows where permissions are temporarily wider than intended. NFSWolf does not exploit SETATTR atomicity gaps: no. What to add: this is primarily an awareness item for the analyzer rather than a new attack.
+
+**NFSv4 fs_locations redirect attack (RFC 7530 ss19, RFC 8587 ss7).** Without integrity protection, an attacker can modify the `fs_locations` attribute returned by GETATTR to redirect the client to a malicious server after receiving NFS4ERR_MOVED. The attack: (1) forge NFS4ERR_MOVED on an unprotected response, (2) when the client queries fs_locations, modify the response to point to an attacker-controlled server. RFC 7530 RECOMMENDS that GETATTR for fs_locations use integrity protection. RFC 8587 reinforces this. NFSWolf does not exploit fs_locations redirection: no. What to add: detect unprotected fs_locations queries as a configuration weakness; potentially forge NFS4ERR_MOVED + fs_locations for server impersonation.
+
+**NFSv4 migration security (RFC 7931 ss8.5-8.6).** Inter-server communication during migration needs integrity and privacy protection. The destination server "MUST NOT use [source server security information] to allow any operation to be performed by the client that would not be allowed otherwise." Integrity protection on SETCLIENTID is desirable to prevent an attacker from forging a verifier change that forces client state loss (ss8.6). NFSWolf does not interact with migration: no. What to add: detect migration events (NFS4ERR_MOVED) and flag the security implications.
+
+**RPCSEC_GSS version 3 reply verifier MitM fix (RFC 7861 ss2.3).** Version 3 fixes a man-in-the-middle weakness in v1/v2 where child and parent context handles sharing a GSS context could have colliding sequence numbers. This is relevant only to environments using RPCSEC_GSS with multi-principal authentication. NFSWolf does not implement RPCSEC_GSS context establishment: no.
+
+**RPCSEC_GSS QOP locking DoS (RFC 2623 ss3.3).** After context establishment, the server MAY lock the `<mechanism, QOP, service>` triple for the session. If the client attempts to change QOP/service mid-session, "it would be possible to execute a denial of service attack, whereby the objective of the caller is to deny CPU service to legitimate users of the NFS server's machine processors." Exploiting this requires an established RPCSEC_GSS context. NFSWolf does not implement this: no.
+
+**NFSv4 case-insensitive filename collisions (RFC 7530 ss12, ss19).** On servers with case-insensitive filesystems (Windows NFS, NetApp NTFS), filename comparisons are case-insensitive. An attacker can create files whose names collide case-insensitively with sensitive files, causing confusion or overwrites. The RFC warns about "security concerns for string comparison" (ss19). NFSWolf does not exploit case collisions: no. What to add: detect case-insensitive servers via PATHCONF `case_insensitive` flag; probe for case-variant filename collisions.
+
+**RPCSEC_GSS channel binding bypass in v2 (RFC 5403 ss3.3-3.4).** RPCSEC_GSS v2 allows channel binding to a secure transport (IPsec, TLS). If the channel binding succeeds, per-message MIC is replaced with `svc_channel_prot`. An attacker who can break or strip the underlying channel (IPsec MITM, STRIPTLS) can cause the client and server to communicate without per-message integrity while both believe the channel is protecting them. This is a downgrade attack on the channel binding mechanism. NFSWolf does not implement this: no. What to add: awareness item; if RPCSEC_GSS v2 with channel binding is detected, flag the dependency on the underlying channel's security.
+
+**NFSv4 extended attribute (xattr) security (RFC 8587 ss7, conceptually from NFSv4 named attributes).** Extended attributes occupy a separate namespace directory per file. The security model for xattrs follows the file's ACL but some implementations grant broader access to the xattr namespace than to the file itself. Reading xattrs can reveal security labels (`security.selinux`), POSIX ACL entries (`system.posix_acl_access`), and application-specific metadata. Writing xattrs (if `--allow-write`) can modify security labels or inject malicious metadata. NFSWolf does not probe xattrs: no. What to add: enumerate xattr names via OPENATTR + READDIR; read security-relevant xattrs.
 
 ---
 
