@@ -416,7 +416,7 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
                     }
                 },
                 Err(e) => {
-                    if matches!(e.status(), Some(nfswolf_nfs2::NfsStat::Stale)) {
+                    if matches!(e.status(), Some(nfswolf_nfs2::Nfs2Stat::Stale)) {
                         stale += 1;
                     }
                 },

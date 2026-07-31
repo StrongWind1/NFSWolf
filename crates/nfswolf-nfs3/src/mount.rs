@@ -33,11 +33,11 @@ impl<T: RpcTransport> MountClient<T> {
     /// for this export, which is how a Kerberos-only export is distinguished
     /// from an AUTH_SYS one without attempting an operation.
     pub async fn mnt(&self, dirpath_: dirpath<'_>) -> Result<mountres3_ok<'static>, MountError<T::Error>> {
-        let result = self.call::<dirpath<'_>, mountres3<'_>>(MOUNT_PROGRAM::MOUNTPROC3_MNT, dirpath_).await?;
+        let result = self.call::<dirpath<'_>, mountres3<'_>>(MOUNT_PROGRAM::MOUNTPROC3_MNT, dirpath_).await.map_err(MountError::Rpc)?;
 
         match result {
             mountres3::Ok(ok) => Ok(ok),
-            mountres3::Err(err) => Err(MountError::Denied(err)),
+            mountres3::Err(err) => Err(MountError::Status(err)),
         }
     }
 

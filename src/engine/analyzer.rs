@@ -133,7 +133,7 @@ use nfswolf_nfs3::wire::{cookieverf3, sattr3};
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
-use crate::proto::conn::ReconnectStrategy;
+use crate::proto::conn::{ReconnectStrategy, parse_proxy_addr, socks5_connect};
 use crate::proto::mount::{ExportEntry, NfsMountClient};
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
@@ -742,7 +742,7 @@ async fn run_amplification_check(portmap: &PortmapClient, addr: SocketAddr, find
 /// entirely -- no privileged port needed, no hostname check, no auth flavor
 /// negotiation. Typical on Solaris, some NetApp configurations, and embedded
 /// RTOS NFS servers (VxWorks).
-async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], findings: &mut Vec<Finding>, _proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use nfswolf_rpc::rpc::opaque_auth;
     use nfswolf_rpc::transport::direct::DirectTransport;
     use nfswolf_rpc::transport::tokio::TokioIo;
@@ -753,7 +753,7 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
 
     // NFSv3 public handle: zero-length (send a GETATTR with an empty fh).
     if nfs_versions.contains(&3)
-        && let Some(stream) = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(nfs_addr)).await.ok().and_then(Result::ok)
+        && let Some(stream) = tokio::time::timeout(std::time::Duration::from_secs(5), connect_tcp(nfs_addr, proxy)).await.ok().and_then(Result::ok)
     {
         let transport = DirectTransport::new(TokioIo::new(stream));
         let empty_fh = FileHandle::from_bytes(&[]);
@@ -789,7 +789,7 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
 
     // NFSv2 public handle: all-zero 32 bytes.
     if nfs_versions.contains(&2)
-        && let Some(stream2) = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(nfs_addr)).await.ok().and_then(Result::ok)
+        && let Some(stream2) = tokio::time::timeout(std::time::Duration::from_secs(5), connect_tcp(nfs_addr, proxy)).await.ok().and_then(Result::ok)
     {
         let cred = AuthSys::new(0, 0, "localhost");
         let opaque = cred.to_opaque_auth(crate::proto::auth::next_stamp());
@@ -1355,4 +1355,16 @@ const fn secs_to_datetime(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
     let month = if month_pos < 10 { month_pos + 3 } else { month_pos - 9 };
     let year = if month <= 2 { year + 1 } else { year };
     (year, month, day, hour, min, sec)
+}
+
+/// Open a TCP connection to `target`, tunnelling through the SOCKS5 proxy when one is configured.
+///
+/// Lightweight wrapper so the WebNFS probe does not leak the operator's IP.
+async fn connect_tcp(target: SocketAddr, proxy: Option<&str>) -> std::io::Result<tokio::net::TcpStream> {
+    if let Some(p) = proxy {
+        let proxy_addr = parse_proxy_addr(p).map_err(std::io::Error::other)?;
+        socks5_connect(proxy_addr, target).await
+    } else {
+        tokio::net::TcpStream::connect(target).await
+    }
 }

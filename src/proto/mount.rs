@@ -352,7 +352,7 @@ impl Default for NfsMountClient {
 fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
     use nfswolf_nfs3::MountError;
     use nfswolf_nfs3::wire::mount::mountstat3;
-    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError<nfswolf_rpc::RpcError>>(), Some(MountError::Denied(mountstat3::MNT3ERR_ACCES))))
+    err.chain().any(|cause| matches!(cause.downcast_ref::<MountError<nfswolf_rpc::RpcError>>(), Some(MountError::Status(mountstat3::MNT3ERR_ACCES))))
 }
 
 /// Connect to `addr` from a privileged source port (300-1023), falling back to ephemeral.

@@ -35,6 +35,7 @@ use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle as FuseFileHandle, FileType as FuseFileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow, WriteFlags,
 };
+use nfswolf_nfs3::Nfs3Error;
 use nfswolf_nfs3::wire::{
     ACCESS3args, COMMIT3args, CREATE3args, FSSTAT3args, GETATTR3args, LINK3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3, createhow3,
     devicedata3, diropargs3, filename3, mknoddata3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime, specdata3, stable_how, symlinkdata3,
@@ -467,7 +468,7 @@ impl NfsFuse {
                 // Only a permission refusal is worth another rung. Any other
                 // status is a real answer -- climbing the ladder would just
                 // repeat it under identities that cannot change it.
-                Ok(Nfs3Result::Err((status, _))) if is_permission_refusal(status) => {
+                Ok(Nfs3Result::Err((status, _))) if Nfs3Error::from_nfsstat3(status).is_some_and(Nfs3Error::is_permission_denied) => {
                     last = Some(r);
                 },
                 Ok(_) => {
@@ -492,7 +493,7 @@ impl NfsFuse {
                 // Only a permission refusal is worth another rung. Any other
                 // status is a real answer -- climbing the ladder would just
                 // repeat it under identities that cannot change it.
-                Ok(Nfs3Result::Err((status, _))) if is_permission_refusal(status) => {
+                Ok(Nfs3Result::Err((status, _))) if Nfs3Error::from_nfsstat3(status).is_some_and(Nfs3Error::is_permission_denied) => {
                     last = Some(r);
                 },
                 Ok(_) => {
@@ -1550,14 +1551,6 @@ fn post_op_attr_to_attrs(opt: nfswolf_nfs3::wire::post_op_attr) -> Option<FileAt
         Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
         Nfs3Option::None => None,
     }
-}
-
-/// Whether a status means "the server refused you" rather than "that failed".
-///
-/// The distinction drives credential escalation: only a refusal is worth
-/// retrying under a different identity.
-const fn is_permission_refusal(status: nfsstat3) -> bool {
-    matches!(status, nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM)
 }
 
 /// Reply to a no-data NFS3 callback (REMOVE / RMDIR / RENAME / COMMIT)

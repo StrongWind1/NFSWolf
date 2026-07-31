@@ -12,7 +12,7 @@
 use nfswolf_rpc::RpcTransport;
 use nfswolf_xdr::{Pack, Unpack, Void};
 
-use crate::wire::{AttrStatRes, DirOpArgs, DirOpRes, NFS_PROGRAM, NFS_VERSION, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr, NfsStat, ReadArgs, ReadRes, ReaddirArgs, ReaddirEntry, StatFsRes, WriteArgs, createargs, linkargs, proc, readdirres, readlinkres, renameargs, sattrargs, symlinkargs};
+use crate::wire::{AttrStatRes, DirOpArgs, DirOpRes, NFS_PROGRAM, NFS_VERSION, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr, Nfs2Stat, ReadArgs, ReadRes, ReaddirArgs, ReaddirEntry, StatFsRes, WriteArgs, createargs, linkargs, proc, readdirres, readlinkres, renameargs, sattrargs, symlinkargs};
 
 /// Client for the `NFSv2` service (program 100003, version 2).
 #[derive(Debug)]
@@ -140,28 +140,28 @@ impl<T: RpcTransport> Nfs2Client<T> {
     /// NFSPROC_REMOVE (proc 10)  --  remove a file.
     pub async fn remove(&self, dir: &Nfs2FileHandle, name: &str) -> Result<(), Nfs2Error<T::Error>> {
         let args = DirOpArgs { dir: *dir, name: name.to_owned() };
-        let status: NfsStat = self.raw_call(proc::NFSPROC_REMOVE, &args).await?;
+        let status: Nfs2Stat = self.raw_call(proc::NFSPROC_REMOVE, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_RENAME (proc 11)  --  rename a file.
     pub async fn rename(&self, from_dir: &Nfs2FileHandle, from: &str, to_dir: &Nfs2FileHandle, to: &str) -> Result<(), Nfs2Error<T::Error>> {
         let args = renameargs { from: DirOpArgs { dir: *from_dir, name: from.to_owned() }, to: DirOpArgs { dir: *to_dir, name: to.to_owned() } };
-        let status: NfsStat = self.raw_call(proc::NFSPROC_RENAME, &args).await?;
+        let status: Nfs2Stat = self.raw_call(proc::NFSPROC_RENAME, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_LINK (proc 12)  --  create a hard link.
     pub async fn link(&self, fh: &Nfs2FileHandle, dir: &Nfs2FileHandle, name: &str) -> Result<(), Nfs2Error<T::Error>> {
         let args = linkargs { fh: *fh, to: DirOpArgs { dir: *dir, name: name.to_owned() } };
-        let status: NfsStat = self.raw_call(proc::NFSPROC_LINK, &args).await?;
+        let status: Nfs2Stat = self.raw_call(proc::NFSPROC_LINK, &args).await?;
         check_status(status)
     }
 
     /// NFSPROC_SYMLINK (proc 13)  --  create a symbolic link.
     pub async fn symlink(&self, dir: &Nfs2FileHandle, name: &str, target: &str, attrs: &Nfs2SetAttr) -> Result<(), Nfs2Error<T::Error>> {
         let args = symlinkargs { from: DirOpArgs { dir: *dir, name: name.to_owned() }, target: target.to_owned(), attrs: *attrs };
-        let status: NfsStat = self.raw_call(proc::NFSPROC_SYMLINK, &args).await?;
+        let status: Nfs2Stat = self.raw_call(proc::NFSPROC_SYMLINK, &args).await?;
         check_status(status)
     }
 
@@ -176,7 +176,7 @@ impl<T: RpcTransport> Nfs2Client<T> {
     /// NFSPROC_RMDIR (proc 15)  --  remove a directory.
     pub async fn rmdir(&self, dir: &Nfs2FileHandle, name: &str) -> Result<(), Nfs2Error<T::Error>> {
         let args = DirOpArgs { dir: *dir, name: name.to_owned() };
-        let status: NfsStat = self.raw_call(proc::NFSPROC_RMDIR, &args).await?;
+        let status: Nfs2Stat = self.raw_call(proc::NFSPROC_RMDIR, &args).await?;
         check_status(status)
     }
 
@@ -233,7 +233,7 @@ impl<T: RpcTransport> Nfs2Client<T> {
             let chunk_len = u32::try_from(chunk.len()).unwrap_or(CHUNK);
             data.extend_from_slice(&chunk);
             if data.len() > MAX_BYTES {
-                return Err(Nfs2Error::Status(NfsStat::Io));
+                return Err(Nfs2Error::Status(Nfs2Stat::Io));
             }
             offset = offset.saturating_add(chunk_len);
             if offset >= attrs.size {
@@ -272,7 +272,7 @@ pub enum Nfs2Error<E> {
     ///
     /// This is a decision by the server, not a failure to reach it, and during
     /// identity probing it is the expected result rather than an error.
-    Status(NfsStat),
+    Status(Nfs2Stat),
 }
 
 impl<E: std::fmt::Display> std::fmt::Display for Nfs2Error<E> {
@@ -296,7 +296,7 @@ impl<E: std::error::Error + 'static> std::error::Error for Nfs2Error<E> {
 impl<E> Nfs2Error<E> {
     /// The protocol status, when the server returned one.
     #[must_use]
-    pub const fn status(&self) -> Option<NfsStat> {
+    pub const fn status(&self) -> Option<Nfs2Stat> {
         match self {
             Self::Status(s) => Some(*s),
             Self::Rpc(_) => None,
@@ -309,7 +309,7 @@ impl<E> Nfs2Error<E> {
     /// breaker.
     #[must_use]
     pub const fn is_permission_denied(&self) -> bool {
-        matches!(self, Self::Status(NfsStat::Acces | NfsStat::Perm))
+        matches!(self, Self::Status(Nfs2Stat::Acces | Nfs2Stat::Perm))
     }
 
     /// Whether the server returned NFSERR_STALE (70).
@@ -319,17 +319,17 @@ impl<E> Nfs2Error<E> {
     /// is wrong.
     #[must_use]
     pub const fn is_stale(&self) -> bool {
-        matches!(self, Self::Status(NfsStat::Stale))
+        matches!(self, Self::Status(Nfs2Stat::Stale))
     }
 
     /// Whether the server returned NFSERR_NOENT (2).
     #[must_use]
     pub const fn is_not_found(&self) -> bool {
-        matches!(self, Self::Status(NfsStat::NoEnt))
+        matches!(self, Self::Status(Nfs2Stat::NoEnt))
     }
 }
 
 /// Map a non-OK status onto an error.
-const fn check_status<E>(status: NfsStat) -> Result<(), Nfs2Error<E>> {
-    if matches!(status, NfsStat::Ok) { Ok(()) } else { Err(Nfs2Error::Status(status)) }
+const fn check_status<E>(status: Nfs2Stat) -> Result<(), Nfs2Error<E>> {
+    if matches!(status, Nfs2Stat::Ok) { Ok(()) } else { Err(Nfs2Error::Status(status)) }
 }

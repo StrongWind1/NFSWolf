@@ -666,6 +666,44 @@ impl Nfs4Status {
             Self::Unknown(v) => v,
         }
     }
+
+    /// True when the server returned success (NFS4_OK = 0, RFC 7530 S13.1).
+    #[must_use]
+    pub const fn is_ok(self) -> bool {
+        matches!(self, Self::Ok)
+    }
+
+    /// True for permission errors (NFS4ERR_PERM, NFS4ERR_ACCESS).
+    ///
+    /// Expected during credential probing -- must never trip the circuit breaker.
+    #[must_use]
+    pub const fn is_permission_denied(self) -> bool {
+        matches!(self, Self::Perm | Self::Acces)
+    }
+
+    /// True when the file handle was well-formed but names nothing that exists.
+    ///
+    /// NFS4ERR_STALE (70, RFC 7530 S13.1.6) is the positive half of the
+    /// handle oracle: the server parsed the handle layout and looked it up,
+    /// so only the inode/generation is wrong.
+    #[must_use]
+    pub const fn is_stale(self) -> bool {
+        matches!(self, Self::Stale)
+    }
+
+    /// True for "no such file or directory" (NFS4ERR_NOENT = 2, RFC 7530 S13.1.6).
+    #[must_use]
+    pub const fn is_not_found(self) -> bool {
+        matches!(self, Self::NoEnt)
+    }
+
+    /// True for transient errors that should trip the circuit breaker.
+    ///
+    /// Permission denials are NOT transient -- they're expected during UID spraying.
+    #[must_use]
+    pub const fn is_transient(self) -> bool {
+        matches!(self, Self::Io)
+    }
 }
 
 impl core::fmt::Display for Nfs4Status {
@@ -700,6 +738,8 @@ impl core::fmt::Display for Nfs4Status {
         }
     }
 }
+
+impl std::error::Error for Nfs4Status {}
 
 #[cfg(test)]
 mod tests {

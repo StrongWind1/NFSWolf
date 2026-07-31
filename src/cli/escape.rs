@@ -469,7 +469,7 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
             Ok(a) if a.ftype == FType::Directory => {
                 return Ok(EscapeOutcome::Success { candidate: candidate.clone(), note: "verified (NFSv2)".to_owned() });
             },
-            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::NfsStat::Stale)) => {
+            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::Nfs2Stat::Stale)) => {
                 found_stale = true;
             },
             _ => {},
@@ -484,7 +484,7 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
             Ok(a) if a.ftype == FType::Directory => {
                 return Ok(EscapeOutcome::Success { candidate, note: "found via scan (NFSv2)".to_owned() });
             },
-            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::NfsStat::Stale)) => {
+            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::Nfs2Stat::Stale)) => {
                 found_stale = true;
             },
             _ => {},
@@ -502,7 +502,7 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
             Ok(a) if a.ftype == FType::Directory => {
                 return Ok(EscapeOutcome::Success { candidate: candidate.clone(), note: "subvolume (verified, NFSv2)".to_owned() });
             },
-            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::NfsStat::Stale)) => {
+            Err(e) if matches!(e.status(), Some(nfswolf_nfs2::Nfs2Stat::Stale)) => {
                 found_stale = true;
             },
             _ => {},

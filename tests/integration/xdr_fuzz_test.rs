@@ -152,7 +152,7 @@ proptest! {
 
     #[test]
     fn fuzz_nfs2_nfsstat_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs2::NfsStat::unpack(&mut Cursor::new(&data));
+        let _ = nfswolf_nfs2::Nfs2Stat::unpack(&mut Cursor::new(&data));
     }
 
     #[test]

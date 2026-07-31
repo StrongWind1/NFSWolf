@@ -4,12 +4,16 @@
 //! What belongs here is the part that is nfswolf's choice rather than the
 //! spec's: which stamp each encoded credential carries.
 //!
-//! The stamp is an arbitrary caller-chosen value (RFC 1057 sec. 9.2), but some
-//! servers key a duplicate-request cache on it. During a UID sweep that matters
-//! -- a fixed stamp lets the server answer a call made as uid 1001 from a
-//! cached reply to the same call made as uid 1000, so the sweep silently reads
-//! one identity's results for every candidate. Incrementing it per encode
-//! defeats that.
+//! The stamp is an arbitrary caller-chosen value (RFC 1057 sec. 9.2). It is NOT
+//! part of the Linux knfsd duplicate-request cache (DRC) key -- the DRC keys on
+//! XID + procedure + source address + version + arg length + checksum of the
+//! call body (see `fs/nfsd/nfscache.c`). XID uniqueness, which the RPC crate
+//! handles via fastrand, is what actually prevents false DRC hits.
+//!
+//! The incrementing stamp is harmless to keep but the original justification
+//! (DRC avoidance during UID sweeps) was wrong. Two calls with different UIDs
+//! already differ in their encoded AUTH_SYS body, so they produce different arg
+//! checksums and cannot collide in the DRC regardless of stamp value.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -19,9 +23,8 @@ pub(crate) use nfswolf_rpc::auth::{AuthFlavor, AuthSys};
 
 /// Stamp start value, and the floor the counter wraps back to.
 ///
-/// Wrapping to 42 rather than 0 keeps the stamp clear of the low values other
-/// clients on the network are most likely to use, so their duplicate-request
-/// cache entries and ours do not collide.
+/// Wrapping to 42 rather than 0 avoids the low values other clients commonly
+/// use. Not load-bearing (stamps are not in the DRC key), just tidy.
 const STAMP_START: u32 = 42;
 
 /// Global stamp counter, advanced once per credential encode.

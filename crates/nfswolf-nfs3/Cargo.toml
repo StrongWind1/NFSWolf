@@ -12,7 +12,6 @@ readme = "README.md"
 [dependencies]
 nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
-thiserror = "2"
 tracing = "0.1"
 
 [lints]

@@ -76,47 +76,48 @@ pub mod proc {
 /// Subset of v3  --  notably missing NFS3ERR_BADHANDLE (the handle oracle
 /// only works on v3+, but v2 doesn't need it since handles are fixed-format).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum NfsStat {
+pub enum Nfs2Stat {
     /// No error.
-    Ok = 0,
+    Ok,
     /// Not owner.
-    Perm = 1,
+    Perm,
     /// No such file or directory.
-    NoEnt = 2,
+    NoEnt,
     /// I/O error.
-    Io = 5,
+    Io,
     /// No such device.
-    Nxio = 6,
+    Nxio,
     /// Permission denied.
-    Acces = 13,
+    Acces,
     /// File exists.
-    Exist = 17,
+    Exist,
     /// No such device.
-    NoDev = 19,
+    NoDev,
     /// Not a directory.
-    NotDir = 20,
+    NotDir,
     /// Is a directory.
-    IsDir = 21,
+    IsDir,
     /// File too large.
-    Fbig = 27,
+    Fbig,
     /// No space left on device.
-    NoSpc = 28,
+    NoSpc,
     /// Read-only filesystem.
-    Rofs = 30,
+    Rofs,
     /// File name too long.
-    NameTooLong = 63,
+    NameTooLong,
     /// Directory not empty.
-    NotEmpty = 66,
+    NotEmpty,
     /// Disk quota exceeded.
-    Dquot = 69,
+    Dquot,
     /// Stale file handle.
-    Stale = 70,
+    Stale,
     /// Write cache flushed (RFC 1094 S2.3.1, server-only advisory).
-    WFlush = 99,
+    WFlush,
+    /// Unrecognized status code from the wire.
+    Unknown(u32),
 }
 
-impl NfsStat {
+impl Nfs2Stat {
     /// Decode a u32 status code from the wire.
     #[must_use]
     pub const fn from_u32(v: u32) -> Self {
@@ -124,6 +125,7 @@ impl NfsStat {
             0 => Self::Ok,
             1 => Self::Perm,
             2 => Self::NoEnt,
+            5 => Self::Io,
             6 => Self::Nxio,
             13 => Self::Acces,
             17 => Self::Exist,
@@ -138,50 +140,75 @@ impl NfsStat {
             69 => Self::Dquot,
             70 => Self::Stale,
             99 => Self::WFlush,
-            // 5 = NFS_ERR_IO; all unknown status codes also map to IO.
-            _ => Self::Io,
+            _ => Self::Unknown(v),
+        }
+    }
+
+    /// Encode to the wire u32 value.
+    const fn to_u32(self) -> u32 {
+        match self {
+            Self::Ok => 0,
+            Self::Perm => 1,
+            Self::NoEnt => 2,
+            Self::Io => 5,
+            Self::Nxio => 6,
+            Self::Acces => 13,
+            Self::Exist => 17,
+            Self::NoDev => 19,
+            Self::NotDir => 20,
+            Self::IsDir => 21,
+            Self::Fbig => 27,
+            Self::NoSpc => 28,
+            Self::Rofs => 30,
+            Self::NameTooLong => 63,
+            Self::NotEmpty => 66,
+            Self::Dquot => 69,
+            Self::Stale => 70,
+            Self::WFlush => 99,
+            Self::Unknown(v) => v,
         }
     }
 }
 
-impl Pack for NfsStat {
+impl Pack for Nfs2Stat {
     fn packed_size(&self) -> usize {
         4
     }
     fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
-        (*self as u32).pack(out)
+        self.to_u32().pack(out)
     }
 }
 
-impl Unpack for NfsStat {
+impl Unpack for Nfs2Stat {
     fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
         let (v, n) = u32::unpack(input)?;
         Ok((Self::from_u32(v), n))
     }
 }
 
-impl std::fmt::Display for NfsStat {
+impl std::fmt::Display for Nfs2Stat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Ok => "NFS_OK",
-            Self::Perm => "NFSERR_PERM",
-            Self::NoEnt => "NFSERR_NOENT",
-            Self::Io => "NFSERR_IO",
-            Self::Nxio => "NFSERR_NXIO",
-            Self::Acces => "NFSERR_ACCES",
-            Self::Exist => "NFSERR_EXIST",
-            Self::NoDev => "NFSERR_NODEV",
-            Self::NotDir => "NFSERR_NOTDIR",
-            Self::IsDir => "NFSERR_ISDIR",
-            Self::Fbig => "NFSERR_FBIG",
-            Self::NoSpc => "NFSERR_NOSPC",
-            Self::Rofs => "NFSERR_ROFS",
-            Self::NameTooLong => "NFSERR_NAMETOOLONG",
-            Self::NotEmpty => "NFSERR_NOTEMPTY",
-            Self::Dquot => "NFSERR_DQUOT",
-            Self::Stale => "NFSERR_STALE",
-            Self::WFlush => "NFSERR_WFLUSH",
-        })
+        match self {
+            Self::Ok => f.write_str("NFS_OK"),
+            Self::Perm => f.write_str("NFSERR_PERM"),
+            Self::NoEnt => f.write_str("NFSERR_NOENT"),
+            Self::Io => f.write_str("NFSERR_IO"),
+            Self::Nxio => f.write_str("NFSERR_NXIO"),
+            Self::Acces => f.write_str("NFSERR_ACCES"),
+            Self::Exist => f.write_str("NFSERR_EXIST"),
+            Self::NoDev => f.write_str("NFSERR_NODEV"),
+            Self::NotDir => f.write_str("NFSERR_NOTDIR"),
+            Self::IsDir => f.write_str("NFSERR_ISDIR"),
+            Self::Fbig => f.write_str("NFSERR_FBIG"),
+            Self::NoSpc => f.write_str("NFSERR_NOSPC"),
+            Self::Rofs => f.write_str("NFSERR_ROFS"),
+            Self::NameTooLong => f.write_str("NFSERR_NAMETOOLONG"),
+            Self::NotEmpty => f.write_str("NFSERR_NOTEMPTY"),
+            Self::Dquot => f.write_str("NFSERR_DQUOT"),
+            Self::Stale => f.write_str("NFSERR_STALE"),
+            Self::WFlush => f.write_str("NFSERR_WFLUSH"),
+            Self::Unknown(code) => write!(f, "NFSERR_UNKNOWN({code})"),
+        }
     }
 }
 
@@ -482,7 +509,7 @@ impl Unpack for DirOpArgs {
 #[derive(Debug, Clone)]
 pub struct DirOpRes {
     /// Status code.
-    pub status: NfsStat,
+    pub status: Nfs2Stat,
     /// New file handle (valid only if `status == Ok`).
     pub handle: Nfs2FileHandle,
     /// Attributes of the file (valid only if `status == Ok`).
@@ -491,11 +518,11 @@ pub struct DirOpRes {
 
 impl Pack for DirOpRes {
     fn packed_size(&self) -> usize {
-        if self.status == NfsStat::Ok { 4 + FHSIZE + self.attrs.packed_size() } else { 4 }
+        if self.status == Nfs2Stat::Ok { 4 + FHSIZE + self.attrs.packed_size() } else { 4 }
     }
     fn pack(&self, out: &mut impl Write) -> nfswolf_xdr::Result<usize> {
         let n = self.status.pack(out)?;
-        if self.status != NfsStat::Ok {
+        if self.status != Nfs2Stat::Ok {
             return Ok(n);
         }
         Ok(n + self.handle.pack(out)? + self.attrs.pack(out)?)
@@ -506,8 +533,8 @@ impl Unpack for DirOpRes {
     /// RFC 1094  --  diropres is an XDR union: on error status, only the status
     /// discriminant is present (no handle or attrs follow).
     fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
-        let (status, n0) = NfsStat::unpack(input)?;
-        if status != NfsStat::Ok {
+        let (status, n0) = Nfs2Stat::unpack(input)?;
+        if status != Nfs2Stat::Ok {
             return Ok((Self { status, handle: Nfs2FileHandle([0u8; FHSIZE]), attrs: Nfs2FileAttr::zeroed() }, n0));
         }
         let (handle, n1) = Nfs2FileHandle::unpack(input)?;
@@ -524,7 +551,7 @@ impl Unpack for DirOpRes {
 #[derive(Debug, Clone)]
 pub struct AttrStatRes {
     /// Status code.
-    pub status: NfsStat,
+    pub status: Nfs2Stat,
     /// File attributes (valid only if `status == Ok`).
     pub attrs: Nfs2FileAttr,
 }
@@ -533,8 +560,8 @@ impl Unpack for AttrStatRes {
     /// RFC 1094  --  attrstat is an XDR union: on error status, only the status
     /// discriminant is present (no attrs follow).
     fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
-        let (status, n0) = NfsStat::unpack(input)?;
-        if status != NfsStat::Ok {
+        let (status, n0) = Nfs2Stat::unpack(input)?;
+        if status != Nfs2Stat::Ok {
             return Ok((Self { status, attrs: Nfs2FileAttr::zeroed() }, n0));
         }
         let (attrs, n1) = Nfs2FileAttr::unpack(input)?;
@@ -580,7 +607,7 @@ impl Unpack for ReadArgs {
 #[derive(Debug, Clone)]
 pub struct ReadRes {
     /// Status code.
-    pub status: NfsStat,
+    pub status: Nfs2Stat,
     /// Current file attributes.
     pub attrs: Nfs2FileAttr,
     /// Data read from the file.
@@ -591,8 +618,8 @@ impl Unpack for ReadRes {
     /// RFC 1094  --  readres is an XDR union: on error status, only the status
     /// discriminant is present (no attrs or data follow).
     fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
-        let (status, n0) = NfsStat::unpack(input)?;
-        if status != NfsStat::Ok {
+        let (status, n0) = Nfs2Stat::unpack(input)?;
+        if status != Nfs2Stat::Ok {
             return Ok((Self { status, attrs: Nfs2FileAttr::zeroed(), data: Vec::new() }, n0));
         }
         let (attrs, n1) = Nfs2FileAttr::unpack(input)?;
@@ -677,29 +704,29 @@ mod tests {
 
     #[test]
     fn nfsstat_from_u32_maps_all_known_codes() {
-        assert_eq!(NfsStat::from_u32(0), NfsStat::Ok);
-        assert_eq!(NfsStat::from_u32(1), NfsStat::Perm);
-        assert_eq!(NfsStat::from_u32(2), NfsStat::NoEnt);
-        assert_eq!(NfsStat::from_u32(5), NfsStat::Io);
-        assert_eq!(NfsStat::from_u32(6), NfsStat::Nxio);
-        assert_eq!(NfsStat::from_u32(13), NfsStat::Acces);
-        assert_eq!(NfsStat::from_u32(17), NfsStat::Exist);
-        assert_eq!(NfsStat::from_u32(19), NfsStat::NoDev);
-        assert_eq!(NfsStat::from_u32(20), NfsStat::NotDir);
-        assert_eq!(NfsStat::from_u32(21), NfsStat::IsDir);
-        assert_eq!(NfsStat::from_u32(27), NfsStat::Fbig);
-        assert_eq!(NfsStat::from_u32(28), NfsStat::NoSpc);
-        assert_eq!(NfsStat::from_u32(30), NfsStat::Rofs);
-        assert_eq!(NfsStat::from_u32(63), NfsStat::NameTooLong);
-        assert_eq!(NfsStat::from_u32(66), NfsStat::NotEmpty);
-        assert_eq!(NfsStat::from_u32(69), NfsStat::Dquot);
-        assert_eq!(NfsStat::from_u32(70), NfsStat::Stale);
+        assert_eq!(Nfs2Stat::from_u32(0), Nfs2Stat::Ok);
+        assert_eq!(Nfs2Stat::from_u32(1), Nfs2Stat::Perm);
+        assert_eq!(Nfs2Stat::from_u32(2), Nfs2Stat::NoEnt);
+        assert_eq!(Nfs2Stat::from_u32(5), Nfs2Stat::Io);
+        assert_eq!(Nfs2Stat::from_u32(6), Nfs2Stat::Nxio);
+        assert_eq!(Nfs2Stat::from_u32(13), Nfs2Stat::Acces);
+        assert_eq!(Nfs2Stat::from_u32(17), Nfs2Stat::Exist);
+        assert_eq!(Nfs2Stat::from_u32(19), Nfs2Stat::NoDev);
+        assert_eq!(Nfs2Stat::from_u32(20), Nfs2Stat::NotDir);
+        assert_eq!(Nfs2Stat::from_u32(21), Nfs2Stat::IsDir);
+        assert_eq!(Nfs2Stat::from_u32(27), Nfs2Stat::Fbig);
+        assert_eq!(Nfs2Stat::from_u32(28), Nfs2Stat::NoSpc);
+        assert_eq!(Nfs2Stat::from_u32(30), Nfs2Stat::Rofs);
+        assert_eq!(Nfs2Stat::from_u32(63), Nfs2Stat::NameTooLong);
+        assert_eq!(Nfs2Stat::from_u32(66), Nfs2Stat::NotEmpty);
+        assert_eq!(Nfs2Stat::from_u32(69), Nfs2Stat::Dquot);
+        assert_eq!(Nfs2Stat::from_u32(70), Nfs2Stat::Stale);
     }
 
     #[test]
-    fn nfsstat_from_u32_unknown_maps_to_io() {
-        assert_eq!(NfsStat::from_u32(9999), NfsStat::Io);
-        assert_eq!(NfsStat::from_u32(42), NfsStat::Io);
+    fn nfsstat_from_u32_unknown_preserves_raw_value() {
+        assert_eq!(Nfs2Stat::from_u32(9999), Nfs2Stat::Unknown(9999));
+        assert_eq!(Nfs2Stat::from_u32(42), Nfs2Stat::Unknown(42));
     }
 
     #[test]
@@ -735,7 +762,7 @@ mod tests {
     fn diropres_unpack_ok_branch_decodes_handle_and_attrs() {
         // Build a DirOpRes with status=Ok, then a 32-byte handle, then 68 bytes of attrs.
         let mut wire: Vec<u8> = Vec::new();
-        _ = NfsStat::Ok.pack(&mut wire).unwrap();
+        _ = Nfs2Stat::Ok.pack(&mut wire).unwrap();
         let fh = Nfs2FileHandle::from_bytes(&[0x42; 32]);
         _ = fh.pack(&mut wire).unwrap();
         // Minimal attrs: ftype=Regular(1), then 10 u32 zeros, then 3 timevals of zeros
@@ -747,7 +774,7 @@ mod tests {
             _ = 0u32.pack(&mut wire).unwrap();
         }
         let (res, _) = DirOpRes::unpack(&mut Cursor::new(&wire)).unwrap();
-        assert_eq!(res.status, NfsStat::Ok);
+        assert_eq!(res.status, Nfs2Stat::Ok);
         assert_eq!(res.handle, fh);
         assert_eq!(res.attrs.ftype, FType::Regular);
     }
@@ -755,10 +782,10 @@ mod tests {
     #[test]
     fn diropres_unpack_error_branch_returns_zeroed() {
         let mut wire: Vec<u8> = Vec::new();
-        _ = NfsStat::Acces.pack(&mut wire).unwrap();
+        _ = Nfs2Stat::Acces.pack(&mut wire).unwrap();
         // No handle or attrs follow the error status.
         let (res, n) = DirOpRes::unpack(&mut Cursor::new(&wire)).unwrap();
-        assert_eq!(res.status, NfsStat::Acces);
+        assert_eq!(res.status, Nfs2Stat::Acces);
         assert_eq!(res.handle, Nfs2FileHandle([0u8; FHSIZE]));
         assert_eq!(res.attrs.ftype, FType::NonFile);
         assert_eq!(n, 4);
@@ -767,12 +794,12 @@ mod tests {
     #[test]
     fn attrstatres_unpack_ok_branch() {
         let mut wire: Vec<u8> = Vec::new();
-        _ = NfsStat::Ok.pack(&mut wire).unwrap();
+        _ = Nfs2Stat::Ok.pack(&mut wire).unwrap();
         let attr =
             Nfs2FileAttr { ftype: FType::Directory, mode: 0o755, nlink: 2, uid: 0, gid: 0, size: 4096, blocksize: 4096, rdev: 0, blocks: 8, fsid: 1, fileid: 2, atime: Timeval { seconds: 100, useconds: 0 }, mtime: Timeval { seconds: 200, useconds: 0 }, ctime: Timeval { seconds: 300, useconds: 0 } };
         _ = attr.pack(&mut wire).unwrap();
         let (res, _) = AttrStatRes::unpack(&mut Cursor::new(&wire)).unwrap();
-        assert_eq!(res.status, NfsStat::Ok);
+        assert_eq!(res.status, Nfs2Stat::Ok);
         assert_eq!(res.attrs.ftype, FType::Directory);
         assert_eq!(res.attrs.mode, 0o755);
     }
@@ -780,9 +807,9 @@ mod tests {
     #[test]
     fn readres_unpack_error_branch() {
         let mut wire: Vec<u8> = Vec::new();
-        _ = NfsStat::Perm.pack(&mut wire).unwrap();
+        _ = Nfs2Stat::Perm.pack(&mut wire).unwrap();
         let (res, n) = ReadRes::unpack(&mut Cursor::new(&wire)).unwrap();
-        assert_eq!(res.status, NfsStat::Perm);
+        assert_eq!(res.status, Nfs2Stat::Perm);
         assert!(res.data.is_empty());
         assert_eq!(n, 4);
     }
@@ -790,9 +817,9 @@ mod tests {
     #[test]
     fn statfsres_unpack_error_branch() {
         let mut wire: Vec<u8> = Vec::new();
-        _ = NfsStat::Stale.pack(&mut wire).unwrap();
+        _ = Nfs2Stat::Stale.pack(&mut wire).unwrap();
         let (res, n) = StatFsRes::unpack(&mut Cursor::new(&wire)).unwrap();
-        assert_eq!(res.status, NfsStat::Stale);
+        assert_eq!(res.status, Nfs2Stat::Stale);
         assert_eq!(res.tsize, 0);
         assert_eq!(n, 4);
     }
@@ -888,37 +915,37 @@ mod tests {
         assert_eq!(n, FHSIZE + 12);
     }
 
-    // --- RFC 1094 S2.3.1: NfsStat WFlush ---
+    // --- RFC 1094 S2.3.1: Nfs2Stat WFlush ---
 
     #[test]
     fn nfsstat_wflush_99_maps_correctly() {
         // RFC 1094 S2.3.1: NFSERR_WFLUSH = 99, server-only advisory status.
-        assert_eq!(NfsStat::from_u32(99), NfsStat::WFlush);
-        assert_eq!(NfsStat::WFlush as u32, 99);
+        assert_eq!(Nfs2Stat::from_u32(99), Nfs2Stat::WFlush);
+        assert_eq!(Nfs2Stat::WFlush.to_u32(), 99);
     }
 
     #[test]
     fn nfsstat_round_trips_all_known_values() {
         // RFC 1094 S2.3.1: pack -> unpack cycle for every defined status code.
-        let all: [(u32, NfsStat); 18] = [
-            (0, NfsStat::Ok),
-            (1, NfsStat::Perm),
-            (2, NfsStat::NoEnt),
-            (5, NfsStat::Io),
-            (6, NfsStat::Nxio),
-            (13, NfsStat::Acces),
-            (17, NfsStat::Exist),
-            (19, NfsStat::NoDev),
-            (20, NfsStat::NotDir),
-            (21, NfsStat::IsDir),
-            (27, NfsStat::Fbig),
-            (28, NfsStat::NoSpc),
-            (30, NfsStat::Rofs),
-            (63, NfsStat::NameTooLong),
-            (66, NfsStat::NotEmpty),
-            (69, NfsStat::Dquot),
-            (70, NfsStat::Stale),
-            (99, NfsStat::WFlush),
+        let all: [(u32, Nfs2Stat); 18] = [
+            (0, Nfs2Stat::Ok),
+            (1, Nfs2Stat::Perm),
+            (2, Nfs2Stat::NoEnt),
+            (5, Nfs2Stat::Io),
+            (6, Nfs2Stat::Nxio),
+            (13, Nfs2Stat::Acces),
+            (17, Nfs2Stat::Exist),
+            (19, Nfs2Stat::NoDev),
+            (20, Nfs2Stat::NotDir),
+            (21, Nfs2Stat::IsDir),
+            (27, Nfs2Stat::Fbig),
+            (28, Nfs2Stat::NoSpc),
+            (30, Nfs2Stat::Rofs),
+            (63, Nfs2Stat::NameTooLong),
+            (66, Nfs2Stat::NotEmpty),
+            (69, Nfs2Stat::Dquot),
+            (70, Nfs2Stat::Stale),
+            (99, Nfs2Stat::WFlush),
         ];
         for (wire_val, expected) in &all {
             let mut buf = Vec::new();
@@ -927,18 +954,17 @@ mod tests {
             // Wire encoding is big-endian u32.
             let encoded = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
             assert_eq!(encoded, *wire_val, "wire encoding mismatch for {expected:?}");
-            let (decoded, n) = NfsStat::unpack(&mut Cursor::new(&buf)).unwrap();
+            let (decoded, n) = Nfs2Stat::unpack(&mut Cursor::new(&buf)).unwrap();
             assert_eq!(n, 4);
             assert_eq!(decoded, *expected, "round-trip failed for wire value {wire_val}");
         }
     }
 
     #[test]
-    fn nfsstat_unknown_is_catch_all_io() {
-        // RFC 1094 S2.3.1: "This error is also used as a catch-all"
-        // for any status code not in the defined set.
+    fn nfsstat_unknown_preserves_raw_code() {
+        // Unrecognized wire values are preserved as Unknown(raw).
         for bogus in [3, 4, 7, 8, 10, 42, 100, 255, 0xDEAD, u32::MAX] {
-            assert_eq!(NfsStat::from_u32(bogus), NfsStat::Io, "unknown status {bogus} must map to Io");
+            assert_eq!(Nfs2Stat::from_u32(bogus), Nfs2Stat::Unknown(bogus), "unknown status {bogus} must become Unknown");
         }
     }
 
@@ -1016,7 +1042,7 @@ mod tests {
     #[test]
     fn diropres_pack_error_writes_only_4_bytes() {
         // RFC 1094 diropres union: error arm has only the status discriminant.
-        let res = DirOpRes { status: NfsStat::Acces, handle: Nfs2FileHandle([0u8; FHSIZE]), attrs: Nfs2FileAttr::zeroed() };
+        let res = DirOpRes { status: Nfs2Stat::Acces, handle: Nfs2FileHandle([0u8; FHSIZE]), attrs: Nfs2FileAttr::zeroed() };
         let mut buf = Vec::new();
         let n = res.pack(&mut buf).unwrap();
         assert_eq!(n, 4);
@@ -1027,7 +1053,7 @@ mod tests {
     fn diropres_pack_ok_writes_104_bytes() {
         // RFC 1094 diropres union: success arm = status(4) + fhandle(32) + fattr(68) = 104.
         let res = DirOpRes {
-            status: NfsStat::Ok,
+            status: Nfs2Stat::Ok,
             handle: Nfs2FileHandle::from_bytes(&[0x42; 32]),
             attrs: Nfs2FileAttr {
                 ftype: FType::Regular,
@@ -1058,12 +1084,12 @@ mod tests {
     fn attrstatres_unpack_error_reads_only_4_bytes() {
         // RFC 1094 attrstat union: error arm has only the status discriminant.
         let mut wire: Vec<u8> = Vec::new();
-        _ = NfsStat::NoEnt.pack(&mut wire).unwrap();
+        _ = Nfs2Stat::NoEnt.pack(&mut wire).unwrap();
         // Append trailing garbage to prove only 4 bytes are consumed.
         wire.extend_from_slice(&[0xFF; 100]);
         let (res, n) = AttrStatRes::unpack(&mut Cursor::new(&wire)).unwrap();
         assert_eq!(n, 4);
-        assert_eq!(res.status, NfsStat::NoEnt);
+        assert_eq!(res.status, Nfs2Stat::NoEnt);
         assert_eq!(res.attrs.ftype, FType::NonFile);
     }
 
@@ -1141,7 +1167,7 @@ impl Unpack for ReaddirEntry {
 #[derive(Debug, Clone, Copy)]
 pub struct StatFsRes {
     /// Status code.
-    pub status: NfsStat,
+    pub status: Nfs2Stat,
     /// Optimal transfer size in bytes.
     pub tsize: u32,
     /// Block size in bytes.
@@ -1158,8 +1184,8 @@ impl Unpack for StatFsRes {
     /// RFC 1094  --  statfsres is an XDR union: on error status, only the status
     /// discriminant is present (no filesystem info follows).
     fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
-        let (status, n0) = NfsStat::unpack(input)?;
-        if status != NfsStat::Ok {
+        let (status, n0) = Nfs2Stat::unpack(input)?;
+        if status != Nfs2Stat::Ok {
             return Ok((Self { status, tsize: 0, bsize: 0, blocks: 0, bfree: 0, bavail: 0 }, n0));
         }
         let (tsize, n1) = u32::unpack(input)?;
@@ -1262,7 +1288,7 @@ impl Pack for symlinkargs {
 /// READLINK result: status + path string.
 #[derive(Debug)]
 pub struct readlinkres {
-    pub status: NfsStat,
+    pub status: Nfs2Stat,
     pub data: String,
 }
 
@@ -1270,8 +1296,8 @@ impl Unpack for readlinkres {
     /// RFC 1094  --  readlinkres is an XDR union: on error status, only the
     /// status discriminant is present (no path string follows).
     fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
-        let (status, n0) = NfsStat::unpack(input)?;
-        if status != NfsStat::Ok {
+        let (status, n0) = Nfs2Stat::unpack(input)?;
+        if status != Nfs2Stat::Ok {
             return Ok((Self { status, data: String::new() }, n0));
         }
         let (data, n1) = nfswolf_xdr::unpack_string(input)?;
@@ -1282,7 +1308,7 @@ impl Unpack for readlinkres {
 /// READDIR result: status + entry list + eof flag.
 #[derive(Debug)]
 pub struct readdirres {
-    pub status: NfsStat,
+    pub status: Nfs2Stat,
     pub entries: Vec<ReaddirEntry>,
 }
 
@@ -1290,8 +1316,8 @@ impl Unpack for readdirres {
     /// RFC 1094  --  readdirres is an XDR union: on error status, only the
     /// status discriminant is present (no entry list or EOF flag follows).
     fn unpack(input: &mut impl Read) -> nfswolf_xdr::Result<(Self, usize)> {
-        let (status, mut n) = NfsStat::unpack(input)?;
-        if status != NfsStat::Ok {
+        let (status, mut n) = Nfs2Stat::unpack(input)?;
+        if status != Nfs2Stat::Ok {
             return Ok((Self { status, entries: Vec::new() }, n));
         }
         let mut entries = Vec::new();

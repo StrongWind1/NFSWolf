@@ -24,4 +24,4 @@ pub mod wire;
 
 pub use client::{Nfs2Client, Nfs2Error};
 pub use mount::MountV1Client;
-pub use wire::{NFS_PROGRAM as PROGRAM, NFS_VERSION as VERSION, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr, NfsStat};
+pub use wire::{NFS_PROGRAM as PROGRAM, NFS_VERSION as VERSION, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr, Nfs2Stat};
