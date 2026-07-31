@@ -132,13 +132,13 @@ Operations across v4.0, v4.1, and v4.2 that return actionable recon information.
 
 (ref: [Scope boundaries — operations worth cherry-picking](CRATE-DESIGN.md#operations-worth-cherry-picking-from-excluded-protocols))
 
-- [ ] **`EXCHANGE_ID` (op 42, v4.1, RFC 8881 §18.35).** `eir_server_impl_id` carries implementor DNS domain, product name, and build date. Unauthenticated vendor and version fingerprinting, better than any banner. Requires `v41` feature on nfs-v4.
-- [ ] **`SECINFO_NO_NAME` (op 52, v4.1, RFC 8881 §18.45).** Security flavours for the current filehandle without needing a filename. Strictly better than v4.0's `SECINFO`. Requires `v41` feature.
-- [ ] **`GETDEVICEINFO` (op 47, v4.1, RFC 8881 §18.40).** pNFS device addressing — data-server IP addresses, per-mirror servers under flex files (RFC 8435). Requires `v41` feature.
-- [ ] **`GETDEVICELIST` (op 48, v4.1, RFC 8881 §18.41).** Enumerates every storage device behind the filesystem. Maps the backend storage network from a client position — lateral-movement reconnaissance. Requires `v41` feature.
+- [x] **`EXCHANGE_ID` (op 42, v4.1, RFC 8881 §18.35).** Wired behind `#[cfg(feature = "v41")]` with `nfs_impl_id4` for server fingerprinting.
+- [x] **`SECINFO_NO_NAME` (op 52, v4.1, RFC 8881 §18.45).** Wired behind `v41` feature with `secinfo4` response type.
+- [x] **`GETDEVICEINFO` (op 47, v4.1, RFC 8881 §18.40).** Wired behind `v41` feature.
+- [x] **`GETDEVICELIST` (op 48, v4.1, RFC 8881 §18.41).** Wired behind `v41` feature.
 - [x] **`SETCLIENTID` (op 35, v4.0, RFC 7530 §16.33).** Wired with full Pack/Unpack. Compound builder convenience method for callback coercion probing.
 - [x] **`OPEN` (op 18, v4.0, RFC 7530 §16.16).** Wired with full Pack/Unpack. Compound builder convenience method for honest write testing.
-- [ ] **`FATTR4_SEC_LABEL` (attr 80, v4.2, RFC 7862 §12.2.4).** The MAC label as an attribute read — the server's SELinux policy and enforcement mode. Requires `v42` feature.
+- [x] **`FATTR4_SEC_LABEL` (attr 80, v4.2, RFC 7862 §12.2.4).** `sec_label4` type wired behind `v42` feature (implies `v41`).
 - [x] **Public filehandle + multi-component LOOKUP.** v4 PUTPUBFH + LOOKUP traversal + GETFH added to escape subcommand. v2/v3 public handle probes were added in Phase 0.
 - [x] **RDMA presence detection.** Scanner checks rpcbind for rdma/rdma6 netids and probes port 20049. Reports when RDMA transport is available.
 - [x] **Wire remaining v4.0 operations (28 of 37 missing).** All 37 v4.0 operations now wired in ArgOp/ResOpData with full Pack/Unpack + supporting types.
