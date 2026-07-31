@@ -22,7 +22,7 @@ Code changes in `src/` that fix parity gaps, error handling, and proxy bypasses.
 
 ### NFSv4 parity (ref: [NFSv2 parity — NFSv4 parity](CRATE-DESIGN.md#nfsv4-parity))
 
-- [ ] **Evaluate `Nfs4DirectClient` → `PooledTransport`.** NFSv4's `COMPOUND` is procedure 1 of program 100003 version 4 — it maps to `RpcTransport::call` directly. If `PooledTransport` is a drop-in, the reconnect path in `reconnect_with_auth`, the missing circuit breaker, and per-reconnect-only stamping all disappear.
+- [x] **Evaluate `Nfs4DirectClient` → `PooledTransport`.** NFSv4's `COMPOUND` is procedure 1 of program 100003 version 4 — it maps to `RpcTransport::call` directly. If `PooledTransport` is a drop-in, the reconnect path in `reconnect_with_auth`, the missing circuit breaker, and per-reconnect-only stamping all disappear.
 
 ### Kernel-verified spec insights (ref: [C702 insights](FUTURE-RESEARCH.md#c702-insights-for-existing-nfs-implementation))
 
@@ -73,9 +73,9 @@ Remove duplication by extracting crates that the target design calls for. Worth 
 
 ### `nfs-mount` extraction (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [crate 6 spec](CRATE-DESIGN.md#6-nfs-mount--rfc-1094-app-a-rfc-1813-app-i--program-100005--extract-from-nfs-v2-and-nfs-v3))
 
-- [ ] **Create `nfs-mount` crate.** MOUNT v1 lives in `nfswolf-nfs2`, MOUNT v3 in `nfswolf-nfs3`, with `PROGRAM = 100_005`, `dirpath`, and `name` declared twice. One crate, three MOUNT versions (v1, v2, v3), one `MountClient<T>` parameterised by version.
-- [ ] **Remove MOUNT code from `nfswolf-nfs2` and `nfswolf-nfs3`.** Both crates depend on `nfs-mount` instead of containing it.
-- [ ] **`MountedHandle` carries `auth_flavors`.** v3 MNT reply includes accepted auth flavours. `is_auth_sys_only()` answers the precondition every downstream finding depends on.
+- [x] **Create `nfs-mount` crate.** Extracted to `crates/nfswolf-mount/` with unified `MountClient<T>` parameterized by version. Wire types, error types, and domain types all in the new crate.
+- [x] **Remove MOUNT code from `nfswolf-nfs2` and `nfswolf-nfs3`.** Both crates depend on `nfswolf-mount` and re-export its types for backwards compatibility.
+- [x] **`MountedHandle` carries `auth_flavors`.** `accepts_auth_sys()` and `is_auth_sys_only()` classification methods.
 
 ### `onc-rpcbind` extraction (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [crate 4 spec](CRATE-DESIGN.md#4-onc-rpcbind--rfc-1833-rfc-1057-app-a--program-100000--extract-from-onc-rpc-client))
 
@@ -83,7 +83,7 @@ Remove duplication by extracting crates that the target design calls for. Worth 
 
 ### `Nfs2RawClient` (ref: [Gaps against the target](CRATE-DESIGN.md#gaps-against-the-target), [the completeness rule](CRATE-DESIGN.md#the-completeness-rule))
 
-- [ ] **Add `Nfs2RawClient<T>` to `nfs-v2`.** 22 wire types are exported with no way to send them. Violates the completeness rule. `Nfs2RawClient` takes wire types in and returns wire types out, mirroring `Nfs3Client`'s role in `nfs-v3`. The version of the protocol with no security negotiation at all (RFC 2623 §2.7) is the one most worth sending deliberate garbage at.
+- [x] **Add `Nfs2RawClient<T>` to `nfs-v2`.** Wire-level client in `crates/nfswolf-nfs2/src/raw.rs` with `call_raw()` for arbitrary procedures. Completes the rule.
 
 ## Phase 3 — prepare for publication
 
