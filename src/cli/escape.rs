@@ -13,7 +13,7 @@
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::probe::{make_client_with_hostname, make_mount_client, parse_addr_with_port};
+use crate::cli::probe::{make_client_with_hostname, make_mount_client, make_v2_client_with_hostname, parse_addr_with_port};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
 use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer};
 use crate::proto::auth::{AuthSys, Credential};
@@ -425,26 +425,15 @@ fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
 /// NFSv2 has no BADHANDLE oracle (all rejections are NFSERR_STALE per RFC 1094)
 /// and handles are fixed 32 bytes. No post-escape shadow read (v2 has no ACCESS).
 async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<EscapeOutcome> {
-    use crate::proto::auth::next_stamp;
-    use nfswolf_nfs2::{
-        Nfs2Client,
-        wire::{FType, Nfs2FileHandle},
-    };
-    use nfswolf_rpc::{rpc::opaque_auth, transport::direct::DirectTransport, transport::tokio::TokioIo};
+    use nfswolf_nfs2::wire::{FType, Nfs2FileHandle};
 
     let addr = parse_addr_with_port(host, globals.nfs_port)?;
     let mc = make_mount_client(globals);
     let mnt = mc.mount_v1(addr, export).await?;
     let seed = mnt.handle;
 
-    let nfs_port = globals.nfs_port.unwrap_or(2049);
-    let nfs_addr = std::net::SocketAddr::new(addr.ip(), nfs_port);
-    let stream = tokio::net::TcpStream::connect(nfs_addr).await?;
-    let io = TokioIo::new(stream);
-    let cred = AuthSys::new(0, 0, "nfswolf");
-    let opaque = cred.to_opaque_auth(next_stamp());
-    let transport = DirectTransport::with_auth(io, opaque, opaque_auth::default());
-    let client = Nfs2Client::new(transport);
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, export, 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
 
     // Guard: if the export already IS the filesystem root there is nothing outside the
     // export to reach. NFSv2 handles are opaque 32-byte blobs without a Linux header, so

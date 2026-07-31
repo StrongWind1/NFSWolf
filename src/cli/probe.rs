@@ -17,6 +17,7 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
 use crate::proto::mount::NfsMountClient;
+use crate::proto::nfs2::Nfs2Client;
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 use crate::proto::pool::{ConnectionPool, PoolKey};
@@ -85,6 +86,27 @@ pub(crate) fn parse_addr_with_port(host: &str, nfs_port: Option<u16>) -> anyhow:
     format!("{host}:{port}").parse::<SocketAddr>().with_context(|| format!("invalid host: {host}"))
 }
 
+/// Build the shared pool, circuit breaker, and pooled transport for a given
+/// host/export/credential combination. Both `make_client_with_hostname` and
+/// `make_v2_client_with_hostname` delegate here so pool/circuit/transport
+/// construction is not duplicated.
+fn make_pooled_transport(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, PooledTransport) {
+    let pool = Arc::new(match proxy {
+        Some(p) => ConnectionPool::with_proxy(p.to_owned()),
+        None => ConnectionPool::default_config(),
+    });
+    let circuit = Arc::new(CircuitBreaker::default_config());
+    let gids = build_gid_list(gid, aux_gids);
+    let auth = AuthSys::with_groups(uid, gid, &gids, hostname);
+    let cred = Credential::Sys(auth);
+    let key = PoolKey { host: addr, export: export.to_owned(), uid, gid };
+    let transport = match nfs_port {
+        Some(p) => PooledTransport::new_direct(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, p),
+        None => PooledTransport::new(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent),
+    };
+    (pool, circuit, transport)
+}
+
 /// Build an `Nfs3Client` for the given host, export, and AUTH_SYS credential,
 /// honouring the operator's spoofed `--hostname` as the AUTH_SYS machinename.
 ///
@@ -98,20 +120,19 @@ pub(crate) fn parse_addr_with_port(host: &str, nfs_port: Option<u16>) -> anyhow:
 /// The hostname is the client identity some servers key export ACLs on, and
 /// `auth_unix.machinename` carries it on the wire (F-1.4).
 pub(crate) fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
-    let pool = Arc::new(match proxy {
-        Some(p) => ConnectionPool::with_proxy(p.to_owned()),
-        None => ConnectionPool::default_config(),
-    });
-    let circuit = Arc::new(CircuitBreaker::default_config());
-    let gids = build_gid_list(gid, aux_gids);
-    let auth = AuthSys::with_groups(uid, gid, &gids, hostname);
-    let cred = Credential::Sys(auth);
-    let key = PoolKey { host: addr, export: export.to_owned(), uid, gid };
-    let client = match nfs_port {
-        Some(p) => Nfs3Client::new(PooledTransport::new_direct(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, p)),
-        None => Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent)),
-    };
-    (pool, circuit, client)
+    let (pool, circuit, transport) = make_pooled_transport(addr, export, uid, gid, aux_gids, stealth, proxy, nfs_port, hostname);
+    (pool, circuit, Nfs3Client::new(transport))
+}
+
+/// Build an `Nfs2Client` for the given host, export, and AUTH_SYS credential,
+/// honouring the operator's spoofed `--hostname` as the AUTH_SYS machinename.
+///
+/// Same semantics as [`make_client_with_hostname`] but wraps a `Nfs2Client`
+/// instead of a `Nfs3Client`. The pooled transport is identical -- only the
+/// protocol client type differs.
+pub(crate) fn make_v2_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs2Client) {
+    let (pool, circuit, transport) = make_pooled_transport(addr, export, uid, gid, aux_gids, stealth, proxy, nfs_port, hostname);
+    (pool, circuit, Nfs2Client::new(transport))
 }
 
 /// Build the GID list for AUTH_SYS: primary GID first, then aux GIDs (deduped).

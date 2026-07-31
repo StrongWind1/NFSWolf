@@ -622,23 +622,13 @@ impl crate::shell::complete::RemoteCompleter for Nfs4RemoteCompleter {
 ///
 /// Connects with MOUNT v1 for the 32-byte handle (or accepts `--handle` for
 /// direct bypass), then delegates all command dispatch to the shared shell.
+/// The v2 data client uses `PooledTransport`, so `--proxy`, `--delay`/`--jitter`,
+/// and mid-session credential swaps all work the same as the v3 path.
 async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
-    use nfswolf_nfs2::Nfs2Client;
-    use nfswolf_rpc::{rpc::opaque_auth, transport::direct::DirectTransport, transport::tokio::TokioIo};
-
+    use crate::cli::probe::{make_v2_client_with_hostname, parse_addr_with_port};
     use crate::cli::target::{Source, parse as parse_target};
-    use crate::proto::auth::next_stamp;
-    use crate::proto::mount::NfsMountClient;
-    use crate::proto::portmap::PortmapClient;
     use crate::shell::V2_SHELL_COMMANDS;
     use crate::shell::v2::V2Ops;
-
-    if globals.proxy.is_some() {
-        tracing::warn!("--proxy not supported with NFSv2; connecting directly");
-    }
-    if globals.delay > 0 || globals.jitter > 0 {
-        tracing::warn!("--delay/--jitter not supported with NFSv2");
-    }
 
     let target = parse_target(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
     let host = target.host;
@@ -648,8 +638,9 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 
     let (root_fh, export) = match &target.source {
         Source::Export(p) => {
+            let mount_client = make_mount_client(globals);
             let addr = SocketAddr::new(host, 111);
-            let mount_client = NfsMountClient::new().with_credential(Credential::Sys(AuthSys::new(uid, gid, &hostname)));
+            eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{p} (MOUNT v1)")));
             let mount_result = mount_client.mount_v1(addr, p).await?;
             let fh = nfswolf_nfs2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
             (fh, p.clone())
@@ -661,32 +652,22 @@ async fn run_nfs2_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
             (fh, String::from("/"))
         },
         Source::None => {
+            let mount_client = make_mount_client(globals);
             let addr = SocketAddr::new(host, 111);
             let export = "/".to_owned();
-            let mount_client = NfsMountClient::new().with_credential(Credential::Sys(AuthSys::new(uid, gid, &hostname)));
+            eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:/ (MOUNT v1)")));
             let mount_result = mount_client.mount_v1(addr, &export).await?;
             let fh = nfswolf_nfs2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
             (fh, export)
         },
     };
 
-    let addr = SocketAddr::new(host, 111);
-    let nfs_port = if let Some(p) = globals.nfs_port {
-        p
-    } else {
-        let portmap = PortmapClient::default_port();
-        portmap.query_port(addr, 100_003, 2).await.unwrap_or(2049)
-    };
+    let addr = parse_addr_with_port(&host.to_string(), globals.nfs_port)?;
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, &export, uid, gid, &globals.aux_gids, stealth, globals.proxy.as_deref(), globals.nfs_port, &hostname);
+    let client = Arc::new(client);
 
-    let nfs_addr = SocketAddr::new(host, nfs_port);
-    let stream = tokio::net::TcpStream::connect(nfs_addr).await?;
-    let io = TokioIo::new(stream);
-    let cred = AuthSys::with_groups(uid, gid, &[gid], &hostname);
-    let opaque = cred.to_opaque_auth(next_stamp());
-    let transport = DirectTransport::with_auth(io, opaque, opaque_auth::default());
-    let client = Arc::new(Nfs2Client::new(transport));
-
-    let v2ops = V2Ops::new(client, uid, gid, hostname.clone(), addr, export.clone(), nfs_port);
+    let v2ops = V2Ops::new(client);
     let root = ShellHandle(root_fh.0.to_vec());
     let mut shell = NfsShell::new(v2ops, root, args.allow_write, hostname, V2_SHELL_COMMANDS);
     shell.refresh_tab_cache().await;
