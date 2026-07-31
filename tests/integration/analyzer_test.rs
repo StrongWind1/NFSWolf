@@ -63,7 +63,7 @@ async fn start_memfs(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16) 
 async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::new(DirectTransport::new(TokioIo::new(stream)))
+    MountClient::v3(DirectTransport::new(TokioIo::new(stream)))
 }
 
 async fn portmap_client(port: u16) -> PortmapperClient<TokioIo<TcpStream>> {
@@ -109,7 +109,7 @@ async fn memfs_advertises_auth_sys_no_kerberos() {
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
 
-    let mount_res = mc.mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
+    let mount_res = mc.v3_mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
 
     // AUTH_SYS = 1. Must be present; RPCSEC_GSS = 6 must be absent.
     assert!(mount_res.auth_flavors.contains(&1), "MemFs must advertise AUTH_SYS (flavor 1)");
@@ -132,7 +132,7 @@ async fn memfs_root_handle_is_non_empty() {
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
 
-    let mount_res = mc.mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
+    let mount_res = mc.v3_mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
     let fh = mount_res.fhandle.0.as_ref();
 
     // Handle must be non-empty -- any length is valid since MemFs uses its own format.
@@ -177,7 +177,7 @@ async fn memfs_auth_flavors_are_valid() {
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
 
-    let mount_res = mc.mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
+    let mount_res = mc.v3_mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
     let known_flavors: &[u32] = &[0, 1, 2, 6];
     for &flavor in &mount_res.auth_flavors {
         assert!(known_flavors.contains(&flavor) || flavor >= 300_000, "unexpected auth flavor {flavor} -- not a well-known value and not in RPCSEC_GSS range");
@@ -201,7 +201,7 @@ async fn memfs_file_handle_usable_across_connections() {
 
     // Connection 1: MOUNT + LOOKUP to get a file handle.
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let addr = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);

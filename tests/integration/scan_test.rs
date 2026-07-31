@@ -144,7 +144,7 @@ async fn memfs_export_list_shows_root() {
 
     // Verify we can MNT the first export and get a root handle.
     let path = export_list[0].ex_dir.0.as_ref().to_vec();
-    let root_fh = mc.mnt(dirpath(Opaque::owned(path))).await.expect("MNT must succeed");
+    let root_fh = mc.v3_mnt(dirpath(Opaque::owned(path))).await.expect("MNT must succeed");
     assert!(!root_fh.fhandle.0.as_ref().is_empty(), "root handle must be non-empty");
 }
 
@@ -193,7 +193,7 @@ async fn start_memfs_server(config: MemFsConfig) -> (tokio::task::JoinHandle<()>
 async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::new(DirectTransport::new(TokioIo::new(stream)))
+    MountClient::v3(DirectTransport::new(TokioIo::new(stream)))
 }
 
 /// Connect an `Nfs3Client` to the given port on loopback.
@@ -213,7 +213,7 @@ async fn memfs_mount_returns_root_handle() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
 
     // The root file handle must be non-empty.
     assert!(!mount_ok.fhandle.0.as_ref().is_empty(), "root handle must be non-empty");
@@ -229,7 +229,7 @@ async fn memfs_getattr_on_root() {
 
     // MOUNT to get the root handle.
     let mc = mount_client(port).await;
-    let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     // GETATTR on the root handle.
@@ -257,7 +257,7 @@ async fn memfs_lookup_file_in_root() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -285,7 +285,7 @@ async fn memfs_lookup_missing_file_returns_noent() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -312,7 +312,7 @@ async fn memfs_read_file_content() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mount_ok = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mount_ok = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfswolf_nfs3::wire::nfs_fh3 { data: mount_ok.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;

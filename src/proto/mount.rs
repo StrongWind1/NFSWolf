@@ -140,7 +140,7 @@ impl NfsMountClient {
     async fn mount_once(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
         let client = self.connect(addr).await?;
         let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
-        let res = client.mnt(path).await.with_context(|| format!("MNT {export}"))?;
+        let res = client.v3_mnt(path).await.with_context(|| format!("MNT {export}"))?;
         let handle = FileHandle::from_bytes(res.fhandle.0.as_ref());
         let parsed_flavors = res.auth_flavors.iter().map(|&f| parse_flavor(f)).collect();
         Ok(MountResult { handle, auth_flavors: res.auth_flavors, _parsed_flavors: parsed_flavors })
@@ -231,7 +231,7 @@ impl NfsMountClient {
     /// MOUNT v1 EXPORT returns the NFSv2 export list; MOUNT v3 EXPORT returns
     /// the NFSv3 export list.  These are usually identical but CAN differ.
     pub(crate) async fn list_exports_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
-        use nfswolf_nfs3::wire::mount::exports;
+        use nfswolf_mount::wire::exports;
         use nfswolf_rpc::rpc::RpcClient;
         use nfswolf_xdr::Void;
 
@@ -307,7 +307,7 @@ impl NfsMountClient {
         } else {
             connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))?
         };
-        Ok(MountClient::new(DirectTransport::with_auth(io, self.credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default())))
+        Ok(MountClient::v3(DirectTransport::with_auth(io, self.credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default())))
     }
 
     /// Try well-known mountd ports when portmapper is unavailable.
@@ -328,7 +328,7 @@ impl NfsMountClient {
                 nfswolf_rpc::transport::tokio::TokioConnector.connect(mount_addr).await
             };
             let Ok(io) = io_result else { continue };
-            let mc = MountClient::new(DirectTransport::new(io));
+            let mc = MountClient::v3(DirectTransport::new(io));
             if mc.export().await.is_ok() {
                 tracing::info!(%addr, port, "mountd found on fallback port");
                 return Ok(port);
@@ -348,10 +348,10 @@ impl Default for NfsMountClient {
 ///
 /// Used to decide whether to retry with a privileged source port.
 /// We walk the anyhow source chain because `mount_once` wraps the raw
-/// `nfswolf_nfs3::MountError` with a `with_context`.
+/// `nfswolf_mount::MountError` with a `with_context`.
 fn downcast_mnt_acces(err: &anyhow::Error) -> bool {
-    use nfswolf_nfs3::MountError;
-    use nfswolf_nfs3::wire::mount::mountstat3;
+    use nfswolf_mount::MountError;
+    use nfswolf_mount::wire::mountstat3;
     err.chain().any(|cause| matches!(cause.downcast_ref::<MountError<nfswolf_rpc::RpcError>>(), Some(MountError::Status(mountstat3::MNT3ERR_ACCES))))
 }
 
@@ -429,32 +429,5 @@ fn bytes_to_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// MOUNT v1 MNT response (RFC 1094 Appendix A).
-///
-/// ```text
-/// union fhstatus switch (unsigned status) {
-///     case 0: fhandle directory;   /* opaque[FHSIZE=32] */
-///     default: void;
-/// };
-/// ```
-///
-/// Hand-implemented because FHSIZE=32 is a fixed-length opaque (no length
-/// prefix), and the status is not a standard NFS3 discriminant.
-struct FhStatus {
-    status: u32,
-    fhandle: [u8; 32],
-}
-
-impl nfswolf_xdr::Unpack for FhStatus {
-    fn unpack(input: &mut impl std::io::Read) -> nfswolf_xdr::Result<(Self, usize)> {
-        let (status, n1) = u32::unpack(input)?;
-        let mut fhandle = [0u8; 32];
-        let n2 = if status == 0 {
-            std::io::Read::read_exact(input, &mut fhandle).map_err(nfswolf_xdr::Error::Io)?;
-            32
-        } else {
-            0
-        };
-        Ok((Self { status, fhandle }, n1 + n2))
-    }
-}
+/// Re-use the MOUNT v1 MNT response from nfswolf-mount.
+use nfswolf_mount::wire::FhStatus;

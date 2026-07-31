@@ -21,6 +21,7 @@ members = [
   "crates/nfswolf-xdr-derive",
   "crates/nfswolf-xdr",
   "crates/nfswolf-rpc",
+  "crates/nfswolf-mount",
   "crates/nfswolf-nfs2",
   "crates/nfswolf-nfs3",
   "crates/nfswolf-nfs4",
@@ -38,6 +39,7 @@ repository = "https://github.com/StrongWind1/NFSWolf"
 nfswolf-xdr-derive = { version = "0.8.0", path = "crates/nfswolf-xdr-derive" }
 nfswolf-xdr = { version = "0.8.0", path = "crates/nfswolf-xdr" }
 nfswolf-rpc = { version = "0.8.0", path = "crates/nfswolf-rpc" }
+nfswolf-mount = { version = "0.8.0", path = "crates/nfswolf-mount" }
 nfswolf-nfs2 = { version = "0.8.0", path = "crates/nfswolf-nfs2" }
 nfswolf-nfs3 = { version = "0.8.0", path = "crates/nfswolf-nfs3" }
 nfswolf-nfs4 = { version = "0.8.0", path = "crates/nfswolf-nfs4" }
@@ -85,6 +87,7 @@ serde_json = "1"
 # NFS protocol stack -- local crates, pure Rust, no C dependencies.
 nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
+nfswolf-mount = { workspace = true }
 nfswolf-nfs2 = { workspace = true }
 nfswolf-nfs3 = { workspace = true }
 nfswolf-nfs4 = { workspace = true }

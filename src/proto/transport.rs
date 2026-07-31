@@ -196,7 +196,7 @@ impl PooledTransport {
 /// host is demonstrably alive. Only a genuine transport fault should feed the
 /// breaker.
 fn is_authorization_denial(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| cause.downcast_ref::<nfswolf_nfs3::MountError<RpcError>>().is_some_and(nfswolf_nfs3::MountError::is_denial))
+    err.chain().any(|cause| cause.downcast_ref::<nfswolf_mount::MountError<RpcError>>().is_some_and(nfswolf_mount::MountError::is_denial))
 }
 
 /// Flatten a checkout failure into the transport's error type.

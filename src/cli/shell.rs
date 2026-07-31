@@ -217,8 +217,14 @@ const NFS4_READ_MAX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 /// Used when `--nfs-version 4` is set.  Connects directly to port 2049 without
 /// the MOUNT protocol (which is not required for NFSv4).  Supports a subset of
 /// the full NFSv3 shell commands sufficient to explore NFSv4-only servers.
+///
+/// Unlike the v3 shell (which always used `PooledTransport`), the v4 shell
+/// previously ran over a single raw TCP socket (`Nfs4DirectClient`) with manual
+/// reconnect-on-credential-change. Now it uses the same pooled transport as v3,
+/// giving it circuit breaking, connection reuse, stealth pacing, and
+/// zero-round-trip credential swaps.
 async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result<()> {
-    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::{Nfs4Client as PooledNfs4Client, PooledNfs4};
 
     let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
     let host = target.host;
@@ -230,13 +236,24 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     let mut gid = globals.gid;
     let mut hostname = globals.hostname.clone();
 
-    // Send the primary GID plus any --aux-gids (RFC 5531 S14, up to 16) so the
-    // shadow-GID trick (e.g. GID 42 to read /etc/shadow) works in v4 mode just as
-    // it does in the v3 shell. The client retains the aux GIDs, so a later
-    // `uid`/`gid`/`hostname` change (dispatch_nfs4) re-applies them on reconnect.
     eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
+
+    // Build the pooled transport -- same pattern as the v3 and v2 shells.
+    // NFSv4 needs no MOUNT, so we use `new_direct` to bypass portmapper.
+    let pool = Arc::new(match &globals.proxy {
+        Some(p) => ConnectionPool::with_proxy(p.clone()),
+        None => ConnectionPool::default_config(),
+    });
+    let circuit = Arc::new(CircuitBreaker::default_config());
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
-    let mut client = Nfs4DirectClient::connect_with_groups_proxy(addr, uid, gid, &globals.aux_gids, &hostname, globals.proxy.as_deref()).await.map_err(|e| anyhow::anyhow!("NFSv4 connect to {addr} failed: {e}"))?.with_stealth(stealth);
+    let gids = build_gid_list(gid, &globals.aux_gids);
+    let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &hostname));
+    // Synthetic export key: NFSv4 has no MOUNT exports, but the pool keys on
+    // (host, export, uid, gid). The port is embedded so distinct --nfs-port
+    // values don't collide.
+    let pool_key = PoolKey { host: addr, export: format!("__nfs4__{nfs_port}"), uid, gid };
+    let transport = PooledTransport::new_direct(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, nfs_port);
+    let client = PooledNfs4Client::new(transport);
 
     // Fetch the root FH from PUTROOTFH + GETFH.
     let root_fh = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?;
@@ -248,12 +265,14 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 
     // Non-interactive mode: run one command and return.
     if let Some(ref cmd) = args.command {
-        dispatch_nfs4(&mut client, cmd, &mut cwd_fh, &mut cwd_path, args.allow_write, &mut uid, &mut gid, &mut hostname).await;
+        dispatch_nfs4(&client, cmd, &mut cwd_fh, &mut cwd_path, args.allow_write, &mut uid, &mut gid, &mut hostname).await;
         crate::cli::emit_replay(globals);
         return Ok(());
     }
 
     // Tab completion: wrap client for shared access, populate cache.
+    // The Mutex is needed so credential changes (which replace the client) are
+    // visible to the tab completer running on rustyline's sync callback thread.
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let tab_cache = {
         let entries = client.lock().await.list_dir(&cwd_fh).await.unwrap_or_default();
@@ -272,10 +291,17 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
                 if trimmed == "exit" || trimmed == "quit" {
                     break;
                 }
-                let mut c = client.lock().await;
-                dispatch_nfs4(&mut c, trimmed, &mut cwd_fh, &mut cwd_path, args.allow_write, &mut uid, &mut gid, &mut hostname).await;
+                let mut guard = client.lock().await;
+                dispatch_nfs4(&guard, trimmed, &mut cwd_fh, &mut cwd_path, args.allow_write, &mut uid, &mut gid, &mut hostname).await;
+                // Credential changes produce a new client via with_credential().
+                // Rebuild when the guard's identity no longer matches the REPL state.
+                if guard.uid() != uid || guard.gid() != gid || guard.machinename() != hostname {
+                    let gids_new = build_gid_list(gid, &globals.aux_gids);
+                    let new_cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids_new, &hostname));
+                    *guard = guard.with_credential(new_cred, uid, gid);
+                }
                 // Refresh tab cache after every command (cheap if cwd unchanged).
-                if let Ok(entries) = c.list_dir(&cwd_fh).await
+                if let Ok(entries) = guard.list_dir(&cwd_fh).await
                     && let Ok(mut cache) = tab_cache.lock()
                 {
                     cache.cwd.clone_from(&cwd_fh);
@@ -294,7 +320,7 @@ async fn run_nfs4_shell(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
 }
 
 /// Read a remote file and stream its contents to stdout (NFSv4 `cat`).
-async fn nfs4_cat(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, file_fh: &[u8]) {
+async fn nfs4_cat(client: &crate::proto::nfs4::Nfs4Client, file_fh: &[u8]) {
     let mut offset: u64 = 0;
     loop {
         match client.read_chunk(file_fh, offset, 65536).await {
@@ -324,7 +350,7 @@ async fn nfs4_cat(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, f
 }
 
 /// Read a remote file and save it locally (NFSv4 `get`).
-async fn nfs4_get(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, file_fh: &[u8], local_name: &str) {
+async fn nfs4_get(client: &crate::proto::nfs4::Nfs4Client, file_fh: &[u8], local_name: &str) {
     let mut buf = Vec::new();
     let mut offset: u64 = 0;
     loop {
@@ -356,11 +382,15 @@ async fn nfs4_get(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, f
 }
 
 /// Dispatch a single command in the NFSv4 shell REPL.
-async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, line: &str, cwd_fh: &mut Vec<u8>, cwd_path: &mut String, allow_write: bool, uid: &mut u32, gid: &mut u32, hostname: &mut String) {
+///
+/// Credential changes (`uid`, `gid`, `hostname`) update the mutable state
+/// variables; the caller is responsible for rebuilding the client via
+/// `with_credential()` when it detects a mismatch. This avoids a TCP reconnect
+/// -- the pooled transport just targets a different pool key.
+async fn dispatch_nfs4(client: &crate::proto::nfs4::Nfs4Client, line: &str, cwd_fh: &mut Vec<u8>, cwd_path: &mut String, allow_write: bool, uid: &mut u32, gid: &mut u32, hostname: &mut String) {
     // NFSv4 write operations (CREATE, WRITE, REMOVE, RENAME, etc.) require
     // OPEN+WRITE+CLOSE with stateid tracking (RFC 7530 S16.2.5), which is out
-    // of scope until stateful v4 support is added.  Suppress the unused warning
-    // until then.
+    // of scope until stateful v4 support is added.
     let _ = allow_write;
     let mut parts = line.split_whitespace();
     let Some(cmd) = parts.next() else { return };
@@ -375,9 +405,9 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             println!("  pwd             print current directory");
             println!("  cat <file>      print file contents");
             println!("  get <file>      download file to current local directory");
-            println!("  uid <n>         set AUTH_SYS UID (reconnects)");
-            println!("  gid <n>         set AUTH_SYS GID (reconnects)");
-            println!("  hostname <name> spoof AUTH_SYS machine name (reconnects)");
+            println!("  uid <n>         set AUTH_SYS UID (zero-cost credential swap)");
+            println!("  gid <n>         set AUTH_SYS GID (zero-cost credential swap)");
+            println!("  hostname <name> spoof AUTH_SYS machine name");
             println!("  whoami          show current uid/gid/hostname");
             println!("  handle          print current file handle as hex");
             println!("  lcd <dir>       change local working directory");
@@ -387,33 +417,27 @@ async fn dispatch_nfs4(client: &mut crate::proto::nfs4::compound::Nfs4DirectClie
             println!("  exit / quit     exit the shell");
         },
         "whoami" | "id" => println!("uid={uid}  gid={gid}  hostname={hostname}"),
+        // Credential changes: update the mutable state variables. The REPL loop
+        // detects the mismatch and rebuilds the client via with_credential(),
+        // which targets a different pool key -- no TCP reconnect needed.
         "uid" => match args.first().and_then(|s| s.parse::<u32>().ok()) {
             Some(new_uid) => {
                 *uid = new_uid;
-                match client.reconnect_with_auth(*uid, *gid, hostname).await {
-                    Ok(()) => println!("uid={uid} gid={gid} hostname={hostname}"),
-                    Err(e) => eprintln!("uid: reconnect failed: {e}"),
-                }
+                println!("uid={uid} gid={gid} hostname={hostname}");
             },
             None => eprintln!("uid: usage: uid <number>"),
         },
         "gid" => match args.first().and_then(|s| s.parse::<u32>().ok()) {
             Some(new_gid) => {
                 *gid = new_gid;
-                match client.reconnect_with_auth(*uid, *gid, hostname).await {
-                    Ok(()) => println!("uid={uid} gid={gid} hostname={hostname}"),
-                    Err(e) => eprintln!("gid: reconnect failed: {e}"),
-                }
+                println!("uid={uid} gid={gid} hostname={hostname}");
             },
             None => eprintln!("gid: usage: gid <number>"),
         },
         "hostname" => {
             if let Some(new_host) = args.first() {
                 (*new_host).clone_into(hostname);
-                match client.reconnect_with_auth(*uid, *gid, hostname).await {
-                    Ok(()) => println!("hostname={hostname}"),
-                    Err(e) => eprintln!("hostname: reconnect failed: {e}"),
-                }
+                println!("hostname={hostname}");
             } else {
                 println!("{hostname}");
             }
@@ -596,7 +620,7 @@ fn cwd_path_plus(cwd_path: &str, target: &str) -> Vec<String> {
 const V4_SHELL_COMMANDS: &[&str] = &["ls", "ll", "dir", "cd", "pwd", "cat", "type", "get", "download", "uid", "gid", "hostname", "whoami", "id", "handle", "lcd", "lls", "lpwd", "lmkdir", "history", "help", "exit", "quit"];
 
 struct Nfs4RemoteCompleter {
-    client: Arc<tokio::sync::Mutex<crate::proto::nfs4::compound::Nfs4DirectClient>>,
+    client: Arc<tokio::sync::Mutex<crate::proto::nfs4::Nfs4Client>>,
 }
 
 impl crate::shell::complete::RemoteCompleter for Nfs4RemoteCompleter {

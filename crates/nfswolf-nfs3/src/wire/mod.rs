@@ -7,7 +7,17 @@
 //!
 //! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
 
-pub mod mount;
+/// Re-export mount wire types from `nfswolf-mount` for backward compatibility.
+///
+/// Callers that used `nfswolf_nfs3::wire::mount::*` can keep that path; new
+/// code should use `nfswolf_mount::wire::*` directly.
+pub mod mount {
+    pub use nfswolf_mount::wire::{FHSIZE3, FhStatus, MNTNAMLEN, MNTPATHLEN, MOUNT_V3, MOUNT_V3_PROC as MOUNT_PROGRAM, PROGRAM, dirpath, export_node, exports, fhandle3, mountbody, mountlist, mountres3, mountres3_ok, mountstat3, name};
+
+    /// Backward-compatible alias for the MOUNT v3 version constant.
+    pub const VERSION: u32 = MOUNT_V3;
+}
+
 mod types;
 
 pub use types::*;

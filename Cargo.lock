@@ -680,6 +680,7 @@ dependencies = [
  "ipnet",
  "libc",
  "nfs3_server",
+ "nfswolf-mount",
  "nfswolf-nfs2",
  "nfswolf-nfs3",
  "nfswolf-nfs4",
@@ -699,9 +700,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfswolf-mount"
+version = "0.8.0"
+dependencies = [
+ "nfswolf-rpc",
+ "nfswolf-xdr",
+]
+
+[[package]]
 name = "nfswolf-nfs2"
 version = "0.8.0"
 dependencies = [
+ "nfswolf-mount",
  "nfswolf-rpc",
  "nfswolf-xdr",
  "tracing",
@@ -711,6 +721,7 @@ dependencies = [
 name = "nfswolf-nfs3"
 version = "0.8.0"
 dependencies = [
+ "nfswolf-mount",
  "nfswolf-rpc",
  "nfswolf-xdr",
  "tracing",
@@ -720,7 +731,9 @@ dependencies = [
 name = "nfswolf-nfs4"
 version = "0.8.0"
 dependencies = [
+ "nfswolf-rpc",
  "nfswolf-xdr",
+ "tracing",
 ]
 
 [[package]]

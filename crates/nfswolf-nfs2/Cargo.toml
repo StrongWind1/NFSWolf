@@ -12,6 +12,7 @@ readme = "README.md"
 [dependencies]
 nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
+nfswolf-mount = { workspace = true }
 tracing = "0.1"
 
 [lints]

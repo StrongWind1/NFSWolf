@@ -86,6 +86,7 @@ impl Nfs4DirectClient {
     /// the v3 shell does (e.g. `--aux-gids 42` to read /etc/shadow without
     /// no_root_squash). `aux_gids` are the auxiliary groups only; the primary
     /// `gid` is prepended automatically and the set is retained for reconnects.
+    #[expect(dead_code, reason = "v4 shell with aux-GID support not yet wired up")]
     pub(crate) async fn connect_with_groups_proxy(addr: SocketAddr, uid: u32, gid: u32, aux_gids: &[u32], hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
         let gids = aux_gids.to_vec();
@@ -113,6 +114,7 @@ impl Nfs4DirectClient {
     /// because `RpcClient` owns the IO and does not expose a credential setter.
     /// The retained `aux_gids` are re-applied (with the possibly-changed primary
     /// `gid`) so the shadow-GID trick survives a mid-session identity change.
+    #[expect(dead_code, reason = "v4 shell identity-change path not yet wired up")]
     pub(crate) async fn reconnect_with_auth(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         use crate::proto::auth::AuthSys;
         let opaque = AuthSys::with_groups(uid, gid, &self.aux_gids, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
@@ -149,6 +151,7 @@ impl Nfs4DirectClient {
     /// For root (`"/"`) pass an empty slice.
     /// For `"/etc"` pass `&["etc"]`.
     /// For `"/etc/nfs"` pass `&["etc", "nfs"]`.
+    #[expect(dead_code, reason = "v4 shell LOOKUP-from-root path not yet wired up")]
     pub(crate) async fn lookup_fh(&mut self, components: &[&str]) -> anyhow::Result<Vec<u8>> {
         if components.is_empty() {
             return self.get_root_fh().await;
@@ -171,6 +174,7 @@ impl Nfs4DirectClient {
     ///
     /// Like `lookup_fh` but uses PUTFH instead of PUTROOTFH, enabling
     /// relative path resolution from the current working directory.
+    #[expect(dead_code, reason = "v4 shell LOOKUP-from-cwd path not yet wired up")]
     pub(crate) async fn lookup_from_fh(&mut self, start_fh: &[u8], components: &[&str]) -> anyhow::Result<Vec<u8>> {
         if components.is_empty() {
             return Ok(start_fh.to_vec());
@@ -256,6 +260,7 @@ impl Nfs4DirectClient {
     ///
     /// Returns `(data, eof)`.  The anonymous stateid (all zeros, RFC 7530 S9.1.4.3)
     /// allows reading without a prior OPEN call on most servers.
+    #[expect(dead_code, reason = "v4 shell READ path not yet wired up")]
     pub(crate) async fn read_chunk(&mut self, file_fh: &[u8], offset: u64, count: u32) -> anyhow::Result<(Vec<u8>, bool)> {
         // Anonymous stateid: seqid=0, other=[0;12] (RFC 7530 S9.1.4.3).
         let stateid = [0u8; 16];

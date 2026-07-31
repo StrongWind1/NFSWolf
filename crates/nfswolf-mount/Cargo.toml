@@ -1,18 +1,16 @@
 [package]
-name = "nfswolf-nfs4"
+name = "nfswolf-mount"
 version.workspace = true
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "NFS version 4.0 (RFC 7530): COMPOUND encoding and the stateless read-only operation subset."
-readme = "README.md"
+description = "MOUNT protocol (RFC 1094 Appendix A / RFC 1813 Appendix I): versions 1 and 3, wire types, and a unified MountClient."
 
 [dependencies]
 nfswolf-xdr = { workspace = true }
 nfswolf-rpc = { workspace = true }
-tracing = "0.1"
 
 [lints]
 workspace = true

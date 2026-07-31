@@ -21,6 +21,8 @@
 //! [RFC 7530]: https://www.rfc-editor.org/rfc/rfc7530
 //! [RFC 8881]: https://www.rfc-editor.org/rfc/rfc8881
 
+pub mod client;
 pub mod wire;
 
+pub use client::{Nfs4Client, Nfs4Error};
 pub use wire::{ArgOp, AttrRequest, CompoundArgs, CompoundRes, DirEntry4, NFS4_PROC_COMPOUND, NFS4_PROGRAM as PROGRAM, NFS4_VERSION as VERSION, Nfs4Status, ResOp, ResOpData};

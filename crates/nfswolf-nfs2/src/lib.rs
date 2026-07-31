@@ -19,9 +19,16 @@
 //! [RFC 2623]: https://www.rfc-editor.org/rfc/rfc2623
 
 mod client;
-pub mod mount;
+pub mod raw;
 pub mod wire;
 
 pub use client::{Nfs2Client, Nfs2Error};
-pub use mount::MountV1Client;
+pub use raw::Nfs2RawClient;
 pub use wire::{NFS_PROGRAM as PROGRAM, NFS_VERSION as VERSION, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr, Nfs2Stat};
+
+/// Re-export the MOUNT client from `nfswolf-mount` for backward compatibility.
+///
+/// `MountV1Client<T>` is `MountClient<T>` configured for MOUNT v1.
+/// Callers that used `nfswolf_nfs2::MountV1Client` can keep that path;
+/// new code should use `nfswolf_mount::MountClient` directly.
+pub type MountV1Client<T> = nfswolf_mount::MountClient<T>;

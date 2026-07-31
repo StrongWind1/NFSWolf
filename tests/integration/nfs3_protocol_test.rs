@@ -61,7 +61,7 @@ async fn start_server(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16)
 async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::new(DirectTransport::new(TokioIo::new(stream)))
+    MountClient::v3(DirectTransport::new(TokioIo::new(stream)))
 }
 
 async fn nfs3_client(port: u16) -> Nfs3Client<DirectTransport<TokioIo<TcpStream>>> {
@@ -83,7 +83,7 @@ async fn readdirplus_lists_all_entries() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -113,7 +113,7 @@ async fn readdirplus_entries_carry_attributes() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -145,7 +145,7 @@ async fn each_rpc_call_produces_a_different_xid() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -172,7 +172,7 @@ async fn lookup_then_read_reproduces_content() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -206,7 +206,7 @@ async fn memfs_getattr_root_nlink_is_nonzero() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -230,7 +230,7 @@ async fn memfs_read_at_offset_returns_partial() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -259,7 +259,7 @@ async fn memfs_read_past_eof_returns_empty() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -287,7 +287,7 @@ async fn memfs_readdirplus_empty_dir() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -317,7 +317,7 @@ async fn memfs_getattr_file_type_is_regular() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -344,7 +344,7 @@ async fn getattr_size_matches_file_content_length() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -375,7 +375,7 @@ async fn chunked_read_reassembles_full_content() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -433,7 +433,7 @@ async fn access_read_on_file_returns_read_bit() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -459,7 +459,7 @@ async fn access_lookup_on_directory_returns_lookup_bit() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -480,7 +480,7 @@ async fn access_all_bits_requested() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -506,7 +506,7 @@ async fn fsstat_returns_nonzero_total_space() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -530,7 +530,7 @@ async fn fsinfo_returns_read_write_limits() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -559,7 +559,7 @@ async fn pathconf_returns_valid_limits() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -586,7 +586,7 @@ async fn readdir_lists_file_names() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -614,7 +614,7 @@ async fn write_then_read_data_integrity() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -653,7 +653,7 @@ async fn create_then_lookup_finds_new_file() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -687,7 +687,7 @@ async fn remove_then_lookup_returns_noent() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -721,7 +721,7 @@ async fn multiple_sequential_operations_same_connection() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -790,7 +790,7 @@ async fn getattr_reflects_size_after_write() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -824,7 +824,7 @@ async fn lookup_nonexistent_entry_returns_noent() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let nfs = nfs3_client(port).await;
@@ -870,7 +870,7 @@ async fn file_handle_works_across_separate_connections() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     // Connection 1: LOOKUP to get the file handle.

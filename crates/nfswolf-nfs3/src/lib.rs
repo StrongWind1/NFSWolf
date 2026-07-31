@@ -10,7 +10,6 @@
 //! |--------|-----------|
 //! | [`wire`] | XDR types transcribed verbatim from the RFC |
 //! | [`Nfs3Client`] | One method per procedure, wire types in and out |
-//! | [`mount`] | The MOUNT v3 client (RFC 1813 appendix I) |
 //! | [`api`] | Domain types -- file handles, attributes, access bits |
 //! | [`Nfs3Error`] | Protocol status codes, classified |
 //!
@@ -38,13 +37,18 @@ pub mod api;
 pub mod wire;
 
 mod error;
-mod error_mount;
-pub mod mount;
 mod raw;
 
 pub use api::{CreateMode, DirEntry, DirEntryPlus, DirPage, FileAttrs, FileHandle, FileType, FsInfo, FsStat, HexError, Nfs3Fault, NfsTime, ReadChunk, WriteAck, WriteStable, access};
 pub use error::Nfs3Error;
-pub use error_mount::MountError;
-pub use mount::MountClient;
 pub use raw::Nfs3Client;
 pub use wire::{PROGRAM, VERSION};
+
+/// Re-export the MOUNT error from `nfswolf-mount` for backward compatibility.
+pub use nfswolf_mount::MountError;
+
+/// Re-export the MOUNT client from `nfswolf-mount` for backward compatibility.
+///
+/// `MountClient<T>` here is the unified mount client. New code should use
+/// `nfswolf_mount::MountClient` directly.
+pub type MountClient<T> = nfswolf_mount::MountClient<T>;
