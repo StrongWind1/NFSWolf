@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "ONC RPC v2 (RFC 5531) client and a runtime-agnostic async transport layer."
 readme = "README.md"
 keywords = ["rpc", "onc", "sunrpc", "client", "network"]

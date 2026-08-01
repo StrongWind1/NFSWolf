@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "NFS version 4 (RFC 7530 / 8881 / 7862): v4.0 COMPOUND, v4.1 recon operations, v4.2 security labels."
 readme = "README.md"
 keywords = ["nfs", "nfsv4", "rpc", "filesystem", "network"]

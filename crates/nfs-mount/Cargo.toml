@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "MOUNT protocol (RFC 1094 Appendix A / RFC 1813 Appendix I): versions 1 and 3, wire types, and a unified MountClient."
 readme = "README.md"
 keywords = ["nfs", "mount", "rpc", "filesystem", "network"]

@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Derive macro for XDR (RFC 4506) Pack/Unpack encoding used by the NFSWolf protocol stack."
 readme = "README.md"
 keywords = ["xdr", "derive", "onc", "rpc", "codec"]

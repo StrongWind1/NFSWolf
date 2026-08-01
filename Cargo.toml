@@ -36,6 +36,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/StrongWind1/NFSWolf"
+homepage = "https://strongwind.dev/NFSWolf"
 
 [workspace.dependencies]
 onc-xdr-derive = { version = "0.1.0", path = "crates/onc-xdr-derive" }
@@ -66,6 +67,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an interactive shell for authorized red-team and pentest work."
 keywords = ["nfs", "security", "pentest", "scanner", "rpc"]
 categories = ["command-line-utilities", "network-programming", "filesystem"]

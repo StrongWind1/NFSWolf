@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "XDR (RFC 4506) codec: Pack/Unpack traits, opaque and list types, and length-hardened decoders for untrusted input."
 readme = "README.md"
 keywords = ["xdr", "serialization", "onc", "rpc", "codec"]

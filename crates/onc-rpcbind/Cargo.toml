@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Portmapper v2 (RFC 1057) and rpcbind v3/v4 (RFC 1833) clients for ONC RPC service discovery."
 readme = "README.md"
 keywords = ["rpcbind", "portmapper", "onc", "rpc", "discovery"]
