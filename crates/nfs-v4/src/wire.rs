@@ -108,16 +108,12 @@ const OP_ILLEGAL: u32 = 10044;
 // --- NFSv4.1 operation codes (RFC 5661 S18) ---
 
 /// EXCHANGE_ID  --  establish client identity (op 42, RFC 5661 S18.35).
-#[cfg(feature = "v41")]
 const OP_EXCHANGE_ID: u32 = 42;
 /// GETDEVICEINFO  --  retrieve pNFS device info (op 47, RFC 5661 S18.40).
-#[cfg(feature = "v41")]
 const OP_GETDEVICEINFO: u32 = 47;
 /// GETDEVICELIST  --  enumerate pNFS devices (op 48, RFC 5661 S18.41).
-#[cfg(feature = "v41")]
 const OP_GETDEVICELIST: u32 = 48;
 /// SECINFO_NO_NAME  --  get security info for current FH (op 52, RFC 5661 S18.45).
-#[cfg(feature = "v41")]
 const OP_SECINFO_NO_NAME: u32 = 52;
 
 // --- XDR helpers ---
@@ -169,7 +165,6 @@ impl AttrRequest {
     ///
     /// Produces a bitmap with only bit 80 set (word 2, bit 16). The response
     /// contains a `SecLabel4` value when the server supports labeled NFS.
-    #[cfg(feature = "v42")]
     #[must_use]
     pub fn sec_label() -> Self {
         // Attribute 80 sits in word 2 (80 / 32 = 2), bit 16 (80 % 32 = 16).
@@ -419,27 +414,23 @@ pub enum ArgOp {
     /// Payload: pre-encoded `EXCHANGE_ID4args` body.
     /// Replaces SETCLIENTID in NFSv4.1. The response reveals the server's
     /// implementation id (vendor, version string) and capability flags.
-    #[cfg(feature = "v41")]
     ExchangeId(Vec<u8>),
     /// Retrieve pNFS device info (op 47, RFC 5661 S18.40).
     ///
     /// Payload: pre-encoded `GETDEVICEINFO4args` body (deviceid + layout_type + maxcount).
     /// Returns data-server addresses, including RDMA endpoints when the file layout
     /// uses the NFSv4.1/files layout type.
-    #[cfg(feature = "v41")]
     Getdeviceinfo(Vec<u8>),
     /// Enumerate pNFS device IDs (op 48, RFC 5661 S18.41).
     ///
     /// Payload: pre-encoded `GETDEVICELIST4args` body (layout_type + maxdevices + cookie).
     /// Lists all device IDs known to the server for a given layout type.
-    #[cfg(feature = "v41")]
     Getdevicelist(Vec<u8>),
     /// Get security info for the current FH's export (op 52, RFC 5661 S18.45).
     ///
     /// Unlike SECINFO (which takes a child name), SECINFO_NO_NAME queries the
     /// security policies on the current file handle itself. The argument is a
     /// single u32 style: 0 = SECINFO_STYLE4_CURRENT_FH, 1 = SECINFO_STYLE4_PARENT.
-    #[cfg(feature = "v41")]
     SecinfoNoName {
         /// 0 = current FH, 1 = parent directory.
         style: u32,
@@ -478,9 +469,7 @@ impl Pack for ArgOp {
             Self::Create(payload) | Self::Lock(payload) | Self::Lockt(payload) | Self::Locku(payload) | Self::Nverify(payload) | Self::Open(payload) | Self::Setattr(payload) | Self::Setclientid(payload) | Self::Verify(payload) | Self::ReleaseLockowner(payload) => 4 + payload.len(),
 
             // v4.1 opaque-payload ops.
-            #[cfg(feature = "v41")]
             Self::ExchangeId(payload) | Self::Getdeviceinfo(payload) | Self::Getdevicelist(payload) => 4 + payload.len(),
-            #[cfg(feature = "v41")]
             Self::SecinfoNoName { .. } => 4 + 4,
         }
     }
@@ -635,13 +624,9 @@ impl Pack for ArgOp {
             Self::ReleaseLockowner(payload) => pack_opcode_payload(OP_RELEASE_LOCKOWNER, payload, out),
 
             // v4.1 opaque-payload ops.
-            #[cfg(feature = "v41")]
             Self::ExchangeId(payload) => pack_opcode_payload(OP_EXCHANGE_ID, payload, out),
-            #[cfg(feature = "v41")]
             Self::Getdeviceinfo(payload) => pack_opcode_payload(OP_GETDEVICEINFO, payload, out),
-            #[cfg(feature = "v41")]
             Self::Getdevicelist(payload) => pack_opcode_payload(OP_GETDEVICELIST, payload, out),
-            #[cfg(feature = "v41")]
             Self::SecinfoNoName { style } => {
                 let mut n = OP_SECINFO_NO_NAME.pack(out)?;
                 n += style.pack(out)?;
@@ -791,7 +776,6 @@ impl CompoundBuilder {
     /// `style`: 0 = SECINFO_STYLE4_CURRENT_FH, 1 = SECINFO_STYLE4_PARENT.
     /// Unlike SECINFO (which takes a child name), this queries the security
     /// policies on the current file handle itself.
-    #[cfg(feature = "v41")]
     #[must_use]
     pub fn secinfo_no_name(self, style: u32) -> Self {
         self.op(ArgOp::SecinfoNoName { style })
@@ -802,7 +786,6 @@ impl CompoundBuilder {
     /// Constructs the pre-encoded EXCHANGE_ID4args payload. The response reveals
     /// the server's implementation id (vendor string, version) and capability flags
     /// (pNFS support, migration, referrals).
-    #[cfg(feature = "v41")]
     #[must_use]
     pub fn exchange_id(self, client_name: &str) -> Self {
         let payload = encode_exchange_id(client_name);
@@ -814,7 +797,6 @@ impl CompoundBuilder {
     /// `device_id` is the 16-byte device ID, `layout_type` is the layout type
     /// (1 = LAYOUT4_NFSV4_1_FILES). Returns data-server addresses including
     /// any RDMA endpoints.
-    #[cfg(feature = "v41")]
     #[must_use]
     pub fn getdeviceinfo(self, device_id: &[u8; 16], layout_type: u32) -> Self {
         let payload = encode_getdeviceinfo(device_id, layout_type);
@@ -825,7 +807,6 @@ impl CompoundBuilder {
     ///
     /// `layout_type` is the layout type (1 = LAYOUT4_NFSV4_1_FILES).
     /// Returns a list of device IDs that can be passed to GETDEVICEINFO.
-    #[cfg(feature = "v41")]
     #[must_use]
     pub fn getdevicelist(self, layout_type: u32) -> Self {
         let payload = encode_getdevicelist(layout_type);
@@ -925,7 +906,6 @@ fn encode_open_read(name: &str) -> Vec<u8> {
 ///   eia_flags: u32 (0 = no special capabilities requested)
 ///   eia_state_protect: state_protect_how4(u32=0 SP4_NONE)
 ///   eia_client_impl_id: nfs_impl_id4<1> (optional, 0-element array = absent)
-#[cfg(feature = "v41")]
 fn encode_exchange_id(client_name: &str) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64);
 
@@ -954,7 +934,6 @@ fn encode_exchange_id(client_name: &str) -> Vec<u8> {
 ///   gdia_layout_type: layouttype4 (u32)
 ///   gdia_maxcount: u32 (max response size, 0 = server default)
 ///   gdia_notify_types: bitmap4 (0-word bitmap = no notifications)
-#[cfg(feature = "v41")]
 fn encode_getdeviceinfo(device_id: &[u8; 16], layout_type: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32);
 
@@ -980,7 +959,6 @@ fn encode_getdeviceinfo(device_id: &[u8; 16], layout_type: u32) -> Vec<u8> {
 ///   gdla_maxdevices: u32 (max devices to return)
 ///   gdla_cookie: u64 (0 for first call)
 ///   gdla_cookieverf: verifier4 (8 bytes, all-zeros for first call)
-#[cfg(feature = "v41")]
 fn encode_getdevicelist(layout_type: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(24);
 
@@ -1017,7 +995,6 @@ pub struct DirEntry4 {
 /// Returned inside the EXCHANGE_ID response. The domain and name fields
 /// reveal the NFS server vendor and product version -- high-value recon
 /// data for fingerprinting the server stack.
-#[cfg(feature = "v41")]
 #[derive(Debug, Clone)]
 pub struct NfsImplId4 {
     /// DNS domain of the implementor (e.g., "kernel.org").
@@ -1033,7 +1010,6 @@ pub struct NfsImplId4 {
 /// FATTR4_SEC_LABEL attribute number (attribute 80, RFC 7862 S12.2.4).
 ///
 /// Bit 80 in the attribute bitmap = word 2, bit 16.
-#[cfg(feature = "v42")]
 pub const FATTR4_SEC_LABEL: u32 = 80;
 
 /// MAC security label (RFC 7862 S12.2.4, attribute 80).
@@ -1041,7 +1017,6 @@ pub const FATTR4_SEC_LABEL: u32 = 80;
 /// Carries the SELinux/Smack/AppArmor label assigned to a file.
 /// The `label` field contains the raw context string bytes
 /// (e.g., `b"system_u:object_r:nfs_t:s0"` for SELinux).
-#[cfg(feature = "v42")]
 #[derive(Debug, Clone)]
 pub struct SecLabel4 {
     /// Label Format Specifier -- identifies the MAC model.
@@ -1122,7 +1097,6 @@ pub enum ResOpData {
     ///
     /// Contains the server's client ID assignment, capability flags, and
     /// implementation identity (vendor, version, build date).
-    #[cfg(feature = "v41")]
     ExchangeId {
         /// Server-assigned client ID.
         clientid: u64,
@@ -1141,7 +1115,6 @@ pub enum ResOpData {
     ///
     /// The `device_addr` bytes carry the layout-type-specific address structure
     /// (e.g., `nfsv4_1_file_layout_ds_addr4` for `LAYOUT4_NFSV4_1_FILES`).
-    #[cfg(feature = "v41")]
     GetDeviceInfo {
         /// Layout type this address applies to.
         layout_type: u32,
@@ -1154,7 +1127,6 @@ pub enum ResOpData {
     ///
     /// Lists device IDs that can be passed to GETDEVICEINFO. Paginated via
     /// cookie/cookieverf like READDIR.
-    #[cfg(feature = "v41")]
     GetDeviceList {
         /// Resume cookie for the next page.
         cookie: u64,
@@ -1431,7 +1403,6 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         },
 
         // SECINFO_NO_NAME result: same format as SECINFO (RFC 5661 S18.45.3).
-        #[cfg(feature = "v41")]
         OP_SECINFO_NO_NAME => {
             let (arr_count, mut n) = u32::unpack(input)?;
             let mut flavors = onc_xdr::vec_with_capacity(arr_count as usize);
@@ -1456,7 +1427,6 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         // Decodes the server's identity, capability flags, and impl_id.
         // Only SP4_NONE state protection is decodable -- SP4_MACH_CRED and
         // SP4_SSV have complex nested structures that stop parsing.
-        #[cfg(feature = "v41")]
         OP_EXCHANGE_ID => {
             let (clientid, mut n) = u64::unpack(input)?;
             let (sequenceid, sn) = u32::unpack(input)?;
@@ -1514,7 +1484,6 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         },
 
         // GETDEVICEINFO result (RFC 8881 S18.40.3).
-        #[cfg(feature = "v41")]
         OP_GETDEVICEINFO => {
             // device_addr4: da_layout_type(u32) + da_addr_body(opaque<>).
             let (layout_type, mut n) = u32::unpack(input)?;
@@ -1542,7 +1511,6 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         },
 
         // GETDEVICELIST result (RFC 8881 S18.41.3).
-        #[cfg(feature = "v41")]
         OP_GETDEVICELIST => {
             let (cookie, mut n) = u64::unpack(input)?;
             let mut cookieverf = [0u8; 8];
@@ -2569,7 +2537,6 @@ mod tests {
             ArgOp::Verify(vec![0u8; 12]),
             ArgOp::ReleaseLockowner(vec![0u8; 16]),
         ];
-        #[cfg(feature = "v41")]
         let ops = {
             let mut v = ops;
             v.extend([ArgOp::ExchangeId(vec![0u8; 32]), ArgOp::Getdeviceinfo(vec![0u8; 28]), ArgOp::Getdevicelist(vec![0u8; 24]), ArgOp::SecinfoNoName { style: 0 }, ArgOp::SecinfoNoName { style: 1 }]);

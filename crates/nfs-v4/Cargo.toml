@@ -6,19 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "NFS version 4.0 (RFC 7530): COMPOUND encoding and the stateless read-only operation subset."
+description = "NFS version 4 (RFC 7530 / 8881 / 7862): v4.0 COMPOUND, v4.1 recon operations, v4.2 security labels."
 readme = "README.md"
 keywords = ["nfs", "nfsv4", "rpc", "filesystem", "network"]
 categories = ["network-programming", "parser-implementations"]
 
-[features]
-## NFSv4.1 operations (RFC 5661): EXCHANGE_ID, SECINFO_NO_NAME, GETDEVICEINFO, GETDEVICELIST.
-v41 = []
-## NFSv4.2 operations (RFC 7862): FATTR4_SEC_LABEL.
-v42 = ["v41"]
-
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
