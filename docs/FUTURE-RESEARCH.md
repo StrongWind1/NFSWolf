@@ -52,7 +52,7 @@ Spec reference: X/Open CAE C702 "XNFS, Version 3W" is at `ref/xopen-c702.pdf` (3
 
 **NFSWolf integration:** Fits into the `escape` subcommand as a first-try before handle forging. Cheaper than `FileHandleAnalyzer` — no filesystem fingerprinting, no inode guessing, one RPC call. Fall back to the existing ext4/xfs/btrfs escape if the server rejects the public handle. `Nfs2Client` and `Nfs3Client` already have LOOKUP — the only new thing is constructing the public handle constant.
 
-**What NFSWolf has today:** `PUTPUBFH` for NFSv4 (already in `crates/nfswolf-nfs4/src/wire.rs`). No v2/v3 public handle probe. The `check_webnfs_public_handle` function in `src/engine/analyzer.rs` exists but has a proxy bypass bug (documented in CRATE-DESIGN.md's SOCKS5 section).
+**What NFSWolf has today:** `PUTPUBFH` for NFSv4 (already in `crates/nfs-v4/src/wire.rs`). No v2/v3 public handle probe. The `check_webnfs_public_handle` function in `src/engine/analyzer.rs` exists but has a proxy bypass bug (documented in CRATE-DESIGN.md's SOCKS5 section).
 
 ### Wire format (C702 Appendix E, pp 307-316; RFC 2054/2055)
 
@@ -81,7 +81,7 @@ The public filehandle is a reserved filehandle value with well-known encoding pe
 
 This is distinct from the v2 encoding: a v2 public handle is 32 zero bytes (a valid-looking handle that happens to be all zeros), while a v3 public handle is a zero-length opaque (an explicitly empty handle). This distinction matters for version detection -- see error semantics below.
 
-**NFSv4 (RFC 7530 ss16.21):** `PUTPUBFH` (op 23) in a COMPOUND request. No wire-level handle constant -- the operation itself semantically places the public filehandle in the current filehandle slot. Already implemented in NFSWolf's `nfswolf-nfs4` crate.
+**NFSv4 (RFC 7530 ss16.21):** `PUTPUBFH` (op 23) in a COMPOUND request. No wire-level handle constant -- the operation itself semantically places the public filehandle in the current filehandle slot. Already implemented in NFSWolf's `nfs-v4` crate.
 
 #### Multi-component LOOKUP encoding (C702 ssE.6, pp 309-310)
 
@@ -1736,7 +1736,7 @@ NFSWolf's immediate need is parsing security flavor advertisements, not establis
 
 3. **No GSS context establishment needed**: parsing the server's security advertisement is a read-only operation on the MOUNT/SECINFO response. No `gss_init_sec_context` call, no Kerberos tickets, no GSSAPI library dependency. The `sec_oid4` field is a raw opaque that can be compared byte-for-byte against known OID encodings.
 
-4. **XDR types already available**: `nfswolf-nfs3` has the MOUNT v3 response types; `nfswolf-nfs4` has the NFSv4 COMPOUND types including SECINFO. The only missing piece is the OID constant table and the pseudo-flavor mapping.
+4. **XDR types already available**: `nfs-v3` has the MOUNT v3 response types; `nfs-v4` has the NFSv4 COMPOUND types including SECINFO. The only missing piece is the OID constant table and the pseudo-flavor mapping.
 
 #### v2 additions (RFC 5403)
 
@@ -1931,7 +1931,7 @@ The existing subsection confirms the `writeverf3` changes on server reboot and d
 
 **Verifier-based uptime estimation.** C702 suggests the `verf` value should be "the time that the server was booted or the time the server was last started (if restarting the server without a reboot results in lost buffers)" (p. 214). Linux knfsd uses a SipHash of the timestamp, so the raw value is not a readable timestamp. However, verifier *stability* is the signal: a stable `verf` across multiple polling intervals proves the NFS server process has not restarted. A change proves it has. Periodic polling (e.g., once per minute) establishes a lower bound on uptime and detects restarts within the polling interval. Combined with `rpcbind GETTIME` (which returns the server's epoch clock), the polling interval brackets the reboot time.
 
-**NFSWolf integration.** The `verf` value is already available in `WRITE3resok` and `COMMIT3resok` via the `nfswolf-nfs3` crate. A reboot oracle would store the baseline `verf` on first COMMIT and compare on subsequent calls. The zero-count COMMIT probe is the preferred polling method -- it requires `--allow-write` for the initial WRITE that establishes the baseline, but the polling COMMITs themselves are read-only (they flush already-committed data). The HA fingerprint is a side effect of the same comparison logic.
+**NFSWolf integration.** The `verf` value is already available in `WRITE3resok` and `COMMIT3resok` via the `nfs-v3` crate. A reboot oracle would store the baseline `verf` on first COMMIT and compare on subsequent calls. The zero-count COMMIT probe is the preferred polling method -- it requires `--allow-write` for the initial WRITE that establishes the baseline, but the polling COMMITs themselves are read-only (they flush already-committed data). The HA fingerprint is a side effect of the same comparison logic.
 
 ### DRC replay window — practical exploitation (C702 ss12.3.4, pp. 191-192; ss7.1.3, p. 70)
 
@@ -1971,7 +1971,7 @@ C702 ss12.3 provides implementation guidance for NFSv3 servers. Several guidelin
 
 **Filename character handling and path traversal (C702 ss12.3.5, p. 192; ss12.2.4, pp. 188-189; Appendix A ss A.15.6, p. 281).** C702 ss12.3.5 (p. 192) states: "Server implementations of NFS Version 3 protocol will frequently impose restrictions on the names that can be created. Many servers will also forbid the use of names that contain certain characters, such as the path component separator used by the server operating system." Appendix A ss A.15.6 (p. 281) adds: "A server may have an implementation-specific set of characters that it does not allow in file names." Case handling is also implementation-defined: "some server implementations do not preserve character case when creating an object" and "some server implementations may ignore case distinctions for lookup operations" (p. 281). This means LOOKUP with mixed-case names may succeed on case-insensitive servers (Windows NFS, NetApp NTFS volumes) when it would fail on case-sensitive ones (Linux ext4). For path traversal: the NFS protocol transmits filenames as raw opaque byte strings. The interpretation of bytes above 0x7F is server-specific -- there is no mandated charset. A filename containing bytes that decode to `../` in one encoding but are treated as a single multibyte character in another could traverse directories on charset-mismatched servers. C702 provides no guidance on charset normalization; the risk is entirely implementation-dependent.
 
-**Server access control model divergence (C702 Appendix A ss A.15.7, pp. 281-282).** "The server may use an access model other than the traditional UNIX mode bits, for example, Access Control Lists. In this case the mode bits reported by the client need not accurately represent the permissions on a file" (p. 281). With NFSv2, "the client relies on the mode bits to determine whether a given process has access to a given file. If the mode bits are sufficiently inaccurate, the client may deny access to a process even though the request would succeed on the server" (p. 281). Conversely, "the client may grant access based on the mode bits, only to have the request denied by the server" (p. 282). With NFSv3, "the client can ask the server whether a particular access request should be granted" via ACCESS (p. 282). This directly validates NFSWolf's existing design rule (CLAUDE.md rule 5): "ACCESS is advisory" -- but C702 goes further by documenting that even the mode bits returned by GETATTR may be a lossy projection of the actual server access model. The credential ladder's mode-bit pruning (`mode & 0o007 == 0` skips service accounts) can be wrong in both directions: overly aggressive (ACLs grant access that mode bits don't show) and insufficiently aggressive (mode bits show access that ACLs deny). The NFS_ACL sideband protocol (program 100227, documented earlier in this file) is the only way to get the real access model.
+**Server access control model divergence (C702 Appendix A ss A.15.7, pp. 281-282).** "The server may use an access model other than the traditional UNIX mode bits, for example, Access Control Lists. In this case the mode bits reported by the client need not accurately represent the permissions on a file" (p. 281). With NFSv2, "the client relies on the mode bits to determine whether a given process has access to a given file. If the mode bits are sufficiently inaccurate, the client may deny access to a process even though the request would succeed on the server" (p. 281). Conversely, "the client may grant access based on the mode bits, only to have the request denied by the server" (p. 282). With NFSv3, "the client can ask the server whether a particular access request should be granted" via ACCESS (p. 282). This directly validates NFSWolf's existing design rule 5: "ACCESS is advisory" -- but C702 goes further by documenting that even the mode bits returned by GETATTR may be a lossy projection of the actual server access model. The credential ladder's mode-bit pruning (`mode & 0o007 == 0` skips service accounts) can be wrong in both directions: overly aggressive (ACLs grant access that mode bits don't show) and insufficiently aggressive (mode bits show access that ACLs deny). The NFS_ACL sideband protocol (program 100227, documented earlier in this file) is the only way to get the real access model.
 
 ### Client-side vulnerabilities documented by C702 (Appendix A ss A.5-A.9, pp. 273-277; ss12.3.1, p. 189)
 
@@ -2064,7 +2064,7 @@ Combines the WebNFS public filehandle with AUTH_SYS credential forging to access
 
 **Prerequisites:** Network access to NFS port 2049. No portmapper needed (WebNFS spec mandates direct port 2049 connection). No MOUNT access needed.
 **Detection difficulty:** Medium. The zero-length/all-zero handle is distinctive in packet captures, but no standard NFS monitoring tool flags it. The MCL path with `..` components is more suspicious but only visible in deep packet inspection.
-**NFSWolf implementation status:** The v4 `PUTPUBFH` is implemented in `nfswolf-nfs4`. The v2/v3 public handle probe is not implemented. `check_webnfs_public_handle` exists in `src/engine/analyzer.rs` but has a proxy bypass bug (documented in CRATE-DESIGN.md). The existing LOOKUP procedures in `Nfs2Client` and `Nfs3Client` are sufficient for the wire-level probe — only the handle constant and MCL path construction are missing.
+**NFSWolf implementation status:** The v4 `PUTPUBFH` is implemented in `nfs-v4`. The v2/v3 public handle probe is not implemented. `check_webnfs_public_handle` exists in `src/engine/analyzer.rs` but has a proxy bypass bug (documented in CRATE-DESIGN.md). The existing LOOKUP procedures in `Nfs2Client` and `Nfs3Client` are sufficient for the wire-level probe — only the handle constant and MCL path construction are missing.
 
 ### Chain 6: PCNFSD -> authenticated NFS access
 
@@ -2107,7 +2107,7 @@ Exploits the NFSv3 spec requirement that failed operations return attributes, tu
 
 **Prerequisites:** File handle for a parent directory (via MOUNT or handle forging). The target files must exist on the export.
 **Detection difficulty:** Low. LOOKUP and ACCESS are the most common NFS operations. The access-denied responses are never logged by standard NFS server configurations. The attacker's probing is indistinguishable from a misconfigured client.
-**NFSWolf implementation status:** LOOKUP and ACCESS are fully implemented. The `post_op_attr` extraction from failure responses is partially implemented — the `Nfs3Result::Err` arm carries the failure data, but `flatten()` in the domain API discards it. Recovering the attributes from the failure arm is a code change in `nfswolf-nfs3`, not a new protocol. The `credential_ladder_with()` integration point is implemented.
+**NFSWolf implementation status:** LOOKUP and ACCESS are fully implemented. The `post_op_attr` extraction from failure responses is partially implemented — the `Nfs3Result::Err` arm carries the failure data, but `flatten()` in the domain API discards it. Recovering the attributes from the failure arm is a code change in `nfs-v3`, not a new protocol. The `credential_ladder_with()` integration point is implemented.
 
 ---
 
@@ -2221,7 +2221,7 @@ NFSWolf currently implements heuristics 1, 2, and partially 4 (FreeBSD from fid_
 
 **Where to add:** `src/shell/v3.rs` `V3Ops::readdir()` (or the equivalent `readdir_plus` call) should detect entries where the handle is `None` and issue a follow-up LOOKUP to obtain the missing handle. The `src/fuse.rs` `NfsFuse` READDIR handler needs the same fix. Could be gated behind a `--fix-nested-exports` flag or made always-on (a LOOKUP for a missing handle is cheap and harmless on non-NetApp servers).
 
-**Implementation complexity:** Moderate. The READDIRPLUS response parsing in `nfswolf-nfs3` already handles optional handles (`post_op_fh3`). The fix is in the consumer: when iterating READDIRPLUS entries, if `handle_follows` is false, issue a LOOKUP for that name against the parent handle. Needs care to avoid infinite recursion if nested exports are deeply stacked.
+**Implementation complexity:** Moderate. The READDIRPLUS response parsing in `nfs-v3` already handles optional handles (`post_op_fh3`). The fix is in the consumer: when iterating READDIRPLUS entries, if `handle_follows` is false, issue a LOOKUP for that name against the parent handle. Needs care to avoid infinite recursion if nested exports are deeply stacked.
 
 #### (g) HP-UX one-request-per-connection handling
 
@@ -2298,7 +2298,7 @@ The wiki also notes that ZFS exports created via `zfs set sharenfs=...` always e
 
 **Where to add:** `src/cli/escape.rs` `EscapeArgs::run()` should fall back to NFSv4 when NFSv3 is unavailable. The constructed handles from `file_handle.rs` are version-agnostic. The verification step (listing the root directory) needs a v4 path: PUTFH + READDIR via the existing `Nfs4DirectClient`. `src/engine/analyzer.rs` `check_escape()` should similarly support v4.
 
-**Implementation complexity:** Moderate. The handle construction is shared. The new code is: (1) sending the constructed handle via PUTFH, (2) issuing READDIR to verify the escape, (3) adapting the directory comparison logic for NFSv4 response types. The `Nfs4DirectClient` and `nfswolf_nfs4::wire` already support PUTFH, READDIR, and GETFH.
+**Implementation complexity:** Moderate. The handle construction is shared. The new code is: (1) sending the constructed handle via PUTFH, (2) issuing READDIR to verify the escape, (3) adapting the directory comparison logic for NFSv4 response types. The `Nfs4DirectClient` and `nfs_v4::wire` already support PUTFH, READDIR, and GETFH.
 
 #### (n) Allowed-client reachability probing
 
@@ -2934,7 +2934,7 @@ Systematic audit of all 15 NFS-related RFCs in `ref/rfc/` for security-relevant 
 
 **Portmapper GETPORT probe (RFC 1057 Appendix A, PMAPPROC_GETPORT).** Takes a program/version/protocol triple and returns the port number (0 if not registered). AUTH_NONE. Probing GETPORT for specific program numbers (100003/NFS, 100021/NLM, 100024/NSM, 100004/NIS, etc.) reveals whether each service is running without needing DUMP. Stealthier than DUMP since it returns a single integer rather than the full service table. NFSWolf already uses this: yes, in `PortmapClient::getport()`.
 
-**Rpcbind GETTIME server clock leak (RFC 1833, rpcbind v3/v4).** Returns the server's epoch time in seconds. AUTH_NONE. Leaks the server's clock, which can be compared against the client's clock to measure time skew. Time skew is relevant to Kerberos attacks (Kerberos requires clocks within 5 minutes by default). Also useful for estimating server uptime when combined with the write verifier oracle. NFSWolf already exploits this: yes, `RpcbindClient::gettime()` in `crates/nfswolf-rpc/`.
+**Rpcbind GETTIME server clock leak (RFC 1833, rpcbind v3/v4).** Returns the server's epoch time in seconds. AUTH_NONE. Leaks the server's clock, which can be compared against the client's clock to measure time skew. Time skew is relevant to Kerberos attacks (Kerberos requires clocks within 5 minutes by default). Also useful for estimating server uptime when combined with the write verifier oracle. NFSWolf already exploits this: yes, `RpcbindClient::gettime()` in `crates/onc-rpcbind/`.
 
 **Rpcbind GETSTAT per-version call counts (RFC 1833, rpcbind v3/v4).** Returns per-version RPC call counts, revealing how actively each program is being used. AUTH_NONE. High call counts on NFS program version 3 vs version 4 reveal which version is in active production use. Call counts on NLM reveal whether advisory locking is in use (relevant for the NLM lock-release attack chain). NFSWolf already exploits this: yes, `RpcbindClient::getstat()`.
 
@@ -2966,7 +2966,7 @@ Systematic audit of all 15 NFS-related RFCs in `ref/rfc/` for security-relevant 
 
 **NFSv3 GETATTR (RFC 1813 ss3.3.1).** Returns full file attributes: type, mode, nlink, uid, gid, size, used, rdev, fsid, fileid, atime, mtime, ctime. The `fsid` value is used for OS/FS fingerprinting. The `fileid` (inode number) is used for handle construction in `FileHandleAnalyzer`. NFSWolf already exploits this: yes, throughout.
 
-**NFSv3 ACCESS (RFC 1813 ss3.3.4).** Returns a bitmask of allowed access rights (READ, LOOKUP, MODIFY, EXTEND, DELETE, EXECUTE). The RFC explicitly states: "The results of this procedure are necessarily advisory in nature" -- a server may return ACCESS3_READ but still deny the actual READ. NFSWolf must always confirm by attempting the operation. NFSWolf already exploits this: yes, in `uid-spray` and credential ladder probing. The advisory nature is documented as design rule 5 in CLAUDE.md.
+**NFSv3 ACCESS (RFC 1813 ss3.3.4).** Returns a bitmask of allowed access rights (READ, LOOKUP, MODIFY, EXTEND, DELETE, EXECUTE). The RFC explicitly states: "The results of this procedure are necessarily advisory in nature" -- a server may return ACCESS3_READ but still deny the actual READ. NFSWolf must always confirm by attempting the operation. NFSWolf already exploits this: yes, in `uid-spray` and credential ladder probing. The advisory nature is documented as design rule 5 in the project instructions.
 
 **NFSv3 PATHCONF (RFC 1813 ss3.3.20).** Returns `linkmax`, `name_max`, `no_trunc`, `chown_restricted`, `case_insensitive`, `case_preserving`. The `case_insensitive` flag reveals whether the server does case-insensitive lookups (Windows NFS, NetApp NTFS volumes). The `chown_restricted` flag reveals whether non-root users can change file ownership. NFSWolf does not specifically use PATHCONF for recon: no. What to add: probe PATHCONF to detect case-insensitive servers (Windows fingerprint) and chown-unrestricted servers (chown-based privilege escalation).
 

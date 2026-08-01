@@ -204,7 +204,7 @@ nfswolf implements 9 of the 39 operations -- the subset needed for recon and rea
 | 39 | `RELEASE_LOCKOWNER` | Lock cleanup | Part of lock state machine. |
 | 10044 | `ILLEGAL` | Error sentinel | Server returns this for unrecognized op numbers. |
 
-**Implementation**: All 9 operations are nfswolf's own XDR code -- `#[derive(XdrCodec)]` Pack/Unpack implementations in `crates/nfswolf-nfs4/src/wire.rs` (re-exported as `types` via `src/proto/nfs4/mod.rs`). The `Nfs4Status` enum carries 25 named variants (Ok + 24 error codes including `BadHandle`, `WrongSec`, `Moved`, and `BadXdr`) plus an `Unknown(u32)` catch-all, and implements `Display` with RFC 7530 error names (e.g., `NFS4ERR_STALE`). nfswolf uses the `nfswolf-rpc` crate's `RpcClient` for the RPC transport layer but implements all NFSv4 XDR encoding/decoding in its own crate.
+**Implementation**: All 9 operations are nfswolf's own XDR code -- `#[derive(XdrCodec)]` Pack/Unpack implementations in `crates/nfs-v4/src/wire.rs` (re-exported as `types` via `src/proto/nfs4/mod.rs`). The `Nfs4Status` enum carries 25 named variants (Ok + 24 error codes including `BadHandle`, `WrongSec`, `Moved`, and `BadXdr`) plus an `Unknown(u32)` catch-all, and implements `Display` with RFC 7530 error names (e.g., `NFS4ERR_STALE`). nfswolf uses the `onc-rpc-client` crate's `RpcClient` for the RPC transport layer but implements all NFSv4 XDR encoding/decoding in its own crate.
 
 ### NFSv4 client variants
 

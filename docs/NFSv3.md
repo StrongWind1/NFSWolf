@@ -124,8 +124,8 @@ Port 111 (fixed). Defined in RFC 1057 Appendix A. Identical to the portmapper us
 | 0 | `NULL` | No | -- | -- | No-op. Not needed; nfswolf never health-checks portmapper. |
 | 1 | `SET` | No | -- | -- | Register an RPC service. Server-side only. |
 | 2 | `UNSET` | No | -- | -- | Unregister an RPC service. Server-side only. |
-| 3 | `GETPORT` | **Yes** | nfswolf-rpc | Correct | Resolves mountd v3 port. Queries `(100005, 3, TCP)`. |
-| 4 | `DUMP` | **Yes** | nfswolf-rpc | Correct | Lists all registered RPC services. Reveals NFS versions (filters program 100003), NIS presence (programs 100004/100007), NetApp (program 400010), and amplification surface (F-3.2). |
+| 3 | `GETPORT` | **Yes** | onc-rpcbind | Correct | Resolves mountd v3 port. Queries `(100005, 3, TCP)`. |
+| 4 | `DUMP` | **Yes** | onc-rpcbind | Correct | Lists all registered RPC services. Reveals NFS versions (filters program 100003), NIS presence (programs 100004/100007), NetApp (program 400010), and amplification surface (F-3.2). |
 | 5 | `CALLIT` | No | -- | -- | Indirect RPC call. Potential amplification vector but not implemented -- nfswolf estimates amplification from DUMP response size. |
 
 ### When port 111 is blocked
@@ -150,12 +150,12 @@ Dynamic port (assigned by portmapper). Defined in RFC 1813 Appendix I. Same 6 pr
 
 | # | Procedure | nfswolf | Via | Correct | Purpose |
 |---|-----------|---------|-----|---------|---------|
-| 0 | `NULL` | **Yes** | nfswolf-nfs3 | Correct | No-op. Used internally for mountd port probing. |
-| 1 | `MNT` | **Yes** | nfswolf-nfs3 | Correct | Path in, variable-length handle + auth flavors out. Auto-retries with privileged source port on MNT3ERR_ACCES (error 13). Auth flavors feed finding F-1.1. |
-| 2 | `DUMP` | **Yes** | nfswolf-nfs3 | Correct | Lists mounted clients (hostname + directory). Reveals active NFS consumers. |
-| 3 | `UMNT` | **Yes** | nfswolf-nfs3 | Correct | Stealth cleanup -- removes our entry from the mount table (F-2.5). |
-| 4 | `UMNTALL` | **Yes** | nfswolf-nfs3 | Correct | Removes all mount entries for our client hostname. |
-| 5 | `EXPORT` | **Yes** | nfswolf-nfs3 | Correct | Lists exports with ACL groups. Empty or wildcard groups = world-accessible (F-7.1). |
+| 0 | `NULL` | **Yes** | nfs-mount | Correct | No-op. Used internally for mountd port probing. |
+| 1 | `MNT` | **Yes** | nfs-mount | Correct | Path in, variable-length handle + auth flavors out. Auto-retries with privileged source port on MNT3ERR_ACCES (error 13). Auth flavors feed finding F-1.1. |
+| 2 | `DUMP` | **Yes** | nfs-mount | Correct | Lists mounted clients (hostname + directory). Reveals active NFS consumers. |
+| 3 | `UMNT` | **Yes** | nfs-mount | Correct | Stealth cleanup -- removes our entry from the mount table (F-2.5). |
+| 4 | `UMNTALL` | **Yes** | nfs-mount | Correct | Removes all mount entries for our client hostname. |
+| 5 | `EXPORT` | **Yes** | nfs-mount | Correct | Lists exports with ACL groups. Empty or wildcard groups = world-accessible (F-7.1). |
 
 ### When mountd is blocked
 
@@ -177,30 +177,30 @@ Port 2049 (conventional). Defined in RFC 1813 §3.3. The file service. Variable-
 
 | # | Procedure | nfswolf | Via | Correct | Purpose |
 |---|-----------|---------|-----|---------|---------|
-| 0 | `NULL` | **Yes** | nfswolf-nfs3 | Correct | No-op. Connectivity test. |
-| 1 | `GETATTR` | **Yes** | nfswolf-nfs3 | Correct | Returns fattr3: type, mode, nlink, uid, gid, size (64-bit), used, rdev, fsid, fileid, atime, mtime, ctime. |
-| 2 | `SETATTR` | **Yes** | nfswolf-nfs3 | Correct | Set attributes with optional guard (ctime check for atomic modify). |
-| 3 | `LOOKUP` | **Yes** | nfswolf-nfs3 | Correct | Resolve one filename in a directory. Returns child file handle + attrs. Core path traversal. |
-| 4 | `ACCESS` | **Yes** | nfswolf-nfs3 | Correct | **New in v3.** Advisory permission check. Returns bitmask of allowed operations (READ/LOOKUP/MODIFY/EXTEND/DELETE/EXECUTE). Used by UID sprayer to test credentials without triggering writes. **Advisory only** -- RFC 1813 §3.3.4: results may not reflect actual access. |
-| 5 | `READLINK` | **Yes** | nfswolf-nfs3 | Correct | Read symbolic link target. |
-| 6 | `READ` | **Yes** | nfswolf-nfs3 | Correct | Read file data. 64-bit offset (vs v2's 32-bit). Returns data + post-op attrs + EOF flag. |
-| 7 | `WRITE` | **Yes** | nfswolf-nfs3 | Correct | **Enhanced in v3.** Supports `stable_how`: UNSTABLE (async), DATA_SYNC, FILE_SYNC. Returns bytes written + committed stability level + write verifier. v2 was FILE_SYNC-only. |
-| 8 | `CREATE` | **Yes** | nfswolf-nfs3 | Correct | **Enhanced in v3.** Supports create modes: UNCHECKED (overwrite OK), GUARDED (fail if exists), EXCLUSIVE (atomic create with verifier). |
-| 9 | `MKDIR` | **Yes** | nfswolf-nfs3 | Correct | Create directory. Returns handle + attrs + wcc_data. |
-| 10 | `SYMLINK` | **Yes** | nfswolf-nfs3 | Correct | Create symbolic link. Returns handle + attrs (v2 returned only status). |
-| 11 | `MKNOD` | **Yes** | nfswolf-nfs3 | Correct | **New in v3.** Create special files: sockets, FIFOs, block/char devices. Not in v2. |
-| 12 | `REMOVE` | **Yes** | nfswolf-nfs3 | Correct | Delete a file. Returns wcc_data for cache consistency. |
-| 13 | `RMDIR` | **Yes** | nfswolf-nfs3 | Correct | Remove directory. Returns wcc_data. |
-| 14 | `RENAME` | **Yes** | nfswolf-nfs3 | Correct | Rename/move a file. Returns wcc_data for both source and destination directories. |
-| 15 | `LINK` | **Yes** | nfswolf-nfs3 | Correct | Create hard link. Returns post-op attrs + wcc_data. |
-| 16 | `READDIR` | **Yes** | nfswolf-nfs3 | Correct | List directory entries (fileid + name + cookie). Cookie-based pagination with 8-byte cookieverf for cache validation. |
-| 17 | `READDIRPLUS` | **Yes** | nfswolf-nfs3 | Correct | **New in v3.** READDIR + file handles + full attrs for every entry. Eliminates N separate LOOKUP/GETATTR calls. Single call maps an entire directory. |
-| 18 | `FSSTAT` | **Yes** | nfswolf-nfs3 | Correct | Filesystem space stats: total/free/available bytes and files. 64-bit counters (v2 was 32-bit blocks). |
-| 19 | `FSINFO` | **Yes** | nfswolf-nfs3 | Correct | **New in v3.** Filesystem capabilities: max read/write/readdir sizes, time granularity, symlink/hardlink support, homogeneous flag. |
-| 20 | `PATHCONF` | **Yes** | nfswolf-nfs3 | Correct | **New in v3.** POSIX pathconf values: max name length, no_trunc, chown_restricted, case_insensitive, case_preserving. |
-| 21 | `COMMIT` | **Yes** | nfswolf-nfs3 | Correct | **New in v3.** Force unstable writes to stable storage. Returns write verifier -- if it differs from the WRITE response verifier, the server rebooted and data may be lost. Used with WRITE stable=UNSTABLE for async write pipelines. |
+| 0 | `NULL` | **Yes** | nfs-v3 | Correct | No-op. Connectivity test. |
+| 1 | `GETATTR` | **Yes** | nfs-v3 | Correct | Returns fattr3: type, mode, nlink, uid, gid, size (64-bit), used, rdev, fsid, fileid, atime, mtime, ctime. |
+| 2 | `SETATTR` | **Yes** | nfs-v3 | Correct | Set attributes with optional guard (ctime check for atomic modify). |
+| 3 | `LOOKUP` | **Yes** | nfs-v3 | Correct | Resolve one filename in a directory. Returns child file handle + attrs. Core path traversal. |
+| 4 | `ACCESS` | **Yes** | nfs-v3 | Correct | **New in v3.** Advisory permission check. Returns bitmask of allowed operations (READ/LOOKUP/MODIFY/EXTEND/DELETE/EXECUTE). Used by UID sprayer to test credentials without triggering writes. **Advisory only** -- RFC 1813 §3.3.4: results may not reflect actual access. |
+| 5 | `READLINK` | **Yes** | nfs-v3 | Correct | Read symbolic link target. |
+| 6 | `READ` | **Yes** | nfs-v3 | Correct | Read file data. 64-bit offset (vs v2's 32-bit). Returns data + post-op attrs + EOF flag. |
+| 7 | `WRITE` | **Yes** | nfs-v3 | Correct | **Enhanced in v3.** Supports `stable_how`: UNSTABLE (async), DATA_SYNC, FILE_SYNC. Returns bytes written + committed stability level + write verifier. v2 was FILE_SYNC-only. |
+| 8 | `CREATE` | **Yes** | nfs-v3 | Correct | **Enhanced in v3.** Supports create modes: UNCHECKED (overwrite OK), GUARDED (fail if exists), EXCLUSIVE (atomic create with verifier). |
+| 9 | `MKDIR` | **Yes** | nfs-v3 | Correct | Create directory. Returns handle + attrs + wcc_data. |
+| 10 | `SYMLINK` | **Yes** | nfs-v3 | Correct | Create symbolic link. Returns handle + attrs (v2 returned only status). |
+| 11 | `MKNOD` | **Yes** | nfs-v3 | Correct | **New in v3.** Create special files: sockets, FIFOs, block/char devices. Not in v2. |
+| 12 | `REMOVE` | **Yes** | nfs-v3 | Correct | Delete a file. Returns wcc_data for cache consistency. |
+| 13 | `RMDIR` | **Yes** | nfs-v3 | Correct | Remove directory. Returns wcc_data. |
+| 14 | `RENAME` | **Yes** | nfs-v3 | Correct | Rename/move a file. Returns wcc_data for both source and destination directories. |
+| 15 | `LINK` | **Yes** | nfs-v3 | Correct | Create hard link. Returns post-op attrs + wcc_data. |
+| 16 | `READDIR` | **Yes** | nfs-v3 | Correct | List directory entries (fileid + name + cookie). Cookie-based pagination with 8-byte cookieverf for cache validation. |
+| 17 | `READDIRPLUS` | **Yes** | nfs-v3 | Correct | **New in v3.** READDIR + file handles + full attrs for every entry. Eliminates N separate LOOKUP/GETATTR calls. Single call maps an entire directory. |
+| 18 | `FSSTAT` | **Yes** | nfs-v3 | Correct | Filesystem space stats: total/free/available bytes and files. 64-bit counters (v2 was 32-bit blocks). |
+| 19 | `FSINFO` | **Yes** | nfs-v3 | Correct | **New in v3.** Filesystem capabilities: max read/write/readdir sizes, time granularity, symlink/hardlink support, homogeneous flag. |
+| 20 | `PATHCONF` | **Yes** | nfs-v3 | Correct | **New in v3.** POSIX pathconf values: max name length, no_trunc, chown_restricted, case_insensitive, case_preserving. |
+| 21 | `COMMIT` | **Yes** | nfs-v3 | Correct | **New in v3.** Force unstable writes to stable storage. Returns write verifier -- if it differs from the WRITE response verifier, the server rebooted and data may be lost. Used with WRITE stable=UNSTABLE for async write pipelines. |
 
-**Implementation**: 22 of 22 procedures implemented. All via the in-tree nfswolf-nfs3 library, which owns the XDR types and raw client. Unlike the NFSv2 client (hand-rolled domain API), the v3 client delegates all wire encoding to the library. `PooledTransport` (`src/proto/transport.rs`) handles connection pooling, circuit breaking, stealth delays, and credential injection transparently via the `RpcTransport` seam -- individual client methods contain no policy.
+**Implementation**: 22 of 22 procedures implemented. All via the in-tree nfs-v3 library, which owns the XDR types and raw client. Unlike the NFSv2 client (hand-rolled domain API), the v3 client delegates all wire encoding to the library. `PooledTransport` (`src/proto/transport.rs`) handles connection pooling, circuit breaking, stealth delays, and credential injection transparently via the `RpcTransport` seam -- individual client methods contain no policy.
 
 **Circuit breaker discrimination**: Permission errors (`NFS3ERR_ACCES`, `NFS3ERR_PERM`) do NOT trip the circuit breaker -- they are expected during UID spraying. Only transient errors (`NFS3ERR_IO`, `NFS3ERR_JUKEBOX`, `NFS3ERR_SERVERFAULT`) trip the breaker and poison the connection.
 

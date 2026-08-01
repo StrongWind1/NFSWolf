@@ -201,17 +201,17 @@ See `nfswolf <subcommand> --help` for per-subcommand flags.
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 469+ tests across 6 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 560 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (469+ tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (560 tests), doc, hygiene, machete
 ```
 
 ## Credits
 
-- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz - the NFSv3 / MOUNT / portmapper / XDR foundation that the `crates/nfswolf-*` protocol stack grew out of, released into the public domain under the Unlicense.
+- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz - the NFSv3 / MOUNT / portmapper / XDR foundation that the `crates/` protocol stack (onc-xdr, onc-rpc-client, nfs-v3, etc.) grew out of, released into the public domain under the Unlicense.
 - Authors of RFC 1057, RFC 1094, RFC 1813, RFC 5531, RFC 7530, RFC 2623, RFC 9289.
 - Prior-art tools that inspired this consolidation: `nfsspy`, `nfsshell`, `showmount`, Metasploit NFS modules.
 

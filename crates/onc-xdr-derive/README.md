@@ -1,20 +1,23 @@
 # onc-xdr-derive
 
-`#[derive(XdrCodec)]` -- generates XDR ([RFC 4506]) `Pack` and `Unpack` implementations for the NFSWolf protocol stack.
+Derive macro that generates XDR ([RFC 4506]) `Pack` and `Unpack` implementations for Rust structs and enums.
 
-XDR is the serialisation format every ONC RPC protocol is built on. NFSv2, NFSv3, NFSv4, MOUNT, and the portmapper all encode their arguments and results with it, which adds up to a few hundred wire types across [RFC 1094], [RFC 1813], and [RFC 7530]. Hand-writing the codec for each one is exactly the kind of mechanical work that invites a transposed field, so this macro generates it.
+XDR is the serialisation format every ONC RPC protocol is built on -- NFSv2, NFSv3, NFSv4, MOUNT, and the portmapper all encode their arguments and results with it. The ~200 wire types in [RFC 1813] alone would be error-prone to implement by hand, so `#[derive(XdrCodec)]` generates the codec mechanically. The `Pack` and `Unpack` traits themselves live in [`onc-xdr`](../onc-xdr); this crate exists only because Rust requires proc macros to ship in their own crate.
 
-The traits themselves live in [`onc-xdr`](../onc-xdr); this crate only exists because Rust requires proc macros to ship in their own crate.
+## Quick start
 
-## Encoding rules
+```rust
+use onc_xdr::{Pack, Unpack, XdrCodec};
 
-- Fields pack in declaration order, no padding between them.
-- Enums (XDR "enum" and discriminated "union") lead with a 4-byte big-endian discriminant, then the arm's payload if it has one.
-- Structs carry no tag of their own.
+// Simple enum -- discriminant from `as u32`.
+#[derive(XdrCodec, Clone, Copy)]
+#[repr(u32)]
+enum ftype3 {
+    NF3REG = 1,
+    NF3DIR = 2,
+}
 
-Simple enums take their discriminant from the variant's `as u32` value. Data-carrying variants cannot, so each is tagged explicitly:
-
-```rust,ignore
+// Data-carrying enum (discriminated union) -- explicit #[xdr(N)].
 #[derive(XdrCodec)]
 enum post_op_attr {
     #[xdr(1)]
@@ -22,9 +25,30 @@ enum post_op_attr {
     #[xdr(0)]
     None,
 }
+
+// Struct -- fields pack in declaration order, no tag.
+#[derive(XdrCodec)]
+struct GETATTR3args {
+    object: nfs_fh3,
+}
 ```
 
-Types whose wire form breaks the mechanical rule -- NFSv2's fixed-width 32-byte file handles, the RPC reply body's nested unions -- implement the traits by hand in the protocol crate that defines them.
+## API overview
+
+| Item | Description |
+|------|-------------|
+| `#[derive(XdrCodec)]` | Generates `Pack` and `Unpack` for structs and enums |
+| `#[repr(u32)]` | Required on simple enums so discriminants come from variant values |
+| `#[xdr(N)]` | Sets the discriminant on data-carrying enum variants |
+
+## Encoding rules
+
+- Struct fields pack in declaration order with no padding between them (RFC 4506 sec. 4.14).
+- Simple enums (all unit variants) encode as a 4-byte big-endian discriminant using the variant's `as u32` value.
+- Data-carrying enums (discriminated unions) encode as a 4-byte discriminant from `#[xdr(N)]`, followed by the arm's payload (RFC 4506 sec. 4.15).
+- Each union arm carries at most one value -- multi-field and braced variants are rejected at compile time.
+
+Types whose wire form breaks these rules -- NFSv2's fixed 32-byte file handles, the RPC reply body's nested unions -- implement the traits by hand in their protocol crate.
 
 ## Pre-1.0
 
@@ -34,7 +58,9 @@ This crate is pre-1.0. The API may change between minor versions.
 
 Derived from [Vaiz/nfs3](https://github.com/Vaiz/nfs3) (Unlicense / public domain). See [`../onc-xdr/NOTICE`](../onc-xdr/NOTICE).
 
+## License
+
+Apache-2.0
+
 [RFC 4506]: https://www.rfc-editor.org/rfc/rfc4506
-[RFC 1094]: https://www.rfc-editor.org/rfc/rfc1094
 [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
-[RFC 7530]: https://www.rfc-editor.org/rfc/rfc7530
