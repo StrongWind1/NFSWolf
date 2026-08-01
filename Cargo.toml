@@ -52,6 +52,12 @@ tracing = "0.1"
 # Async runtime — only the tokio backend is provided; privileged source-port
 # binding (RFC 2623 sec. 2.3.1) goes through TcpSocket.
 tokio = { version = "1", features = ["net", "io-util", "time", "sync"] }
+# Proc-macro internals (onc-xdr-derive only).
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }
+# Compile-fail test framework (onc-xdr-derive dev-dep only).
+trybuild = "1"
 
 [package]
 name = "nfswolf"
