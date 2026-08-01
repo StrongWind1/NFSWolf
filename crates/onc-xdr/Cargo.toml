@@ -10,6 +10,7 @@ description = "XDR (RFC 4506) codec: Pack/Unpack traits, opaque and list types, 
 readme = "README.md"
 keywords = ["xdr", "serialization", "onc", "rpc", "codec"]
 categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md", "NOTICE"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]

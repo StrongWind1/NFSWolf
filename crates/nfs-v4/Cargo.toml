@@ -10,6 +10,7 @@ description = "NFS version 4 (RFC 7530 / 8881 / 7862): v4.0 COMPOUND, v4.1 recon
 readme = "README.md"
 keywords = ["nfs", "nfsv4", "rpc", "filesystem", "network"]
 categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md", "NOTICE"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]

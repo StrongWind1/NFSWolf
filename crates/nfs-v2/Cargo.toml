@@ -10,6 +10,7 @@ description = "NFS version 2 (RFC 1094): all 18 procedures and the fixed-width w
 readme = "README.md"
 keywords = ["nfs", "nfsv2", "rpc", "filesystem", "network"]
 categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md", "NOTICE"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]

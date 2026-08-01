@@ -10,6 +10,7 @@ description = "MOUNT protocol (RFC 1094 Appendix A / RFC 1813 Appendix I): versi
 readme = "README.md"
 keywords = ["nfs", "mount", "rpc", "filesystem", "network"]
 categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]

@@ -10,6 +10,7 @@ description = "ONC RPC v2 (RFC 5531) client and a runtime-agnostic async transpo
 readme = "README.md"
 keywords = ["rpc", "onc", "sunrpc", "client", "network"]
 categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md", "NOTICE"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]

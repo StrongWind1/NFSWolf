@@ -10,6 +10,7 @@ description = "Portmapper v2 (RFC 1057) and rpcbind v3/v4 (RFC 1833) clients for
 readme = "README.md"
 keywords = ["rpcbind", "portmapper", "onc", "rpc", "discovery"]
 categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
