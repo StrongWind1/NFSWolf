@@ -455,7 +455,7 @@ impl Pack for ArgOp {
             // 4 (opcode) + 16 (stateid) + 8 (offset) + 4 (count) = 32
             Self::Read { .. } | Self::OpenDowngrade { .. } => 4 + 16 + 8 + 4,
             // 4 (opcode) + 4 (uint32)
-            Self::Access { .. } | Self::Openattr { .. } => 4 + 4,
+            Self::Access { .. } | Self::Openattr { .. } | Self::SecinfoNoName { .. } => 4 + 4,
             // 4 (opcode) + 4 (seqid) + 16 (stateid) = 24
             Self::Close { .. } | Self::OpenConfirm { .. } => 4 + 4 + 16,
             Self::Commit { .. } => 4 + 8 + 4,
@@ -466,11 +466,19 @@ impl Pack for ArgOp {
             Self::Rename { oldname, newname } => 4 + onc_xdr::string_packed_size(oldname) + onc_xdr::string_packed_size(newname),
 
             // Opaque-payload ops: opcode + raw bytes (already XDR-encoded by caller).
-            Self::Create(payload) | Self::Lock(payload) | Self::Lockt(payload) | Self::Locku(payload) | Self::Nverify(payload) | Self::Open(payload) | Self::Setattr(payload) | Self::Setclientid(payload) | Self::Verify(payload) | Self::ReleaseLockowner(payload) => 4 + payload.len(),
-
-            // v4.1 opaque-payload ops.
-            Self::ExchangeId(payload) | Self::Getdeviceinfo(payload) | Self::Getdevicelist(payload) => 4 + payload.len(),
-            Self::SecinfoNoName { .. } => 4 + 4,
+            Self::Create(payload)
+            | Self::Lock(payload)
+            | Self::Lockt(payload)
+            | Self::Locku(payload)
+            | Self::Nverify(payload)
+            | Self::Open(payload)
+            | Self::Setattr(payload)
+            | Self::Setclientid(payload)
+            | Self::Verify(payload)
+            | Self::ReleaseLockowner(payload)
+            | Self::ExchangeId(payload)
+            | Self::Getdeviceinfo(payload)
+            | Self::Getdevicelist(payload) => 4 + payload.len(),
         }
     }
 
@@ -1271,8 +1279,9 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             Ok((ResOpData::Getattr { fsid }, n))
         },
 
-        // SECINFO result: variable-length array of secinfo4 entries.
-        OP_SECINFO => {
+        // SECINFO / SECINFO_NO_NAME result: variable-length array of secinfo4.
+        // Same wire format for both (RFC 5661 S18.45.3).
+        OP_SECINFO | OP_SECINFO_NO_NAME => {
             let (arr_count, mut n) = u32::unpack(input)?;
             let mut flavors = onc_xdr::vec_with_capacity(arr_count as usize);
             for _ in 0..arr_count {
@@ -1400,26 +1409,6 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             let mut stateid = [0u8; 16];
             input.read_exact(&mut stateid).map_err(onc_xdr::Error::Io)?;
             Ok((ResOpData::None, 16))
-        },
-
-        // SECINFO_NO_NAME result: same format as SECINFO (RFC 5661 S18.45.3).
-        OP_SECINFO_NO_NAME => {
-            let (arr_count, mut n) = u32::unpack(input)?;
-            let mut flavors = onc_xdr::vec_with_capacity(arr_count as usize);
-            for _ in 0..arr_count {
-                let (flavor, fn_) = u32::unpack(input)?;
-                n += fn_;
-                flavors.push(flavor);
-                if flavor == 6 {
-                    // RPCSEC_GSS: oid opaque<> + qop u32 + service u32
-                    n += skip_opaque(input)?;
-                    let (_, qn) = u32::unpack(input)?;
-                    n += qn;
-                    let (_, sn) = u32::unpack(input)?;
-                    n += sn;
-                }
-            }
-            Ok((ResOpData::SecFlavors(flavors), n))
         },
 
         // EXCHANGE_ID result (RFC 8881 S18.35.3).

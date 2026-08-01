@@ -1,33 +1,22 @@
 # ---------------------------------------------------------------------------
-# Workspace
+# Workspace -- eight internal crates own the NFS protocol stack so the
+# binary's policy layer (pool, circuit breaker, stealth, auto-UID) stays
+# cleanly separated from wire formats:
 #
-# NFSWolf owns its entire NFS stack.  The protocol layer lives in two internal
-# crates so the binary's application layer (pool, circuit breaker, stealth,
-# auto-UID) stays cleanly separated from the wire format:
+#   onc-xdr-derive  -- #[derive(XdrCodec)] proc macro (RFC 4506)
+#   onc-xdr         -- XDR codec (RFC 4506)
+#   onc-rpc-client  -- ONC RPC v2, AUTH_SYS (RFC 5531)
+#   onc-rpcbind     -- Portmapper v2 (RFC 1057) / rpcbind v3/v4 (RFC 1833)
+#   nfs-mount       -- MOUNT v1/v3 (RFC 1094 App A / RFC 1813 App I)
+#   nfs-v2          -- NFS v2 (RFC 1094)
+#   nfs-v3          -- NFS v3 (RFC 1813)
+#   nfs-v4          -- NFS v4.0/4.1/4.2 (RFC 7530 / 8881 / 7862)
 #
-#   crates/onc-xdr-derive  -- #[derive(XdrCodec)] proc macro (RFC 4506)
-#   crates/onc-xdr         -- XDR codec (RFC 4506)
-#   crates/onc-rpc-client   -- ONC RPC v2, AUTH_SYS (RFC 5531)
-#   crates/onc-rpcbind      -- Portmapper v2 (RFC 1057) / rpcbind v3/v4 (RFC 1833)
-#   crates/nfs-v2           -- NFS v2 (RFC 1094)
-#   crates/nfs-v3           -- NFS v3 + MOUNT v3 (RFC 1813)
-#   crates/nfs-v4           -- NFS v4.0 COMPOUND (RFC 7530)
-#
-# Both crates originate from Vaiz/nfs3 (Unlicense / public domain) plus the
-# NFSv2 and NFSv4 layers NFSWolf wrote itself.  See the NOTICE file in each crate.
+# Origin: Vaiz/nfs3 (Unlicense) plus NFSv2, NFSv4, MOUNT, and rpcbind
+# layers written for NFSWolf.  See the NOTICE file in each crate.
 # ---------------------------------------------------------------------------
 [workspace]
-members = [
-  ".",
-  "crates/onc-xdr-derive",
-  "crates/onc-xdr",
-  "crates/onc-rpc-client",
-  "crates/onc-rpcbind",
-  "crates/nfs-mount",
-  "crates/nfs-v2",
-  "crates/nfs-v3",
-  "crates/nfs-v4",
-]
+members = [".", "crates/*"]
 resolver = "3"
 
 [workspace.package]
@@ -48,17 +37,12 @@ nfs-mount = { version = "0.1.0", path = "crates/nfs-mount" }
 nfs-v2 = { version = "0.1.0", path = "crates/nfs-v2" }
 nfs-v3 = { version = "0.1.0", path = "crates/nfs-v3" }
 nfs-v4 = { version = "0.1.0", path = "crates/nfs-v4" }
-# XID generation (RFC 5531 sec. 9) — tiny dependency-free PRNG, no crypto needed.
 fastrand = "2"
 tracing = "0.1"
-# Async runtime — only the tokio backend is provided; privileged source-port
-# binding (RFC 2623 sec. 2.3.1) goes through TcpSocket.
-tokio = { version = "1", features = ["net", "io-util", "time", "sync"] }
-# Proc-macro internals (onc-xdr-derive only).
+tokio = { version = "1", features = ["full"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full"] }
-# Compile-fail test framework (onc-xdr-derive dev-dep only).
 trybuild = "1"
 
 [package]
@@ -83,26 +67,13 @@ include = [
   "/CHANGELOG.md",
 ]
 
-# Build the published documentation on docs.rs with all features enabled and a
-# stable cfg flag (`docsrs`), matching the convention used by most well-curated
-# Rust crates so doc rebuilds stay deterministic across nightly toolchains.
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# CLI
-clap = { version = "4", features = ["derive", "env", "wrap_help"] }
-clap_complete = "4"
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# NFS protocol stack -- local crates, pure Rust, no C dependencies.
+tokio = { workspace = true }
+tracing = { workspace = true }
 onc-xdr = { workspace = true }
 onc-rpc-client = { workspace = true }
 onc-rpcbind = { workspace = true }
@@ -110,37 +81,21 @@ nfs-mount = { workspace = true }
 nfs-v2 = { workspace = true }
 nfs-v3 = { workspace = true }
 nfs-v4 = { workspace = true }
-
-# Concurrent maps for the connection pool and circuit breaker.
-# Privileged source-port binding lives in nfswolf-rpc (tokio TcpSocket), so
-# the binary needs no socket crate of its own.
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 dashmap = "6"
-
-# FUSE
 fuser = { version = "0.18", optional = true }
-
-# TUI / Shell
 rustyline = "18"
 indicatif = "0.18"
-
-# Output / Reporting
 colored = "3"
 tabled = { version = "0.21", default-features = false, features = ["ansi"] }
-
-# Cryptography
 sha2 = "0.11"
-
-# Utilities
 rand = "0.10"
 anyhow = "1"
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ipnet = "2"
-
-# POSIX detach for `nfswolf mount` (libc::daemon).  The mount subcommand
-# detaches itself so the FUSE handler survives the operator's shell exit;
-# this is the only place the binary uses libc directly, and the unsafe
-# call is gated by `#[allow(unsafe_code, reason = ...)]` at a single site.
 libc = "0.2"
 
 [dev-dependencies]
@@ -207,13 +162,8 @@ strip = "symbols"
 # Overflow checks in tests to catch arithmetic bugs.
 overflow-checks = true
 
-# ---------------------------------------------------------------------------
-# Lint policy
-#
-# Defined once at workspace level so the binary and both protocol crates are
-# held to identical standards.  `.cargo/config.toml` adds `-D warnings`, so
-# every "warn" below is a hard build failure.
-# ---------------------------------------------------------------------------
+# Lint policy -- workspace-wide, all crates held to identical standards.
+# `.cargo/config.toml` adds `-D warnings`, so every "warn" is a hard failure.
 [workspace.lints.rust]
 # --- Forbid (no override possible) ------------------------------------------
 # Provable integer overflow at compile time.
