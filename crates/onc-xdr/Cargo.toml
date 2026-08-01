@@ -12,7 +12,6 @@ keywords = ["xdr", "serialization", "onc", "rpc", "codec"]
 categories = ["network-programming", "parser-implementations"]
 
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]

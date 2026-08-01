@@ -12,7 +12,6 @@ keywords = ["rpc", "onc", "sunrpc", "client", "network"]
 categories = ["network-programming", "parser-implementations"]
 
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]

@@ -12,7 +12,6 @@ keywords = ["nfs", "nfsv3", "rpc", "filesystem", "network"]
 categories = ["network-programming", "parser-implementations"]
 
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
