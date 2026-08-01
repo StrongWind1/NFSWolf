@@ -24,7 +24,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 onc-xdr = { workspace = true }
 onc-rpc-client = { workspace = true }
-tracing = "0.1"
+tracing = { workspace = true }
 
 [lints]
 workspace = true

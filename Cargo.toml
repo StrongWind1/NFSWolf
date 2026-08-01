@@ -46,6 +46,12 @@ nfs-mount = { version = "0.1.0", path = "crates/nfs-mount" }
 nfs-v2 = { version = "0.1.0", path = "crates/nfs-v2" }
 nfs-v3 = { version = "0.1.0", path = "crates/nfs-v3" }
 nfs-v4 = { version = "0.1.0", path = "crates/nfs-v4" }
+# XID generation (RFC 5531 sec. 9) — tiny dependency-free PRNG, no crypto needed.
+fastrand = "2"
+tracing = "0.1"
+# Async runtime — only the tokio backend is provided; privileged source-port
+# binding (RFC 2623 sec. 2.3.1) goes through TcpSocket.
+tokio = { version = "1", features = ["net", "io-util", "time", "sync"] }
 
 [package]
 name = "nfswolf"
