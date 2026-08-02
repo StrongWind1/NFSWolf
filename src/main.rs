@@ -3,12 +3,6 @@
 //! A unified tool for discovering, analyzing, and exploiting NFS
 //! misconfigurations during authorized security assessments.
 
-// The Rust 1.96 toolchain enforces `unused` more aggressively than 1.95,
-// surfacing ~40 pre-existing dead-code items (enum variants reserved for
-// future server types, struct fields for binary protocol compatibility,
-// planned-but-not-yet-wired infrastructure). Suppressing at crate level
-// until the individual items are cleaned up.
-
 #[cfg(test)]
 use assert_cmd as _;
 #[cfg(not(feature = "fuse"))]

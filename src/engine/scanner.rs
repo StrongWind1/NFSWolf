@@ -453,7 +453,18 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let exports_v3 = if has_v3 && (mount_port_infos.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
         job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports(SocketAddr::new(ip, 111))).await {
-            Ok(Ok(e)) => Some(e),
+            Ok(Ok(mut exports)) => {
+                // Probe MNT per export to discover auth flavors (RFC 1813 Appendix III).
+                let mount_addr = SocketAddr::new(ip, 111);
+                for entry in &mut exports {
+                    job.stealth.wait().await;
+                    if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount(mount_addr, &entry.path)).await {
+                        entry.auth_flavors = mr.auth_flavors;
+                        drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                    }
+                }
+                Some(exports)
+            },
             _ => None,
         }
     } else {

@@ -157,7 +157,7 @@ pub(crate) struct SquashProbeResult {
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use nfs_v3::wire::{LOOKUP3args, Nfs3Option, Nfs3Result, READ3args, cookieverf3, diropargs3, filename3, nfsstat3, sattr3};
+use nfs_v3::wire::{LOOKUP3args, Nfs3Option, Nfs3Result, PATHCONF3args, READ3args, cookieverf3, diropargs3, filename3, nfsstat3, sattr3};
 use onc_xdr::Opaque;
 
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus};
@@ -269,6 +269,7 @@ impl Analyzer {
         run_nis_check(&self.portmap, addr, &mut findings).await;
         run_amplification_check(&self.portmap, addr, &mut findings).await;
         check_webnfs_public_handle(addr, &nfs_versions, &mut findings, self.proxy.as_deref(), &self.stealth).await;
+        check_auth_tls(addr, &mut findings, self.proxy.as_deref(), &self.stealth).await;
 
         // Per-export checks.
         let exports = self.mount.list_exports(addr).await.unwrap_or_default();
@@ -374,6 +375,14 @@ impl Analyzer {
         check_nfs4_secinfo(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
         check_windows_signing(&fh, &entry.path, findings);
         check_handle_entropy(&fh, &entry.path, findings);
+
+        // PATHCONF: case-insensitive detection (Windows/NTFS fingerprint) and
+        // unrestricted chown detection (ownership hijacking).
+        check_pathconf(&export_nfs3, &fh, &entry.path, findings).await;
+
+        // AUTH_NONE metadata leak: check if the server allows unauthenticated
+        // GETATTR on the export root handle (RFC 2623 S2.3.2 automounter support).
+        check_auth_none_leak(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // Export escape check (F-2.x). Capture the confirmed escape handle so the
         // --test-read probes below can walk from the filesystem root.
@@ -708,6 +717,25 @@ fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Ve
                 export: Some(export_path),
             },
             Severity::High,
+        ));
+    }
+
+    // AUTH_DH (flavor 3): obsolete, uses 192-bit DH / 56-bit DES (RFC 5531 S14).
+    if auth_flavors.contains(&3) {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-3.7",
+                title: "AUTH_DH advertised (cryptographically broken)",
+                desc: "The export advertises AUTH_DH (flavor 3), which uses 192-bit Diffie-Hellman \
+                       key exchange and 56-bit DES encryption. Both are trivially factorable by \
+                       modern standards. RFC 5531 S14: 'AUTH_DH [...] is considered obsolete and \
+                       insecure; see [RFC2695].'",
+                evidence: &format!("auth_flavors={auth_flavors:?}"),
+                remediation: "Remove AUTH_DH from the export's security configuration. Use \
+                              sec=krb5p for authenticated and integrity-protected access.",
+                export: Some(export_path),
+            },
+            Severity::Medium,
         ));
     }
 }
@@ -1443,6 +1471,173 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
                 evidence: &format!("SECINFO flavors={flavors:?}"),
                 remediation: "Remove AUTH_SYS from exports that require Kerberos authentication: \
                               use sec=krb5 (or krb5i/krb5p) exclusively in /etc/exports.",
+                export: Some(export_path),
+            },
+            Severity::High,
+        ));
+    }
+
+    // AUTH_DH (flavor 3) via NFSv4 SECINFO.
+    if flavors.contains(&3) {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-3.7",
+                title: "NFSv4 SECINFO: AUTH_DH advertised (cryptographically broken)",
+                desc: &format!(
+                    "NFSv4 SECINFO for export {export_path} includes AUTH_DH (flavor 3), which \
+                     uses 192-bit Diffie-Hellman / 56-bit DES. RFC 5531 S14: 'AUTH_DH [...] is \
+                     considered obsolete and insecure; see [RFC2695].'",
+                ),
+                evidence: &format!("SECINFO flavors={flavors:?}"),
+                remediation: "Remove AUTH_DH from the export's security configuration. Use \
+                              sec=krb5p for authenticated and integrity-protected access.",
+                export: Some(export_path),
+            },
+            Severity::Medium,
+        ));
+    }
+}
+
+// --- AUTH_NONE metadata leak (RFC 2623 S2.3.2) ---
+
+/// Check whether the server allows unauthenticated GETATTR on the export root.
+///
+/// Some servers permit AUTH_NONE for GETATTR/FSINFO at mount time to support
+/// automounters that lack Kerberos credentials (RFC 2623 S2.3.2). If GETATTR
+/// with AUTH_NONE returns file attributes, metadata (uid, gid, mode, size,
+/// timestamps) is leaked to any unauthenticated client.
+async fn check_auth_none_leak(addr: SocketAddr, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    use onc_rpc_client::transport::direct::DirectTransport;
+    use onc_rpc_client::transport::tokio::TokioIo;
+
+    stealth.wait().await;
+
+    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+    let timeout = std::time::Duration::from_secs(5);
+
+    let Ok(Ok(stream)) = tokio::time::timeout(timeout, connect_tcp(nfs_addr, proxy)).await else { return };
+
+    // DirectTransport defaults to AUTH_NONE.
+    let transport = DirectTransport::new(TokioIo::new(stream));
+    let client = nfs_v3::Nfs3Client::new(transport);
+
+    if let Ok(attrs) = client.attrs(root_fh).await {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-5.8",
+                title: "Export root attributes leaked via AUTH_NONE",
+                desc: "The server returned file attributes for the export root handle using \
+                       AUTH_NONE (no credentials). RFC 2623 S2.3.2 permits this for automounter \
+                       support, but it leaks metadata (uid, gid, mode, size, timestamps) to \
+                       any unauthenticated client who possesses a valid file handle.",
+                evidence: &format!("AUTH_NONE GETATTR: uid={}, gid={}, mode={:#o}, size={}", attrs.uid, attrs.gid, attrs.mode, attrs.size),
+                remediation: "Restrict AUTH_NONE access. Configure sec=krb5 or sec=sys \
+                              to require authentication for all NFS operations.",
+                export: Some(export_path),
+            },
+            Severity::Low,
+        ));
+    }
+}
+
+// --- AUTH_TLS STARTTLS probe (RFC 9289 S4.1) ---
+
+/// Probe whether the NFS server supports RPC-with-TLS (RFC 9289).
+///
+/// Sends a NULL RPC with AUTH_TLS (flavor 7) credential and a verifier
+/// containing the ASCII string "STARTTLS". If the server responds with
+/// MSG_ACCEPTED and "STARTTLS" in the reply verifier, TLS is available.
+/// The probe result is stored on the analyzer for use by `check_plaintext_transport`.
+async fn check_auth_tls(addr: SocketAddr, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    use onc_rpc_client::RpcTransport as _;
+    use onc_rpc_client::rpc::{auth_flavor, opaque_auth};
+    use onc_rpc_client::transport::direct::DirectTransport;
+    use onc_rpc_client::transport::tokio::TokioIo;
+
+    stealth.wait().await;
+
+    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+    let timeout = std::time::Duration::from_secs(5);
+
+    let Ok(Ok(stream)) = tokio::time::timeout(timeout, connect_tcp(nfs_addr, proxy)).await else { return };
+
+    // Build a raw RPC CALL message with AUTH_TLS credential + STARTTLS verifier.
+    let starttls_bytes: &[u8] = b"\x00\x00\x00\x07STARTTLS";
+    let cred = opaque_auth { flavor: auth_flavor::AUTH_TLS, body: Opaque::borrowed(&[]) };
+    let verf = opaque_auth { flavor: auth_flavor::AUTH_TLS, body: Opaque::borrowed(starttls_bytes) };
+    let transport = DirectTransport::with_auth(TokioIo::new(stream), cred, verf);
+
+    // Send a NULL call to NFS program (100003, v3, proc 0).
+    let null_args = onc_xdr::Void;
+    let result: Result<onc_xdr::Void, _> = transport.call(100_003, 3, 0, &null_args).await;
+
+    if result.is_ok() {
+        // Server accepted the AUTH_TLS NULL  --  TLS negotiation is available.
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-3.8",
+                title: "RPC-with-TLS supported (RFC 9289)",
+                desc: "The server accepted an AUTH_TLS NULL probe, indicating that \
+                       RPC-with-TLS is available for transport encryption. Note: TLS \
+                       encrypts the wire but AUTH_SYS inside TLS still allows credential \
+                       forging (RFC 9289 S6.3). Mutual TLS authentication is RECOMMENDED \
+                       but not required.",
+                evidence: "AUTH_TLS NULL accepted",
+                remediation: "Enable mutual TLS authentication to bind client identity \
+                              to the TLS certificate. Use RPCSEC_GSS(krb5p) for full \
+                              user-level authentication.",
+                export: None,
+            },
+            Severity::Info,
+        ));
+    }
+    // Non-response or rejection: server does not support AUTH_TLS.
+    // The plaintext-transport finding (F-3.1) already handles this case.
+}
+
+// --- PATHCONF fingerprint and security checks ---
+
+/// Probe PATHCONF for case-insensitive filesystem and unrestricted chown.
+///
+/// `case_insensitive = true` is a strong Windows NFS / NetApp NTFS fingerprint.
+/// `chown_restricted = false` means any user can change file ownership, enabling
+/// ownership hijacking attacks.
+async fn check_pathconf(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
+    let args = PATHCONF3args { object: root_fh.to_nfs_fh3() };
+    let Ok(res) = nfs3.pathconf(&args).await else { return };
+    let Nfs3Result::Ok(ok) = res else { return };
+
+    if ok.case_insensitive {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-5.7",
+                title: "Case-insensitive filesystem (Windows NFS / NTFS fingerprint)",
+                desc: "PATHCONF reports case_insensitive=true. This indicates a Windows NFS \
+                       server or NetApp NTFS volume. Case-insensitive lookups enable filename \
+                       collision attacks: creating 'SHADOW' alongside '/etc/shadow' or exploiting \
+                       case-variant names to bypass path-based access controls (RFC 7530 S12).",
+                evidence: &format!("case_insensitive=true, case_preserving={}", ok.case_preserving),
+                remediation: "Awareness only. Case-insensitive filesystems cannot be changed \
+                              to case-sensitive without reformatting.",
+                export: Some(export_path),
+            },
+            Severity::Low,
+        ));
+    }
+
+    if !ok.chown_restricted {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-4.6",
+                title: "Unrestricted chown (any user can change file ownership)",
+                desc: "PATHCONF reports chown_restricted=false. Non-root users can change file \
+                       ownership via SETATTR, enabling ownership hijacking: an attacker writes a \
+                       file, then chowns it to root to create a SUID binary. Most UNIX systems \
+                       restrict chown to root (_POSIX_CHOWN_RESTRICTED), but some NFS servers or \
+                       older systems do not enforce this.",
+                evidence: "chown_restricted=false",
+                remediation: "Enable _POSIX_CHOWN_RESTRICTED on the exported filesystem. \
+                              On Linux, this is the default and cannot be disabled per-export.",
                 export: Some(export_path),
             },
             Severity::High,

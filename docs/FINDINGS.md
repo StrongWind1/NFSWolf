@@ -290,6 +290,32 @@ File handles are bearer tokens -- possession is authorization.
 
 **Why this works**: The portmapper is a service directory, not a security gate. NFS can be contacted directly on port 2049 without going through portmapper. Mount ports can be guessed or scanned.
 
+### F-3.7: AUTH_DH Advertised (Cryptographically Broken)
+
+| Field | Value |
+|-------|-------|
+| Severity | Medium |
+| RFC Basis | RFC 5531 §14, RFC 2695 |
+| Precondition | Server advertises AUTH_DH (flavor 3) in MOUNT auth_flavors or NFSv4 SECINFO |
+| Detection | Check MOUNT MNT auth_flavors and NFSv4 SECINFO for flavor value 3 |
+
+**Why the RFC flags this**: RFC 5531 §14: "AUTH_DH [...] is considered obsolete and insecure; see [RFC2695]." AUTH_DH uses 192-bit Diffie-Hellman key exchange and 56-bit DES encryption. Both are trivially factorable by modern standards.
+
+**What nfswolf tests**: Checks `auth_flavors.contains(&3)` in both `check_auth_methods()` (MOUNT flavor list) and `check_nfs4_secinfo()` (NFSv4 SECINFO response).
+
+### F-3.8: RPC-with-TLS Supported (RFC 9289)
+
+| Field | Value |
+|-------|-------|
+| Severity | Info |
+| RFC Basis | RFC 9289 §4.1 (AUTH_TLS STARTTLS), RFC 9289 §6.3 |
+| Precondition | Server accepts AUTH_TLS NULL probe |
+| Detection | Send NULL RPC with auth_flavor=7 and STARTTLS verifier |
+
+**Why this matters**: RPC-with-TLS encrypts the wire but AUTH_SYS inside TLS still allows UID/GID credential forging (RFC 9289 §6.3). Mutual TLS is RECOMMENDED but not required. The presence of TLS is a positive security indicator, but does not eliminate AUTH_SYS spoofing.
+
+**What nfswolf tests**: Sends a NULL RPC to NFS program (100003 v3 proc 0) with `auth_flavor=AUTH_TLS` (7) and a verifier containing the STARTTLS token. If accepted, emits an informational finding.
+
 ---
 
 ## Category 4: Privilege Escalation
@@ -351,6 +377,19 @@ File handles are bearer tokens -- possession is authorization.
 
 **Why this exists**: "RPCSEC_GSSv3 is not a complete solution for labeling: it conveys the labels of actors but not the labels of objects." (RFC 7861 §4). Without labeled NFS (extremely rare), NFS-created files get default SELinux contexts, bypassing mandatory access control.
 
+### F-4.6: Unrestricted chown (Any User Can Change File Ownership)
+
+| Field | Value |
+|-------|-------|
+| Severity | High |
+| RFC Basis | RFC 1094 §3.3, RFC 1813 §4.4 |
+| Precondition | PATHCONF chown_restricted=false on the exported filesystem |
+| Detection | Call PATHCONF per export, check chown_restricted field |
+
+**Why this exists**: When `_POSIX_CHOWN_RESTRICTED` is not enforced, any user can change file ownership via SETATTR. An attacker can write a file, then chown it to root to create a SUID binary. Most modern UNIX systems restrict chown to root, but some NFS servers or older systems do not enforce this.
+
+**What nfswolf tests**: Calls PATHCONF on the export root and checks `chown_restricted`. False = any user can chown = ownership hijacking possible.
+
 ---
 
 ## Category 5: Information Disclosure
@@ -409,6 +448,45 @@ File handles are bearer tokens -- possession is authorization.
 | Detection | Browse from PUTROOTFH |
 
 **Why the RFC allows this**: The pseudo-filesystem "provides a view of exported directories" (RFC 7530 §7.3). The server SHOULD hide existence via ancestor security policies, but this is only SHOULD -- the directory structure between exports is often visible.
+
+### F-5.6: Metadata Disclosed on Access Denial
+
+| Field | Value |
+|-------|-------|
+| Severity | Low |
+| RFC Basis | RFC 1813 §3.3 (post_op_attr on failure) |
+| Precondition | Server returns fattr3 in NFS3ERR_ACCES/PERM responses |
+| Detection | Harvest post_op_attr from denied LOOKUP and READ operations |
+
+**Why the RFC allows this**: RFC 1813 "strongly encourages" servers to return as much attribute data as possible on failure. Linux knfsd always returns post_op_attr on access denial (fs/nfsd/nfs3xdr.c). This discloses uid, gid, mode, and size of files the caller cannot read.
+
+**What nfswolf tests**: Extracts `post_op_attr` from NFS3ERR_ACCES and NFS3ERR_PERM failure responses in `probe_file_access()`. Deduplicates by (operation, path) and reports all leaked metadata.
+
+### F-5.7: Case-Insensitive Filesystem (Windows NFS / NTFS Fingerprint)
+
+| Field | Value |
+|-------|-------|
+| Severity | Low |
+| RFC Basis | RFC 1813 §3.3.20 (PATHCONF), RFC 7530 §12 |
+| Precondition | Server filesystem is case-insensitive |
+| Detection | Call PATHCONF, check case_insensitive field |
+
+**Why this matters**: PATHCONF `case_insensitive=true` indicates a Windows NFS server or NetApp NTFS volume. Case-insensitive lookups enable filename collision attacks and path-based access control bypasses (RFC 7530 §12 security concerns).
+
+**What nfswolf tests**: Calls PATHCONF per export and checks the `case_insensitive` flag. Also reports `case_preserving` in evidence.
+
+### F-5.8: Export Root Attributes Leaked via AUTH_NONE
+
+| Field | Value |
+|-------|-------|
+| Severity | Low |
+| RFC Basis | RFC 2623 §2.3.2 (automounter AUTH_NONE support) |
+| Precondition | Server allows GETATTR with AUTH_NONE on valid file handles |
+| Detection | Send GETATTR with AUTH_NONE credentials on the export root handle |
+
+**Why this exists**: RFC 2623 §2.3.2 permits AUTH_NONE for GETATTR at mount time to support automounters that lack Kerberos credentials. This leaks uid, gid, mode, size, and timestamps to any unauthenticated client who possesses a valid file handle.
+
+**What nfswolf tests**: Creates a temporary NFS client with AUTH_NONE credentials (DirectTransport default) and sends GETATTR against the export root handle.
 
 ---
 

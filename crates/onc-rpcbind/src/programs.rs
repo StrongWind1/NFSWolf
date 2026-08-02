@@ -37,6 +37,8 @@ static PROGRAMS: &[(u32, &str)] = &[
     (100_227, "nfs_acl"),
     // Sun pcnfsd -- PC-NFS authentication daemon.
     (150_001, "pcnfsd"),
+    // NetApp ONTAP management daemon (observed in ONTAP portmapper DUMP).
+    (400_010, "netapp_mgmt"),
 ];
 
 /// Look up the human-readable name for an RPC program number.
@@ -50,6 +52,32 @@ pub fn program_name(prog: u32) -> Option<&'static str> {
     PROGRAMS.binary_search_by_key(&prog, |&(num, _)| num).ok().and_then(|idx| PROGRAMS.get(idx)).map(|&(_, name)| name)
 }
 
+/// Security implication note for a registered RPC program.
+///
+/// Returns a short one-line note describing the security-relevant attack
+/// surface exposed by the program, or `None` for programs with no notable
+/// security implications beyond their normal function.
+#[must_use]
+pub fn security_note(prog: u32) -> Option<&'static str> {
+    match prog {
+        // NLM -- lock manipulation, holder enumeration, grace-period DoS.
+        100_021 => Some("lock manipulation, holder enumeration, grace-period DoS (AUTH_SYS)"),
+        // NSM -- reboot notification spoofing, callback coercion.
+        100_024 => Some("reboot notification spoofable, callback coercion possible (AUTH_SYS)"),
+        // RQUOTA -- UID enumeration via quota oracle.
+        100_011 => Some("UID enumeration via quota queries (AUTH_SYS)"),
+        // NFS_ACL -- POSIX ACLs may grant access beyond mode bits.
+        100_227 => Some("POSIX ACLs may grant access beyond mode bits (AUTH_SYS)"),
+        // NIS ypserv -- credential maps dumpable without authentication.
+        100_004 => Some("credential maps may be dumpable without authentication"),
+        // NIS ypbind -- NIS domain name discoverable.
+        100_007 => Some("NIS domain name discoverable"),
+        // PCNFSD -- password oracle and print spool code execution.
+        150_001 => Some("password oracle (PCNFSD_AUTH), print spool code execution (PR_START)"),
+        _ => None,
+    }
+}
+
 /// The full table of well-known RPC program numbers and names.
 ///
 /// Returned in ascending program-number order.
@@ -60,7 +88,7 @@ pub fn known_programs() -> &'static [(u32, &'static str)] {
 
 #[cfg(test)]
 mod tests {
-    use super::{known_programs, program_name};
+    use super::{known_programs, program_name, security_note};
 
     #[test]
     fn known_programs_returns_all_entries() {
@@ -98,6 +126,7 @@ mod tests {
         assert_eq!(program_name(100_011), Some("rquotad"));
         assert_eq!(program_name(100_227), Some("nfs_acl"));
         assert_eq!(program_name(150_001), Some("pcnfsd"));
+        assert_eq!(program_name(400_010), Some("netapp_mgmt"));
     }
 
     #[test]
@@ -108,5 +137,23 @@ mod tests {
         assert_eq!(program_name(100_001), None);
         assert_eq!(program_name(999_999), None);
         assert_eq!(program_name(u32::MAX), None);
+    }
+
+    #[test]
+    fn sideband_programs_have_security_notes() {
+        assert!(security_note(100_021).is_some(), "NLM should have a security note");
+        assert!(security_note(100_024).is_some(), "NSM should have a security note");
+        assert!(security_note(100_011).is_some(), "RQUOTA should have a security note");
+        assert!(security_note(100_227).is_some(), "NFS_ACL should have a security note");
+        assert!(security_note(100_004).is_some(), "ypserv should have a security note");
+        assert!(security_note(100_007).is_some(), "ypbind should have a security note");
+        assert!(security_note(150_001).is_some(), "pcnfsd should have a security note");
+    }
+
+    #[test]
+    fn core_programs_have_no_security_note() {
+        assert!(security_note(100_000).is_none(), "portmapper needs no note");
+        assert!(security_note(100_003).is_none(), "nfs needs no note");
+        assert!(security_note(100_005).is_none(), "mountd needs no note");
     }
 }

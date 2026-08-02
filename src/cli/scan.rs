@@ -540,7 +540,11 @@ fn print_rpc_services(r: &HostResult) {
         let mut vers = versions.clone();
         vers.sort_unstable();
         let ver_str: String = vers.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
-        println!("    {prog:<8}{name:<14}v{ver_str:<8}{port}/{proto}");
+        if let Some(note) = onc_rpcbind::security_note(*prog) {
+            println!("    {prog:<8}{name:<14}v{ver_str:<8}{port}/{proto}  \x1b[33m! {note}\x1b[0m");
+        } else {
+            println!("    {prog:<8}{name:<14}v{ver_str:<8}{port}/{proto}");
+        }
     }
 }
 
@@ -571,7 +575,26 @@ fn print_exports(r: &HostResult) {
             ExportListKind::Mount(entries) => {
                 for e in *entries {
                     let acl = if e.allowed_hosts.is_empty() { "*".to_owned() } else { e.allowed_hosts.join(",") };
-                    println!("    {:<40}{acl}", e.path);
+                    if e.auth_flavors.is_empty() {
+                        println!("    {:<40}{acl}", e.path);
+                    } else {
+                        let flavors: Vec<&str> = e
+                            .auth_flavors
+                            .iter()
+                            .map(|&f| match f {
+                                0 => "AUTH_NONE",
+                                1 => "AUTH_SYS",
+                                2 => "AUTH_SHORT",
+                                3 => "AUTH_DH",
+                                6 => "RPCSEC_GSS",
+                                390_003 => "krb5",
+                                390_004 => "krb5i",
+                                390_005 => "krb5p",
+                                _ => "other",
+                            })
+                            .collect();
+                        println!("    {:<40}{acl:<24}[{}]", e.path, flavors.join(","));
+                    }
                 }
             },
             ExportListKind::V4(entries) => {
@@ -668,15 +691,18 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
             "version": e.version,
             "protocol": if e.protocol == onc_rpcbind::IPPROTO_TCP { "tcp" } else if e.protocol == onc_rpcbind::IPPROTO_UDP { "udp" } else { "other" },
             "port": e.port,
+            "security_note": onc_rpcbind::security_note(e.program),
         })).collect::<Vec<_>>(),
         "exports": {
             "v2": r.exports_v2.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,
                 "allowed": if e.allowed_hosts.is_empty() { vec!["*".to_owned()] } else { e.allowed_hosts.clone() },
+                "auth_flavors": e.auth_flavors,
             })).collect::<Vec<_>>()),
             "v3": r.exports_v3.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,
                 "allowed": if e.allowed_hosts.is_empty() { vec!["*".to_owned()] } else { e.allowed_hosts.clone() },
+                "auth_flavors": e.auth_flavors,
             })).collect::<Vec<_>>()),
             "v4": r.exports_v4.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,

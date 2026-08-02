@@ -133,7 +133,10 @@ pub enum auth_flavor {
     AUTH_UNIX = 1,
     AUTH_SHORT = 2,
     AUTH_DES = 3,
-    // and more to be defined
+    /// RFC 2203 -- RPCSEC_GSS.
+    RPCSEC_GSS = 6,
+    /// RFC 9289 S4.1 -- RPC-with-TLS STARTTLS probe.
+    AUTH_TLS = 7,
 }
 
 #[derive(Clone, Debug, XdrCodec)]

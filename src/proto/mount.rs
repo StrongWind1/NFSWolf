@@ -43,6 +43,14 @@ pub(crate) struct ExportEntry {
     ///
     /// An empty list means the export is open to all (`*`).
     pub allowed_hosts: Vec<String>,
+    /// Authentication flavors from MNT response (RFC 1813 Appendix III).
+    ///
+    /// Populated by the scanner's MNT probe if the export is mountable.
+    /// Empty if the export was enumerated via EXPORT only (no MNT attempted).
+    /// Raw u32 values: `AUTH_NONE=0`, `AUTH_SYS=1`, `AUTH_SHORT=2`,
+    /// `AUTH_DH=3`, `RPCSEC_GSS=6`, krb5 pseudo-flavors `390003-390005`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub auth_flavors: Vec<u32>,
 }
 
 /// A client that currently has an export mounted (from MNTPROC_DUMP).
@@ -204,7 +212,6 @@ impl NfsMountClient {
     }
 
     /// Unmount an export (MNTPROC_UMNT) for stealth cleanup (F-2.5).
-    #[cfg(feature = "fuse")]
     pub(crate) async fn unmount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
         let client = self.connect(addr).await?;
         let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
@@ -421,7 +428,7 @@ const fn parse_flavor(raw: u32) -> AuthFlavor {
 fn export_entry_from(node: export_node<'_, '_>) -> ExportEntry {
     let path = bytes_to_string(node.ex_dir.0.as_ref());
     let allowed_hosts = node.ex_groups.into_inner().into_iter().map(|n| bytes_to_string(n.0.as_ref())).collect();
-    ExportEntry { path, allowed_hosts }
+    ExportEntry { path, allowed_hosts, auth_flavors: Vec::new() }
 }
 
 /// Decode XDR bytes to a UTF-8 string, replacing invalid bytes with `?`.

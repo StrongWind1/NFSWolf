@@ -26,7 +26,8 @@ What nfswolf MUST detect, organized by operational phase. Every requirement trac
 | Detect NFS version support (v2, v3, v4.0, v4.1, v4.2) | MUST | F-1.6 |
 | Detect auth flavors per export (from MNT response) | MUST | F-1.1 |
 | Enumerate connected clients (if available) | SHOULD | -- |
-| Detect vendor-specific programs (NetApp 400010) | SHOULD | -- |
+| Detect vendor-specific programs (NetApp 400010) | MUST | -- |
+| Report security implications for sideband programs (NLM/NSM/RQUOTA/NFS_ACL/PCNFSD) | MUST | -- |
 
 ### R1.3: OS/Filesystem Fingerprinting
 
@@ -36,6 +37,8 @@ What nfswolf MUST detect, organized by operational phase. Every requirement trac
 | Fingerprint filesystem type (ext4/xfs/btrfs/ntfs/zfs) | MUST | F-2.1 |
 | Detect BTRFS fileid_type (0x4d-0x4f) for subvolume attacks | MUST | F-2.4 |
 | Detect Windows NFS server (handle size/structure) | MUST | F-2.3 |
+| Detect case-insensitive filesystem via PATHCONF | MUST | F-5.7 |
+| Detect unrestricted chown via PATHCONF | MUST | F-4.6 |
 | Analyze file handle entropy (brute-force feasibility) | SHOULD | F-2.2 |
 
 ---
@@ -71,7 +74,8 @@ What nfswolf MUST detect, organized by operational phase. Every requirement trac
 | Test if server accepts connections from ports >= 1024 | ~~MUST~~ removed | F-7.2 |
 | Report `insecure` export option detection | ~~MUST~~ removed | F-7.2 |
 | Test UDP vs TCP availability | SHOULD | F-3.3 |
-| Detect TLS support (AUTH_TLS probe) | SHOULD | F-3.4 |
+| Detect TLS support (AUTH_TLS STARTTLS probe) | MUST | F-3.8 |
+| Flag AUTH_DH as cryptographically broken | MUST | F-3.7 |
 | Check for DANE/TLSA records | SHOULD | F-3.4 |
 
 ---
