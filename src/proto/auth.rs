@@ -49,6 +49,26 @@ impl Credential {
     }
 }
 
+/// Human-readable name for an RPC auth flavor value.
+///
+/// Covers AUTH_NONE (0), AUTH_SYS (1), AUTH_SHORT (2), AUTH_DH (3),
+/// RPCSEC_GSS (6), AUTH_TLS (7, RFC 9289), and the Linux krb5 pseudo-flavors
+/// (390003-390005, RFC 2623 S2.1.1). Unknown values render as `flavor(N)`.
+pub(crate) fn flavor_name(flavor: u32) -> String {
+    match flavor {
+        0 => "AUTH_NONE".to_owned(),
+        1 => "AUTH_SYS".to_owned(),
+        2 => "AUTH_SHORT".to_owned(),
+        3 => "AUTH_DH".to_owned(),
+        6 => "RPCSEC_GSS".to_owned(),
+        7 => "AUTH_TLS".to_owned(),
+        390_003 => "RPCSEC_GSS(krb5)".to_owned(),
+        390_004 => "RPCSEC_GSS(krb5i)".to_owned(),
+        390_005 => "RPCSEC_GSS(krb5p)".to_owned(),
+        _ => format!("flavor({flavor})"),
+    }
+}
+
 /// Fetch the next stamp, wrapping back to [`STAMP_START`] at `u32::MAX`.
 ///
 /// A compare-and-swap loop keeps the wrap atomic without a mutex; contention is

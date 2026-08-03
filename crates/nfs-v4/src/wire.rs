@@ -12,7 +12,7 @@
 // NFSv4 XDR Pack/Unpack slices are at fixed offsets matching the RFC 7530 wire format.
 use std::io::{Read, Write};
 
-use onc_xdr::{Pack, Unpack};
+use onc_xdr::{Opaque, Pack, Unpack};
 
 /// NFSv4 RPC program number (shared with NFSv2/v3  --  version distinguishes).
 pub const NFS4_PROGRAM: u32 = 100_003;
@@ -1035,6 +1035,34 @@ pub struct SecLabel4 {
     pub label: Vec<u8>,
 }
 
+/// One entry from a SECINFO / SECINFO_NO_NAME response (RFC 7530 S16.31).
+///
+/// Simple flavors (AUTH_NONE, AUTH_SYS, AUTH_DH) carry only the flavor number.
+/// RPCSEC_GSS (flavor 6) additionally carries the GSS mechanism OID, QOP hint,
+/// and service level (1=none/auth-only, 2=integrity, 3=privacy).
+#[derive(Debug, Clone)]
+pub struct SecInfoEntry {
+    /// Auth flavor number (RFC 5531 S8.2).
+    pub flavor: u32,
+    /// GSS mechanism OID bytes (DER-encoded), when flavor == 6.
+    pub gss_oid: Option<Vec<u8>>,
+    /// Quality-of-protection hint, when flavor == 6 (usually 0 = default).
+    pub gss_qop: Option<u32>,
+    /// GSS service level, when flavor == 6. RFC 2203 S5.2.2:
+    /// 1 = rpc_gss_svc_none (auth only, no per-message protection),
+    /// 2 = rpc_gss_svc_integrity (MIC on every message),
+    /// 3 = rpc_gss_svc_privacy (encrypted payload).
+    pub gss_service: Option<u32>,
+}
+
+impl SecInfoEntry {
+    /// The raw flavor number (convenience for callers that just need the u32).
+    #[must_use]
+    pub const fn flavor(&self) -> u32 {
+        self.flavor
+    }
+}
+
 /// Decoded payload from a successful NFSv4 operation result.
 ///
 /// Most operations produce no inline data beyond the status code.
@@ -1075,11 +1103,11 @@ pub enum ResOpData {
         /// File data bytes.
         data: Vec<u8>,
     },
-    /// Auth flavor codes from SECINFO (RFC 7530 S16.31).
+    /// Security info entries from SECINFO / SECINFO_NO_NAME (RFC 7530 S16.31).
     ///
-    /// 1 = AUTH_SYS, 6 = RPCSEC_GSS (Kerberos). No flavor 6 means
-    /// the export accepts credential spoofing via AUTH_SYS (F-3.4).
-    SecFlavors(Vec<u32>),
+    /// Each entry carries the auth flavor and, for RPCSEC_GSS (flavor 6), the
+    /// mechanism OID, QOP, and service level from the `rpcsec_gss_info` struct.
+    SecFlavors(Vec<SecInfoEntry>),
     /// ACCESS result: supported + access bitmasks (RFC 7530 S16.1).
     Access {
         /// Access rights the server can reliably verify.
@@ -1283,21 +1311,24 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         // Same wire format for both (RFC 5661 S18.45.3).
         OP_SECINFO | OP_SECINFO_NO_NAME => {
             let (arr_count, mut n) = u32::unpack(input)?;
-            let mut flavors = onc_xdr::vec_with_capacity(arr_count as usize);
+            let mut entries = onc_xdr::vec_with_capacity(arr_count as usize);
             for _ in 0..arr_count {
                 let (flavor, fn_) = u32::unpack(input)?;
                 n += fn_;
-                flavors.push(flavor);
                 if flavor == 6 {
-                    // RPCSEC_GSS: oid opaque<> + qop u32 + service u32
-                    n += skip_opaque(input)?;
-                    let (_, qn) = u32::unpack(input)?;
+                    // RPCSEC_GSS: sec_oid4 opaque<> + qop u32 + service u32
+                    let (oid, on) = Opaque::unpack(input)?;
+                    n += on;
+                    let (qop, qn) = u32::unpack(input)?;
                     n += qn;
-                    let (_, sn) = u32::unpack(input)?;
+                    let (service, sn) = u32::unpack(input)?;
                     n += sn;
+                    entries.push(SecInfoEntry { flavor, gss_oid: Some(oid.into_owned()), gss_qop: Some(qop), gss_service: Some(service) });
+                } else {
+                    entries.push(SecInfoEntry { flavor, gss_oid: None, gss_qop: None, gss_service: None });
                 }
             }
-            Ok((ResOpData::SecFlavors(flavors), n))
+            Ok((ResOpData::SecFlavors(entries), n))
         },
 
         // READ result: bool eof (u32) + opaque<> file data.
@@ -2395,8 +2426,12 @@ mod tests {
         0u32.pack(&mut wire).unwrap(); // AUTH_NONE
         let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
         match &res.results[0].data {
-            ResOpData::SecFlavors(flavors) => {
-                assert_eq!(flavors, &[1, 0]);
+            ResOpData::SecFlavors(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].flavor, 1);
+                assert!(entries[0].gss_oid.is_none());
+                assert_eq!(entries[1].flavor, 0);
+                assert!(entries[1].gss_oid.is_none());
             },
             other => panic!("expected ResOpData::SecFlavors, got {other:?}"),
         }

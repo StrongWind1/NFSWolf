@@ -41,6 +41,8 @@ pub enum AuthFlavor {
     Dh = 3,
     /// `RPCSEC_GSS` -- the only flavor that actually authenticates (Kerberos).
     Gss = 6,
+    /// `AUTH_TLS` -- RFC 9289 STARTTLS probe for RPC-with-TLS.
+    Tls = 7,
     /// A flavor number this crate does not recognise, including vendor-specific
     /// GSS pseudo-flavors.
     Unknown = 255,
@@ -60,6 +62,7 @@ impl AuthFlavor {
             2 => Self::Short,
             3 => Self::Dh,
             6 | 390_003..=390_005 => Self::Gss,
+            7 => Self::Tls,
             _ => Self::Unknown,
         }
     }
@@ -250,7 +253,7 @@ mod tests {
 
     #[test]
     fn auth_flavor_unknown_for_unrecognized_values() {
-        for v in [4_u32, 5, 7, 100, 390_002, 390_006, u32::MAX] {
+        for v in [4_u32, 5, 8, 100, 390_002, 390_006, u32::MAX] {
             assert_eq!(AuthFlavor::from_u32(v), AuthFlavor::Unknown, "flavor {v} should be Unknown");
         }
     }

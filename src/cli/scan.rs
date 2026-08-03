@@ -578,21 +578,7 @@ fn print_exports(r: &HostResult) {
                     if e.auth_flavors.is_empty() {
                         println!("    {:<40}{acl}", e.path);
                     } else {
-                        let flavors: Vec<&str> = e
-                            .auth_flavors
-                            .iter()
-                            .map(|&f| match f {
-                                0 => "AUTH_NONE",
-                                1 => "AUTH_SYS",
-                                2 => "AUTH_SHORT",
-                                3 => "AUTH_DH",
-                                6 => "RPCSEC_GSS",
-                                390_003 => "krb5",
-                                390_004 => "krb5i",
-                                390_005 => "krb5p",
-                                _ => "other",
-                            })
-                            .collect();
+                        let flavors: Vec<String> = e.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
                         println!("    {:<40}{acl:<24}[{}]", e.path, flavors.join(","));
                     }
                 }

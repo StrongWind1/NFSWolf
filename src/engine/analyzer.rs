@@ -349,25 +349,7 @@ impl Analyzer {
 
         let fh = mount_res.handle;
         ea.file_handle = fh.to_hex();
-        ea.auth_methods = mount_res
-            .auth_flavors
-            .iter()
-            .map(|&f| match f {
-                0 => "AUTH_NONE".to_owned(),
-                1 => "AUTH_SYS".to_owned(),
-                2 => "AUTH_SHORT".to_owned(),
-                3 => "AUTH_DH".to_owned(),
-                6 => "RPCSEC_GSS".to_owned(),
-                // RPCSEC_GSS Kerberos pseudo-flavors (RFC 2623 S2.1.1, IANA RPC
-                // auth-flavor registry). Real krb5 exports advertise these, not
-                // bare flavor 6; rendering them as GSS keeps the plaintext-transport
-                // check (F-3.1) from misfiring on a krb5p-protected export.
-                390_003 => "RPCSEC_GSS(krb5)".to_owned(),
-                390_004 => "RPCSEC_GSS(krb5i)".to_owned(),
-                390_005 => "RPCSEC_GSS(krb5p)".to_owned(),
-                _ => format!("flavor({f})"),
-            })
-            .collect();
+        ea.auth_methods = mount_res.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
 
         check_auth_methods(&entry.path, &mount_res.auth_flavors, findings);
         // NFSv4 SECINFO check: verify auth methods from the NFSv4 perspective (F-3.4).
@@ -1430,12 +1412,32 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
         return;
     }
 
-    let flavors = res.results.last().and_then(|op| if let ResOpData::SecFlavors(f) = &op.data { Some(f.as_slice()) } else { None });
-    let Some(flavors) = flavors else { return };
+    let entries = res.results.last().and_then(|op| if let ResOpData::SecFlavors(f) = &op.data { Some(f.as_slice()) } else { None });
+    let Some(entries) = entries else { return };
+
+    let raw_flavors: Vec<u32> = entries.iter().map(|e| e.flavor).collect();
+
+    // Build a human-readable summary including GSS service levels.
+    let flavor_strs: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            if e.flavor == 6 {
+                match e.gss_service {
+                    Some(1) => "RPCSEC_GSS(krb5)".to_owned(),
+                    Some(2) => "RPCSEC_GSS(krb5i)".to_owned(),
+                    Some(3) => "RPCSEC_GSS(krb5p)".to_owned(),
+                    _ => "RPCSEC_GSS".to_owned(),
+                }
+            } else {
+                crate::proto::auth::flavor_name(e.flavor)
+            }
+        })
+        .collect();
+    let evidence_str = format!("SECINFO flavors=[{}]", flavor_strs.join(", "));
 
     // Kerberos: bare RPCSEC_GSS (6) or krb5 pseudo-flavors (390003-390005).
-    let has_kerberos = flavors.iter().any(|&f| f == 6 || (390_003..=390_005).contains(&f));
-    let has_auth_sys = flavors.contains(&1); // 1 = AUTH_SYS (RFC 5531 S14)
+    let has_kerberos = raw_flavors.iter().any(|&f| f == 6 || (390_003..=390_005).contains(&f));
+    let has_auth_sys = raw_flavors.contains(&1);
 
     if has_auth_sys && !has_kerberos {
         findings.push(make_finding(
@@ -1448,16 +1450,13 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
                      credentials via NFSv4 COMPOUND without Kerberos. \
                      RFC 9289 S1: NFS-over-TLS and RPCSEC_GSS are opt-in and rarely deployed.",
                 ),
-                evidence: &format!("SECINFO flavors={flavors:?}"),
+                evidence: &evidence_str,
                 remediation: "Configure `sec=krb5p` in /etc/exports to require Kerberos authentication.",
                 export: Some(export_path),
             },
             Severity::High,
         ));
     } else if has_auth_sys && has_kerberos {
-        // Mixed flavors via NFSv4 SECINFO: same downgrade risk as the MOUNT
-        // flavor list (F-1.7). Without integrity protection on the SECINFO
-        // call itself, a MITM can strip krb5 entries (RFC 7530 S19).
         findings.push(make_finding(
             &FindingSpec {
                 id: "F-1.7",
@@ -1468,7 +1467,7 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
                      (RFC 2203 S5.2.1). Without integrity protection on the SECINFO call, a MITM \
                      can also strip the krb5 entries to force clients onto AUTH_SYS (RFC 7530 S19).",
                 ),
-                evidence: &format!("SECINFO flavors={flavors:?}"),
+                evidence: &evidence_str,
                 remediation: "Remove AUTH_SYS from exports that require Kerberos authentication: \
                               use sec=krb5 (or krb5i/krb5p) exclusively in /etc/exports.",
                 export: Some(export_path),
@@ -1478,7 +1477,7 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
     }
 
     // AUTH_DH (flavor 3) via NFSv4 SECINFO.
-    if flavors.contains(&3) {
+    if raw_flavors.contains(&3) {
         findings.push(make_finding(
             &FindingSpec {
                 id: "F-3.7",
@@ -1488,7 +1487,7 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
                      uses 192-bit Diffie-Hellman / 56-bit DES. RFC 5531 S14: 'AUTH_DH [...] is \
                      considered obsolete and insecure; see [RFC2695].'",
                 ),
-                evidence: &format!("SECINFO flavors={flavors:?}"),
+                evidence: &evidence_str,
                 remediation: "Remove AUTH_DH from the export's security configuration. Use \
                               sec=krb5p for authenticated and integrity-protected access.",
                 export: Some(export_path),

@@ -412,16 +412,9 @@ async fn connect_privileged_only(addr: SocketAddr) -> std::io::Result<crate::pro
     Err(last_err.unwrap_or_else(|| std::io::Error::other("privileged source port range 300-1023 exhausted")))
 }
 
-/// Convert raw auth flavor u32 to the `AuthFlavor` enum (best-effort).
+/// Convert raw auth flavor u32 to the `AuthFlavor` enum.
 const fn parse_flavor(raw: u32) -> AuthFlavor {
-    match raw {
-        0 => AuthFlavor::None,
-        1 => AuthFlavor::Sys,
-        2 => AuthFlavor::Short,
-        3 => AuthFlavor::Dh,
-        6 => AuthFlavor::Gss,
-        _ => AuthFlavor::Unknown,
-    }
+    AuthFlavor::from_u32(raw)
 }
 
 /// Convert an `export_node` to our `ExportEntry`.
