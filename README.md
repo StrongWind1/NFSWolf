@@ -201,12 +201,12 @@ See `nfswolf <subcommand> --help` for per-subcommand flags.
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 542 tests across 8 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 543 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (542 tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (543 tests), doc, hygiene, machete
 ```
 
 ## Credits

@@ -4,6 +4,50 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-03
+
+### Added
+
+- **Comprehensive auth flavor enumeration** -- the analyzer and scanner now discover and report all authentication types available on every export.
+  - SECINFO GSS mechanism decoding: `rpcsec_gss_info` (OID, QOP, service level) is now parsed from NFSv4 SECINFO responses, distinguishing krb5/krb5i/krb5p directly from SECINFO instead of relying on MOUNT pseudo-flavors.
+  - Scanner v4 SECINFO probing: NFSv4 pseudo-root entries now show auth flavors via per-entry SECINFO queries.
+  - Scanner v3 MNT auth probing: every v3 export is probed via MNT to discover `auth_flavors` (RFC 1813 Appendix III), displayed in console and JSON output.
+  - `AUTH_TOOWEAK` oracle (F-1.8): detects Kerberos enforcement at the NFS operation level when MOUNT accepts AUTH_SYS but GETATTR returns `AUTH_TOOWEAK` (RFC 5531 S8.3).
+  - `AUTH_SHORT` session credential finding (F-3.9): warns when AUTH_SHORT (flavor 2) is advertised, since opaque session tokens are replayable from wire captures (RFC 1057 S9.2).
+  - Unified `flavor_name()` function: single source of truth for flavor-to-name mapping across analyzer and scanner, covering all 19 IANA-assigned flavors.
+  - `SecInfoEntry` struct in `nfs-v4` crate: carries GSS mechanism OID, QOP, and service level alongside the raw flavor number.
+- **New analyzer checks** -- 6 new security findings using existing protocol crate infrastructure:
+  - F-3.7: AUTH_DH advertised (cryptographically broken, RFC 5531 S14) -- detected in both MOUNT auth_flavors and NFSv4 SECINFO.
+  - F-3.8: RPC-with-TLS supported (RFC 9289) -- AUTH_TLS NULL probe with STARTTLS verifier.
+  - F-3.9: AUTH_SHORT session credentials advertised -- replayable without knowing original UID/GID.
+  - F-4.6: Unrestricted chown via PATHCONF `chown_restricted=false` -- ownership hijacking risk.
+  - F-5.7: Case-insensitive filesystem via PATHCONF `case_insensitive=true` -- Windows NFS / NTFS fingerprint.
+  - F-5.8: Export root attributes leaked via AUTH_NONE GETATTR (RFC 2623 S2.3.2 automounter support).
+  - F-1.8: NFS operations reject AUTH_SYS (Kerberos enforced at NFS layer via AUTH_TOOWEAK).
+- **Complete IANA registries** -- all three RPC registries now have full coverage:
+  - RPC program numbers: 1251 entries from the IANA CSV, replacing the previous 13-entry hand-curated table. Every assigned program in a portmapper DUMP is now decoded by name.
+  - Auth flavor numbers: all 19 assigned values (AUTH_NONE through AUTH_TLS, plus legacy AUTH_KERB/AUTH_RSA/AUTH_NW/AUTH_SEC/AUTH_ESV/AUTH_NQNFS/AUTH_GSSAPI/AUTH_ILU_UGEN and pseudo-flavors AUTH_SPNEGO/krb5/krb5i/krb5p).
+  - Auth status numbers: all 19 values (AUTH_OK through RPCSEC_GSS_UNKNOWN_MESSAGE, RFC 7861).
+- **Scanner security notes** for sideband RPC programs -- NLM, NSM, RQUOTA, NFS_ACL, NIS (ypserv/ypbind), PCNFSD, rstatd, rusersd, yppasswdd, rexec, ypupdate, keyserv, ypxfrd, ttdbserverd, sadmind annotated with attack surface descriptions in console and JSON output.
+- `AuthFlavor::Tls` variant and `RPCSEC_GSS = 6` in the `auth_flavor` wire enum (`onc-rpc-client`).
+- `auth_flavors` field on `ExportEntry` and `V4ExportEntry` for scanner output.
+
+### Changed
+
+- **NFSv2 on PooledTransport** -- all v2 code paths (shell, escape, brute-handle) now use the same `PooledTransport` infrastructure as v3, providing connection pooling, circuit breaker, stealth pacing, and SOCKS5 proxy support. Previously v2 used raw `DirectTransport` with no policy.
+- **NFSv4 wire coverage** -- all 37 NFSv4.0 operations (ops 3-39) plus ILLEGAL (10044) are now representable as `ArgOp` variants. `CompoundBuilder` has typed methods for 13+ operations including SETCLIENTID, OPEN, EXCHANGE_ID, SECINFO_NO_NAME, GETDEVICEINFO, GETDEVICELIST. NFSv4.1 operations (EXCHANGE_ID op 42, SECINFO_NO_NAME op 52, GETDEVICEINFO op 47, GETDEVICELIST op 48) and NFSv4.2 security labels (FATTR4_SEC_LABEL, SecLabel4, RFC 7862) are supported.
+- `parse_flavor()` in mount.rs now delegates to `AuthFlavor::from_u32()`, fixing a bug where krb5 pseudo-flavors (390003-390005) mapped to `Unknown` instead of `Gss`.
+- `NfsMountClient::unmount()` is no longer gated behind `#[cfg(feature = "fuse")]` -- it is a basic MOUNT protocol operation used by the scanner for stealth cleanup.
+- `auth_stat` enum extended from 8 to 19 variants (all IANA-assigned values).
+- `AuthFlavor::from_u32()` classifies AUTH_SPNEGO (390000) as `Gss` and AUTH_TLS (7) as `Tls`.
+- Removed stale dead-code suppression comment from main.rs.
+- Updated CRATE-DESIGN.md: proxy bypass table, NFSv2 parity table, phase completion status, error taxonomy all reflect current state.
+- Updated all markdown documentation: finding counts (47), test counts (543), shell command counts (52), crate README compilation fixes, NFSv4.md operation coverage.
+
+### Fixed
+
+- Three inline flavor-to-name match blocks (analyzer, scanner, mount) replaced by single `flavor_name()` function, eliminating naming inconsistencies ("RPCSEC_GSS(krb5)" vs "krb5" vs `Unknown`).
+
 ## [0.8.0] - 2026-07-28
 
 ### Added
