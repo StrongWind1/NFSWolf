@@ -720,6 +720,28 @@ fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Ve
             Severity::Medium,
         ));
     }
+
+    // AUTH_SHORT (flavor 2): opaque server-issued session credential replayable
+    // from wire captures without knowing the original UID/GID.
+    if auth_flavors.contains(&2) {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-3.9",
+                title: "AUTH_SHORT session credentials advertised",
+                desc: "The export advertises AUTH_SHORT (flavor 2). After an initial AUTH_SYS \
+                       call, the server may return an AUTH_SHORT verifier containing an opaque \
+                       shorthand credential. This shorthand is not cryptographically bound to \
+                       the original identity (RFC 1057 S9.2, RFC 5531 Appendix A). An attacker \
+                       who captures the AUTH_SHORT token from the wire can replay it to \
+                       impersonate the original client without knowing their UID/GID.",
+                evidence: &format!("auth_flavors={auth_flavors:?}"),
+                remediation: "AUTH_SHORT is a legacy optimization. Use sec=krb5p to eliminate \
+                              replayable session credentials.",
+                export: Some(export_path),
+            },
+            Severity::Low,
+        ));
+    }
 }
 
 /// Attempt to escape the export by constructing a handle targeting the filesystem root.
@@ -1493,6 +1515,27 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
                 export: Some(export_path),
             },
             Severity::Medium,
+        ));
+    }
+
+    // AUTH_SHORT (flavor 2) via NFSv4 SECINFO.
+    if raw_flavors.contains(&2) {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-3.9",
+                title: "NFSv4 SECINFO: AUTH_SHORT session credentials advertised",
+                desc: &format!(
+                    "NFSv4 SECINFO for export {export_path} includes AUTH_SHORT (flavor 2). \
+                     AUTH_SHORT opaque tokens captured from the wire can be replayed to \
+                     impersonate the original client without knowing their UID/GID \
+                     (RFC 1057 S9.2, RFC 5531 Appendix A).",
+                ),
+                evidence: &evidence_str,
+                remediation: "AUTH_SHORT is a legacy optimization. Use sec=krb5p to eliminate \
+                              replayable session credentials.",
+                export: Some(export_path),
+            },
+            Severity::Low,
         ));
     }
 }
