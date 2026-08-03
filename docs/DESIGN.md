@@ -66,7 +66,7 @@ nfswolf targets the following threat scenario:
 ## Document Hierarchy
 
 ```
-FINDINGS.md (41 findings with RFC-cited vulnerability analysis, F-1.1 through F-7.6)
+FINDINGS.md (47 findings with RFC-cited vulnerability analysis, F-1.1 through F-7.6)
     └── findings/ (detailed write-ups per finding)
         └── REQUIREMENTS.md (what the tool must detect, R1-R7)
             └── DESIGN.md (vision, goals, threat model)     <- you are here
@@ -177,7 +177,7 @@ nfswolf and [niffler](https://github.com/evilsocket/niffler) are complementary. 
 
 NFSv2 (RFC 1094) has zero security negotiation -- no auth flavor enforcement, no ACCESS procedure -- and some server implementations skip `root_squash` on the v2 code path (RFC 2623 §2.7). When `scan` or `analyze` detects v2 support alongside v3/v4 with RPCSEC_GSS, that combination is flagged as F-1.6 because v2 provides a downgrade path that bypasses the v3/v4 security policy entirely.
 
-The NFSv2 wire protocol lives in `nfs-v2` (all 18 procedures, fixed 32-byte handles, 32-bit sizes) and the binary links it. `--nfs-version 2` enters a v2 shell backed by `V2Ops`, which obtains a 32-byte root handle via MOUNT v1 MNT (`MountV1Client` in `crates/nfs-mount/src/client.rs`) and wraps an `Nfs2Client<DirectTransport>` -- no connection pooling, no ACCESS procedure to drive a credential ladder, but identity changes are supported by reconnecting with new AUTH_SYS credentials (same pattern as the v4 shell's `reconnect_with_auth()`). `--handle HEX` also works, bypassing MOUNT entirely. All 44 shell commands are available through the unified `NfsShell<V2Ops>` architecture. `escape` and `brute-handle` fall back to NFSv2 automatically when MOUNT v3 fails, so v2-only servers are covered without an explicit `--nfs-version 2` flag. Live-tested against four VMs spanning kernels 2.6.32 through 4.15; Linux knfsd enforces `sec=krb5` on v2 NFS operations while MOUNT v1 leaks the handle without krb5 auth, confirming the downgrade gap documented in F-1.6.
+The NFSv2 wire protocol lives in `nfs-v2` (all 18 procedures, fixed 32-byte handles, 32-bit sizes) and the binary links it. `--nfs-version 2` enters a v2 shell backed by `V2Ops`, which obtains a 32-byte root handle via MOUNT v1 MNT (`MountV1Client` in `crates/nfs-mount/src/client.rs`) and wraps an `Nfs2Client<DirectTransport>` -- no connection pooling, no ACCESS procedure to drive a credential ladder, but identity changes are supported by reconnecting with new AUTH_SYS credentials (same pattern as the v4 shell's `reconnect_with_auth()`). `--handle HEX` also works, bypassing MOUNT entirely. All 52 shell commands are available through the unified `NfsShell<V2Ops>` architecture. `escape` and `brute-handle` fall back to NFSv2 automatically when MOUNT v3 fails, so v2-only servers are covered without an explicit `--nfs-version 2` flag. Live-tested against four VMs spanning kernels 2.6.32 through 4.15; Linux knfsd enforces `sec=krb5` on v2 NFS operations while MOUNT v1 leaks the handle without krb5 auth, confirming the downgrade gap documented in F-1.6.
 
 ### 5. Export Escape Lives in One Place -- `nfswolf escape`
 
@@ -217,7 +217,7 @@ NFSv3 distinguishes NFS3ERR_BADHANDLE from NFS3ERR_STALE (RFC 1813 §2.6). nfswo
 
 ### 10. Connection Pool with Health Eviction
 
-Per-(host, export, uid, gid) connection pools with health-aware lifecycle. Idle connections older than 5 seconds get a GETATTR health check before reuse. Failed connections are "poisoned" (discarded on return). Backpressure via `Notify` prevents thundering herd at max connections.
+Per-(host, export, uid, gid) connection pools with health-aware lifecycle. Idle connections older than 5 seconds get a GETATTR health check before reuse. Failed connections are "poisoned" (discarded on return). Backpressure via `Semaphore` prevents thundering herd at max connections.
 
 ### 11. Circuit Breaker per Host
 
@@ -229,7 +229,7 @@ See [ARCHITECTURE.md -- Comparison table](ARCHITECTURE.md#comparison-with-existi
 
 ## References
 
-- [FINDINGS.md](FINDINGS.md) -- All 41 findings grouped by attack type (RFC-cited)
+- [FINDINGS.md](FINDINGS.md) -- All 47 findings grouped by attack type (RFC-cited)
 - [findings/](findings/README.md) -- Detailed write-ups per finding
 - [REQUIREMENTS.md](REQUIREMENTS.md) -- Tool requirements with finding traceability
 - [ARCHITECTURE.md](ARCHITECTURE.md) -- Implementation architecture and module layout

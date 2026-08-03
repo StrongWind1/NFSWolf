@@ -31,7 +31,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 | Async / concurrent scan | yes | no | no | yes | no | no |
 | AUTH_SYS UID spraying | yes | no | yes | yes | no | no |
 | Export escape (ext4/XFS/BTRFS) | yes | no | no | no | no | no |
-| Interactive NFS shell (44+ commands) | yes | no | no | no | no | yes |
+| Interactive NFS shell (52 commands) | yes | no | no | no | no | yes |
 | FUSE mount (`nfswolf mount`) | yes | no | no | no | no | no |
 | Portmapper / mountd enumeration | yes | partial | no | no | no | no |
 | Self-contained HTML / JSON / CSV reports | yes | no | no | no | no | no |
@@ -201,12 +201,12 @@ See `nfswolf <subcommand> --help` for per-subcommand flags.
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 560 tests across 8 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 542 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (560 tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (542 tests), doc, hygiene, machete
 ```
 
 ## Credits

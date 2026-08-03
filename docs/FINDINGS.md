@@ -598,16 +598,22 @@ subcommand exercises these findings.
 | F-3.4 | [STRIPTLS Downgrade](findings/F-3.4-striptls-downgrade.md) | High | `analyze` (AUTH_TLS probe); NFSv4 SECINFO |
 | F-3.5 | [Portmapper Tunnel Bypass](findings/F-3.5-portmapper-tunnel-bypass.md) | Medium | `scan` (direct port 2049 probe when 111 filtered) |
 | F-3.6 | [UDP MOUNT Handle Theft](findings/F-3.6-udp-mount-handle-theft.md) | Critical | `scan --scan-udp` (mountd UDP availability) |
+| F-3.7 | [AUTH_DH Advertised (Cryptographically Broken)](findings/F-3.7-auth-dh-broken.md) | Medium | `analyze` (MOUNT auth_flavors + NFSv4 SECINFO flavor 3 detection) |
+| F-3.8 | [RPC-with-TLS Supported (RFC 9289)](findings/F-3.8-rpc-with-tls.md) | Info | `analyze` (AUTH_TLS NULL probe on NFS program) |
 | F-4.1 | [no_root_squash](findings/F-4.1-no-root-squash.md) | Critical | `analyze`, `mount --uid 0 --allow-write`, `shell uid 0` |
 | F-4.2 | [SUID/SGID Escalation](findings/F-4.2-suid-sgid-escalation.md) | High | `shell suid-scan`, `mount` + `chmod u+s` via regular tools |
 | F-4.3 | [Device Node Creation](findings/F-4.3-device-node-creation.md) | High | `shell mknod` |
 | F-4.4 | [Symlink Escape](findings/F-4.4-symlink-escape.md) | High | `analyze` (writable parent detection), `shell symlink` |
 | F-4.5 | [SELinux Label Bypass](findings/F-4.5-selinux-label-bypass.md) | Medium | Not implemented -- documented for awareness (no SELinux/MAC check in `analyze`) |
+| F-4.6 | [Unrestricted chown](findings/F-4.6-unrestricted-chown.md) | High | `analyze` (PATHCONF `chown_restricted` check per export) |
 | F-5.1 | [Export List Enumeration](findings/F-5.1-export-list-enumeration.md) | Medium | `scan` (MNTPROC_EXPORT), `analyze` |
 | F-5.2 | [READDIRPLUS Harvesting](findings/F-5.2-readdirplus-handle-harvesting.md) | High | `shell ls`, `shell find`, `mount` (transparent via FUSE) |
 | F-5.3 | [NIS Credential Extraction](findings/F-5.3-nis-credential-extraction.md) | High | `scan` / `analyze` (portmapper 100004/100007 detect) |
 | F-5.4 | [RPC Service Enumeration](findings/F-5.4-rpc-service-enumeration.md) | Low | `scan` (PMAPPROC_DUMP full dump) |
 | F-5.5 | [NFSv4 Pseudo-FS Leakage](findings/F-5.5-nfsv4-pseudo-fs-leakage.md) | Low | `scan` (pseudo-root READDIR via `Nfs4DirectClient`) |
+| F-5.6 | Metadata Disclosed on Access Denial | Low | `analyze` (harvests `post_op_attr` from NFS3ERR_ACCES/PERM responses) |
+| F-5.7 | [Case-Insensitive Filesystem](findings/F-5.7-case-insensitive-filesystem.md) | Low | `analyze` (PATHCONF `case_insensitive` check per export) |
+| F-5.8 | [Export Root Attributes Leaked via AUTH_NONE](findings/F-5.8-auth-none-attr-leak.md) | Low | `analyze` (GETATTR with AUTH_NONE on export root handle) |
 | F-6.1 | [NLM Lock Attacks](findings/F-6.1-nlm-lock-attacks.md) | Medium | Out of scope -- lock-DoS module removed |
 | F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | Out of scope -- never implemented |
 | F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | Out of scope -- never implemented |

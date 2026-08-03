@@ -267,7 +267,7 @@ What nfswolf MUST detect, organized by operational phase. Every requirement trac
 ## Requirement Traceability
 
 ```
-FINDINGS.md (41 findings with RFC analysis)
+FINDINGS.md (47 findings with RFC analysis)
     └── findings/ (detailed write-ups)
         └── REQUIREMENTS.md (what the tool detects)  <- you are here
             └── ARCHITECTURE.md (how it's built)

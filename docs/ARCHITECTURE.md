@@ -6,7 +6,7 @@ For vision and goals, see [DESIGN.md](DESIGN.md). For security rationale, see [F
 ## Document Traceability
 
 ```
-FINDINGS.md (41 findings with RFC-cited analysis, F-1.1 through F-7.6)
+FINDINGS.md (47 findings with RFC-cited analysis, F-1.1 through F-7.6)
     └── findings/ (detailed write-ups per finding)
         └── REQUIREMENTS.md (what the tool must detect, R1-R7)
             └── DESIGN.md (vision, goals, threat model)
@@ -628,7 +628,7 @@ nfswolf/
 ├── src/
 │   ├── main.rs                    # CLI entry point with tracing + subcommand dispatch
 │   ├── output.rs                  # status_info/warn/err, print_handle, print_handle_next_steps
-│   ├── shell/                     # NfsShell: 44+ commands, tab completion, readline REPL
+│   ├── shell/                     # NfsShell: 52 commands, tab completion, readline REPL
 │   │   ├── mod.rs                 # Shell REPL loop, command dispatch, tab completion
 │   │   ├── complete.rs            # Tab completion for remote/local paths
 │   │   ├── ops.rs                 # ShellOps trait + version-neutral types
@@ -688,12 +688,12 @@ nfswolf/
 │   ├── credential_test.rs
 │   └── xdr_fuzz_test.rs
 ├── docs/
-│   ├── FINDINGS.md                # Finding catalog (41 findings, F-1.1 through F-7.6)
+│   ├── FINDINGS.md                # Finding catalog (47 findings, F-1.1 through F-7.6 plus F-3.7, F-3.8, F-4.6, F-5.6, F-5.7, F-5.8)
 │   ├── REQUIREMENTS.md            # Tool requirements (R1 through R7)
 │   ├── DESIGN.md                  # Vision, goals, threat model
 │   ├── ARCHITECTURE.md            # This file
 │   ├── NFSv2.md, NFSv3.md, NFSv4.md  # Protocol reference notes
-│   └── findings/                  # Detailed finding write-ups (42 files: 41 findings + README)
+│   └── findings/                  # Detailed finding write-ups (48 files: 47 findings + README)
 └── ref/
     ├── nfs3/                      # Read-only Vaiz/nfs3 checkout (for upstream diffing)
     └── rfc/                       # NFS/RPC/XDR RFCs (1057, 1094, 1813, 1831, 2623, 5531, 7530, 9289)

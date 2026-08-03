@@ -8,6 +8,7 @@ MOUNT v1 (NFSv2-era) returns a bare 32-byte handle. MOUNT v3 (NFSv3-era) returns
 
 ```rust
 use nfs_mount::{MountClient, MountVersion, MountedHandle};
+use nfs_mount::wire::dirpath;
 use onc_rpc_client::DirectTransport;
 use onc_xdr::Opaque;
 
@@ -16,7 +17,7 @@ let transport = DirectTransport::new(stream);
 let mount = MountClient::v3(transport);
 
 // Get the root handle and auth flavors for an export.
-let handle: MountedHandle = mount.mnt(Opaque::borrowed(b"/export")).await?;
+let handle: MountedHandle = mount.mnt(dirpath(Opaque::borrowed(b"/export"))).await?;
 println!("handle: {} bytes, auth_sys: {}", handle.bytes.len(), handle.accepts_auth_sys());
 
 // List all exports.

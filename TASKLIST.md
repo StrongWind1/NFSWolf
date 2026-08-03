@@ -1,6 +1,6 @@
 # v1.0 Release Tasklist
 
-What must change before stamping 1.0.0. Every gap below was verified against the current codebase (v0.8.0) — items that CRATE-DESIGN.md or FUTURE-RESEARCH.md listed as open but that already shipped in v0.7.0/v0.8.0 are excluded.
+What must change before stamping 1.0.0. Every gap below was verified against the current codebase (v0.8.0) -- items that CRATE-DESIGN.md or FUTURE-RESEARCH.md listed as open but that already shipped in v0.7.0/v0.8.0 are excluded.
 
 ## Already done (verified, no action needed)
 
@@ -8,11 +8,11 @@ These items appear as open in CRATE-DESIGN.md but are already implemented. Liste
 
 | Item | Evidence |
 |------|----------|
-| NFSv2 on PooledTransport (pool, circuit breaker, stealth, proxy) | All v2 paths use `make_v2_client_with_hostname` → `make_pooled_transport` (`src/cli/probe.rs:93-136`) |
+| NFSv2 on PooledTransport (pool, circuit breaker, stealth, proxy) | All v2 paths use `make_v2_client_with_hostname` -> `make_pooled_transport` (`src/cli/probe.rs:93-136`) |
 | NFSv2 SOCKS5 proxy bypass (escape, brute-handle, shell) | `escape.rs:235,581`, `brute_handle.rs:372`, `shell.rs:691` all pass `globals.proxy.as_deref()` |
 | WebNFS analyzer proxy bypass (`_proxy` unused) | Fixed: `analyzer.rs:867` takes `proxy: Option<&str>`, passes to `connect_tcp` at line 878 |
-| `NfsStat` → `Nfs2Stat` rename | `crates/nfs-v2/src/wire.rs:80` defines `pub enum Nfs2Stat` |
-| `MountError::Denied` → `Status` | `crates/nfs-mount/src/error.rs:24` has `Status(mountstat3)`, with `#[non_exhaustive]` |
+| `NfsStat` -> `Nfs2Stat` rename | `crates/nfs-v2/src/wire.rs:80` defines `pub enum Nfs2Stat` |
+| `MountError::Denied` -> `Status` | `crates/nfs-mount/src/error.rs:24` has `Status(mountstat3)`, with `#[non_exhaustive]` |
 | `Nfs4Status` classification methods | `crates/nfs-v4/src/wire.rs:1687-1703`: `is_permission_denied`, `is_stale`, `is_not_found` |
 | `fuse.rs` duplicate `is_permission_refusal` | Removed; fuse.rs uses `Nfs3Error::is_permission_denied` directly (line 471, 496) |
 | `rpc_probe.rs` (266 lines of stale RPC parsing) | Deleted entirely |
@@ -27,57 +27,57 @@ These items appear as open in CRATE-DESIGN.md but are already implemented. Liste
 
 ---
 
-## Tier 1 — Must-have: new analyzer checks
+## Tier 1 -- Must-have: new analyzer checks
 
 These use existing crate infrastructure that src/ never calls. Each adds a new security finding using procedures already implemented in the protocol crates.
 
-### ~~T-1.1: AUTH_DH (flavor 3) security finding~~ ✅ DONE
+### ~~T-1.1: AUTH_DH (flavor 3) security finding~~ [x] DONE
 
 Emits F-3.7 from both `check_auth_methods()` and `check_nfs4_secinfo()` when AUTH_DH (flavor 3) is present.
 
-### ~~T-1.2: PATHCONF case-insensitive + chown_restricted detection~~ ✅ DONE
+### ~~T-1.2: PATHCONF case-insensitive + chown_restricted detection~~ [x] DONE
 
 `check_pathconf()` calls raw PATHCONF per-export. Emits F-5.7 (case-insensitive) and F-4.6 (unrestricted chown).
 
-### ~~T-1.3: AUTH_TLS STARTTLS probe (RFC 9289)~~ ✅ DONE
+### ~~T-1.3: AUTH_TLS STARTTLS probe (RFC 9289)~~ [x] DONE
 
 `check_auth_tls()` sends AUTH_TLS NULL probe (flavor 7). Emits F-3.8 when TLS is available. Added `AUTH_TLS = 7` and `RPCSEC_GSS = 6` to `auth_flavor` enum in `onc-rpc-client`.
 
-### ~~T-1.4: AUTH_NONE metadata leak probe (FSINFO/GETATTR)~~ ✅ DONE
+### ~~T-1.4: AUTH_NONE metadata leak probe (FSINFO/GETATTR)~~ [x] DONE
 
 `check_auth_none_leak()` sends GETATTR with AUTH_NONE per-export. Emits F-5.8 when metadata is leaked to unauthenticated clients.
 
 ---
 
-## Tier 2 — Must-have: scanner enrichment
+## Tier 2 -- Must-have: scanner enrichment
 
-### ~~T-2.1: Portmapper sideband program security labeling~~ ✅ DONE
+### ~~T-2.1: Portmapper sideband program security labeling~~ [x] DONE
 
-Added `security_note()` in `onc-rpcbind/src/programs.rs` covering NLM, NSM, RQUOTA, NFS_ACL, NIS, PCNFSD. Scanner console output shows notes in yellow with ⚠ prefix. JSON output includes `security_note` field.
+Added `security_note()` in `onc-rpcbind/src/programs.rs` covering NLM, NSM, RQUOTA, NFS_ACL, NIS, PCNFSD. Scanner console output shows notes in yellow with ! prefix. JSON output includes `security_note` field.
 
-### ~~T-2.2: NetApp program 400010 in program table~~ ✅ DONE
+### ~~T-2.2: NetApp program 400010 in program table~~ [x] DONE
 
 Added `(400_010, "netapp_mgmt")` to sorted PROGRAMS array with test.
 
-### ~~T-2.3: Scanner auth flavor enumeration per export~~ ✅ DONE
+### ~~T-2.3: Scanner auth flavor enumeration per export~~ [x] DONE
 
 Added `auth_flavors: Vec<u32>` to `ExportEntry`. Scanner now MNTs each v3 export to discover auth flavors, then UMNTs. Console output shows `[AUTH_SYS,krb5p]` alongside the ACL. JSON output includes `auth_flavors` array per export.
 
 ---
 
-## Tier 3 — Must-have: documentation cleanup
+## Tier 3 -- Must-have: documentation cleanup
 
-### ~~T-3.1: Update CRATE-DESIGN.md~~ ✅ DONE
+### ~~T-3.1: Update CRATE-DESIGN.md~~ [x] DONE
 
 Updated proxy bypass table (all 4 fixed), NFSv2 parity table (all on PooledTransport), phase completion status, error taxonomy (all resolved), `#[non_exhaustive]` (48 annotations), xdr-derive tests (present), removed stale rpc_probe.rs references.
 
-### ~~T-3.2: Remove stale dead-code comment in main.rs~~ ✅ DONE
+### ~~T-3.2: Remove stale dead-code comment in main.rs~~ [x] DONE
 
 Removed the stale 5-line comment about crate-level dead-code suppression.
 
 ---
 
-## Tier 4 — Release
+## Tier 4 -- Release
 
 ### T-4.1: Version bump to 1.0.0
 
@@ -89,11 +89,11 @@ Removed the stale 5-line comment about crate-level dead-code suppression.
 - **What to do:** Write the `[1.0.0]` section documenting all changes since v0.8.0.
 - **Files:** `CHANGELOG.md`
 
-### ~~T-4.3: FINDINGS.md + finding write-ups~~ ✅ DONE
+### ~~T-4.3: FINDINGS.md + finding write-ups~~ [x] DONE
 
 Added F-3.7, F-3.8, F-4.6, F-5.6, F-5.7, F-5.8 to `docs/FINDINGS.md`. Individual write-up files in `docs/findings/`.
 
-### ~~T-4.4: REQUIREMENTS.md update~~ ✅ DONE
+### ~~T-4.4: REQUIREMENTS.md update~~ [x] DONE
 
 Added requirements for PATHCONF (F-5.7, F-4.6), AUTH_TLS (F-3.8), AUTH_DH (F-3.7), sideband program labeling, and NetApp 400010 with finding traceability.
 
@@ -109,7 +109,7 @@ Added requirements for PATHCONF (F-5.7, F-4.6), AUTH_TLS (F-3.8), AUTH_DH (F-3.7
 
 ---
 
-## Tier 5 — Nice-to-have (not blocking 1.0)
+## Tier 5 -- Nice-to-have (not blocking 1.0)
 
 ### T-5.1: Write verifier reboot oracle
 
@@ -127,7 +127,7 @@ Linux NFS clients create `.nfs<inode><hex>` files when an open file is unlinked.
 - **Effort:** Trivial
 - **Files:** `src/shell/mod.rs`
 
-### T-5.3: OS fingerprinting — Windows version-pattern correlation
+### T-5.3: OS fingerprinting -- Windows version-pattern correlation
 
 Windows NFS servers advertise v3+v4.1 only (no v2, no v4.0). The `detect_windows_handle_version` function exists at `src/engine/file_handle.rs:228` but is `#[cfg(test)]` only. The version-set correlation is not used as a fingerprinting signal.
 
@@ -179,4 +179,4 @@ Only 3 of 6 portmapper procedures are implemented (NULL, GETPORT, DUMP). CALLIT 
 
 ## Verification
 
-After every change: `make check-all` (fmt → clippy → deny → check → test → doc → hygiene → machete).
+After every change: `make check-all` (fmt -> clippy -> deny -> check -> test -> doc -> hygiene -> machete).

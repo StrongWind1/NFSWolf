@@ -29,7 +29,7 @@ let (data, eof) = nfs.read_chunk(&file_fh, 0, 65536).await?;
 |------|-------------|
 | `Nfs4Client<T>` | Client with `compound()`, `get_root_fh()`, `lookup_fh()`, `list_dir()`, `read_chunk()` |
 | `Nfs4Error<E>` | Error type: `Rpc`, `Status`, `MissingResult` |
-| `CompoundBuilder` | Chainable builder: `putrootfh()`, `lookup()`, `getfh()`, `getattr()`, `secinfo()`, etc. |
+| `CompoundBuilder` | Chainable builder with 13 typed methods: `putrootfh()`, `putpubfh()`, `putfh()`, `lookup()`, `getfh()`, `getattr()`, `secinfo()`, `setclientid()`, `secinfo_no_name()`, `exchange_id()`, `getdeviceinfo()`, `getdevicelist()`, `open_read()` |
 | `CompoundArgs` / `CompoundRes` | Wire-level COMPOUND request and response |
 | `ArgOp` | Enum of all 37 NFSv4.0 operations (ops 3-39) plus ILLEGAL (10044) |
 | `ResOp` / `ResOpData` | Result operation with typed payloads (Fh, Readdir, Read, Secinfo, Getattr, ...) |
@@ -37,12 +37,14 @@ let (data, eof) = nfs.read_chunk(&file_fh, 0, 65536).await?;
 | `Nfs4Status` | Status codes with `Display` impl |
 | `DirEntry4` | Directory entry (name, cookie, optional attributes) |
 | `NfsImplId4` | Server implementation ID (NFSv4.1+) |
+| `SecLabel4` | Security label (LFS + PI + label bytes, RFC 7862 S12.2.4) |
+| `FATTR4_SEC_LABEL` | Attribute number 80 for requesting security labels |
 
 ## Protocol coverage
 
 **Implemented (stateless, read-only):** PUTROOTFH, PUTPUBFH, PUTFH, LOOKUP, LOOKUPP, GETFH, GETATTR, READDIR, READLINK, READ, SECINFO, SAVEFH, RESTOREFH, NVERIFY, VERIFY, ACCESS, SETCLIENTID, SETCLIENTID_CONFIRM, RENEW. All 37 v4.0 operation codes (ops 3-39, RFC 7530 sec. 16) are representable in `ArgOp` -- operations without typed fields carry opaque payloads so every valid op code can be serialised and round-tripped.
 
-**NFSv4.1/4.2 extensions:** SECINFO_NO_NAME (op 52, RFC 5661) and EXCHANGE_ID (op 42, RFC 5661) are supported for probing server capabilities.
+**NFSv4.1/4.2 extensions:** SECINFO_NO_NAME (op 52, RFC 5661), EXCHANGE_ID (op 42, RFC 5661), GETDEVICEINFO (op 47, RFC 5661 S18.40), and GETDEVICELIST (op 48, RFC 5661 S18.41) are supported for probing server capabilities and pNFS device enumeration. `AttrRequest` supports `FATTR4_SEC_LABEL` (attribute 80, RFC 7862 S12.2.4) for requesting security labels, with the `SecLabel4` type for decoding the response.
 
 **Not implemented:** the stateful half -- `OPEN`, `CLOSE`, `LOCK`, delegations, and the v4.1 session machinery of [RFC 8881]. Those require clientid and stateid tracking, `OPEN_CONFIRM`, and lease renewal.
 

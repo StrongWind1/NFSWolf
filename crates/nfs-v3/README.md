@@ -14,7 +14,7 @@ use onc_xdr::Opaque;
 
 let stream = tokio::net::TcpStream::connect("server:mount_port").await?;
 let mount = MountClient::new(DirectTransport::new(stream), MountVersion::V3);
-let mounted = mount.mnt(Opaque::borrowed(b"/export")).await?;
+let mounted = mount.mnt(nfs_mount::wire::dirpath(Opaque::borrowed(b"/export"))).await?;
 
 let stream = tokio::net::TcpStream::connect("server:nfs_port").await?;
 let nfs = Nfs3Client::new(DirectTransport::new(stream));

@@ -32,6 +32,7 @@ for m in &mappings {
 | `known_programs()` | The full table of well-known program numbers |
 | `mapping` | XDR type for a portmapper registration entry |
 | `IPPROTO_TCP` / `IPPROTO_UDP` | Protocol constants for `getport()` |
+| `security_note(u32)` | Return a security-relevant note for a sideband RPC program number |
 | `PMAP_PORT` | Well-known portmapper port (111) |
 
 ## Protocol coverage
@@ -42,7 +43,7 @@ for m in &mappings {
 
 **rpcbind v4** (RFC 1833 sec. 2.2.2): `GETSTAT` returns per-version call counts, SET/UNSET totals, and address/rmtcall statistics for versions 2, 3, and 4.
 
-The program number table covers portmapper, NFS, mountd, ypserv, ypbind, rquotad, nlockmgr, status (NSM), nfs_acl, pcnfsd, and other programs commonly found alongside NFS.
+The program number table covers portmapper, NFS, mountd, ypserv, ypbind, rquotad, nlockmgr, status (NSM), nfs_acl, pcnfsd, netapp_mgmt (400010), and other programs commonly found alongside NFS. `security_note()` returns a brief security-relevant note for programs that have one (e.g., rquotad's unprotected per-user quota exposure).
 
 ## Pre-1.0
 

@@ -13,7 +13,7 @@ use onc_rpc_client::DirectTransport;
 
 let stream = tokio::net::TcpStream::connect("server:mount_port").await?;
 let mount = MountV1Client::new(DirectTransport::new(stream), MountVersion::V1);
-let handle = mount.mnt(onc_xdr::Opaque::borrowed(b"/export")).await?;
+let handle = mount.mnt(nfs_mount::wire::dirpath(onc_xdr::Opaque::borrowed(b"/export"))).await?;
 
 let stream = tokio::net::TcpStream::connect("server:nfs_port").await?;
 let nfs = Nfs2Client::new(DirectTransport::new(stream));
