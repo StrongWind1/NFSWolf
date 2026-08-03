@@ -585,7 +585,12 @@ fn print_exports(r: &HostResult) {
             },
             ExportListKind::V4(entries) => {
                 for e in *entries {
-                    println!("    {}", e.path);
+                    if e.auth_flavors.is_empty() {
+                        println!("    {}", e.path);
+                    } else {
+                        let flavors: Vec<String> = e.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
+                        println!("    {:<40}[{}]", e.path, flavors.join(","));
+                    }
                 }
             },
         }
@@ -692,6 +697,7 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
             })).collect::<Vec<_>>()),
             "v4": r.exports_v4.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,
+                "auth_flavors": e.auth_flavors,
             })).collect::<Vec<_>>()),
         },
         "mounts": r.mounts.as_ref().map(|m| m.iter().map(|c| serde_json::json!({

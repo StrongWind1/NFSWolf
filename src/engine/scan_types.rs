@@ -170,6 +170,12 @@ pub(crate) struct MountPortInfo {
 pub(crate) struct V4ExportEntry {
     /// Entry name from the pseudo-root READDIR (e.g., `"srv"`, `"data"`).
     pub path: String,
+    /// Authentication flavors from SECINFO probe.
+    ///
+    /// Populated when the scanner issues SECINFO per pseudo-root entry.
+    /// Empty if NFSv4 SECINFO was not attempted or the server rejected it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub auth_flavors: Vec<u32>,
 }
 
 // --- Host result ------------------------------------------------------------

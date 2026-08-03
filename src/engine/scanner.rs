@@ -610,6 +610,8 @@ async fn probe_nfs_versions_tcp(addr: SocketAddr, probe_timeout: Duration, proxy
 /// Tries AUTH_SYS (uid=0) first since most servers require it for the pseudo-root.
 /// Falls back to AUTH_NONE if AUTH_SYS fails.
 async fn readdir_v4_pseudo_root(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Vec<V4ExportEntry>> {
+    use crate::proto::nfs4::types::ResOpData;
+
     // AUTH_SYS with uid=0 (most servers require at least AUTH_SYS for READDIR)
     let result = Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await;
     let mut client = match result {
@@ -618,7 +620,18 @@ async fn readdir_v4_pseudo_root(addr: SocketAddr, proxy: Option<&str>) -> anyhow
     };
     let root_fh = client.get_root_fh().await?;
     let entries = client.list_dir(&root_fh).await?;
-    Ok(entries.into_iter().map(|name| V4ExportEntry { path: name }).collect())
+
+    // Probe SECINFO per entry to discover auth flavors (RFC 7530 S16.31).
+    let mut v4_exports: Vec<V4ExportEntry> = Vec::with_capacity(entries.len());
+    for name in entries {
+        let ops = vec![ArgOp::Putrootfh, ArgOp::Secinfo(name.clone())];
+        let auth_flavors = match client.compound(ops).await {
+            Ok(res) if res.status == 0 => res.results.last().and_then(|op| if let ResOpData::SecFlavors(ref f) = op.data { Some(f.iter().map(|e| e.flavor).collect()) } else { None }).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        v4_exports.push(V4ExportEntry { path: name, auth_flavors });
+    }
+    Ok(v4_exports)
 }
 
 /// Detect RDMA transport availability for NFS.
