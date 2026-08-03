@@ -121,6 +121,14 @@ pub enum auth_stat {
     RPCSEC_GSS_CREDPROBLEM = 13,
     /// Problem with context (RPCSEC_GSS, RFC 5531).
     RPCSEC_GSS_CTXPROBLEM = 14,
+    /// No credentials for multi-principal assertion inner context user (RFC 7861).
+    RPCSEC_GSS_INNER_CREDPROBLEM = 15,
+    /// Problem with label assertion (RFC 7861).
+    RPCSEC_GSS_LABEL_PROBLEM = 16,
+    /// Problem with structured privilege assertion (RFC 7861).
+    RPCSEC_GSS_PRIVILEGE_PROBLEM = 17,
+    /// Unknown structured privilege assertion (RFC 7861).
+    RPCSEC_GSS_UNKNOWN_MESSAGE = 18,
 }
 
 impl std::fmt::Display for auth_stat {
@@ -141,6 +149,10 @@ impl std::fmt::Display for auth_stat {
             Self::AUTH_NET_ADDR => "AUTH_NET_ADDR",
             Self::RPCSEC_GSS_CREDPROBLEM => "RPCSEC_GSS_CREDPROBLEM",
             Self::RPCSEC_GSS_CTXPROBLEM => "RPCSEC_GSS_CTXPROBLEM",
+            Self::RPCSEC_GSS_INNER_CREDPROBLEM => "RPCSEC_GSS_INNER_CREDPROBLEM",
+            Self::RPCSEC_GSS_LABEL_PROBLEM => "RPCSEC_GSS_LABEL_PROBLEM",
+            Self::RPCSEC_GSS_PRIVILEGE_PROBLEM => "RPCSEC_GSS_PRIVILEGE_PROBLEM",
+            Self::RPCSEC_GSS_UNKNOWN_MESSAGE => "RPCSEC_GSS_UNKNOWN_MESSAGE",
         };
         write!(f, "{name}")
     }
