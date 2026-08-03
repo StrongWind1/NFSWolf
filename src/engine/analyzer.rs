@@ -1644,9 +1644,10 @@ async fn check_auth_tls(addr: SocketAddr, findings: &mut Vec<Finding>, proxy: Op
     let Ok(Ok(stream)) = tokio::time::timeout(timeout, connect_tcp(nfs_addr, proxy)).await else { return };
 
     // Build a raw RPC CALL message with AUTH_TLS credential + STARTTLS verifier.
-    let starttls_bytes: &[u8] = b"\x00\x00\x00\x07STARTTLS";
+    // RFC 9289 S4.1: verifier body is the 8-byte fixed-length opaque "STARTTLS".
+    // The opaque_auth XDR encoding adds the length prefix; we supply raw bytes only.
     let cred = opaque_auth { flavor: auth_flavor::AUTH_TLS, body: Opaque::borrowed(&[]) };
-    let verf = opaque_auth { flavor: auth_flavor::AUTH_TLS, body: Opaque::borrowed(starttls_bytes) };
+    let verf = opaque_auth { flavor: auth_flavor::AUTH_TLS, body: Opaque::borrowed(b"STARTTLS") };
     let transport = DirectTransport::with_auth(TokioIo::new(stream), cred, verf);
 
     // Send a NULL call to NFS program (100003, v3, proc 0).
