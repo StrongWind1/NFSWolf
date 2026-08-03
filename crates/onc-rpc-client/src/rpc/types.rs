@@ -107,6 +107,20 @@ pub enum auth_stat {
     AUTH_TOOWEAK = 5,
     AUTH_INVALIDRESP = 6,
     AUTH_FAILED = 7,
+    /// Kerberos generic error (deprecated, RFC 2695).
+    AUTH_KERB_GENERIC = 8,
+    /// Kerberos credential expired (deprecated, RFC 2695).
+    AUTH_TIMEEXPIRE = 9,
+    /// Kerberos ticket file problem (deprecated, RFC 2695).
+    AUTH_TKT_FILE = 10,
+    /// Can't decode authenticator (deprecated, RFC 2695).
+    AUTH_DECODE = 11,
+    /// Wrong net address in ticket / RPCSEC_GSS GSS-related error.
+    AUTH_NET_ADDR = 12,
+    /// No credentials for user (RPCSEC_GSS, RFC 5531).
+    RPCSEC_GSS_CREDPROBLEM = 13,
+    /// Problem with context (RPCSEC_GSS, RFC 5531).
+    RPCSEC_GSS_CTXPROBLEM = 14,
 }
 
 impl std::fmt::Display for auth_stat {
@@ -120,6 +134,13 @@ impl std::fmt::Display for auth_stat {
             Self::AUTH_TOOWEAK => "AUTH_TOOWEAK",
             Self::AUTH_INVALIDRESP => "AUTH_INVALIDRESP",
             Self::AUTH_FAILED => "AUTH_FAILED",
+            Self::AUTH_KERB_GENERIC => "AUTH_KERB_GENERIC",
+            Self::AUTH_TIMEEXPIRE => "AUTH_TIMEEXPIRE",
+            Self::AUTH_TKT_FILE => "AUTH_TKT_FILE",
+            Self::AUTH_DECODE => "AUTH_DECODE",
+            Self::AUTH_NET_ADDR => "AUTH_NET_ADDR",
+            Self::RPCSEC_GSS_CREDPROBLEM => "RPCSEC_GSS_CREDPROBLEM",
+            Self::RPCSEC_GSS_CTXPROBLEM => "RPCSEC_GSS_CTXPROBLEM",
         };
         write!(f, "{name}")
     }

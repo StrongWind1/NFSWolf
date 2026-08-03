@@ -61,7 +61,7 @@ impl AuthFlavor {
             1 => Self::Sys,
             2 => Self::Short,
             3 => Self::Dh,
-            6 | 390_003..=390_005 => Self::Gss,
+            6 | 390_000 | 390_003..=390_005 => Self::Gss,
             7 => Self::Tls,
             _ => Self::Unknown,
         }

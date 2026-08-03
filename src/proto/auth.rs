@@ -55,13 +55,24 @@ impl Credential {
 /// RPCSEC_GSS (6), AUTH_TLS (7, RFC 9289), and the Linux krb5 pseudo-flavors
 /// (390003-390005, RFC 2623 S2.1.1). Unknown values render as `flavor(N)`.
 pub(crate) fn flavor_name(flavor: u32) -> String {
+    // IANA "RPC Authentication Flavor Numbers" registry.
+    // https://www.iana.org/assignments/rpc-authentication-numbers/flavor.csv
     match flavor {
         0 => "AUTH_NONE".to_owned(),
         1 => "AUTH_SYS".to_owned(),
         2 => "AUTH_SHORT".to_owned(),
         3 => "AUTH_DH".to_owned(),
+        4 => "AUTH_KERB".to_owned(),
+        5 => "AUTH_RSA".to_owned(),
         6 => "RPCSEC_GSS".to_owned(),
         7 => "AUTH_TLS".to_owned(),
+        30_001 => "AUTH_NW".to_owned(),
+        200_000 => "AUTH_SEC".to_owned(),
+        200_004 => "AUTH_ESV".to_owned(),
+        300_000 => "AUTH_NQNFS".to_owned(),
+        300_001 => "AUTH_GSSAPI".to_owned(),
+        300_002 => "AUTH_ILU_UGEN".to_owned(),
+        390_000 => "RPCSEC_GSS(SPNEGO)".to_owned(),
         390_003 => "RPCSEC_GSS(krb5)".to_owned(),
         390_004 => "RPCSEC_GSS(krb5i)".to_owned(),
         390_005 => "RPCSEC_GSS(krb5p)".to_owned(),
