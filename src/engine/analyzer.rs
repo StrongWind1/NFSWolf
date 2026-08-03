@@ -366,6 +366,10 @@ impl Analyzer {
         // GETATTR on the export root handle (RFC 2623 S2.3.2 automounter support).
         check_auth_none_leak(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
+        // AUTH_TOOWEAK oracle: probe whether the server enforces stronger auth than
+        // AUTH_SYS at the NFS operation level (even though MOUNT accepted AUTH_SYS).
+        check_auth_tooweak(&export_nfs3, &fh, &entry.path, findings).await;
+
         // Export escape check (F-2.x). Capture the confirmed escape handle so the
         // --test-read probes below can walk from the filesystem root.
         let escape_fh = check_escape(&export_nfs3, &fh, &entry.path, findings).await;
@@ -1536,6 +1540,42 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
                 export: Some(export_path),
             },
             Severity::Low,
+        ));
+    }
+}
+
+// --- AUTH_TOOWEAK oracle (RFC 5531 S8.3) ---
+
+/// Probe whether the server enforces stronger auth than AUTH_SYS at the NFS
+/// operation level.
+///
+/// MOUNT may accept AUTH_SYS (returning a handle and auth_flavors) while the
+/// NFS server rejects AUTH_SYS operations with AUTH_TOOWEAK (RFC 5531 S8.3).
+/// This catches the case where Kerberos is enforced for NFS operations but not
+/// for MOUNT, which is common in mixed environments.
+async fn check_auth_tooweak(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
+    use onc_rpc_client::RpcError;
+    use onc_rpc_client::rpc::auth_stat;
+
+    if let Err(nfs_v3::Nfs3Fault::Rpc(RpcError::Auth(stat))) = nfs3.attrs(root_fh).await
+        && stat == auth_stat::AUTH_TOOWEAK
+    {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-1.8",
+                title: "NFS operations reject AUTH_SYS (Kerberos enforced at NFS layer)",
+                desc: "MOUNT accepted AUTH_SYS and returned a valid handle, but the NFS \
+                           server rejected a GETATTR with AUTH_TOOWEAK (RFC 5531 S8.3). The \
+                           server enforces stronger authentication (Kerberos) at the NFS \
+                           operation level even though MOUNT does not. AUTH_SYS attacks \
+                           (F-1.1 through F-1.7) will fail against this export.",
+                evidence: &format!("GETATTR on {export_path} returned AUTH_TOOWEAK"),
+                remediation: "Positive security indicator. Consider also requiring \
+                                  Kerberos for MOUNT (sec=krb5 on the export) to prevent \
+                                  handle disclosure via AUTH_SYS MNT.",
+                export: Some(export_path),
+            },
+            Severity::Info,
         ));
     }
 }
