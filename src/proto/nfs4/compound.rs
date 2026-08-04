@@ -138,7 +138,6 @@ impl Nfs4DirectClient {
     /// EXCHANGE_ID (op 42, RFC 5661 S18.35) and other v4.1 operations require
     /// minorversion=1 in the COMPOUND tag; v4.0-only servers reject them with
     /// NFS4ERR_MINOR_VERS_MISMATCH or NFS4ERR_OP_ILLEGAL.
-    #[expect(dead_code, reason = "reserved for upcoming v4.1 EXCHANGE_ID probing")]
     pub(crate) async fn compound_v41(&mut self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
         self.stealth.wait().await;
         let args = CompoundArgs { tag: String::new(), minorversion: 1, ops };
@@ -163,7 +162,6 @@ impl Nfs4DirectClient {
     /// For root (`"/"`) pass an empty slice.
     /// For `"/etc"` pass `&["etc"]`.
     /// For `"/etc/nfs"` pass `&["etc", "nfs"]`.
-    #[expect(dead_code, reason = "v4 shell LOOKUP-from-root path not yet wired up")]
     pub(crate) async fn lookup_fh(&mut self, components: &[&str]) -> anyhow::Result<Vec<u8>> {
         if components.is_empty() {
             return self.get_root_fh().await;

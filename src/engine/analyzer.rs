@@ -277,6 +277,9 @@ impl Analyzer {
         // probe when the server supports NFSv4.1.
         let exchange_id_fp = probe_exchange_id(addr, self.proxy.as_deref(), &self.stealth).await;
 
+        // NFSv4.1 pNFS topology probe: EXCHANGE_ID + conditional GETDEVICELIST.
+        probe_pnfs_topology(addr, &mut findings, self.proxy.as_deref(), &self.stealth).await;
+
         // Per-export checks.
         let exports = self.mount.list_exports(addr).await.unwrap_or_default();
         check_export_acls(&exports, &mut findings);
@@ -361,9 +364,8 @@ impl Analyzer {
         ea.auth_methods = mount_res.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
 
         check_auth_methods(&entry.path, &mount_res.auth_flavors, findings);
-        // NFSv4 SECINFO check: verify auth methods from the NFSv4 perspective (F-3.4).
-        // Complements check_auth_methods (which uses MOUNT auth flavors) with a live NFSv4 probe.
-        check_nfs4_secinfo(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+        // NFSv4 probes: SECINFO, per-path SECINFO, SEC_LABEL, xattrs.
+        run_nfs4_export_checks(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
         check_windows_signing(&fh, &entry.path, findings);
         check_handle_entropy(&fh, &entry.path, findings);
 
@@ -1492,6 +1494,20 @@ pub(crate) fn infer_squash_mode(observed_uid: u32, probe_uid: u32) -> SquashProb
 /// SECINFO (RFC 7530 S18.29) returns the actual required auth methods per directory,
 /// independent of the NFSv3 MOUNT auth flavor list.  AUTH_SYS-only NFSv4 means
 /// an attacker can spoof arbitrary UID/GID credentials even when accessing via NFSv4
+/// Run all per-export NFSv4 checks: SECINFO, per-path SECINFO, SEC_LABEL, xattrs.
+///
+/// Extracted from `analyze_export` to keep cognitive complexity below the threshold.
+async fn run_nfs4_export_checks(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    // NFSv4 SECINFO check: verify auth methods from the NFSv4 perspective (F-3.4).
+    check_nfs4_secinfo(addr, export_path, findings, proxy, stealth).await;
+    // NFSv4 per-path SECINFO: walk subdirectories and compare auth flavors to the root.
+    check_nfs4_secinfo_per_path(addr, export_path, findings, proxy, stealth).await;
+    // NFSv4 FATTR4_SEC_LABEL: read SELinux labels via GETATTR.
+    check_nfs4_sec_label(addr, export_path, findings, proxy, stealth).await;
+    // NFSv4 named attributes (xattrs) via OPENATTR + READDIR.
+    check_nfs4_xattrs(addr, export_path, findings, proxy, stealth).await;
+}
+
 /// (F-3.4: TLS downgrade not enforced  --  RPCSEC_GSS not required).  Mixed
 /// AUTH_SYS + Kerberos means the attacker can choose AUTH_SYS and bypass Kerberos
 /// entirely (F-1.7, RFC 2203 S5.2.1).
@@ -1635,6 +1651,329 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
             Severity::Low,
         ));
     }
+}
+
+// --- NFSv4.1 pNFS topology probe ---
+
+/// Probe NFSv4.1 EXCHANGE_ID for pNFS MDS capability, then attempt GETDEVICELIST.
+///
+/// EXCHANGE_ID (RFC 5661 S18.35) returns server capability flags. When the server
+/// advertises pNFS MDS role, GETDEVICELIST enumerates data-server device IDs, which
+/// reveals the pNFS topology (data-server addresses the attacker may also reach).
+///
+/// Best-effort: silently returns if the server does not support NFSv4.1 or pNFS.
+async fn probe_pnfs_topology(addr: SocketAddr, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::{CompoundBuilder, ResOpData};
+
+    /// EXCHGID4_FLAG_USE_PNFS_MDS (RFC 5661 S18.35.3, bit 17 = 0x0002_0000).
+    const EXCHGID4_FLAG_USE_PNFS_MDS: u32 = 0x0002_0000;
+
+    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let timeout = std::time::Duration::from_secs(5);
+
+    let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
+    let Ok(Ok(mut client)) = connect else { return };
+    client = client.with_stealth(stealth.clone());
+
+    // Step 1: EXCHANGE_ID to check v4.1 support and pNFS MDS flag.
+    let eid_ops = CompoundBuilder::new().exchange_id("nfswolf").build();
+    let eid_res = tokio::time::timeout(timeout, client.compound_v41(eid_ops)).await;
+    let Ok(Ok(eid_res)) = eid_res else { return };
+    if eid_res.status != 0 {
+        return; // v4.1 not supported or EXCHANGE_ID rejected
+    }
+
+    let server_flags = match eid_res.results.first().map(|op| &op.data) {
+        Some(ResOpData::ExchangeId { flags, .. }) => *flags,
+        _ => return,
+    };
+
+    let is_mds = (server_flags & EXCHGID4_FLAG_USE_PNFS_MDS) != 0;
+    if !is_mds {
+        return; // not a pNFS metadata server
+    }
+
+    // Step 2: GETDEVICELIST to enumerate pNFS data-server device IDs.
+    // LAYOUT4_NFSV4_1_FILES = 1 (RFC 5661 S13.1).
+    let gdl_ops = CompoundBuilder::new().putrootfh().getdevicelist(1).build();
+    let gdl_res = tokio::time::timeout(timeout, client.compound_v41(gdl_ops)).await;
+    let (device_count, device_ids_hex): (usize, Vec<String>) = match gdl_res {
+        Ok(Ok(ref res)) if res.status == 0 => match res.results.get(1).map(|op| &op.data) {
+            Some(ResOpData::GetDeviceList { deviceid_list, .. }) => {
+                let hex: Vec<String> = deviceid_list
+                    .iter()
+                    .map(|id| {
+                        id.iter().fold(String::with_capacity(32), |mut s, b| {
+                            use std::fmt::Write;
+                            let _ = write!(s, "{b:02x}");
+                            s
+                        })
+                    })
+                    .collect();
+                (deviceid_list.len(), hex)
+            },
+            _ => (0, Vec::new()),
+        },
+        _ => (0, Vec::new()),
+    };
+
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-3.5",
+            title: "pNFS metadata server detected  --  data-server topology exposed",
+            desc: "The server's EXCHANGE_ID flags indicate pNFS metadata server (MDS) capability \
+                   (RFC 5661 S18.35). GETDEVICELIST reveals the topology of pNFS data servers, \
+                   which may be on separate networks or lack equivalent access controls.",
+            evidence: &format!("server_flags={server_flags:#010x}, pNFS_MDS=true, device_count={device_count}, device_ids={device_ids_hex:?}"),
+            remediation: "Ensure pNFS data servers have equivalent network access controls \
+                          and authentication requirements as the metadata server.",
+            export: None,
+        },
+        Severity::Info,
+    ));
+}
+
+// --- NFSv4 per-path SECINFO probing ---
+
+/// Walk subdirectories 1 level deep and compare per-path auth flavors to the export root.
+///
+/// When the auth flavors differ between the export root and a subdirectory, the
+/// export has mixed security zones: some paths may accept weaker auth (e.g., AUTH_SYS)
+/// while others require krb5. This inconsistency is a downgrade attack vector
+/// (RFC 7530 S19: without integrity protection on SECINFO, a MITM can strip the
+/// stronger entries).
+///
+/// Best-effort: silently returns on any error.
+async fn check_nfs4_secinfo_per_path(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::{ArgOp, ResOpData};
+
+    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let timeout = std::time::Duration::from_secs(5);
+
+    let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
+    let Ok(Ok(mut client)) = connect else { return };
+    client = client.with_stealth(stealth.clone());
+
+    // Step 1: Get SECINFO on the export root to establish the baseline.
+    let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    if components.is_empty() {
+        return; // root export: per-path comparison not meaningful
+    }
+    let Some((&secinfo_name, parent)) = components.split_last() else { return };
+
+    let mut root_ops: Vec<ArgOp> = Vec::with_capacity(parent.len() + 2);
+    root_ops.push(ArgOp::Putrootfh);
+    for &c in parent {
+        root_ops.push(ArgOp::Lookup(c.to_owned()));
+    }
+    root_ops.push(ArgOp::Secinfo(secinfo_name.to_owned()));
+
+    let root_result = tokio::time::timeout(timeout, client.compound(root_ops)).await;
+    let Ok(Ok(root_res)) = root_result else { return };
+    if root_res.status != 0 {
+        return;
+    }
+    let root_flavors: Vec<u32> = match root_res.results.last().map(|op| &op.data) {
+        Some(ResOpData::SecFlavors(entries)) => entries.iter().map(nfs_v4::SecInfoEntry::flavor).collect(),
+        _ => return,
+    };
+
+    // Step 2: READDIR on the export root to list subdirectories (1 level deep).
+    // Reconnect because the SECINFO consumed the current FH state.
+    let connect2 = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
+    let Ok(Ok(mut client2)) = connect2 else { return };
+    client2 = client2.with_stealth(stealth.clone());
+
+    let Ok(Ok(export_fh)) = tokio::time::timeout(timeout, client2.lookup_fh(&components)).await else { return };
+    let Ok(Ok(subdirs)) = tokio::time::timeout(timeout, client2.list_dir(&export_fh)).await else { return };
+
+    // Step 3: SECINFO on each subdirectory, compare to root.
+    let mut mismatches: Vec<(String, Vec<u32>)> = Vec::new();
+    // Cap the number of subdirectories to probe (avoid hammering large dirs).
+    for subdir_name in subdirs.iter().take(20) {
+        // SECINFO requires the parent FH as current + the child name.
+        let sub_ops = vec![ArgOp::Putfh(export_fh.clone()), ArgOp::Secinfo(subdir_name.clone())];
+        let sub_result = tokio::time::timeout(timeout, client2.compound(sub_ops)).await;
+        let Ok(Ok(sub_res)) = sub_result else { continue };
+        if sub_res.status != 0 {
+            continue;
+        }
+        let sub_flavors: Vec<u32> = match sub_res.results.last().map(|op| &op.data) {
+            Some(ResOpData::SecFlavors(entries)) => entries.iter().map(nfs_v4::SecInfoEntry::flavor).collect(),
+            _ => continue,
+        };
+        // Normalize and compare: sort both so order differences don't trigger.
+        let mut root_sorted = root_flavors.clone();
+        let mut sub_sorted = sub_flavors.clone();
+        root_sorted.sort_unstable();
+        sub_sorted.sort_unstable();
+        if root_sorted != sub_sorted {
+            mismatches.push((subdir_name.clone(), sub_flavors));
+        }
+    }
+
+    if mismatches.is_empty() {
+        return;
+    }
+
+    let mismatch_detail: Vec<String> = mismatches.iter().map(|(name, flavors)| format!("{name}={flavors:?}")).collect();
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-3.6",
+            title: "Mixed security zones  --  per-path auth flavors differ from export root",
+            desc: &format!(
+                "NFSv4 SECINFO probing reveals that subdirectories of {export_path} accept \
+                 different auth flavors than the export root. An attacker may bypass stronger \
+                 authentication on the root by directly accessing a subdirectory that accepts \
+                 weaker auth (e.g., AUTH_SYS vs krb5). SECINFO responses lack integrity \
+                 protection unless the initial connection uses RPCSEC_GSS (RFC 7530 S19).",
+            ),
+            evidence: &format!("root_flavors={root_flavors:?}, mismatched_subdirs=[{detail}]", detail = mismatch_detail.join(", ")),
+            remediation: "Apply uniform sec= settings across the entire export tree. \
+                          Use sec=krb5p at the export level rather than per-subdirectory overrides.",
+            export: Some(export_path),
+        },
+        Severity::Medium,
+    ));
+}
+
+// --- NFSv4 FATTR4_SEC_LABEL probe ---
+
+/// Probe the export root for FATTR4_SEC_LABEL (SELinux labels, RFC 7862 S12.2.4).
+///
+/// If the server supports labeled NFS, the security label attribute carries the
+/// MAC label (e.g., "system_u:object_r:nfs_t:s0") for each file. The presence
+/// of labels is security-relevant: it reveals the SELinux policy structure and
+/// whether labeled NFS is active.
+///
+/// Best-effort: silently returns if GETATTR for sec_label is not supported.
+async fn check_nfs4_sec_label(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
+
+    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let timeout = std::time::Duration::from_secs(5);
+
+    let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
+    let Ok(Ok(mut client)) = connect else { return };
+    client = client.with_stealth(stealth.clone());
+
+    // Build LOOKUP chain to reach the export directory, then GETATTR with sec_label.
+    let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    let mut ops: Vec<ArgOp> = Vec::with_capacity(components.len() + 2);
+    ops.push(ArgOp::Putrootfh);
+    for &c in &components {
+        ops.push(ArgOp::Lookup(c.to_owned()));
+    }
+    ops.push(ArgOp::Getattr(AttrRequest::sec_label()));
+
+    let result = tokio::time::timeout(timeout, client.compound(ops)).await;
+    let Ok(Ok(res)) = result else { return };
+    if res.status != 0 {
+        return;
+    }
+
+    // The GETATTR result is the last op in the compound.
+    let sec_label = res.results.last().and_then(|op| if let ResOpData::Getattr { sec_label, .. } = &op.data { sec_label.as_ref() } else { None });
+
+    let Some(label) = sec_label else { return };
+
+    let label_text = String::from_utf8_lossy(&label.label);
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-4.5",
+            title: "SELinux security label exposed via NFSv4 FATTR4_SEC_LABEL",
+            desc: &format!(
+                "The export root at {export_path} carries a SELinux security label \
+                 (FATTR4_SEC_LABEL, RFC 7862 S12.2.4). This reveals the server's \
+                 SELinux policy structure and confirms labeled NFS is active.",
+            ),
+            evidence: &format!("lfs={}, pi={}, label=\"{label_text}\"", label.lfs, label.pi),
+            remediation: "Review whether exposing SELinux labels to NFS clients is \
+                          intended. Consider restricting FATTR4_SEC_LABEL if label \
+                          information leakage is a concern.",
+            export: Some(export_path),
+        },
+        Severity::Info,
+    ));
+}
+
+// --- NFSv4 named attributes / xattrs probe ---
+
+/// Probe for NFSv4 named attributes via OPENATTR + READDIR on the export root.
+///
+/// OPENATTR (op 19, RFC 7530 S16.17) opens the named attribute directory
+/// associated with a file or directory. Named attributes can carry metadata
+/// like POSIX ACLs, SELinux labels, and custom xattrs. Their presence reveals
+/// what extended metadata the server stores and exposes.
+///
+/// Best-effort: silently returns if the server does not support named attributes
+/// (NFS4ERR_NOTSUPP) or if no named attributes exist (NFS4ERR_NOENT).
+async fn check_nfs4_xattrs(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
+
+    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let timeout = std::time::Duration::from_secs(5);
+
+    let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
+    let Ok(Ok(mut client)) = connect else { return };
+    client = client.with_stealth(stealth.clone());
+
+    // Navigate to the export directory, then OPENATTR(create=false) + READDIR.
+    let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    let mut ops: Vec<ArgOp> = Vec::with_capacity(components.len() + 3);
+    ops.push(ArgOp::Putrootfh);
+    for &c in &components {
+        ops.push(ArgOp::Lookup(c.to_owned()));
+    }
+    // OPENATTR changes the current FH to the named attribute directory.
+    ops.push(ArgOp::Openattr { createdir: false });
+    // READDIR on the named attribute directory to list xattr names.
+    ops.push(ArgOp::Readdir { cookie: 0, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() });
+
+    let result = tokio::time::timeout(timeout, client.compound(ops)).await;
+    let Ok(Ok(res)) = result else { return };
+    // If OPENATTR failed (NFS4ERR_NOTSUPP=10004, NFS4ERR_NOENT=2), the compound
+    // stops before READDIR. Check the overall status and OPENATTR op status.
+    if res.status != 0 {
+        return;
+    }
+
+    // The READDIR result is the last successful op.
+    let xattr_names: Vec<String> = match res.results.last().map(|op| &op.data) {
+        Some(ResOpData::Readdir { entries, .. }) => entries.iter().map(|e| e.name.clone()).filter(|n| n != "." && n != "..").collect(),
+        _ => return,
+    };
+
+    if xattr_names.is_empty() {
+        return;
+    }
+
+    // Flag security-relevant xattrs: POSIX ACLs, SELinux, capabilities.
+    let security_xattrs: Vec<&str> = xattr_names.iter().filter(|n| n.starts_with("system.posix_acl") || n.starts_with("security.") || n.starts_with("trusted.") || *n == "system.nfs4_acl").map(String::as_str).collect();
+
+    let severity = if security_xattrs.is_empty() { Severity::Info } else { Severity::Low };
+
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-5.13",
+            title: "NFSv4 named attributes (xattrs) exposed on export root",
+            desc: &format!(
+                "OPENATTR + READDIR on the export root at {export_path} reveals named \
+                 attributes. These may carry sensitive metadata: POSIX ACLs \
+                 (system.posix_acl_access), SELinux labels (security.selinux), file \
+                 capabilities (security.capability), or application-specific data.",
+            ),
+            evidence: &format!("xattr_names={xattr_names:?}, security_relevant={security_xattrs:?}"),
+            remediation: "Review which named attributes are exposed and whether their contents \
+                          leak sensitive metadata. Consider restricting xattr access via export options.",
+            export: Some(export_path),
+        },
+        severity,
+    ));
 }
 
 // --- AUTH_TOOWEAK oracle (RFC 5531 S8.3) ---

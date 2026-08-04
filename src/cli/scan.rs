@@ -290,6 +290,17 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 let v2_flag = if *version == "v2" { " --nfs-version 2" } else { "" };
                 println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
+            Ok(EscapeOutcome::Nfs4Lookupp { root_handle }) => {
+                escaped += 1;
+                let hex = root_handle.to_hex();
+                println!();
+                println!("{}", crate::output::status_ok(&format!("{}:{} escaped  --  NFSv4 LOOKUPP traversal", res.host, res.export)));
+                crate::output::print_handle("Root handle", &hex);
+                let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
+                let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
+                let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
+                println!("    {} shell {} --nfs-version 4{proxy_flag}{nfs_port_flag}{mount_port_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+            },
             Ok(EscapeOutcome::StaleNoRoot) => {
                 println!("  {}", format!("{}:{}  handle valid but root not found (raise `escape --max-root-scan`)", res.host, res.export).dimmed());
             },

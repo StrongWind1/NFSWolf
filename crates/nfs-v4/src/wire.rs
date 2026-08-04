@@ -1082,6 +1082,8 @@ pub enum ResOpData {
     Getattr {
         /// Decoded fsid4 major/minor, when FATTR4_FSID was returned.
         fsid: Option<(u64, u64)>,
+        /// Decoded SELinux security label, when FATTR4_SEC_LABEL (attribute 80, RFC 7862 S12.2.4) was returned.
+        sec_label: Option<SecLabel4>,
     },
     /// Directory entries from READDIR (RFC 7530 S16.24), plus EOF flag.
     Readdir {
@@ -1277,13 +1279,25 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         // We decode only FATTR4_FSID (attribute 8, RFC 7530 S5.8.1.9) when it is
         // the sole word-0 attribute requested, so the 16-byte fsid4 sits at the
         // start of attrvals. Any other attribute combination yields fsid = None.
+        // GETATTR result: bitmap (u32 count + N words) + opaque<> attrvals.
+        //
+        // Decodes two attributes when they sit at known positions in attrvals:
+        // - FATTR4_FSID (attribute 8, word 0, RFC 7530 S5.8.1.9): decoded when
+        //   no lower word-0 bit precedes it (fsid_only request).
+        // - FATTR4_SEC_LABEL (attribute 80, word 2 bit 16, RFC 7862 S12.2.4):
+        //   decoded when word 0 and word 1 are both zero (sec_label-only request).
         OP_GETATTR => {
             let (bitmap_count, mut n) = u32::unpack(input)?;
             let mut bitmap_w0 = 0u32;
+            let mut bitmap_w1 = 0u32;
+            let mut bitmap_w2 = 0u32;
             for i in 0..bitmap_count {
                 let (w, wn) = u32::unpack(input)?;
-                if i == 0 {
-                    bitmap_w0 = w;
+                match i {
+                    0 => bitmap_w0 = w,
+                    1 => bitmap_w1 = w,
+                    2 => bitmap_w2 = w,
+                    _ => {},
                 }
                 n += wn;
             }
@@ -1295,6 +1309,10 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             let pad = (4 - (attrval_len % 4)) % 4;
             onc_xdr::skip_pad(input, pad)?;
             n += pad;
+
+            // FATTR4_FSID is bit 8 of word 0; fsid4 = { major u64, minor u64 }.
+            // Only safe to read at offset 0 when no lower-numbered word-0
+            // attribute (bits 0..7) precedes it in the attrvals stream.
             let fsid_bit: u32 = 1 << 8;
             let lower_bits: u32 = fsid_bit - 1;
             let fsid = if (bitmap_w0 & fsid_bit) != 0 && (bitmap_w0 & lower_bits) == 0 {
@@ -1304,7 +1322,15 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             } else {
                 None
             };
-            Ok((ResOpData::Getattr { fsid }, n))
+
+            // FATTR4_SEC_LABEL is bit 16 of word 2 (attribute 80, RFC 7862 S12.2.4).
+            // sec_label4 = { lfs u32, pi u32, slai_data opaque<> }.
+            // Only decoded when word 0 and word 1 are both zero, so sec_label sits
+            // at offset 0 in attrvals (sec_label-only request).
+            let sec_label_bit: u32 = 1 << 16;
+            let sec_label = if (bitmap_w2 & sec_label_bit) != 0 && bitmap_w0 == 0 && bitmap_w1 == 0 { decode_sec_label(&attrvals) } else { None };
+
+            Ok((ResOpData::Getattr { fsid, sec_label }, n))
         },
 
         // SECINFO / SECINFO_NO_NAME result: variable-length array of secinfo4.
@@ -1556,6 +1582,19 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         // Results so far are valid.
         _ => Err(onc_xdr::Error::InvalidEnumValue(op_code)),
     }
+}
+
+/// Decode a sec_label4 structure from raw attrvals bytes (RFC 7862 S12.2.4).
+///
+/// sec_label4 = { lfs: uint32, pi: uint32, slai_data: opaque<> }.
+/// Returns None if the attrvals are too short or malformed.
+fn decode_sec_label(attrvals: &[u8]) -> Option<SecLabel4> {
+    // sec_label4: lfs(4) + pi(4) + opaque_len(4) + label_data
+    let lfs = u32::from_be_bytes(attrvals.get(..4)?.try_into().ok()?);
+    let pi = u32::from_be_bytes(attrvals.get(4..8)?.try_into().ok()?);
+    let label_len = u32::from_be_bytes(attrvals.get(8..12)?.try_into().ok()?) as usize;
+    let label = attrvals.get(12..12 + label_len)?.to_vec();
+    Some(SecLabel4 { lfs, pi, label })
 }
 
 /// Read and discard a single XDR opaque<>: 4-byte length + data + padding.
@@ -2496,8 +2535,9 @@ mod tests {
         200u64.pack(&mut wire).unwrap(); // minor
         let (res, _) = CompoundRes::unpack(&mut &wire[..]).unwrap();
         match &res.results[0].data {
-            ResOpData::Getattr { fsid } => {
+            ResOpData::Getattr { fsid, sec_label } => {
                 assert_eq!(*fsid, Some((100, 200)));
+                assert!(sec_label.is_none());
             },
             other => panic!("expected ResOpData::Getattr, got {other:?}"),
         }
