@@ -271,16 +271,25 @@ impl Analyzer {
         check_webnfs_public_handle(addr, &nfs_versions, &mut findings, self.proxy.as_deref(), &self.stealth).await;
         check_auth_tls(addr, &mut findings, self.proxy.as_deref(), &self.stealth).await;
 
+        // EXCHANGE_ID fingerprint: most authoritative source of server identity.
+        // Runs before per-export checks because it needs no MOUNT and works even
+        // when all exports deny access. Overrides the null-filename behavioral
+        // probe when the server supports NFSv4.1.
+        let exchange_id_fp = probe_exchange_id(addr, self.proxy.as_deref(), &self.stealth).await;
+
         // Per-export checks.
         let exports = self.mount.list_exports(addr).await.unwrap_or_default();
         check_export_acls(&exports, &mut findings);
 
         let mut export_analyses: Vec<ExportAnalysis> = Vec::new();
-        let mut impl_fingerprint: Option<String> = None;
+        // Start with the EXCHANGE_ID result; fall back to null-filename probe
+        // if the server doesn't support v4.1.
+        let mut impl_fingerprint: Option<String> = exchange_id_fp;
         for entry in &exports {
             let ea = self.analyze_export(config, addr, entry, &mut findings).await;
             // Run the null-filename fingerprint probe once, on the first
-            // export that mounted successfully (non-empty handle).
+            // export that mounted successfully (non-empty handle), but only
+            // when EXCHANGE_ID did not already provide a fingerprint.
             if impl_fingerprint.is_none()
                 && !ea.file_handle.is_empty()
                 && let Ok(fh) = FileHandle::from_hex(&ea.file_handle)
@@ -1726,6 +1735,115 @@ async fn check_pathconf(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &s
             Severity::High,
         ));
     }
+}
+
+// --- NFSv4.1 EXCHANGE_ID fingerprinting ---
+
+/// Probe the server's NFSv4.1 EXCHANGE_ID to extract the implementation identity.
+///
+/// EXCHANGE_ID (op 42, RFC 5661 S18.35) is a v4.1 operation that returns the
+/// server's vendor string, build date, capability flags, and state protection
+/// policy. This is the most authoritative fingerprint available -- it comes
+/// directly from the NFS server's self-reported identity rather than behavioral
+/// inference.
+///
+/// Uses a raw `DirectTransport` to port 2049 with AUTH_NONE (same approach as
+/// `check_webnfs_public_handle`), building a minorversion=1 COMPOUND since the
+/// library `compound()` helpers hardcode minorversion=0.
+///
+/// Returns `None` when the server does not support NFSv4.1 (NFS4ERR_MINOR_VERS_MISMATCH,
+/// NFS4ERR_OP_ILLEGAL, or connection failure).
+async fn probe_exchange_id(addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Option<String> {
+    use onc_rpc_client::RpcTransport as _;
+    use onc_rpc_client::transport::direct::DirectTransport;
+    use onc_rpc_client::transport::tokio::TokioIo;
+
+    use crate::proto::nfs4::types::{CompoundArgs, CompoundBuilder, CompoundRes, NFS4_PROC_COMPOUND, NFS4_PROGRAM, NFS4_VERSION, ResOpData};
+
+    stealth.wait().await;
+
+    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let timeout = std::time::Duration::from_secs(5);
+
+    let stream = match tokio::time::timeout(timeout, connect_tcp(nfs4_addr, proxy)).await {
+        Ok(Ok(s)) => s,
+        _ => return None,
+    };
+
+    let null_auth = onc_rpc_client::rpc::opaque_auth::default();
+    let transport = DirectTransport::with_auth(TokioIo::new(stream), null_auth.clone(), null_auth);
+
+    // Build a minorversion=1 COMPOUND with just EXCHANGE_ID.
+    let ops = CompoundBuilder::new().exchange_id("nfswolf").build();
+    let args = CompoundArgs { tag: String::new(), minorversion: 1, ops };
+
+    let result = tokio::time::timeout(timeout, transport.call::<CompoundArgs, CompoundRes>(NFS4_PROGRAM, NFS4_VERSION, NFS4_PROC_COMPOUND, &args)).await;
+    let res = match result {
+        Ok(Ok(r)) => r,
+        _ => {
+            tracing::debug!("EXCHANGE_ID probe failed (server may not support NFSv4.1)");
+            return None;
+        },
+    };
+
+    // Non-zero top-level status means the server rejected the COMPOUND
+    // (e.g. NFS4ERR_MINOR_VERS_MISMATCH for v4.0-only servers).
+    if res.status != 0 {
+        tracing::debug!("EXCHANGE_ID COMPOUND rejected: status={}", res.status);
+        return None;
+    }
+
+    let op = res.results.first()?;
+    let ResOpData::ExchangeId { flags, impl_id, .. } = &op.data else {
+        return None;
+    };
+
+    // Capability flags (RFC 5661 S18.35.3):
+    //   0x1  = EXCHGID4_FLAG_SUPP_MOVED_REFER
+    //   0x2  = EXCHGID4_FLAG_SUPP_MOVED_MIGR
+    //   0x4  = EXCHGID4_FLAG_BIND_PRINC_STATEID
+    //   0x10 = EXCHGID4_FLAG_USE_NON_PNFS
+    //   0x20 = EXCHGID4_FLAG_USE_PNFS_MDS
+    //   0x40 = EXCHGID4_FLAG_USE_PNFS_DS
+    let has_pnfs_mds = flags & 0x20 != 0;
+    let has_pnfs_ds = flags & 0x40 != 0;
+
+    let mut extras = Vec::new();
+    if has_pnfs_mds {
+        extras.push("pNFS_MDS");
+    }
+    if has_pnfs_ds {
+        extras.push("pNFS_DS");
+    }
+    let extras_str = if extras.is_empty() { String::new() } else { format!(", {}", extras.join("+")) };
+
+    // Extract the implementation identity (0 or 1 element per the RFC).
+    let fingerprint = if let Some(id) = impl_id.first() {
+        // Format the build date if it looks like a real epoch timestamp.
+        let date_str = if id.date.0 > 0 {
+            format_epoch(id.date.0)
+        } else {
+            String::new()
+        };
+
+        if date_str.is_empty() {
+            format!("{} [{}] (EXCHANGE_ID{extras_str})", id.name, id.domain)
+        } else {
+            format!("{} [{}] (built {}, EXCHANGE_ID{extras_str})", id.name, id.domain, date_str)
+        }
+    } else {
+        // No impl_id but the EXCHANGE_ID succeeded -- still useful.
+        format!("NFSv4.1 (no impl_id, EXCHANGE_ID{extras_str})")
+    };
+
+    tracing::info!("EXCHANGE_ID fingerprint: {fingerprint}");
+    Some(fingerprint)
+}
+
+/// Format a Unix epoch timestamp as YYYY-MM-DD.
+fn format_epoch(secs: u64) -> String {
+    let (year, month, day, _, _, _) = secs_to_datetime(secs);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 // --- Null-filename server fingerprint ---
