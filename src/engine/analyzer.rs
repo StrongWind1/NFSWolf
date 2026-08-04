@@ -160,7 +160,7 @@ use std::sync::Arc;
 use nfs_v3::wire::{LOOKUP3args, Nfs3Option, Nfs3Result, PATHCONF3args, READ3args, cookieverf3, diropargs3, filename3, nfsstat3, sattr3};
 use onc_xdr::Opaque;
 
-use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus};
+use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus, WindowsHandleVersion};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::{ReconnectStrategy, parse_proxy_addr, socks5_connect};
@@ -313,7 +313,7 @@ impl Analyzer {
 
         // OS guess from first valid handle.
         let os_guess = export_analyses.iter().find_map(|ea| if ea.file_handle.is_empty() { None } else { FileHandle::from_hex(&ea.file_handle).ok() });
-        let os_string = os_guess.map(|fh| check_os_fingerprint(&fh));
+        let os_string = os_guess.map(|fh| check_os_fingerprint(&fh, &nfs_versions));
 
         Ok(AnalysisResult { host: config.host.clone(), timestamp, os_guess: os_string, impl_fingerprint, nfs_versions: version_strings, exports: export_analyses, findings })
     }
@@ -370,6 +370,21 @@ impl Analyzer {
         // PATHCONF: case-insensitive detection (Windows/NTFS fingerprint) and
         // unrestricted chown detection (ownership hijacking).
         check_pathconf(&export_nfs3, &fh, &entry.path, findings).await;
+
+        // FSINFO: time_delta (Solaris fingerprint) and properties bitmask.
+        check_fsinfo_properties(&export_nfs3, &fh, &entry.path, findings).await;
+
+        // FSSTAT: disk capacity and inode pressure.
+        check_fsstat_capacity(&export_nfs3, &fh, &entry.path, findings).await;
+
+        // Silly-rename detection: .nfs<hex> files indicate open-unlinked files.
+        check_silly_renames(&export_nfs3, &fh, &entry.path, findings).await;
+
+        // Write verifier stability (reboot oracle): zero-count COMMIT returns
+        // the server's writeverf3 at no I/O cost. Two matching probes confirm
+        // the server has been up continuously; a mismatch means a reboot (or
+        // volatile-cache discard) occurred between probes.
+        check_write_verifier(&export_nfs3, &fh, &entry.path, findings).await;
 
         // AUTH_NONE metadata leak: check if the server allows unauthenticated
         // GETATTR on the export root handle (RFC 2623 S2.3.2 automounter support).
@@ -579,6 +594,38 @@ fn check_export_acls(exports: &[ExportEntry], findings: &mut Vec<Finding>) {
                     export: Some(&export.path),
                 },
                 Severity::High,
+            ));
+        }
+
+        // FreeBSD-style truncated subnet detection (F-7.7 / OsGuess::FreeBsd signal).
+        let truncated: Vec<&str> = export
+            .allowed_hosts
+            .iter()
+            .filter(|h| {
+                if h.contains('/') || h.contains('*') || h.contains('?') {
+                    return false;
+                }
+                let octets: Vec<&str> = h.split('.').collect();
+                (octets.len() == 2 || octets.len() == 3) && octets.iter().all(|o| o.parse::<u8>().is_ok())
+            })
+            .map(String::as_str)
+            .collect();
+        if !truncated.is_empty() {
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-7.7",
+                    title: "FreeBSD-style truncated subnet in export ACL (OS fingerprint)",
+                    desc: &format!(
+                        "Export {} uses truncated subnet notation ({}) without a mask. \
+                         This format is characteristic of FreeBSD NFS servers.",
+                        export.path,
+                        truncated.join(", ")
+                    ),
+                    evidence: &format!("truncated_subnets={truncated:?}, FreeBSD OsGuess signal"),
+                    remediation: "Informational -- verify the intended subnet scope matches the implied CIDR.",
+                    export: Some(&export.path),
+                },
+                Severity::Info,
             ));
         }
     }
@@ -990,19 +1037,31 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
 /// Check Windows file handle signing status.
 ///
 /// All-zero HMAC bytes mean signing is disabled  --  arbitrary handle forgery is possible.
+///
+/// Two detection paths: `fingerprint_os` recognises 32-byte v3 handles; the new
+/// `detect_windows_handle_version` also catches 28-byte v4.1 handles.
 fn check_windows_signing(fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
-    if FileHandleAnalyzer::fingerprint_os(fh) != OsGuess::Windows {
+    let os = FileHandleAnalyzer::fingerprint_os(fh);
+    let is_windows = os == OsGuess::Windows || FileHandleAnalyzer::detect_windows_handle_version(fh) == Some(WindowsHandleVersion::V41);
+    if !is_windows {
         return;
     }
+    let version_label = match FileHandleAnalyzer::detect_windows_handle_version(fh) {
+        Some(WindowsHandleVersion::V3) => "NFSv3 (32-byte)",
+        Some(WindowsHandleVersion::V41) => "NFSv4.1 (28-byte)",
+        None => "unknown",
+    };
     if FileHandleAnalyzer::check_windows_signing(fh) == SigningStatus::Disabled {
         findings.push(make_finding(
             &FindingSpec {
                 id: "F-2.3",
                 title: "Windows NFS server has handle signing disabled",
-                desc: "The NFS server appears to be Windows (handle size and format match). \
-                       The HMAC signature bytes in the file handle are all zero, meaning handle \
-                       signing is disabled. Any handle value can be forged to access arbitrary files.",
-                evidence: &format!("handle_hex={}", fh.to_hex()),
+                desc: &format!(
+                    "The NFS server appears to be Windows ({version_label} handle format). \
+                     The HMAC signature bytes in the file handle are all zero, meaning handle \
+                     signing is disabled. Any handle value can be forged to access arbitrary files.",
+                ),
+                evidence: &format!("handle_hex={}, version={version_label}", fh.to_hex()),
                 remediation: "Enable NFS handle signing in Windows Server NFS configuration.",
                 export: Some(export_path),
             },
@@ -1096,10 +1155,35 @@ async fn probe_file_access(nfs3: &Nfs3Client, root_fh: &FileHandle, path: &str, 
 }
 
 /// Format OS and filesystem fingerprint as a human-readable string.
-fn check_os_fingerprint(fh: &FileHandle) -> String {
+///
+/// Combines handle-based fingerprinting with the NFS version matrix as a
+/// secondary signal. Windows Server NFS supports v3 + v4.1 but NOT v2 or
+/// v4.0. A version pattern of [v3, v4] without v2 is suggestive of Windows,
+/// though not conclusive -- portmapper registers program version 4 without
+/// distinguishing 4.0 from 4.1 (minor versions are negotiated inside the
+/// NFSv4 COMPOUND, not at the portmapper level).
+fn check_os_fingerprint(fh: &FileHandle, nfs_versions: &[u32]) -> String {
     let os = FileHandleAnalyzer::fingerprint_os(fh);
     let fs = FileHandleAnalyzer::fingerprint_fs(fh);
-    format!("{os:?}/{fs:?}")
+
+    let has_v2 = nfs_versions.contains(&2);
+    let has_v3 = nfs_versions.contains(&3);
+    let has_v4 = nfs_versions.contains(&4);
+    let windows_version_pattern = has_v3 && has_v4 && !has_v2;
+
+    match os {
+        OsGuess::Windows if windows_version_pattern => "Windows/Unknown (version pattern: v3+v4, no v2 corroborates)".to_owned(),
+        OsGuess::Windows => "Windows/Unknown".to_owned(),
+        OsGuess::Unknown if windows_version_pattern && FileHandleAnalyzer::detect_windows_handle_version(fh).is_some() => {
+            let ver = match FileHandleAnalyzer::detect_windows_handle_version(fh) {
+                Some(WindowsHandleVersion::V3) => "NFSv3",
+                Some(WindowsHandleVersion::V41) => "NFSv4.1",
+                None => unreachable!(),
+            };
+            format!("Windows(probable)/{ver} handle (version pattern: v3+v4, no v2; portmapper does not distinguish v4.0 from v4.1)")
+        },
+        _ => format!("{os:?}/{fs:?}"),
+    }
 }
 
 // --- Missing check implementations ---
@@ -1765,10 +1849,7 @@ async fn probe_exchange_id(addr: SocketAddr, proxy: Option<&str>, stealth: &Stea
     let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
     let timeout = std::time::Duration::from_secs(5);
 
-    let stream = match tokio::time::timeout(timeout, connect_tcp(nfs4_addr, proxy)).await {
-        Ok(Ok(s)) => s,
-        _ => return None,
-    };
+    let Ok(Ok(stream)) = tokio::time::timeout(timeout, connect_tcp(nfs4_addr, proxy)).await else { return None };
 
     let null_auth = onc_rpc_client::rpc::opaque_auth::default();
     let transport = DirectTransport::with_auth(TokioIo::new(stream), null_auth.clone(), null_auth);
@@ -1778,12 +1859,9 @@ async fn probe_exchange_id(addr: SocketAddr, proxy: Option<&str>, stealth: &Stea
     let args = CompoundArgs { tag: String::new(), minorversion: 1, ops };
 
     let result = tokio::time::timeout(timeout, transport.call::<CompoundArgs, CompoundRes>(NFS4_PROGRAM, NFS4_VERSION, NFS4_PROC_COMPOUND, &args)).await;
-    let res = match result {
-        Ok(Ok(r)) => r,
-        _ => {
-            tracing::debug!("EXCHANGE_ID probe failed (server may not support NFSv4.1)");
-            return None;
-        },
+    let Ok(Ok(res)) = result else {
+        tracing::debug!("EXCHANGE_ID probe failed (server may not support NFSv4.1)");
+        return None;
     };
 
     // Non-zero top-level status means the server rejected the COMPOUND
@@ -1805,14 +1883,15 @@ async fn probe_exchange_id(addr: SocketAddr, proxy: Option<&str>, stealth: &Stea
     //   0x10 = EXCHGID4_FLAG_USE_NON_PNFS
     //   0x20 = EXCHGID4_FLAG_USE_PNFS_MDS
     //   0x40 = EXCHGID4_FLAG_USE_PNFS_DS
-    let has_pnfs_mds = flags & 0x20 != 0;
-    let has_pnfs_ds = flags & 0x40 != 0;
+    // pNFS role flags (RFC 5661 S12.1): 0x20 = USE_PNFS_MDS, 0x40 = USE_PNFS_DS.
+    let is_pnfs_metadata = flags & 0x20 != 0;
+    let is_pnfs_data = flags & 0x40 != 0;
 
     let mut extras = Vec::new();
-    if has_pnfs_mds {
+    if is_pnfs_metadata {
         extras.push("pNFS_MDS");
     }
-    if has_pnfs_ds {
+    if is_pnfs_data {
         extras.push("pNFS_DS");
     }
     let extras_str = if extras.is_empty() { String::new() } else { format!(", {}", extras.join("+")) };
@@ -1820,17 +1899,9 @@ async fn probe_exchange_id(addr: SocketAddr, proxy: Option<&str>, stealth: &Stea
     // Extract the implementation identity (0 or 1 element per the RFC).
     let fingerprint = if let Some(id) = impl_id.first() {
         // Format the build date if it looks like a real epoch timestamp.
-        let date_str = if id.date.0 > 0 {
-            format_epoch(id.date.0)
-        } else {
-            String::new()
-        };
+        let date_str = if id.date.0 > 0 { format_epoch(id.date.0) } else { String::new() };
 
-        if date_str.is_empty() {
-            format!("{} [{}] (EXCHANGE_ID{extras_str})", id.name, id.domain)
-        } else {
-            format!("{} [{}] (built {}, EXCHANGE_ID{extras_str})", id.name, id.domain, date_str)
-        }
+        if date_str.is_empty() { format!("{} [{}] (EXCHANGE_ID{extras_str})", id.name, id.domain) } else { format!("{} [{}] (built {}, EXCHANGE_ID{extras_str})", id.name, id.domain, date_str) }
     } else {
         // No impl_id but the EXCHANGE_ID succeeded -- still useful.
         format!("NFSv4.1 (no impl_id, EXCHANGE_ID{extras_str})")
@@ -1844,6 +1915,176 @@ async fn probe_exchange_id(addr: SocketAddr, proxy: Option<&str>, stealth: &Stea
 fn format_epoch(secs: u64) -> String {
     let (year, month, day, _, _, _) = secs_to_datetime(secs);
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+// --- FSINFO properties (F-5.10) ---
+
+/// RFC 1813 S3.3.18 filesystem properties bitmask constants.
+const FSF3_LINK: u32 = 0x0001;
+const FSF3_SYMLINK: u32 = 0x0002;
+#[expect(dead_code, reason = "referenced in evidence formatting only")]
+const FSF3_HOMOGENEOUS: u32 = 0x0008;
+#[expect(dead_code, reason = "referenced in evidence formatting only")]
+const FSF3_CANSETTIME: u32 = 0x0010;
+
+/// Extract FSINFO time_delta and properties bitmask.
+///
+/// `time_delta` of {0, 1000} (1-microsecond) is a Solaris fingerprint signal
+/// (Linux uses nanosecond granularity). Missing `FSF3_LINK`/`FSF3_SYMLINK`
+/// reduces the symlink/hardlink attack surface.
+async fn check_fsinfo_properties(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
+    let Ok(info) = nfs3.info_fs(root_fh).await else { return };
+
+    // Solaris fingerprint: time_delta = {0, 1000} means microsecond granularity.
+    if info.time_delta.seconds == 0 && info.time_delta.nseconds == 1000 {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-5.10",
+                title: "Solaris NFS server detected (microsecond time_delta)",
+                desc: "FSINFO reports time_delta={0, 1000} (1-microsecond granularity). \
+                       Linux knfsd uses nanosecond (time_delta={0, 1}). Microsecond granularity \
+                       is characteristic of Solaris NFS servers.",
+                evidence: &format!("time_delta={{{}, {}}}", info.time_delta.seconds, info.time_delta.nseconds),
+                remediation: "Informational -- adjust escape strategy for Solaris NFS handle formats.",
+                export: Some(export_path),
+            },
+            Severity::Info,
+        ));
+    }
+
+    let no_link = (info.properties & FSF3_LINK) == 0;
+    let no_symlink = (info.properties & FSF3_SYMLINK) == 0;
+    if no_link || no_symlink {
+        let mut missing = Vec::new();
+        if no_link {
+            missing.push("hard links (FSF3_LINK)");
+        }
+        if no_symlink {
+            missing.push("symbolic links (FSF3_SYMLINK)");
+        }
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-5.11",
+                title: "Filesystem lacks link/symlink support (reduced attack surface)",
+                desc: &format!(
+                    "FSINFO properties indicate the filesystem does not support: {}. \
+                     Symlink (F-4.4) and hardlink attacks are inapplicable on this export.",
+                    missing.join(", ")
+                ),
+                evidence: &format!("properties={:#06x}", info.properties),
+                remediation: "Informational -- no action required.",
+                export: Some(export_path),
+            },
+            Severity::Info,
+        ));
+    }
+}
+
+// --- FSSTAT capacity ---
+
+/// Check disk capacity and inode pressure via FSSTAT.
+///
+/// Low `avail_files` relative to `total_files` signals inode exhaustion
+/// DoS potential.
+async fn check_fsstat_capacity(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
+    let Ok(stat) = nfs3.stat_fs(root_fh).await else { return };
+    if stat.total_files == 0 {
+        return;
+    }
+    if stat.avail_files < 1000 {
+        let usage_pct = ((stat.total_files - stat.free_files) * 100) / stat.total_files;
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-5.12",
+                title: "Near inode exhaustion (DoS risk)",
+                desc: "FSSTAT reports fewer than 1000 available file slots. An attacker \
+                       with write access can exhaust remaining inodes to deny file creation.",
+                evidence: &format!("total_files={}, free_files={}, avail_files={}, usage={}%, total_bytes={}, free_bytes={}", stat.total_files, stat.free_files, stat.avail_files, usage_pct, stat.total_bytes, stat.free_bytes),
+                remediation: "Expand filesystem capacity or restrict write access.",
+                export: Some(export_path),
+            },
+            Severity::Medium,
+        ));
+    }
+}
+
+// --- Silly-rename detection ---
+
+/// Detect `.nfs*` silly-rename files (open-unlinked indicators).
+///
+/// Linux NFS clients create `.nfs<inode><hex>` files when an open file is
+/// unlinked. Their presence reveals actively-used files -- reconnaissance
+/// signal for identifying overwrite targets (C702 Appendix A S A.8).
+async fn check_silly_renames(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
+    let Ok(entries) = nfs3.list_dir(root_fh, 2000).await else { return };
+    let silly: Vec<&str> = entries.iter().map(|e| e.name.as_str()).filter(|n| is_silly_rename(n)).collect();
+    if silly.is_empty() {
+        return;
+    }
+    let display: Vec<&str> = silly.iter().copied().take(10).collect();
+    let truncated = if silly.len() > 10 { format!(" (+{} more)", silly.len() - 10) } else { String::new() };
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-5.9",
+            title: "Silly-rename files detected (open-unlinked indicator)",
+            desc: "The export root contains .nfs* files created by Linux NFS clients \
+                   when an open file is deleted. These indicate actively-used files \
+                   that can be overwritten via NFS (ETXTBSY is not enforced over NFS, \
+                   C702 Appendix A S A.8).",
+            evidence: &format!("count={}, names={display:?}{truncated}", silly.len()),
+            remediation: "Informational -- used files can be identified and targeted for content replacement.",
+            export: Some(export_path),
+        },
+        Severity::Info,
+    ));
+}
+
+fn is_silly_rename(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".nfs") else { return false };
+    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+// --- Write verifier reboot oracle ---
+
+/// Probe the server's write verifier twice to detect a reboot between probes.
+///
+/// A zero-count COMMIT (RFC 1813 S3.3.21) is a no-op on the data path but returns
+/// the current `writeverf3`.  The server regenerates this opaque 8-byte value on
+/// reboot (or when its volatile write cache is discarded). Two consecutive probes
+/// that return the same verifier confirm the server has been up continuously;
+/// a mismatch means a restart occurred between them.
+async fn check_write_verifier(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
+    let Ok(verf1) = nfs3.commit_verifier(root_fh).await else { return };
+    let Ok(verf2) = nfs3.commit_verifier(root_fh).await else { return };
+
+    let hex = |v: &[u8; 8]| -> String {
+        use std::fmt::Write as _;
+        v.iter().fold(String::with_capacity(16), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+    };
+
+    if verf1 == verf2 {
+        tracing::debug!(verifier = %hex(&verf1), export = export_path, "write verifier stable");
+    } else {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-5.8",
+                title: "Write verifier changed between probes (server reboot detected)",
+                desc: "Two consecutive zero-count COMMIT calls returned different writeverf3 \
+                       values. Per RFC 1813 S3.3.21 the server regenerates this verifier on \
+                       reboot. A verifier change means the server restarted (or flushed its \
+                       volatile write cache) between the two probes. Any data previously \
+                       written with UNSTABLE stability that was not re-committed is lost.",
+                evidence: &format!("verf1={}, verf2={}", hex(&verf1), hex(&verf2)),
+                remediation: "Investigate server stability. Clients with outstanding UNSTABLE \
+                              writes must re-send them when the verifier changes.",
+                export: Some(export_path),
+            },
+            Severity::Medium,
+        ));
+    }
 }
 
 // --- Null-filename server fingerprint ---

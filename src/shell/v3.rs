@@ -320,6 +320,11 @@ impl ShellOps for V3Ops {
     fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter> {
         Box::new(Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) })
     }
+
+    async fn write_verifier(&self, fh: &ShellHandle) -> anyhow::Result<Option<[u8; 8]>> {
+        let verf = self.nfs3.commit_verifier(&to_v3_fh(fh)).await.map_err(fault_to_anyhow)?;
+        Ok(Some(verf))
+    }
 }
 
 // --- Remote completion for tab-complete in the v3 shell ----------------------

@@ -218,6 +218,9 @@ pub(crate) struct HostResult {
     /// (RFC 1833 sec. 2.1) or probing TCP port 20049 (the conventional NFS/RDMA port).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rdma_detected: bool,
+    /// OS/FS fingerprint from the first valid MOUNT handle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_guess: Option<String>,
     /// Wall-clock time for all probes on this host.
     #[serde(with = "duration_ms")]
     pub scan_duration: Duration,

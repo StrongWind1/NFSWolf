@@ -450,6 +450,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
 
     // v3 exports -- only query if NFSv3 version probe succeeded
     let has_v3 = nfs_ports_info.iter().any(|p| p.v3);
+    let mut os_guess: Option<String> = None;
     let exports_v3 = if has_v3 && (mount_port_infos.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
         job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports(SocketAddr::new(ip, 111))).await {
@@ -460,6 +461,12 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                     job.stealth.wait().await;
                     if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount(mount_addr, &entry.path)).await {
                         entry.auth_flavors = mr.auth_flavors;
+                        // Fingerprint the OS/FS from the first valid handle.
+                        if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
+                            let os = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_os(&mr.handle);
+                            let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
+                            os_guess = Some(format!("{os:?}/{fs:?}"));
+                        }
                         drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
                     }
                 }
@@ -517,7 +524,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // --- Stage 9: Assembly ---
     // No trailing stealth delay here: pacing is applied before each outbound
     // probe above, so the per-host burst is already spread across the scan.
-    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, rpc_services: dump_entries, exports_v2, exports_v3, exports_v4, mounts, hint, rdma_detected, scan_duration: start.elapsed() })
+    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, rpc_services: dump_entries, exports_v2, exports_v3, exports_v4, mounts, hint, rdma_detected, os_guess, scan_duration: start.elapsed() })
 }
 
 /// Non-blocking TCP probe: returns true if the port accepts connections within timeout.

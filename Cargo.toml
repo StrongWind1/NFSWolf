@@ -29,13 +29,13 @@ homepage = "https://strongwind.dev/NFSWolf"
 readme = "README.md"
 
 [workspace.dependencies]
-onc-xdr-derive = { version = "0.1.0", path = "crates/onc-xdr-derive" }
-onc-xdr = { version = "0.1.0", path = "crates/onc-xdr" }
-onc-rpc-client = { version = "0.1.0", path = "crates/onc-rpc-client" }
-onc-rpcbind = { version = "0.1.0", path = "crates/onc-rpcbind" }
-nfs-mount = { version = "0.1.0", path = "crates/nfs-mount" }
-nfs-v2 = { version = "0.1.0", path = "crates/nfs-v2" }
-nfs-v3 = { version = "0.1.0", path = "crates/nfs-v3" }
+onc-xdr-derive = { version = "0.2.0", path = "crates/onc-xdr-derive" }
+onc-xdr = { version = "0.2.0", path = "crates/onc-xdr" }
+onc-rpc-client = { version = "0.2.0", path = "crates/onc-rpc-client" }
+onc-rpcbind = { version = "0.2.0", path = "crates/onc-rpcbind" }
+nfs-mount = { version = "0.2.0", path = "crates/nfs-mount" }
+nfs-v2 = { version = "0.2.0", path = "crates/nfs-v2" }
+nfs-v3 = { version = "0.2.0", path = "crates/nfs-v3" }
 nfs-v4 = { version = "0.1.0", path = "crates/nfs-v4" }
 fastrand = "2"
 tracing = "0.1"

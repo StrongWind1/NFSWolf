@@ -315,7 +315,7 @@ fn print_table(results: &[HostResult], scan_udp: bool) {
     }
 
     // Build all rows first so we can detect blank columns.
-    let headers = ["Hostname", "IP", "RPC Port 111", "NFS Port", "NFSv2", "v2 Exports", "NFSv3", "v3 Exports", "NFSv4", "v4 Exports", "Hint", "Mount Port", "Clients"];
+    let headers = ["Hostname", "IP", "RPC Port 111", "NFS Port", "NFSv2", "v2 Exports", "NFSv3", "v3 Exports", "NFSv4", "v4 Exports", "OS", "Hint", "Mount Port", "Clients"];
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(results.len());
 
     for r in results {
@@ -330,6 +330,7 @@ fn print_table(results: &[HostResult], scan_udp: bool) {
             render_export_count(r.exports_v3.as_deref()),
             if r.has_v4() { "yes".to_owned() } else { "--".to_owned() },
             render_v4_export_count(r),
+            r.os_guess.as_deref().unwrap_or("--").to_owned(),
             render_hint(r),
             render_mount_ports(&r.mount_ports),
             render_mounts_count(r),
@@ -706,9 +707,37 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
         })).collect::<Vec<_>>()),
         "mounts_available": r.mounts.is_some(),
         "rdma_detected": r.rdma_detected,
+        "os_guess": r.os_guess,
         "hint": r.hint.as_ref().map(ToString::to_string),
         "scan_duration_ms": u64::try_from(r.scan_duration.as_millis()).unwrap_or(u64::MAX),
     })
+}
+
+/// Collect all auth flavors across v2/v3/v4 exports into a deduplicated, sorted string.
+fn build_auth_flavors(r: &HostResult) -> String {
+    let mut flavors = std::collections::BTreeSet::new();
+    if let Some(ref exports) = r.exports_v2 {
+        for e in exports {
+            for &f in &e.auth_flavors {
+                _ = flavors.insert(crate::proto::auth::flavor_name(f));
+            }
+        }
+    }
+    if let Some(ref exports) = r.exports_v3 {
+        for e in exports {
+            for &f in &e.auth_flavors {
+                _ = flavors.insert(crate::proto::auth::flavor_name(f));
+            }
+        }
+    }
+    if let Some(ref exports) = r.exports_v4 {
+        for e in exports {
+            for &f in &e.auth_flavors {
+                _ = flavors.insert(crate::proto::auth::flavor_name(f));
+            }
+        }
+    }
+    if flavors.is_empty() { "--".to_owned() } else { flavors.into_iter().collect::<Vec<_>>().join(",") }
 }
 
 // --- CSV output --------------------------------------------------------------
@@ -717,7 +746,7 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
 fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyhow::Result<()> {
     use std::fmt::Write as _;
 
-    let mut csv = String::from("Hostname,IP,:111,NFS Port,v2,v2x,v3,v3x,v4,v4x,Hint,Mount Port,Clients,HostInfo\n");
+    let mut csv = String::from("Hostname,IP,:111,NFS Port,v2,v2x,v3,v3x,v4,v4x,OS,Auth,Hint,Mount Port,Clients,HostInfo\n");
 
     for r in results {
         let hostname = r.hostname.as_deref().unwrap_or("");
@@ -730,6 +759,8 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
         let v3x = render_export_count(r.exports_v3.as_deref());
         let v4 = if r.has_v4() { "true" } else { "--" };
         let v4x = render_v4_export_count(r);
+        let os = r.os_guess.as_deref().unwrap_or("--");
+        let auth = build_auth_flavors(r);
         let hint = r.hint.as_ref().map_or_else(|| "--".to_owned(), ToString::to_string);
         let mount_port = render_mount_ports(&r.mount_ports);
         let mounts = render_mounts_count(r);
@@ -741,7 +772,7 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
         // Infallible: fmt::Write for String never fails.
         let _ = writeln!(
             csv,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_field(hostname),
             csv_field(&ip),
             csv_field(portmap),
@@ -752,6 +783,8 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
             csv_field(&v3x),
             csv_field(v4),
             csv_field(&v4x),
+            csv_field(os),
+            csv_field(&auth),
             csv_field(&hint),
             csv_field(&mount_port),
             csv_field(&mounts),

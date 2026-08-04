@@ -211,6 +211,8 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     } else {
         mount_options.push(MountOption::RO);
     }
+    tracing::warn!("FUSE mount uses suid+dev passthrough for security testing (F-4.2, F-4.3) -- do not use on production systems");
+
     // Config is #[non_exhaustive] so we can't use a struct literal; mutate after default().
     let mut config = fuser::Config::default();
     config.mount_options = mount_options;

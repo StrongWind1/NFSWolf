@@ -79,6 +79,7 @@ pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "escape-root",
     "mount-handle",
     "handle",
+    "verifier",
     "lcd",
     "lls",
     "lpwd",
@@ -278,6 +279,7 @@ impl<O: ShellOps> NfsShell<O> {
             // Handle info
             "handle" => println!("{}", self.cwd.to_hex()),
             "root" => self.cmd_root().await,
+            "verifier" => self.cmd_verifier().await,
             // Local ops
             "lcd" => self.cmd_lcd(arg),
             "lls" => self.cmd_lls(arg),
@@ -1425,6 +1427,26 @@ impl<O: ShellOps> NfsShell<O> {
         }
     }
 
+    /// Probe the server's write verifier via zero-count COMMIT (reboot oracle).
+    ///
+    /// The writeverf3 is an opaque 8-byte value the server regenerates on reboot
+    /// (RFC 1813 S3.3.21). Comparing verifiers across probes detects server
+    /// restarts without requiring any write traffic.
+    async fn cmd_verifier(&self) {
+        match self.ops.write_verifier(&self.cwd).await {
+            Ok(Some(verf)) => {
+                use std::fmt::Write as _;
+                let hex = verf.iter().fold(String::with_capacity(16), |mut s, b| {
+                    let _ = write!(s, "{b:02x}");
+                    s
+                });
+                println!("writeverf3: {hex}");
+            },
+            Ok(None) => println!("{}", "verifier: COMMIT not available on this NFS version".yellow()),
+            Err(e) => eprintln!("{}", format!("verifier: {e}").red()),
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Local filesystem
     // -------------------------------------------------------------------------
@@ -1582,6 +1604,9 @@ impl<O: ShellOps> NfsShell<O> {
         println!("  handle                     print current dir handle (hex)");
         if self.ops.version_name() == "NFSv2" {
             println!("  root                       probe NFSPROC_ROOT (obsolete MOUNT bypass)");
+        }
+        if self.ops.version_name() == "NFSv3" {
+            println!("  verifier                   probe write verifier (reboot oracle, RFC 1813 S3.3.21)");
         }
         println!();
         println!("{}", "Local:".bold().underline());

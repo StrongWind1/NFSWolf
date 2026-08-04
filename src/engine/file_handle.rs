@@ -16,6 +16,9 @@ pub(crate) enum OsGuess {
     Linux,
     Windows,
     FreeBsd,
+    /// HP-UX: one-request-per-TCP connection model. Reserved for future TCP behavior fingerprinting.
+    #[expect(dead_code, reason = "reserved for future TCP behavior fingerprinting")]
+    HpUx,
     Unknown,
 }
 
@@ -43,7 +46,6 @@ pub(crate) enum SigningStatus {
 }
 
 /// Which NFS version's handle format was checked for Windows signing.
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsHandleVersion {
     /// NFSv3: 32-byte handle, last 10 bytes are HMAC
@@ -223,8 +225,8 @@ impl FileHandleAnalyzer {
         SigningStatus::NotApplicable
     }
 
-    /// Detect which Windows handle version format we're looking at.
-    #[cfg(test)]
+    /// Returns `V3` for 32-byte handles and `V41` for 28-byte handles, which are
+    /// the two known Windows NFS handle formats. Returns `None` for any other size.
     pub(crate) fn detect_windows_handle_version(fh: &FileHandle) -> Option<WindowsHandleVersion> {
         match fh.as_bytes().len() {
             32 => Some(WindowsHandleVersion::V3),
@@ -550,7 +552,7 @@ impl FileHandleAnalyzer {
                     (0.0, vec![])
                 }
             },
-            OsGuess::Unknown => (32.0, vec!["unknown fields".into()]),
+            OsGuess::HpUx | OsGuess::Unknown => (32.0, vec!["unknown fields".into()]),
         };
 
         let brute_force_seconds = entropy_bits.exp2() / 10000.0;

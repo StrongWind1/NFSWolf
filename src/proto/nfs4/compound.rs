@@ -133,6 +133,18 @@ impl Nfs4DirectClient {
         self.rpc.call::<CompoundArgs, CompoundRes>(NFS4_PROGRAM, NFS4_VERSION, NFS4_PROC_COMPOUND, &args).await.context("NFSv4 COMPOUND")
     }
 
+    /// Send a COMPOUND with minorversion=1 (NFSv4.1).
+    ///
+    /// EXCHANGE_ID (op 42, RFC 5661 S18.35) and other v4.1 operations require
+    /// minorversion=1 in the COMPOUND tag; v4.0-only servers reject them with
+    /// NFS4ERR_MINOR_VERS_MISMATCH or NFS4ERR_OP_ILLEGAL.
+    #[expect(dead_code, reason = "reserved for upcoming v4.1 EXCHANGE_ID probing")]
+    pub(crate) async fn compound_v41(&mut self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
+        self.stealth.wait().await;
+        let args = CompoundArgs { tag: String::new(), minorversion: 1, ops };
+        self.rpc.call::<CompoundArgs, CompoundRes>(NFS4_PROGRAM, NFS4_VERSION, NFS4_PROC_COMPOUND, &args).await.context("NFSv4.1 COMPOUND")
+    }
+
     /// Retrieve the root file handle bytes via PUTROOTFH + GETFH.
     ///
     /// On success, the returned bytes can be used in subsequent PUTFH operations

@@ -258,6 +258,17 @@ impl<T: RpcTransport> Nfs3Client<T> {
         Ok(())
     }
 
+    /// Retrieve the server's write verifier without flushing any data.
+    ///
+    /// Sends a zero-count COMMIT (RFC 1813 S3.3.21) which is a no-op on the
+    /// data path but returns the current `writeverf3`. If the verifier changes
+    /// between two probes the server rebooted (or its volatile cache was
+    /// discarded), which is the reboot oracle.
+    pub async fn commit_verifier(&self, fh: &FileHandle) -> Result<[u8; 8], Nfs3Fault<T::Error>> {
+        let ok = flatten(self.commit(&COMMIT3args { file: fh.to_nfs_fh3(), offset: 0, count: 0 }).await)?;
+        Ok(ok.verf.0)
+    }
+
     /// Dynamic filesystem statistics.
     pub async fn stat_fs(&self, fh: &FileHandle) -> Result<super::FsStat, Nfs3Fault<T::Error>> {
         let ok = flatten(self.fsstat(&FSSTAT3args { fsroot: fh.to_nfs_fh3() }).await)?;

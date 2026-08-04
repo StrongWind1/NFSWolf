@@ -207,4 +207,11 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
     fn probe_root(&self) -> impl Future<Output = anyhow::Result<Option<ShellHandle>>> + Send {
         async { Ok(None) }
     }
+
+    /// Retrieve the server's write verifier (reboot oracle, RFC 1813 S3.3.21).
+    ///
+    /// Only NFSv3 supports COMMIT; v2 returns `Ok(None)`.
+    fn write_verifier(&self, _fh: &ShellHandle) -> impl Future<Output = anyhow::Result<Option<[u8; 8]>>> + Send {
+        async { Ok(None) }
+    }
 }
