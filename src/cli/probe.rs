@@ -229,7 +229,6 @@ impl HandleProbeResult {
     }
 
     /// All variants usable as escape seeds (v3_ok, v3_stale, or v2_ok).
-    #[expect(dead_code, reason = "used by escape matrix path")]
     pub(crate) fn escape_seeds(&self) -> Vec<&TestedHandle> {
         self.tested.iter().filter(|t| t.v3_ok || t.v3_stale || t.v2_ok).collect()
     }
