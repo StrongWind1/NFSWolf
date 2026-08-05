@@ -238,7 +238,14 @@ impl HandleProbeResult {
 /// each against NFSv3 + NFSv2 GETATTR.
 ///
 /// Blocks 1-4 of the handle matrix plan: acquire -> derive -> deduplicate -> test.
-pub(crate) async fn acquire_and_test_handles(mount: &NfsMountClient, nfs3: &Nfs3Client, addr: SocketAddr, export: &str, stealth: &StealthConfig, nfs_port: Option<u16>, proxy: Option<&str>, hostname: &str) -> HandleProbeResult {
+pub(crate) async fn acquire_and_test_handles(mount: &NfsMountClient, _nfs3: &Nfs3Client, addr: SocketAddr, export: &str, stealth: &StealthConfig, nfs_port: Option<u16>, proxy: Option<&str>, hostname: &str) -> HandleProbeResult {
+    // Build a direct-port NFS client for handle testing. This bypasses the
+    // PooledTransport's lazy MOUNT, which would fail when mountd v3 is disabled.
+    // The handles come from the explicit MOUNT v1/v3 calls below, not from the
+    // transport's connection setup.
+    let direct_port = nfs_port.unwrap_or(2049);
+    let (_, _, probe_nfs3) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), proxy, Some(direct_port), hostname);
+
     // Block 1: acquire from both MOUNT versions.
     stealth.wait().await;
     let v3_result = mount.mount(addr, export).await;
@@ -270,7 +277,7 @@ pub(crate) async fn acquire_and_test_handles(mount: &NfsMountClient, nfs3: &Nfs3
     let mut tested = Vec::with_capacity(variants.len());
     for variant in variants {
         stealth.wait().await;
-        let (v3_ok_flag, v3_stale_flag) = match nfs3.attrs(&variant.handle).await {
+        let (v3_ok_flag, v3_stale_flag) = match probe_nfs3.attrs(&variant.handle).await {
             Ok(_) => (true, false),
             Err(e) if e.is_permission_denied() => (true, false),
             Err(e) if e.is_stale() => (false, true),

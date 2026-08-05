@@ -282,8 +282,12 @@ impl Analyzer {
         // NFSv4.1 pNFS topology probe: EXCHANGE_ID + conditional GETDEVICELIST.
         probe_pnfs_topology(addr, &mut findings, self.proxy.as_deref(), &self.stealth).await;
 
-        // Per-export checks.
-        let exports = self.mount.list_exports(addr).await.unwrap_or_default();
+        // Per-export checks. Try MOUNT v3 EXPORT first; fall back to MOUNT v1
+        // EXPORT when v3 is unavailable (e.g., mountd -N 3).
+        let mut exports = self.mount.list_exports(addr).await.unwrap_or_default();
+        if exports.is_empty() {
+            exports = self.mount.list_exports_v1(addr).await.unwrap_or_default();
+        }
         check_export_acls(&exports, &mut findings);
 
         let mut export_analyses: Vec<ExportAnalysis> = Vec::new();

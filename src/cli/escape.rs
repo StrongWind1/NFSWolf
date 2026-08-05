@@ -753,7 +753,8 @@ async fn find_escape_matrix(host: &str, export: &str, btrfs_subvols: u32, max_ro
     let addr = parse_addr_with_port(host, globals.nfs_port).ok()?;
     let mount = make_mount_client(globals);
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
-    let (_, _, nfs3) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+    let direct_port = globals.nfs_port.unwrap_or(2049);
+    let (_, _, nfs3) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
 
     let probe = acquire_and_test_handles(&mount, &nfs3, addr, export, &stealth, globals.nfs_port, globals.proxy.as_deref(), &globals.hostname).await;
 
