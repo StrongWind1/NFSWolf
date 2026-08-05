@@ -78,6 +78,55 @@ pub(crate) struct EscapeResult {
     pub inode_number: u32,
 }
 
+/// A handle with a label describing how it was derived.
+#[derive(Debug, Clone)]
+pub(crate) struct HandleVariant {
+    pub handle: FileHandle,
+    pub label: String,
+}
+
+/// Derive all plausible length variants of a handle by padding and trimming.
+///
+/// From a single source handle, produces up to 4 variants:
+///   raw       -- as-is
+///   trimmed   -- trailing zero bytes stripped (min 1 byte retained)
+///   padded_32 -- zero-padded to 32 bytes (FHSIZE2, NFSv2 wire format)
+///   padded_64 -- zero-padded to 64 bytes (NFS3_FHSIZE maximum)
+pub(crate) fn derive_handle_variants(handle: &FileHandle, source: &str) -> Vec<HandleVariant> {
+    let bytes = handle.as_bytes();
+    let len = bytes.len();
+    let mut variants = Vec::with_capacity(4);
+
+    variants.push(HandleVariant { handle: handle.clone(), label: format!("{source}_raw({len}B)") });
+
+    let trimmed_len = bytes.iter().rposition(|&b| b != 0).map_or(1, |i| i + 1);
+    if trimmed_len < len
+        && let Some(trimmed) = bytes.get(..trimmed_len)
+    {
+        variants.push(HandleVariant { handle: FileHandle::from_bytes(trimmed), label: format!("{source}_trimmed({trimmed_len}B)") });
+    }
+
+    if len < 32 {
+        let mut padded = bytes.to_vec();
+        padded.resize(32, 0);
+        variants.push(HandleVariant { handle: FileHandle::from_bytes(&padded), label: format!("{source}_pad32") });
+    }
+
+    if len < 64 {
+        let mut padded = bytes.to_vec();
+        padded.resize(64, 0);
+        variants.push(HandleVariant { handle: FileHandle::from_bytes(&padded), label: format!("{source}_pad64") });
+    }
+
+    variants
+}
+
+/// Remove duplicate variants (same byte content), keeping the first label.
+pub(crate) fn dedup_variants(variants: &mut Vec<HandleVariant>) {
+    let mut seen = std::collections::HashSet::new();
+    variants.retain(|v| seen.insert(v.handle.as_bytes().to_vec()));
+}
+
 /// Analyze and manipulate NFS file handles.
 #[derive(Debug)]
 pub(crate) struct FileHandleAnalyzer;

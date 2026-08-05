@@ -216,6 +216,8 @@ pub(crate) struct Analyzer {
     pub hostname: String,
     /// Auxiliary GIDs from --aux-gids, threaded into per-export credentials.
     pub aux_gids: Vec<u32>,
+    /// Optional NFS port override (--nfs-port), passed to handle probes.
+    pub nfs_port: Option<u16>,
 }
 
 impl std::fmt::Debug for Analyzer {
@@ -229,7 +231,7 @@ impl Analyzer {
     #[must_use]
     #[expect(clippy::missing_const_for_fn, reason = "Arc<T> cannot be used in const context")]
     pub(crate) fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient, pool: Arc<ConnectionPool>, circuit: Arc<CircuitBreaker>, hostname: String, aux_gids: Vec<u32>) -> Self {
-        Self { nfs3, mount, portmap, proxy: None, stealth: StealthConfig::none(), pool, circuit, hostname, aux_gids }
+        Self { nfs3, mount, portmap, proxy: None, stealth: StealthConfig::none(), pool, circuit, hostname, aux_gids, nfs_port: None }
     }
 
     /// Attach a SOCKS5 proxy for NFSv4 SECINFO probes.
@@ -338,32 +340,43 @@ impl Analyzer {
     async fn analyze_export(&self, config: &AnalyzeConfig, addr: SocketAddr, entry: &ExportEntry, findings: &mut Vec<Finding>) -> ExportAnalysis {
         let mut ea = ExportAnalysis { path: entry.path.clone(), allowed_hosts: entry.allowed_hosts.clone(), auth_methods: Vec::new(), writable: false, no_root_squash: None, escape_possible: false, file_handle: String::new(), file_access_tests: Vec::new(), nfs4_acls: Vec::new() };
 
-        // Pace the per-export MOUNT burst (Critical Design Rule 10). NfsMountClient
-        // does not embed StealthConfig, so honour the delay/jitter here.
-        self.stealth.wait().await;
-        let mount_res = match self.mount.mount(addr, &entry.path).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Failed to mount {}: {e}", entry.path);
-                return ea;
-            },
+        // Handle acquisition matrix: try MOUNT v3 and v1, derive all length
+        // variants (raw, trimmed, padded to 32/64), test each against NFSv3 + NFSv2
+        // GETATTR. This catches F-1.6 (v1 leaks handle when v3 requires krb5) and
+        // cross-version handle reuse (v1 handle works with v3 ops).
+        let export_nfs3 = self.build_export_client(addr, entry);
+        let probe = crate::cli::probe::acquire_and_test_handles(&self.mount, &export_nfs3, addr, &entry.path, &self.stealth, self.nfs_port, self.proxy.as_deref(), &self.hostname).await;
+
+        if probe.v1_bypass {
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-1.6",
+                    title: "MOUNT v1 leaks handle when MOUNT v3 denies access (auth bypass)",
+                    desc: &format!(
+                        "MOUNT v3 for export {} failed but MOUNT v1 succeeded. The v1 handle \
+                         is usable with NFSv3 operations because the NFS daemon validates handle \
+                         bytes, not the MOUNT version (RFC 2623 S2.6).",
+                        entry.path
+                    ),
+                    evidence: &format!("v3_error={}, v1_handle_variants_tested={}", probe.v3_error.as_deref().unwrap_or("unknown"), probe.tested.len()),
+                    remediation: "Disable MOUNT v1 (mountd -N 1) or disable NFSv2 entirely (nfs.conf: vers2=n).",
+                    export: Some(&entry.path),
+                },
+                Severity::Critical,
+            ));
+        }
+
+        let Some(best) = probe.best_v3() else {
+            tracing::warn!(export = %entry.path, "No handle variant accepted by NFSv3 GETATTR (tried {} variants)", probe.tested.len());
+            return ea;
         };
 
-        // Build a per-export NFS client so pool checkout uses the correct MOUNT path.
-        // The global self.nfs3 has export="/" which fails on servers with restricted exports.
-        // Shares self.pool / self.circuit (the pool keys on (host, export, uid, gid) so
-        // different exports get different connection slots automatically), and inherits
-        // the proxy, hostname, and aux-gids the operator supplied.
-        // Inherits the configured stealth pacing so every per-export probe RPC
-        // (escape, btrfs, nohide, symlink, squash writes, file-access reads)
-        // honours --delay/--jitter (Critical Design Rule 10).
-        let export_nfs3 = self.build_export_client(addr, entry);
-
-        let fh = mount_res.handle;
+        let fh = best.variant.handle.clone();
+        tracing::debug!(export = %entry.path, variant = %best.variant.label, "Using handle variant for analysis");
         ea.file_handle = fh.to_hex();
-        ea.auth_methods = mount_res.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
+        ea.auth_methods = probe.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
 
-        check_auth_methods(&entry.path, &mount_res.auth_flavors, findings);
+        check_auth_methods(&entry.path, &probe.auth_flavors, findings);
         // NFSv4 probes: SECINFO, per-path SECINFO, SEC_LABEL, xattrs.
         run_nfs4_export_checks(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
         check_windows_signing(&fh, &entry.path, findings);
