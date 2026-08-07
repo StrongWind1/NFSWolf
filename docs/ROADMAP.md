@@ -168,7 +168,7 @@ Done. `check_nfs4_secinfo_per_path()` walks subdirectories and compares per-path
 
 ### NFS4ERR_WRONGSEC iterative enumeration
 
-Partially done. Implemented in a worktree but not yet merged into main. Wire types ready.
+Done. `wrongsec_flavor_oracle()` iterates AUTH_NONE/AUTH_SYS, sends PUTROOTFH+LOOKUP per flavor, classifies NFS4ERR_WRONGSEC (10016) as rejected. Third fallback after SECINFO and SECINFO_NO_NAME in the `check_nfs4_secinfo()` cascade.
 
 ### Scanner CSV auth column
 
@@ -202,7 +202,7 @@ Done. `probe_exchange_id()` sends EXCHANGE_ID via minorversion=1 COMPOUND, extra
 
 ### SECINFO_NO_NAME (op 52, v4.1)
 
-Partially done. Wire types ready. Implemented in a worktree (SECINFO fallback) but not merged. SECINFO on the export root is done; SECINFO_NO_NAME as a fallback for v4.1-only servers is pending.
+Done. `check_nfs4_secinfo()` tries SECINFO first, falls back to SECINFO_NO_NAME via `compound_v41()` when SECINFO fails (NFS4ERR_NOTSUPP or NFS4ERR_OP_ILLEGAL).
 
 ### GETDEVICEINFO / GETDEVICELIST (ops 47-48, v4.1)
 
@@ -246,7 +246,7 @@ Pre-publish checklist for the eight protocol crates. The binary (`nfswolf`) is d
 | Crate renaming (`nfswolf-*` -> `onc-*`/`nfs-*`) | Done |
 | `#[non_exhaustive]` on all public enums | Done. All 48 `pub enum` types across 8 crates are annotated (verified by automated scan). |
 | `keywords` and `categories` in every crate Cargo.toml | Done (all 8 crates) |
-| Golden vector tests (real server bytes -> expected structs) | Partial (onc-xdr, onc-rpc-client, nfs-v2, nfs-v3, nfs-v4 have them; MOUNT/rpcbind gaps remain) |
+| Golden vector tests (real server bytes -> expected structs) | Done. All crates covered including MOUNT v1/v3 (3 tests with lab handle bytes) and portmapper (2 tests). |
 | `cargo-hack --feature-powerset --no-dev-deps check` in CI | Done (ci.yml feature-powerset job) |
 | Dedicated MSRV CI job | Done (ci.yml MSRV check) |
 | `docs.rs` metadata (`all-features`, `docsrs` cfg) | Done (all 8 crates) |
@@ -263,7 +263,7 @@ Pre-publish checklist for the eight protocol crates. The binary (`nfswolf`) is d
 | Phase 0 | Binary fixes (v2 parity, proxy, errors) | Complete |
 | Phase 1 | Foundation (portmapper, absorb udp.rs, derive tests) | Complete except CALLIT |
 | Phase 2 | Extract (nfs-mount, onc-rpcbind, Nfs2Client) | Complete |
-| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Done except golden vector gaps in MOUNT/rpcbind |
+| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Done |
 | Phase 4 | Publish 8 crates to crates.io | Ready (all names available, all metadata present) |
 | Phase 5 | Wire v4.1/v4.2 recon ops into scanner/analyzer | Done (EXCHANGE_ID, GETDEVICELIST, SECINFO_NO_NAME, FATTR4_SEC_LABEL, per-path SECINFO, xattrs) |
 | Tier 3 | Sideband protocol crates (NLM, NSM, RQUOTA, NFS_ACL, NIS, RPCSEC_GSS) | Blocked on consumers |
