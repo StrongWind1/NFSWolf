@@ -808,8 +808,8 @@ async fn find_escape_matrix(host: &str, export: &str, btrfs_subvols: u32, max_ro
                     _ => {},
                 }
 
-                // Try NFSv2 GETATTR on 32-byte variants
-                if rv.handle.as_bytes().len() == 32 {
+                // Try NFSv2 GETATTR -- pad/truncate every variant to 32 bytes.
+                {
                     stealth.wait().await;
                     let v2_fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(rv.handle.as_bytes());
                     let v2_stealth = StealthConfig::new(globals.delay, globals.jitter);

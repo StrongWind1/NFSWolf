@@ -284,12 +284,12 @@ pub(crate) async fn acquire_and_test_handles(mount: &NfsMountClient, _nfs3: &Nfs
             _ => (false, false),
         };
 
-        let v2_ok_flag = if variant.handle.as_bytes().len() == 32 {
-            stealth.wait().await;
-            test_handle_v2(addr, &variant.handle, stealth, proxy, nfs_port, hostname).await
-        } else {
-            false
-        };
+        // NFSv2 requires exactly 32 bytes. Produce the 32-byte form of every
+        // variant (pad short, truncate long) via Nfs2FileHandle::from_bytes.
+        let v2_fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(variant.handle.as_bytes());
+        let v2_handle = FileHandle::from_bytes(&v2_fh.0);
+        stealth.wait().await;
+        let v2_ok_flag = test_handle_v2(addr, &v2_handle, stealth, proxy, nfs_port, hostname).await;
 
         tested.push(TestedHandle { variant, v3_ok: v3_ok_flag, v3_stale: v3_stale_flag, v2_ok: v2_ok_flag });
     }
