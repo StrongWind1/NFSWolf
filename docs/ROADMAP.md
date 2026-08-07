@@ -52,11 +52,7 @@ Rare on modern systems but legacy SunOS/Solaris PC-NFS gateways persist in enter
 
 ### WebNFS multi-component LOOKUP (MCL) path traversal
 
-**No new RPC procedures needed. Low effort.**
-
-The public handle probe (v2 all-zero 32B, v3 zero-length, v4 PUTPUBFH) is implemented. What remains is multi-component LOOKUP: a slash-delimited path in one LOOKUP call against the public handle, including `../` traversal for cross-export escape.
-
-Two path encodings: canonical (ASCII, percent-escaping) and native (`0x80` prefix, raw server pathname syntax). The spec's own worked example is a `../` cross-export traversal (C702 Appendix E, pp 312-313).
+**Done.** `try_webnfs_escape()` in `escape.rs` sends `../../../etc/passwd` as a multi-component LOOKUP against the public handle for v2 (all-zero 32B), v3 (zero-length), and v4 (PUTPUBFH). Both single-slash (server splits) and component-by-component (client splits) paths are tried. The analyzer also probes MCL via `check_webnfs_public_handle()` with `etc/shadow`. Native path encoding (`0x80` prefix) is not implemented.
 
 ### Portmapper CALLIT -- amplification and relay primitive
 
@@ -214,7 +210,7 @@ Done. `probe_pnfs_topology()` sends EXCHANGE_ID + GETDEVICELIST to discover pNFS
 
 ### OPEN for honest write testing (op 18, v4.0)
 
-Not done. Requires SETCLIENTID for state management. Medium-high effort.
+Not done. Wire building blocks exist (`ArgOp::Open`, `encode_open_read()`, `CompoundBuilder::setclientid()`) but no analyzer integration. Requires SETCLIENTID for state management before OPEN can be issued. Medium-high effort.
 
 ### FATTR4_SEC_LABEL (attr 80, v4.2)
 
@@ -248,7 +244,7 @@ Pre-publish checklist for the eight protocol crates. The binary (`nfswolf`) is d
 | Item | Status |
 |------|--------|
 | Crate renaming (`nfswolf-*` -> `onc-*`/`nfs-*`) | Done |
-| `#[non_exhaustive]` on all public enums | Done (48 annotations, audited -- all covered) |
+| `#[non_exhaustive]` on all public enums | 48 annotations present. 16 `pub enum` types in crates still lack it (mostly XDR wire types with derive macros). Audit before publish. |
 | `keywords` and `categories` in every crate Cargo.toml | Done (all 8 crates) |
 | Golden vector tests (real server bytes -> expected structs) | Partial (onc-xdr, onc-rpc-client, nfs-v2, nfs-v3, nfs-v4 have them; MOUNT/rpcbind gaps remain) |
 | `cargo-hack --feature-powerset --no-dev-deps check` in CI | Done (ci.yml feature-powerset job) |
@@ -267,7 +263,7 @@ Pre-publish checklist for the eight protocol crates. The binary (`nfswolf`) is d
 | Phase 0 | Binary fixes (v2 parity, proxy, errors) | Complete |
 | Phase 1 | Foundation (portmapper, absorb udp.rs, derive tests) | Complete except CALLIT |
 | Phase 2 | Extract (nfs-mount, onc-rpcbind, Nfs2Client) | Complete |
-| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Done except golden vector gaps in MOUNT/rpcbind |
+| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Done except golden vector gaps in MOUNT/rpcbind and 16 `pub enum` types missing `#[non_exhaustive]` |
 | Phase 4 | Publish 8 crates to crates.io | Ready (all names available, all metadata present) |
 | Phase 5 | Wire v4.1/v4.2 recon ops into scanner/analyzer | Done (EXCHANGE_ID, GETDEVICELIST, SECINFO_NO_NAME, FATTR4_SEC_LABEL, per-path SECINFO, xattrs) |
 | Tier 3 | Sideband protocol crates (NLM, NSM, RQUOTA, NFS_ACL, NIS, RPCSEC_GSS) | Blocked on consumers |
