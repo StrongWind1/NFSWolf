@@ -80,7 +80,7 @@ impl std::fmt::Display for PMAP_PROG {
 
 #[cfg(test)]
 mod tests {
-    use super::{IPPROTO_TCP, IPPROTO_UDP, PMAP_PORT, PMAP_PROG, PROGRAM, VERSION, mapping};
+    use super::{IPPROTO_TCP, IPPROTO_UDP, PMAP_PORT, PMAP_PROG, PROGRAM, VERSION, mapping, pmaplist};
     use onc_xdr::{Pack, Unpack};
     use std::io::Cursor;
 
@@ -169,5 +169,72 @@ mod tests {
         for v in [6_u32, 100, u32::MAX] {
             assert!(PMAP_PROG::try_from(v).is_err(), "procedure {v} should be invalid");
         }
+    }
+
+    // --- Golden vector tests: hand-constructed byte sequences verified against RFC 1057 XDR ---
+
+    /// Golden vector: portmapper DUMP response containing one NFSv3/TCP mapping
+    /// at port 2049, encoded as an XDR optional-data linked list.
+    ///
+    /// Wire layout (RFC 1057 Appendix A):
+    ///   TRUE(4) | mapping(prog=100003, vers=3, prot=6, port=2049)(16) | FALSE(4)
+    /// Total: 24 bytes.
+    #[test]
+    fn golden_pmaplist_single_nfsv3() {
+        #[rustfmt::skip]
+        let golden: &[u8] = &[
+            // pmaplist: value_follows = TRUE
+            0x00, 0x00, 0x00, 0x01,
+            // mapping.prog = 100003 (NFS, 0x0001_86A3)
+            0x00, 0x01, 0x86, 0xA3,
+            // mapping.vers = 3 (NFSv3)
+            0x00, 0x00, 0x00, 0x03,
+            // mapping.prot = 6 (IPPROTO_TCP)
+            0x00, 0x00, 0x00, 0x06,
+            // mapping.port = 2049 (0x0801)
+            0x00, 0x00, 0x08, 0x01,
+            // pmaplist: value_follows = FALSE (end of list)
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(golden.len(), 24);
+
+        // Unpack the golden vector.
+        let (decoded, consumed) = pmaplist::unpack(&mut Cursor::new(golden)).expect("unpack golden pmaplist");
+        assert_eq!(consumed, 24);
+        assert_eq!(decoded.0.len(), 1, "one mapping entry");
+        let m = &decoded.0[0];
+        assert_eq!(m.prog, 100_003, "NFS program number");
+        assert_eq!(m.vers, 3, "NFSv3");
+        assert_eq!(m.prot, IPPROTO_TCP, "TCP transport");
+        assert_eq!(m.port, 2049, "standard NFS port");
+
+        // Pack and verify it reproduces the golden vector.
+        let mut packed = Vec::new();
+        let n = decoded.pack(&mut packed).expect("pack pmaplist");
+        assert_eq!(n, 24);
+        assert_eq!(packed, golden, "pack must reproduce the golden vector byte-for-byte");
+    }
+
+    /// Golden vector: portmapper GETPORT response returning port 2049.
+    ///
+    /// The GETPORT response is a bare XDR unsigned int (RFC 1057 Appendix A).
+    /// Wire layout: port(4)=2049. Total: 4 bytes.
+    #[test]
+    fn golden_getport_response() {
+        #[rustfmt::skip]
+        let golden: &[u8] = &[
+            // port = 2049 (0x0801)
+            0x00, 0x00, 0x08, 0x01,
+        ];
+
+        let (port, consumed) = u32::unpack(&mut Cursor::new(golden)).expect("unpack golden getport");
+        assert_eq!(consumed, 4);
+        assert_eq!(port, 2049, "GETPORT must return NFS port 2049");
+
+        // Pack and verify.
+        let mut packed = Vec::new();
+        let n = port.pack(&mut packed).expect("pack u32");
+        assert_eq!(n, 4);
+        assert_eq!(packed, golden, "pack must reproduce the golden vector byte-for-byte");
     }
 }

@@ -283,4 +283,41 @@ mod tests {
         assert_eq!(decoded.ex_groups.0[0].0.as_ref(), b"host1");
         assert_eq!(decoded.ex_groups.0[1].0.as_ref(), b"host2");
     }
+
+    // --- Golden vector tests: hand-constructed byte sequences verified against RFC 1094 XDR ---
+
+    /// Golden vector: FhStatus success with a real 32-byte handle (fsid_type=4
+    /// from lab testing).
+    ///
+    /// Wire layout (RFC 1094 Appendix A):
+    ///   status(4)=0 | fhandle(32) -- fixed-length opaque, no length prefix
+    /// Total: 36 bytes.
+    #[test]
+    fn golden_fhstatus_ok() {
+        #[rustfmt::skip]
+        let golden: &[u8] = &[
+            // status = 0 (success)
+            0x00, 0x00, 0x00, 0x00,
+            // fhandle: real lab handle (fsid_type=4, fixed 32 bytes, no length prefix)
+            0x01, 0x00, 0x04, 0x00, 0x29, 0x00, 0x12, 0x00,
+            0xE6, 0x8D, 0x6A, 0x0C, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(golden.len(), 36);
+
+        let expected_handle = Nfs2FileHandle::from_bytes(&[0x01, 0x00, 0x04, 0x00, 0x29, 0x00, 0x12, 0x00, 0xE6, 0x8D, 0x6A, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        // Unpack the golden vector and verify each field.
+        let (decoded, consumed) = FhStatus::unpack(&mut Cursor::new(golden)).expect("unpack golden FhStatus ok");
+        assert_eq!(consumed, 36);
+        assert_eq!(decoded.status, 0, "status must be success");
+        assert_eq!(decoded.fhandle, expected_handle, "handle bytes must match lab capture");
+
+        // Pack the Rust struct and verify it reproduces the golden vector exactly.
+        let mut packed = Vec::new();
+        let n = decoded.pack(&mut packed).unwrap();
+        assert_eq!(n, 36);
+        assert_eq!(packed, golden, "pack must reproduce the golden vector byte-for-byte");
+    }
 }
