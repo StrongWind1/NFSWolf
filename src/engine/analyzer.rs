@@ -1525,9 +1525,124 @@ async fn run_nfs4_export_checks(addr: SocketAddr, export_path: &str, findings: &
     check_nfs4_xattrs(addr, export_path, findings, proxy, stealth).await;
 }
 
+/// Emit findings for auth flavors discovered via SECINFO, SECINFO_NO_NAME, or
+/// the NFS4ERR_WRONGSEC oracle (F-3.4, F-1.7, F-3.7, F-3.9).
+///
+/// `source` is the probe method name for the evidence string (e.g. "SECINFO",
+/// "SECINFO_NO_NAME", "WRONGSEC oracle"). `entries` are the `SecInfoEntry`
+/// items from the response (or synthetic entries for the WRONGSEC path).
+fn emit_secinfo_findings(entries: &[nfs_v4::SecInfoEntry], source: &str, export_path: &str, findings: &mut Vec<Finding>) {
+    let raw_flavors: Vec<u32> = entries.iter().map(|e| e.flavor).collect();
+
+    // Build a human-readable summary including GSS service levels.
+    let flavor_strs: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            if e.flavor == 6 {
+                match e.gss_service {
+                    Some(1) => "RPCSEC_GSS(krb5)".to_owned(),
+                    Some(2) => "RPCSEC_GSS(krb5i)".to_owned(),
+                    Some(3) => "RPCSEC_GSS(krb5p)".to_owned(),
+                    _ => "RPCSEC_GSS".to_owned(),
+                }
+            } else {
+                crate::proto::auth::flavor_name(e.flavor)
+            }
+        })
+        .collect();
+    let evidence_str = format!("{source} flavors=[{}]", flavor_strs.join(", "));
+
+    // Kerberos: bare RPCSEC_GSS (6) or krb5 pseudo-flavors (390003-390005).
+    let has_kerberos = raw_flavors.iter().any(|&f| f == 6 || (390_003..=390_005).contains(&f));
+    let has_auth_sys = raw_flavors.contains(&1);
+
+    if has_auth_sys && !has_kerberos {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-3.4",
+                title: "NFSv4 export accepts AUTH_SYS with no Kerberos (TLS downgrade not enforced)",
+                desc: &format!(
+                    "NFSv4 {source} for export {export_path} returns AUTH_SYS (flavor 1) \
+                     with no RPCSEC_GSS (flavor 6). An attacker can spoof arbitrary UID/GID \
+                     credentials via NFSv4 COMPOUND without Kerberos. \
+                     RFC 9289 S1: NFS-over-TLS and RPCSEC_GSS are opt-in and rarely deployed.",
+                ),
+                evidence: &evidence_str,
+                remediation: "Configure `sec=krb5p` in /etc/exports to require Kerberos authentication.",
+                export: Some(export_path),
+            },
+            Severity::High,
+        ));
+    } else if has_auth_sys && has_kerberos {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-1.7",
+                title: "NFSv4 SECINFO: mixed auth flavors allow RPCSEC_GSS downgrade to AUTH_SYS",
+                desc: &format!(
+                    "NFSv4 {source} for export {export_path} returns both AUTH_SYS and RPCSEC_GSS \
+                     (Kerberos). An attacker can choose AUTH_SYS and bypass Kerberos entirely \
+                     (RFC 2203 S5.2.1). Without integrity protection on the SECINFO call, a MITM \
+                     can also strip the krb5 entries to force clients onto AUTH_SYS (RFC 7530 S19).",
+                ),
+                evidence: &evidence_str,
+                remediation: "Remove AUTH_SYS from exports that require Kerberos authentication: \
+                              use sec=krb5 (or krb5i/krb5p) exclusively in /etc/exports.",
+                export: Some(export_path),
+            },
+            Severity::High,
+        ));
+    }
+
+    // AUTH_DH (flavor 3).
+    if raw_flavors.contains(&3) {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-3.7",
+                title: "NFSv4 SECINFO: AUTH_DH advertised (cryptographically broken)",
+                desc: &format!(
+                    "NFSv4 {source} for export {export_path} includes AUTH_DH (flavor 3), which \
+                     uses 192-bit Diffie-Hellman / 56-bit DES. RFC 5531 S14: 'AUTH_DH [...] is \
+                     considered obsolete and insecure; see [RFC2695].'",
+                ),
+                evidence: &evidence_str,
+                remediation: "Remove AUTH_DH from the export's security configuration. Use \
+                              sec=krb5p for authenticated and integrity-protected access.",
+                export: Some(export_path),
+            },
+            Severity::Medium,
+        ));
+    }
+
+    // AUTH_SHORT (flavor 2).
+    if raw_flavors.contains(&2) {
+        findings.push(make_finding(
+            &FindingSpec {
+                id: "F-3.9",
+                title: "NFSv4 SECINFO: AUTH_SHORT session credentials advertised",
+                desc: &format!(
+                    "NFSv4 {source} for export {export_path} includes AUTH_SHORT (flavor 2). \
+                     AUTH_SHORT opaque tokens captured from the wire can be replayed to \
+                     impersonate the original client without knowing their UID/GID \
+                     (RFC 1057 S9.2, RFC 5531 Appendix A).",
+                ),
+                evidence: &evidence_str,
+                remediation: "AUTH_SHORT is a legacy optimization. Use sec=krb5p to eliminate \
+                              replayable session credentials.",
+                export: Some(export_path),
+            },
+            Severity::Low,
+        ));
+    }
+}
+
 /// (F-3.4: TLS downgrade not enforced  --  RPCSEC_GSS not required).  Mixed
 /// AUTH_SYS + Kerberos means the attacker can choose AUTH_SYS and bypass Kerberos
 /// entirely (F-1.7, RFC 2203 S5.2.1).
+///
+/// Probes auth flavors via three methods in order of preference:
+/// 1. SECINFO (op 33, v4.0)  --  returns flavors for a named child
+/// 2. SECINFO_NO_NAME (op 52, v4.1)  --  fallback when SECINFO fails
+/// 3. NFS4ERR_WRONGSEC oracle  --  last resort when both SECINFO ops fail
 ///
 /// Best-effort: silently returns on timeout or PROG_MISMATCH (NFSv3-only server).
 async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
@@ -1549,6 +1664,7 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
     }
     let Some((secinfo_name, parent)) = components.split_last() else { return };
 
+    // --- Attempt 1: SECINFO (op 33, v4.0) ---
     let mut ops: Vec<ArgOp> = Vec::with_capacity(parent.len() + 2);
     ops.push(ArgOp::Putrootfh);
     for &c in parent {
@@ -1559,115 +1675,113 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
     let result = tokio::time::timeout(timeout, client.compound(ops)).await;
     let Ok(Ok(res)) = result else { return };
 
-    if res.status != 0 {
-        // Server rejected SECINFO (e.g. PROG_MISMATCH, WRONGSEC, or path not found).
+    if res.status == 0 {
+        let entries = res.results.last().and_then(|op| if let ResOpData::SecFlavors(f) = &op.data { Some(f.as_slice()) } else { None });
+        if let Some(entries) = entries {
+            emit_secinfo_findings(entries, "SECINFO", export_path, findings);
+            return;
+        }
+    }
+
+    // --- Attempt 2: SECINFO_NO_NAME (op 52, v4.1) ---
+    // SECINFO failed (NFS4ERR_NOTSUPP, NFS4ERR_OP_ILLEGAL, NFS4ERR_WRONGSEC, or
+    // path error on old v4.0 servers). Try SECINFO_NO_NAME which queries the
+    // security policy on the current FH itself (RFC 5661 S18.45).
+    // Requires minorversion=1 and a fresh connection (previous may be tainted).
+    let connect_v41 = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
+    let Ok(Ok(client_v41)) = connect_v41 else {
+        // Connection failed; try WRONGSEC oracle as last resort.
+        wrongsec_flavor_oracle(nfs4_addr, export_path, &components, findings, proxy, stealth, timeout).await;
+        return;
+    };
+    let mut client_v41 = client_v41.with_stealth(stealth.clone());
+
+    let mut v41_ops: Vec<ArgOp> = Vec::with_capacity(components.len() + 2);
+    v41_ops.push(ArgOp::Putrootfh);
+    for &c in &components {
+        v41_ops.push(ArgOp::Lookup(c.to_owned()));
+    }
+    // style=0 = SECINFO_STYLE4_CURRENT_FH (RFC 5661 S18.45.3).
+    v41_ops.push(ArgOp::SecinfoNoName { style: 0 });
+
+    let v41_result = tokio::time::timeout(timeout, client_v41.compound_v41(v41_ops)).await;
+    if let Ok(Ok(v41_res)) = v41_result
+        && v41_res.status == 0
+    {
+        let entries = v41_res.results.last().and_then(|op| if let ResOpData::SecFlavors(f) = &op.data { Some(f.as_slice()) } else { None });
+        if let Some(entries) = entries {
+            emit_secinfo_findings(entries, "SECINFO_NO_NAME", export_path, findings);
+            return;
+        }
+    }
+
+    // --- Attempt 3: NFS4ERR_WRONGSEC oracle ---
+    // Both SECINFO and SECINFO_NO_NAME failed (e.g. permission denied on parent,
+    // v4.0-only server rejecting v4.1 ops). Use the WRONGSEC error as a negative
+    // auth flavor oracle: try each flavor and see which ones the server rejects.
+    wrongsec_flavor_oracle(nfs4_addr, export_path, &components, findings, proxy, stealth, timeout).await;
+}
+
+/// Use NFS4ERR_WRONGSEC (status 10016) as a negative auth flavor oracle.
+///
+/// When SECINFO and SECINFO_NO_NAME both fail to return flavor lists, we can
+/// still infer accepted auth flavors by connecting with each flavor's credential
+/// and attempting PUTROOTFH + LOOKUP(export components). The server returns
+/// NFS4ERR_WRONGSEC (10016, RFC 7530 S13.1.6) when the flavor is rejected,
+/// and success (or any other error) when the flavor is accepted for this export.
+async fn wrongsec_flavor_oracle(nfs4_addr: SocketAddr, export_path: &str, components: &[&str], findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig, timeout: std::time::Duration) {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::ArgOp;
+
+    /// Auth flavors to probe: (flavor_number, uid, gid).
+    /// AUTH_NONE (0) uses uid=0/gid=0 but connects with AUTH_NONE.
+    /// AUTH_SYS (1) uses uid=0/gid=0 with AUTH_SYS credentials.
+    const PROBE_FLAVORS: [(u32, u32, u32); 2] = [
+        (0, 0, 0), // AUTH_NONE
+        (1, 0, 0), // AUTH_SYS
+    ];
+
+    let mut accepted_flavors: Vec<u32> = Vec::new();
+
+    for &(flavor, uid, gid) in &PROBE_FLAVORS {
+        // Connect with the appropriate auth credential for each flavor.
+        let connect_result = if flavor == 0 {
+            // AUTH_NONE: use the default anonymous connection.
+            tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await
+        } else {
+            // AUTH_SYS: connect with uid/gid credentials.
+            tokio::time::timeout(timeout, Nfs4DirectClient::connect_with_auth_proxy(nfs4_addr, uid, gid, "localhost", proxy)).await
+        };
+        let Ok(Ok(probe_client)) = connect_result else { continue };
+        let mut probe_client = probe_client.with_stealth(stealth.clone());
+
+        // Build PUTROOTFH + LOOKUP chain for the export path.
+        let mut ops: Vec<ArgOp> = Vec::with_capacity(components.len() + 1);
+        ops.push(ArgOp::Putrootfh);
+        for &c in components {
+            ops.push(ArgOp::Lookup(c.to_owned()));
+        }
+
+        let probe_result = tokio::time::timeout(timeout, probe_client.compound(ops)).await;
+        let Ok(Ok(res)) = probe_result else { continue };
+
+        // NFS4ERR_WRONGSEC (10016) means this flavor is explicitly rejected.
+        // Any other status (including success=0, permission errors, etc.) means
+        // the server accepted this auth flavor for the export.
+        if res.status != 10016 {
+            accepted_flavors.push(flavor);
+        }
+    }
+
+    if accepted_flavors.is_empty() {
         return;
     }
 
-    let entries = res.results.last().and_then(|op| if let ResOpData::SecFlavors(f) = &op.data { Some(f.as_slice()) } else { None });
-    let Some(entries) = entries else { return };
+    // Build synthetic SecInfoEntry values from the accepted flavors so the
+    // shared finding-emission logic can process them uniformly.
+    let entries: Vec<nfs_v4::SecInfoEntry> = accepted_flavors.iter().map(|&f| nfs_v4::SecInfoEntry { flavor: f, gss_oid: None, gss_qop: None, gss_service: None }).collect();
 
-    let raw_flavors: Vec<u32> = entries.iter().map(|e| e.flavor).collect();
-
-    // Build a human-readable summary including GSS service levels.
-    let flavor_strs: Vec<String> = entries
-        .iter()
-        .map(|e| {
-            if e.flavor == 6 {
-                match e.gss_service {
-                    Some(1) => "RPCSEC_GSS(krb5)".to_owned(),
-                    Some(2) => "RPCSEC_GSS(krb5i)".to_owned(),
-                    Some(3) => "RPCSEC_GSS(krb5p)".to_owned(),
-                    _ => "RPCSEC_GSS".to_owned(),
-                }
-            } else {
-                crate::proto::auth::flavor_name(e.flavor)
-            }
-        })
-        .collect();
-    let evidence_str = format!("SECINFO flavors=[{}]", flavor_strs.join(", "));
-
-    // Kerberos: bare RPCSEC_GSS (6) or krb5 pseudo-flavors (390003-390005).
-    let has_kerberos = raw_flavors.iter().any(|&f| f == 6 || (390_003..=390_005).contains(&f));
-    let has_auth_sys = raw_flavors.contains(&1);
-
-    if has_auth_sys && !has_kerberos {
-        findings.push(make_finding(
-            &FindingSpec {
-                id: "F-3.4",
-                title: "NFSv4 export accepts AUTH_SYS with no Kerberos (TLS downgrade not enforced)",
-                desc: &format!(
-                    "NFSv4 SECINFO for export {export_path} returns AUTH_SYS (flavor 1) \
-                     with no RPCSEC_GSS (flavor 6). An attacker can spoof arbitrary UID/GID \
-                     credentials via NFSv4 COMPOUND without Kerberos. \
-                     RFC 9289 S1: NFS-over-TLS and RPCSEC_GSS are opt-in and rarely deployed.",
-                ),
-                evidence: &evidence_str,
-                remediation: "Configure `sec=krb5p` in /etc/exports to require Kerberos authentication.",
-                export: Some(export_path),
-            },
-            Severity::High,
-        ));
-    } else if has_auth_sys && has_kerberos {
-        findings.push(make_finding(
-            &FindingSpec {
-                id: "F-1.7",
-                title: "NFSv4 SECINFO: mixed auth flavors allow RPCSEC_GSS downgrade to AUTH_SYS",
-                desc: &format!(
-                    "NFSv4 SECINFO for export {export_path} returns both AUTH_SYS and RPCSEC_GSS \
-                     (Kerberos). An attacker can choose AUTH_SYS and bypass Kerberos entirely \
-                     (RFC 2203 S5.2.1). Without integrity protection on the SECINFO call, a MITM \
-                     can also strip the krb5 entries to force clients onto AUTH_SYS (RFC 7530 S19).",
-                ),
-                evidence: &evidence_str,
-                remediation: "Remove AUTH_SYS from exports that require Kerberos authentication: \
-                              use sec=krb5 (or krb5i/krb5p) exclusively in /etc/exports.",
-                export: Some(export_path),
-            },
-            Severity::High,
-        ));
-    }
-
-    // AUTH_DH (flavor 3) via NFSv4 SECINFO.
-    if raw_flavors.contains(&3) {
-        findings.push(make_finding(
-            &FindingSpec {
-                id: "F-3.7",
-                title: "NFSv4 SECINFO: AUTH_DH advertised (cryptographically broken)",
-                desc: &format!(
-                    "NFSv4 SECINFO for export {export_path} includes AUTH_DH (flavor 3), which \
-                     uses 192-bit Diffie-Hellman / 56-bit DES. RFC 5531 S14: 'AUTH_DH [...] is \
-                     considered obsolete and insecure; see [RFC2695].'",
-                ),
-                evidence: &evidence_str,
-                remediation: "Remove AUTH_DH from the export's security configuration. Use \
-                              sec=krb5p for authenticated and integrity-protected access.",
-                export: Some(export_path),
-            },
-            Severity::Medium,
-        ));
-    }
-
-    // AUTH_SHORT (flavor 2) via NFSv4 SECINFO.
-    if raw_flavors.contains(&2) {
-        findings.push(make_finding(
-            &FindingSpec {
-                id: "F-3.9",
-                title: "NFSv4 SECINFO: AUTH_SHORT session credentials advertised",
-                desc: &format!(
-                    "NFSv4 SECINFO for export {export_path} includes AUTH_SHORT (flavor 2). \
-                     AUTH_SHORT opaque tokens captured from the wire can be replayed to \
-                     impersonate the original client without knowing their UID/GID \
-                     (RFC 1057 S9.2, RFC 5531 Appendix A).",
-                ),
-                evidence: &evidence_str,
-                remediation: "AUTH_SHORT is a legacy optimization. Use sec=krb5p to eliminate \
-                              replayable session credentials.",
-                export: Some(export_path),
-            },
-            Severity::Low,
-        ));
-    }
+    emit_secinfo_findings(&entries, "WRONGSEC oracle", export_path, findings);
 }
 
 // --- NFSv4.1 pNFS topology probe ---

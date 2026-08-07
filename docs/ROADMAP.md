@@ -244,7 +244,7 @@ Pre-publish checklist for the eight protocol crates. The binary (`nfswolf`) is d
 | Item | Status |
 |------|--------|
 | Crate renaming (`nfswolf-*` -> `onc-*`/`nfs-*`) | Done |
-| `#[non_exhaustive]` on all public enums | 48 annotations present. 16 `pub enum` types in crates still lack it (mostly XDR wire types with derive macros). Audit before publish. |
+| `#[non_exhaustive]` on all public enums | Done. All 48 `pub enum` types across 8 crates are annotated (verified by automated scan). |
 | `keywords` and `categories` in every crate Cargo.toml | Done (all 8 crates) |
 | Golden vector tests (real server bytes -> expected structs) | Partial (onc-xdr, onc-rpc-client, nfs-v2, nfs-v3, nfs-v4 have them; MOUNT/rpcbind gaps remain) |
 | `cargo-hack --feature-powerset --no-dev-deps check` in CI | Done (ci.yml feature-powerset job) |
@@ -263,7 +263,7 @@ Pre-publish checklist for the eight protocol crates. The binary (`nfswolf`) is d
 | Phase 0 | Binary fixes (v2 parity, proxy, errors) | Complete |
 | Phase 1 | Foundation (portmapper, absorb udp.rs, derive tests) | Complete except CALLIT |
 | Phase 2 | Extract (nfs-mount, onc-rpcbind, Nfs2Client) | Complete |
-| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Done except golden vector gaps in MOUNT/rpcbind and 16 `pub enum` types missing `#[non_exhaustive]` |
+| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Done except golden vector gaps in MOUNT/rpcbind |
 | Phase 4 | Publish 8 crates to crates.io | Ready (all names available, all metadata present) |
 | Phase 5 | Wire v4.1/v4.2 recon ops into scanner/analyzer | Done (EXCHANGE_ID, GETDEVICELIST, SECINFO_NO_NAME, FATTR4_SEC_LABEL, per-path SECINFO, xattrs) |
 | Tier 3 | Sideband protocol crates (NLM, NSM, RQUOTA, NFS_ACL, NIS, RPCSEC_GSS) | Blocked on consumers |
