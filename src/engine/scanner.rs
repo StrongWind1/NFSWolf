@@ -459,15 +459,30 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                 let mount_addr = SocketAddr::new(ip, 111);
                 for entry in &mut exports {
                     job.stealth.wait().await;
+                    // Try MOUNT v3 MNT first (returns auth flavors + variable-length handle).
                     if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount(mount_addr, &entry.path)).await {
                         entry.auth_flavors = mr.auth_flavors;
-                        // Fingerprint the OS/FS from the first valid handle.
+                        entry.handle_hex = mr.handle.to_hex();
                         if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
                             let os = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_os(&mr.handle);
                             let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
                             os_guess = Some(format!("{os:?}/{fs:?}"));
                         }
                         drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                    } else {
+                        // MOUNT v3 MNT failed -- try v1 MNT as fallback (F-1.6).
+                        // v1 returns a 32-byte handle with a different fsid_type encoding.
+                        job.stealth.wait().await;
+                        if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_v1(mount_addr, &entry.path)).await {
+                            entry.auth_flavors = mr.auth_flavors;
+                            entry.handle_hex = mr.handle.to_hex();
+                            if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
+                                let os = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_os(&mr.handle);
+                                let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
+                                os_guess = Some(format!("{os:?}/{fs:?}"));
+                            }
+                            drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                        }
                     }
                 }
                 Some(exports)
@@ -483,7 +498,23 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let exports_v2 = if has_v2 && mount_port_infos.iter().any(|m| m.versions.contains(&1)) {
         job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports_v1(SocketAddr::new(ip, 111))).await {
-            Ok(Ok(e)) => Some(e),
+            Ok(Ok(mut exports)) => {
+                let mount_addr = SocketAddr::new(ip, 111);
+                for entry in &mut exports {
+                    job.stealth.wait().await;
+                    if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_v1(mount_addr, &entry.path)).await {
+                        entry.auth_flavors = mr.auth_flavors;
+                        entry.handle_hex = mr.handle.to_hex();
+                        if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
+                            let os = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_os(&mr.handle);
+                            let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
+                            os_guess = Some(format!("{os:?}/{fs:?}"));
+                        }
+                        drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                    }
+                }
+                Some(exports)
+            },
             _ => None,
         }
     } else {

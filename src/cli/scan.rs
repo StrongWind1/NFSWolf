@@ -587,11 +587,18 @@ fn print_exports(r: &HostResult) {
             ExportListKind::Mount(entries) => {
                 for e in *entries {
                     let acl = if e.allowed_hosts.is_empty() { "*".to_owned() } else { e.allowed_hosts.join(",") };
+                    let handle_hint = if e.handle_hex.len() > 16 {
+                        format!(" fh={}...", &e.handle_hex[..16])
+                    } else if !e.handle_hex.is_empty() {
+                        format!(" fh={}", e.handle_hex)
+                    } else {
+                        String::new()
+                    };
                     if e.auth_flavors.is_empty() {
-                        println!("    {:<40}{acl}", e.path);
+                        println!("    {:<40}{acl}{handle_hint}", e.path);
                     } else {
                         let flavors: Vec<String> = e.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
-                        println!("    {:<40}{acl:<24}[{}]", e.path, flavors.join(","));
+                        println!("    {:<40}{acl:<24}[{}]{handle_hint}", e.path, flavors.join(","));
                     }
                 }
             },
@@ -701,11 +708,13 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
                 "path": e.path,
                 "allowed": if e.allowed_hosts.is_empty() { vec!["*".to_owned()] } else { e.allowed_hosts.clone() },
                 "auth_flavors": e.auth_flavors,
+                "handle": e.handle_hex,
             })).collect::<Vec<_>>()),
             "v3": r.exports_v3.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,
                 "allowed": if e.allowed_hosts.is_empty() { vec!["*".to_owned()] } else { e.allowed_hosts.clone() },
                 "auth_flavors": e.auth_flavors,
+                "handle": e.handle_hex,
             })).collect::<Vec<_>>()),
             "v4": r.exports_v4.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,

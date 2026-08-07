@@ -51,6 +51,12 @@ pub(crate) struct ExportEntry {
     /// `AUTH_DH=3`, `RPCSEC_GSS=6`, krb5 pseudo-flavors `390003-390005`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub auth_flavors: Vec<u32>,
+    /// File handle hex from MNT response (v3 or v1).
+    ///
+    /// Populated by the scanner's per-export MNT probe. Empty string if MNT
+    /// was not attempted or failed.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub handle_hex: String,
 }
 
 /// A client that currently has an export mounted (from MNTPROC_DUMP).
@@ -421,7 +427,7 @@ const fn parse_flavor(raw: u32) -> AuthFlavor {
 fn export_entry_from(node: export_node<'_, '_>) -> ExportEntry {
     let path = bytes_to_string(node.ex_dir.0.as_ref());
     let allowed_hosts = node.ex_groups.into_inner().into_iter().map(|n| bytes_to_string(n.0.as_ref())).collect();
-    ExportEntry { path, allowed_hosts, auth_flavors: Vec::new() }
+    ExportEntry { path, allowed_hosts, auth_flavors: Vec::new(), handle_hex: String::new() }
 }
 
 /// Decode XDR bytes to a UTF-8 string, replacing invalid bytes with `?`.

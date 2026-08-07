@@ -131,13 +131,19 @@ pub(crate) async fn run(args: ShellArgs, globals: &GlobalOpts) -> anyhow::Result
     } else {
         let mount_client = make_mount_client(globals);
         eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
-        let mount_result = mount_client.mount(addr, &export).await?;
+        let (mount_result, via_v1) = match mount_client.mount(addr, &export).await {
+            Ok(r) => (r, false),
+            Err(v3_err) => {
+                tracing::info!("MOUNT v3 failed ({v3_err}); trying MOUNT v1");
+                let r = mount_client.mount_v1(addr, &export).await.map_err(|v1_err| anyhow::anyhow!("MOUNT v3: {v3_err}; MOUNT v1: {v1_err}"))?;
+                (r, true)
+            },
+        };
         let key = PoolKey { host: addr, export: export.clone(), uid, gid };
-        // Honour --nfs-port on the MOUNT path too: when set, route the data
-        // client directly to the chosen port (new_direct) instead of resolving
-        // it via portmapper, which hangs when TCP/111 is firewalled. `None`
-        // keeps the portmapper default (mirrors src/cli/mount.rs).
-        (mount_result.handle, key, globals.nfs_port)
+        // When MOUNT v1 returned the handle, force direct port 2049 so the
+        // pooled transport doesn't try a lazy MOUNT v3 (which would fail again).
+        let direct_port = if via_v1 && globals.nfs_port.is_none() { Some(2049) } else { globals.nfs_port };
+        (mount_result.handle, key, direct_port)
     };
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
