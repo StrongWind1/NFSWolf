@@ -1,12 +1,12 @@
 [package]
 name = "onc-xdr"
-version = "0.2.0"
-publish = false
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/onc-xdr"
 description = "XDR (RFC 4506) codec: Pack/Unpack traits, opaque and list types, and length-hardened decoders for untrusted input."
 readme.workspace = true
 keywords = ["xdr", "serialization", "onc", "rpc", "codec"]

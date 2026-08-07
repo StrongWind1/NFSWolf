@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "nfs-mount"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "onc-rpc-client",
  "onc-xdr",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "nfs-v2"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "nfs-mount",
  "onc-rpc-client",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "nfs-v3"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "nfs-mount",
  "onc-rpc-client",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "nfs-v4"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "onc-rpc-client",
  "onc-xdr",
@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "onc-rpc-client"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "fastrand",
  "onc-xdr",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "onc-rpcbind"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "onc-rpc-client",
  "onc-xdr",
@@ -834,14 +834,14 @@ dependencies = [
 
 [[package]]
 name = "onc-xdr"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "onc-xdr-derive",
 ]
 
 [[package]]
 name = "onc-xdr-derive"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "onc-xdr",
  "proc-macro2",

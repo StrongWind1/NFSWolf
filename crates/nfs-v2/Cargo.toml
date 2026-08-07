@@ -1,12 +1,12 @@
 [package]
 name = "nfs-v2"
-version = "0.2.0"
-publish = false
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/nfs-v2"
 description = "NFS version 2 (RFC 1094): all 18 procedures and the fixed-width wire format."
 readme.workspace = true
 keywords = ["nfs", "nfsv2", "rpc", "filesystem", "network"]

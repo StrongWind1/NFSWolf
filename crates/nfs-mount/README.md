@@ -1,10 +1,32 @@
-# nfs-mount
+<h1 align="center">nfs-mount</h1>
 
-MOUNT protocol client for versions 1 ([RFC 1094] appendix A) and 3 ([RFC 1813] appendix I) -- the sideband service that turns a directory path into the root file handle every NFS operation starts from.
+<p align="center">
+  <strong>MOUNT protocol (RFC 1094 Appendix A / RFC 1813 Appendix I): versions 1 and 3, wire types, and a unified MountClient.</strong>
+</p>
 
-MOUNT v1 (NFSv2-era) returns a bare 32-byte handle. MOUNT v3 (NFSv3-era) returns a variable-length handle plus the list of authentication flavors the export accepts, which is the only way to learn whether Kerberos is required before trying an NFS operation. `MountClient` wraps both versions behind one type with version-specific and version-neutral methods. This crate depends only on `onc-xdr` and `onc-rpc-client`; the NFS version crates depend on it, not the reverse.
+<p align="center">
+  <a href="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/nfs-mount"><img src="https://img.shields.io/crates/v/nfs-mount.svg" alt="crates.io"></a>
+  <a href="../../rust-toolchain.toml"><img src="https://img.shields.io/badge/edition-2024-informational" alt="Edition 2024"></a>
+  <a href="../../Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.95-informational" alt="MSRV 1.95"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="https://docs.rs/nfs-mount"><img src="https://img.shields.io/docsrs/nfs-mount" alt="docs.rs"></a>
+</p>
 
-## Quick start
+<p align="center">
+  <a href="#usage">Usage</a> &bull;
+  <a href="#api-reference">API reference</a> &bull;
+  <a href="#protocol-coverage">Protocol coverage</a> &bull;
+  <a href="#safety-and-hardening">Safety</a>
+</p>
+
+---
+
+Part of the [NFSWolf](https://github.com/StrongWind1/NFSWolf) protocol stack.
+
+MOUNT is the sideband service that turns a directory path into the root file handle every NFS operation starts from. MOUNT v1 (NFSv2-era) returns a bare 32-byte handle. MOUNT v3 (NFSv3-era) returns a variable-length handle plus the list of authentication flavors the export accepts, which is the only way to learn whether Kerberos is required before trying an NFS operation. `MountClient` wraps both versions behind one type with version-specific and version-neutral methods. This crate depends only on `onc-xdr` and `onc-rpc-client`; the NFS version crates depend on it, not the reverse.
+
+## Usage
 
 ```rust
 use nfs_mount::{MountClient, MountVersion, MountedHandle};
@@ -24,7 +46,7 @@ println!("handle: {} bytes, auth_sys: {}", handle.bytes.len(), handle.accepts_au
 let exports = mount.export().await?;
 ```
 
-## API overview
+## API reference
 
 | Type | Description |
 |------|-------------|
@@ -37,12 +59,15 @@ let exports = mount.export().await?;
 | `wire::mountres3` / `mountres3_ok` | Wire-level MNT v3 response types |
 | `wire::FhStatus` | Wire-level MNT v1 response (status + 32-byte handle) |
 | `wire::mountstat3` | MOUNT v3 status codes |
+| `wire::PROGRAM` | MOUNT program number (100005) |
+| `wire::MOUNT_V1` / `MOUNT_V3` | Version constants |
+| `wire::FHSIZE2` / `FHSIZE3` | Maximum file handle sizes (32 / 64 bytes) |
 
 ## Protocol coverage
 
-**MOUNT v1** (RFC 1094 appendix A): `NULL`, `MNT`, `DUMP`, `UMNT`, `UMNTALL`, `EXPORT`. The client exposes `null()`, `v1_mnt()`, `export()`, `umnt()`.
+**MOUNT v1** ([RFC 1094] appendix A): `NULL`, `MNT`, `DUMP`, `UMNT`, `UMNTALL`, `EXPORT`. The client exposes `null()`, `v1_mnt()`, `export()`, `umnt()`.
 
-**MOUNT v3** (RFC 1813 appendix I): `NULL`, `MNT`, `DUMP`, `UMNT`, `UMNTALL`, `EXPORT`. The client exposes `null()`, `v3_mnt()`, `export()`, `umnt()`, `dump()`, `umntall()`.
+**MOUNT v3** ([RFC 1813] appendix I): `NULL`, `MNT`, `DUMP`, `UMNT`, `UMNTALL`, `EXPORT`. The client exposes `null()`, `v3_mnt()`, `export()`, `umnt()`, `dump()`, `umntall()`.
 
 The version-neutral `mnt()` method returns a `MountedHandle` regardless of which version is configured. MOUNT v1 errors (raw UNIX errno values) are mapped to `mountstat3` for uniform error handling.
 
@@ -51,13 +76,22 @@ The version-neutral `mnt()` method returns a `MountedHandle` regardless of which
 - `MountedHandle::accepts_auth_sys()` and `is_auth_sys_only()` let callers check whether an export requires Kerberos before attempting NFS operations.
 - `MountError::is_denial()` distinguishes a server refusing the mount (a finding about the export's configuration) from a transport failure (not a finding).
 
-## Pre-1.0
+## Crate position
 
-This crate is pre-1.0. The API may change between minor versions.
+```
+onc-xdr-derive
+  +-- onc-xdr
+       +-- onc-rpc-client
+            +-- onc-rpcbind
+            +-- nfs-mount    <-- this crate
+            |    +-- nfs-v2
+            |    +-- nfs-v3
+            +-- nfs-v4
+```
 
 ## License
 
-Apache-2.0
+[Apache License 2.0](../../LICENSE)
 
 [RFC 1094]: https://www.rfc-editor.org/rfc/rfc1094
 [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813

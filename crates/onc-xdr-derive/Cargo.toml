@@ -1,12 +1,12 @@
 [package]
 name = "onc-xdr-derive"
-version = "0.2.0"
-publish = false
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/onc-xdr-derive"
 description = "Derive macro for XDR (RFC 4506) Pack/Unpack encoding used by the NFSWolf protocol stack."
 readme.workspace = true
 keywords = ["xdr", "derive", "onc", "rpc", "codec"]

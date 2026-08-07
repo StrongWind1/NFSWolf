@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
-# Workspace -- eight internal crates own the NFS protocol stack so the
-# binary's policy layer (pool, circuit breaker, stealth, auto-UID) stays
-# cleanly separated from wire formats:
+# Workspace -- eight crates (published on crates.io) own the NFS protocol
+# stack so the binary's policy layer (pool, circuit breaker, stealth,
+# auto-UID) stays cleanly separated from wire formats:
 #
 #   onc-xdr-derive  -- #[derive(XdrCodec)] proc macro (RFC 4506)
 #   onc-xdr         -- XDR codec (RFC 4506)
@@ -29,14 +29,14 @@ homepage = "https://strongwind.dev/NFSWolf"
 readme = "README.md"
 
 [workspace.dependencies]
-onc-xdr-derive = { version = "0.2.0", path = "crates/onc-xdr-derive" }
-onc-xdr = { version = "0.2.0", path = "crates/onc-xdr" }
-onc-rpc-client = { version = "0.2.0", path = "crates/onc-rpc-client" }
-onc-rpcbind = { version = "0.2.0", path = "crates/onc-rpcbind" }
-nfs-mount = { version = "0.2.0", path = "crates/nfs-mount" }
-nfs-v2 = { version = "0.2.0", path = "crates/nfs-v2" }
-nfs-v3 = { version = "0.2.0", path = "crates/nfs-v3" }
-nfs-v4 = { version = "0.1.0", path = "crates/nfs-v4" }
+onc-xdr-derive = { version = "1.0.0", path = "crates/onc-xdr-derive" }
+onc-xdr = { version = "1.0.0", path = "crates/onc-xdr" }
+onc-rpc-client = { version = "1.0.0", path = "crates/onc-rpc-client" }
+onc-rpcbind = { version = "1.0.0", path = "crates/onc-rpcbind" }
+nfs-mount = { version = "1.0.0", path = "crates/nfs-mount" }
+nfs-v2 = { version = "1.0.0", path = "crates/nfs-v2" }
+nfs-v3 = { version = "1.0.0", path = "crates/nfs-v3" }
+nfs-v4 = { version = "1.0.0", path = "crates/nfs-v4" }
 fastrand = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["full"] }
@@ -53,6 +53,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/nfswolf"
 description = "Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an interactive shell for authorized red-team and pentest work."
 keywords = ["nfs", "security", "pentest", "scanner", "rpc"]
 categories = ["command-line-utilities", "network-programming", "filesystem"]

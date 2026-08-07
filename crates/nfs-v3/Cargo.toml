@@ -1,12 +1,12 @@
 [package]
 name = "nfs-v3"
-version = "0.2.0"
-publish = false
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/nfs-v3"
 description = "NFS version 3 (RFC 1813): all 22 procedures, the MOUNT v3 protocol, and domain types over the raw wire format."
 readme.workspace = true
 keywords = ["nfs", "nfsv3", "rpc", "filesystem", "network"]
