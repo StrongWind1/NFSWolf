@@ -12,9 +12,9 @@ Source references: X/Open CAE C702 "XNFS, Version 3W" at `ref/xopen-c702.pdf` (3
 - [New protocol crates](#new-protocol-crates) -- standalone RPC program clients
 - [Analyzer and scanner enhancements](#analyzer-and-scanner-enhancements) -- improvements to existing modules
 - [OS fingerprinting](#os-fingerprinting) -- additional detection signals
-- [NFSv4 recon operations](#nfsv4-recon-operations) -- v4.0/v4.1/v4.2 probes not yet wired into the binary
+- [NFSv4 recon operations](#nfsv4-recon-operations) -- remaining v4 probes
 - [Cross-protocol attack chains](#cross-protocol-attack-chains) -- multi-protocol sequences
-- [Crate publication](#crate-publication) -- pre-publish checklist and phases
+- [Crate publication](#crate-publication) -- publish to crates.io
 - [Protocol reference](#protocol-reference) -- wire formats, XDR definitions, security analysis
 - [Out of scope](#out-of-scope) -- explicitly deferred
 
@@ -50,23 +50,11 @@ No public spec exists. Wire format reverse-engineered from Linux kernel source (
 
 Rare on modern systems but legacy SunOS/Solaris PC-NFS gateways persist in enterprise environments. Detection is already implemented (portmapper DUMP for program 150001 with security note). Full exploitation is the remaining work.
 
-### WebNFS multi-component LOOKUP (MCL) path traversal
-
-**Done.** `try_webnfs_escape()` in `escape.rs` sends `../../../etc/passwd` as a multi-component LOOKUP against the public handle for v2 (all-zero 32B), v3 (zero-length), and v4 (PUTPUBFH). Both single-slash (server splits) and component-by-component (client splits) paths are tried. The analyzer also probes MCL via `check_webnfs_public_handle()` with `etc/shadow`. Native path encoding (`0x80` prefix) is not implemented.
-
 ### Portmapper CALLIT -- amplification and relay primitive
 
 **3 missing procedures: SET, UNSET, CALLIT. Low-medium effort.**
 
 `CALLIT` (proc 5) forwards an RPC call to a local program over UDP and returns the result. Attack surface: UDP amplification (small request -> larger response with spoofed source IP), relay to programs on non-standard ports, and probing programs not directly reachable by the attacker. This is the primitive behind finding F-3.2, which the tool reports but cannot demonstrate.
-
-### Write verifier reboot oracle
-
-**Done.** `commit_verifier()` domain API exposes the raw 8-byte verifier. `check_write_verifier()` analyzer probe calls COMMIT twice and flags verifier changes. Shell `verifier` command prints the hex verifier.
-
-### `.nfs*` silly-rename detection
-
-**Done.** `check_silly_renames()` pattern-matches `.nfs<hex>` filenames in READDIRPLUS results. Finding F-5.9.
 
 ---
 
@@ -132,27 +120,13 @@ Deferred until a consumer exists. The recon value is already captured.
 
 ## Analyzer and scanner enhancements
 
-Improvements that use existing infrastructure, no new protocol crates needed.
-
 ### ZFS escape handles
 
 ZFS file handles use a different structure than ext4/XFS/BTRFS. Requires lab testing with a ZFS NFS server to capture and analyze handle formats. The ext4/XFS/BTRFS escape paths are fully implemented; ZFS is the remaining gap.
 
-### FSINFO time_delta + properties extraction
-
-Done. `check_fsinfo_properties()` extracts `time_delta` (Solaris fingerprint: {0, 1000}) and `properties` bitmask. Findings F-5.10, F-5.11.
-
-### FSSTAT free-space analysis
-
-Done. `check_fsstat_capacity()` reports inode exhaustion when `avail_files < 1000`. Finding F-5.12.
-
-### NFSv4 extended attributes (xattrs)
-
-Done. `check_nfs4_xattrs()` issues OPENATTR + READDIR. Classifies security-relevant xattr names. Finding F-5.13.
-
 ### DRC replay attacks
 
-After detecting a server reboot (via write verifier oracle), replay captured destructive XIDs (REMOVE, RENAME, CREATE UNCHECKED). The duplicate request cache is RAM-only -- a reboot wipes it. Requires the write verifier oracle (ready to build) and `--allow-write`. Medium effort.
+After detecting a server reboot (via write verifier oracle), replay captured destructive XIDs (REMOVE, RENAME, CREATE UNCHECKED). The duplicate request cache is RAM-only -- a reboot wipes it. Requires the write verifier oracle (done) and `--allow-write`. Medium effort.
 
 ### NFSv4 SETCLIENTID callback coercion
 
@@ -162,59 +136,22 @@ After detecting a server reboot (via write verifier oracle), replay captured des
 
 AUTH_SHORT opaque tokens captured from wire traffic can be replayed to impersonate the original client. Requires network sniffing or PCAP parsing. Post-v1.0.
 
-### Per-path SECINFO probing
-
-Done. `check_nfs4_secinfo_per_path()` walks subdirectories and compares per-path auth flavors to the root's. Finding F-3.6.
-
-### NFS4ERR_WRONGSEC iterative enumeration
-
-Done. `wrongsec_flavor_oracle()` iterates AUTH_NONE/AUTH_SYS, sends PUTROOTFH+LOOKUP per flavor, classifies NFS4ERR_WRONGSEC (10016) as rejected. Third fallback after SECINFO and SECINFO_NO_NAME in the `check_nfs4_secinfo()` cascade.
-
-### Scanner CSV auth column
-
-Done. `Auth` column in CSV, `build_auth_flavors()` deduplicates across v2/v3/v4 exports.
-
 ---
 
 ## OS fingerprinting
 
-Additional signals beyond what's already implemented (handle prefix, handle length, null-filename LOOKUP, PATHCONF case_insensitive).
-
 | Signal | Detects | Effort | Status |
 |--------|---------|--------|--------|
-| Windows version pattern: v3+v4.1 only (no v2, no v4.0) | Windows NFS | Trivial | Done. `check_os_fingerprint()` + `detect_windows_handle_version()` promoted to production |
-| FreeBSD subnet format in EXPORT ACL | FreeBSD | Trivial | Done. `check_export_acls()` pattern match, finding F-7.7 |
 | HP-UX one-request-per-TCP | HP-UX | Low | `OsGuess::HpUx` variant reserved; active TCP detection pending |
-| NetApp program 400010 in portmapper | NetApp ONTAP | Done | In IANA table |
-| Null-string LOOKUP response | Linux knfsd vs spec-conformant | Done | `check_null_filename_fingerprint()` |
-| Write verifier timestamp format | Solaris | Medium | Done. `check_fsinfo_properties()` detects Solaris via time_delta={0,1000}; `check_write_verifier()` probes verifier stability |
 | CALLIT response behavior | Various | Medium | Requires CALLIT implementation |
 
 ---
 
 ## NFSv4 recon operations
 
-Operations that have typed `ArgOp` variants and `CompoundBuilder` methods. Most are now wired into the scanner and/or analyzer.
-
-### EXCHANGE_ID (op 42, v4.1)
-
-Done. `probe_exchange_id()` sends EXCHANGE_ID via minorversion=1 COMPOUND, extracts `nii_name`, `nii_date`, pNFS flags. Populates `impl_fingerprint` in both scan and analyze output.
-
-### SECINFO_NO_NAME (op 52, v4.1)
-
-Done. `check_nfs4_secinfo()` tries SECINFO first, falls back to SECINFO_NO_NAME via `compound_v41()` when SECINFO fails (NFS4ERR_NOTSUPP or NFS4ERR_OP_ILLEGAL).
-
-### GETDEVICEINFO / GETDEVICELIST (ops 47-48, v4.1)
-
-Done. `probe_pnfs_topology()` sends EXCHANGE_ID + GETDEVICELIST to discover pNFS MDS capability and enumerate data-server device IDs. Finding F-3.5.
-
 ### OPEN for honest write testing (op 18, v4.0)
 
 Not done. Wire building blocks exist (`ArgOp::Open`, `encode_open_read()`, `CompoundBuilder::setclientid()`) but no analyzer integration. Requires SETCLIENTID for state management before OPEN can be issued. Medium-high effort.
-
-### FATTR4_SEC_LABEL (attr 80, v4.2)
-
-Done. `check_nfs4_sec_label()` reads SELinux labels via GETATTR with `AttrRequest::sec_label()`. Finding F-4.5.
 
 ---
 
@@ -237,24 +174,7 @@ Multi-protocol sequences combining sideband RPC programs with NFS for compound e
 
 ## Crate publication
 
-Pre-publish checklist for the eight protocol crates. The binary (`nfswolf`) is distributed via GitHub releases and `cargo install --git`; the crates are internal-only until published.
-
-### Pre-publish checklist
-
-| Item | Status |
-|------|--------|
-| Crate renaming (`nfswolf-*` -> `onc-*`/`nfs-*`) | Done |
-| `#[non_exhaustive]` on all public enums | Done. All 48 `pub enum` types across 8 crates are annotated (verified by automated scan). |
-| `keywords` and `categories` in every crate Cargo.toml | Done (all 8 crates) |
-| Golden vector tests (real server bytes -> expected structs) | Done. All crates covered including MOUNT v1/v3 (3 tests with lab handle bytes) and portmapper (2 tests). |
-| `cargo-hack --feature-powerset --no-dev-deps check` in CI | Done (ci.yml feature-powerset job) |
-| Dedicated MSRV CI job | Done (ci.yml MSRV check) |
-| `docs.rs` metadata (`all-features`, `docsrs` cfg) | Done (all 8 crates) |
-| Re-export convention (key types at crate root) | Done (verified) |
-| Switch from lockstep to independent versioning | Done (foundation crates 0.2.0, nfs-v4 stays 0.1.0) |
-| README per crate with `0.x` stability caveat | Done |
-| Re-check crates.io name availability | Done. All 8 names available. `onc-rpc` (taken, v0.3.3) is distinct from `onc-rpc-client` |
-| Evaluate existing `onc-rpc` crate as dependency | Done. `onc-rpc` is serialization-only (no async client). Complementary, not competing. No dependency needed |
+Pre-publish checklist is complete. The binary (`nfswolf`) is distributed via GitHub releases and `cargo install --git`; the crates are internal-only until published.
 
 ### Publication phases
 
@@ -263,10 +183,19 @@ Pre-publish checklist for the eight protocol crates. The binary (`nfswolf`) is d
 | Phase 0 | Binary fixes (v2 parity, proxy, errors) | Complete |
 | Phase 1 | Foundation (portmapper, absorb udp.rs, derive tests) | Complete except CALLIT |
 | Phase 2 | Extract (nfs-mount, onc-rpcbind, Nfs2Client) | Complete |
-| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Done |
+| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Complete |
 | Phase 4 | Publish 8 crates to crates.io | Ready (all names available, all metadata present) |
-| Phase 5 | Wire v4.1/v4.2 recon ops into scanner/analyzer | Done (EXCHANGE_ID, GETDEVICELIST, SECINFO_NO_NAME, FATTR4_SEC_LABEL, per-path SECINFO, xattrs) |
 | Tier 3 | Sideband protocol crates (NLM, NSM, RQUOTA, NFS_ACL, NIS, RPCSEC_GSS) | Blocked on consumers |
+
+---
+
+## HVS Consulting gap analysis
+
+Comparison against HVS Consulting's nfs-security-tooling (nfs_analyze + fuse_nfs, December 2024). Remaining gap:
+
+| Gap | Description | Effort |
+|-----|-------------|--------|
+| ZFS escape handles | ZFS handle format not implemented in `FileHandleAnalyzer` | Medium (needs lab) |
 
 ---
 
@@ -411,21 +340,6 @@ Well-known map names:
 - `netgroup`: `netgroup_name (host,user,domain) ...`
 - `hosts.byname`: `hostname IP`
 - `mail.aliases`: `alias: expansion`
-
----
-
-## HVS Consulting gap analysis
-
-Comparison against HVS Consulting's nfs-security-tooling (nfs_analyze + fuse_nfs, December 2024). Items not yet addressed by nfswolf:
-
-| Gap | Description | Effort |
-|-----|-------------|--------|
-| ZFS escape handles | ZFS handle format not implemented in `FileHandleAnalyzer` | Medium (needs lab) -- **open** |
-| Windows v4.1 handle parsing | 28-byte v4.1 handles with different internal structure | **Done.** `detect_windows_handle_version()` promoted, `check_windows_signing()` handles 28-byte v4.1 |
-| HP-UX connection model detection | One-request-per-TCP behavior | **Stub.** `OsGuess::HpUx` variant added; active detection pending |
-| NFSv4 escape via COMPOUND | Construct escape handle via v4 COMPOUND instead of v3 | **Done.** `try_nfs4_escape()` via PUTROOTFH + LOOKUPP chain |
-| FreeBSD subnet format warning | Pattern-match EXPORT ACL for subnet-without-mask | **Done.** Finding F-7.7 in `check_export_acls()` |
-| FUSE dev/suid mount options | Warn if FUSE mount lacks `-o nodev,nosuid` | **Done.** `tracing::warn!` at mount time |
 
 ---
 
