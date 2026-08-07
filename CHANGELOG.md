@@ -4,6 +4,27 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+### Added
+
+- **NFSv4 escape via LOOKUPP** -- pseudo-filesystem traversal to the real filesystem root, bypassing export boundaries without MOUNT.
+- **Handle acquisition matrix** -- MOUNT v1/v3 cross-version handle probing with pad/trim variants and per-variant GETATTR validation against both NFSv3 and NFSv2.
+- **SECINFO_NO_NAME fallback** (op 52, RFC 5661) -- probes auth requirements on the pseudo-root when per-name SECINFO fails; WRONGSEC oracle detects per-path Kerberos enforcement.
+- **OS fingerprinting** -- EXCHANGE_ID (op 42, RFC 5661) vendor/version strings decoded in the analyzer for server identification.
+- **pNFS topology** -- GETDEVICEINFO/GETDEVICELIST enumerate pNFS data-server layout devices.
+- **Per-path SECINFO probing** and xattr detection via FATTR4_SEC_LABEL (RFC 7862).
+- **Golden vector tests** for MOUNT and portmapper wire types (round-trip encoding validation).
+- **Protocol crates on crates.io** -- all 8 protocol crates published as standalone libraries.
+
+### Changed
+
+- All 8 protocol crates bumped to v1.0.0.
+- Standardized crate READMEs: centered headers, badges (CI, crates.io, edition, MSRV, license, docs.rs), nav links, API reference tables, ASCII dependency graph, protocol/codec coverage, safety sections.
+- Removed `publish = false` from all crates; added `documentation` field (docs.rs).
+- Fixed `readme` path: workspace-inherited readme resolved outside the package; now crate-local.
+- Fixed provenance text for nfs-v2 and nfs-v4 READMEs (incorrectly said "Derived from Vaiz/nfs3"; NOTICE files say "Original NFSWolf work").
+- Top-level README: added crates.io and docs.rs badges, `cargo install nfswolf` option, protocol crates table, WEPWolf in related tools.
+- Scanner stores handles from MOUNT for cross-version testing; MOUNT v1 MNT runs per export.
+
 ## [1.0.0] - 2026-08-03
 
 ### Added
@@ -31,6 +52,7 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - **Scanner security notes** for sideband RPC programs -- NLM, NSM, RQUOTA, NFS_ACL, NIS (ypserv/ypbind), PCNFSD, rstatd, rusersd, yppasswdd, rexec, ypupdate, keyserv, ypxfrd, ttdbserverd, sadmind annotated with attack surface descriptions in console and JSON output.
 - `AuthFlavor::Tls` variant and `RPCSEC_GSS = 6` in the `auth_flavor` wire enum (`onc-rpc-client`).
 - `auth_flavors` field on `ExportEntry` and `V4ExportEntry` for scanner output.
+- **Eight-crate workspace rename** -- all protocol crates renamed from `nfswolf-*` to vendor-neutral names: `nfswolf-xdr-derive` to `onc-xdr-derive`, `nfswolf-xdr` to `onc-xdr`, `nfswolf-rpc` to `onc-rpc-client`, `nfswolf-rpcbind` to `onc-rpcbind`, `nfswolf-mount` to `nfs-mount`, `nfswolf-nfs2` to `nfs-v2`, `nfswolf-nfs3` to `nfs-v3`, `nfswolf-nfs4` to `nfs-v4`. Portmapper and rpcbind extracted from `onc-rpc-client` into their own `onc-rpcbind` crate; MOUNT extracted into `nfs-mount`.
 
 ### Changed
 
@@ -356,7 +378,8 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.8.0...v1.0.0
 [0.8.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.5.0...v0.7.0
 [0.5.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.4.0...v0.5.0
