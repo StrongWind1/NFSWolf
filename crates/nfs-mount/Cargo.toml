@@ -1,0 +1,24 @@
+[package]
+name = "nfs-mount"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nfs-mount"
+description = "MOUNT protocol (RFC 1094 Appendix A / RFC 1813 Appendix I): versions 1 and 3, wire types, and a unified MountClient."
+readme = "README.md"
+keywords = ["nfs", "mount", "rpc", "filesystem", "network"]
+categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md"]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+onc-xdr = { workspace = true }
+onc-rpc-client = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+error: proc-macro derive panicked
+ --> tests/ui/multi_field_variant.rs:4:10
+  |
+4 | #[derive(XdrCodec)]
+  |          ^^^^^^^^
+  |
+  = help: message: Complex enum variant 'Variant' must be either unit or have exactly one unnamed field

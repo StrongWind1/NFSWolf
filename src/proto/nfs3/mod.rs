@@ -8,13 +8,13 @@
 
 /// Domain types live in the protocol crate; re-exported under the name call
 /// sites already use.
-pub(crate) use nfswolf_nfs3::api as types;
+pub(crate) use nfs_v3::api as types;
 
 /// Protocol status codes live in the protocol crate.
 pub(crate) mod errors {}
 
 /// An NFSv3 client issuing calls through nfswolf's pooled transport.
-pub(crate) type Nfs3Client = nfswolf_nfs3::Nfs3Client<crate::proto::transport::PooledTransport>;
+pub(crate) type Nfs3Client = nfs_v3::Nfs3Client<crate::proto::transport::PooledTransport>;
 
 /// Hostname presented when no AUTH_SYS credential is configured.
 ///

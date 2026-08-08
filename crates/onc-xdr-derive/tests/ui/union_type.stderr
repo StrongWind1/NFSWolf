@@ -1,0 +1,7 @@
+error: proc-macro derive panicked
+ --> tests/ui/union_type.rs:4:10
+  |
+4 | #[derive(XdrCodec)]
+  |          ^^^^^^^^
+  |
+  = help: message: XdrCodec can only be derived for structs and enums

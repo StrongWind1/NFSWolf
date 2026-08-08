@@ -42,6 +42,8 @@ For the summary catalog with RFC rationale, see [FINDINGS.md](../FINDINGS.md).
 | F-3.4 | [STRIPTLS Downgrade (RFC 9289)](F-3.4-striptls-downgrade.md) | High |
 | F-3.5 | [Filtered Portmapper Bypass](F-3.5-portmapper-tunnel-bypass.md) | Medium |
 | F-3.6 | [UDP MOUNT Handle Theft via Source IP Spoofing](F-3.6-udp-mount-handle-theft.md) | Critical |
+| F-3.7 | [AUTH_DH Advertised (Cryptographically Broken)](F-3.7-auth-dh-broken.md) | Medium |
+| F-3.8 | [RPC-with-TLS Supported (RFC 9289)](F-3.8-rpc-with-tls.md) | Info |
 
 ### Category 4: Privilege Escalation
 
@@ -52,6 +54,7 @@ For the summary catalog with RFC rationale, see [FINDINGS.md](../FINDINGS.md).
 | F-4.3 | [Device Node Creation via MKNOD](F-4.3-device-node-creation.md) | High |
 | F-4.4 | [Symlink Escape](F-4.4-symlink-escape.md) | High |
 | F-4.5 | [SELinux/MAC Label Bypass via NFS](F-4.5-selinux-label-bypass.md) | Medium |
+| F-4.6 | [Unrestricted chown](F-4.6-unrestricted-chown.md) | High |
 
 ### Category 5: Information Disclosure
 
@@ -62,6 +65,9 @@ For the summary catalog with RFC rationale, see [FINDINGS.md](../FINDINGS.md).
 | F-5.3 | [NIS Credential Extraction](F-5.3-nis-credential-extraction.md) | High |
 | F-5.4 | [RPC Service Enumeration](F-5.4-rpc-service-enumeration.md) | Low |
 | F-5.5 | [NFSv4 Pseudo-FS Structure Leakage](F-5.5-nfsv4-pseudo-fs-leakage.md) | Low |
+| F-5.6 | Metadata Disclosed on Access Denial (no standalone write-up yet) | Low |
+| F-5.7 | [Case-Insensitive Filesystem](F-5.7-case-insensitive-filesystem.md) | Low |
+| F-5.8 | [Export Root Attributes Leaked via AUTH_NONE](F-5.8-auth-none-attr-leak.md) | Low |
 
 ### Category 6: Denial of Service (out of scope)
 

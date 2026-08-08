@@ -24,6 +24,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use ipnet::IpNet;
+use onc_rpc_client::RpcClient;
+use onc_rpc_client::RpcError;
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_xdr::Void;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -32,8 +36,8 @@ use tokio::time::timeout;
 use crate::engine::scan_types::{HostResult, MountPortInfo, NfsPortInfo, PortReachability, TargetSpec, V4ExportEntry, VersionRange};
 use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs4::compound::Nfs4DirectClient;
+use crate::proto::nfs4::types::{ArgOp, CompoundArgs, CompoundRes};
 use crate::proto::portmap::PortmapClient;
-use crate::proto::rpc_probe::probe_nfs_versions_tcp;
 use crate::util::stealth::StealthConfig;
 
 /// Output from `scan_range` -- results plus metadata about the scan.
@@ -368,22 +372,12 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         }
         let addr = SocketAddr::new(ip, port_info.port);
         job.stealth.wait().await;
-        let (v2_res, v3_res, v4_res) = probe_nfs_versions_tcp(addr, probe_timeout, job.proxy.as_deref()).await;
-
-        port_info.v2 = v2_res.is_accepted();
-        port_info.v3 = v3_res.is_accepted();
-        // For v4: any valid COMPOUND response (even non-zero NFS4 status) confirms v4.
-        port_info.v4 = v4_res.is_accepted();
-
-        // Capture first PROG_MISMATCH range for the Hint column.
+        let (v2, v3, v4, tcp_hint) = probe_nfs_versions_tcp(addr, probe_timeout, job.proxy.as_deref()).await;
+        port_info.v2 = v2;
+        port_info.v3 = v3;
+        port_info.v4 = v4;
         if hint.is_none() {
-            if let Some(r) = v2_res.mismatch_range() {
-                hint = Some(r.clone());
-            } else if let Some(r) = v3_res.mismatch_range() {
-                hint = Some(r.clone());
-            } else if let Some(r) = v4_res.mismatch_range() {
-                hint = Some(r.clone());
-            }
+            hint = tcp_hint;
         }
     }
 
@@ -396,26 +390,18 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
             let addr = SocketAddr::new(ip, port_info.port);
             if !port_info.v2 {
                 job.stealth.wait().await;
-                let r = crate::proto::rpc_probe::probe_nfs_null_udp(addr, 2, probe_timeout).await;
-                if r.is_accepted() {
-                    port_info.v2 = true;
-                }
-                if hint.is_none()
-                    && let Some(range) = r.mismatch_range()
-                {
-                    hint = Some(range.clone());
+                match onc_rpc_client::transport::udp::call_rpc_udp::<Void, Void>(addr, 100_003, 2, 0, &Void, probe_timeout).await {
+                    Ok(Void) => port_info.v2 = true,
+                    Err(RpcError::ProgMismatch { low, high }) if hint.is_none() => hint = Some(VersionRange { low, high }),
+                    Err(_) => {},
                 }
             }
             if !port_info.v3 {
                 job.stealth.wait().await;
-                let r = crate::proto::rpc_probe::probe_nfs_null_udp(addr, 3, probe_timeout).await;
-                if r.is_accepted() {
-                    port_info.v3 = true;
-                }
-                if hint.is_none()
-                    && let Some(range) = r.mismatch_range()
-                {
-                    hint = Some(range.clone());
+                match onc_rpc_client::transport::udp::call_rpc_udp::<Void, Void>(addr, 100_003, 3, 0, &Void, probe_timeout).await {
+                    Ok(Void) => port_info.v3 = true,
+                    Err(RpcError::ProgMismatch { low, high }) if hint.is_none() => hint = Some(VersionRange { low, high }),
+                    Err(_) => {},
                 }
             }
         }
@@ -464,10 +450,43 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
 
     // v3 exports -- only query if NFSv3 version probe succeeded
     let has_v3 = nfs_ports_info.iter().any(|p| p.v3);
+    let mut os_guess: Option<String> = None;
     let exports_v3 = if has_v3 && (mount_port_infos.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
         job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports(SocketAddr::new(ip, 111))).await {
-            Ok(Ok(e)) => Some(e),
+            Ok(Ok(mut exports)) => {
+                // Probe MNT per export to discover auth flavors (RFC 1813 Appendix III).
+                let mount_addr = SocketAddr::new(ip, 111);
+                for entry in &mut exports {
+                    job.stealth.wait().await;
+                    // Try MOUNT v3 MNT first (returns auth flavors + variable-length handle).
+                    if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount(mount_addr, &entry.path)).await {
+                        entry.auth_flavors = mr.auth_flavors;
+                        entry.handle_hex = mr.handle.to_hex();
+                        if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
+                            let os = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_os(&mr.handle);
+                            let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
+                            os_guess = Some(format!("{os:?}/{fs:?}"));
+                        }
+                        drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                    } else {
+                        // MOUNT v3 MNT failed -- try v1 MNT as fallback (F-1.6).
+                        // v1 returns a 32-byte handle with a different fsid_type encoding.
+                        job.stealth.wait().await;
+                        if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_v1(mount_addr, &entry.path)).await {
+                            entry.auth_flavors = mr.auth_flavors;
+                            entry.handle_hex = mr.handle.to_hex();
+                            if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
+                                let os = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_os(&mr.handle);
+                                let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
+                                os_guess = Some(format!("{os:?}/{fs:?}"));
+                            }
+                            drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                        }
+                    }
+                }
+                Some(exports)
+            },
             _ => None,
         }
     } else {
@@ -479,7 +498,23 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let exports_v2 = if has_v2 && mount_port_infos.iter().any(|m| m.versions.contains(&1)) {
         job.stealth.wait().await;
         match timeout(probe_timeout, mount_client.list_exports_v1(SocketAddr::new(ip, 111))).await {
-            Ok(Ok(e)) => Some(e),
+            Ok(Ok(mut exports)) => {
+                let mount_addr = SocketAddr::new(ip, 111);
+                for entry in &mut exports {
+                    job.stealth.wait().await;
+                    if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_v1(mount_addr, &entry.path)).await {
+                        entry.auth_flavors = mr.auth_flavors;
+                        entry.handle_hex = mr.handle.to_hex();
+                        if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
+                            let os = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_os(&mr.handle);
+                            let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
+                            os_guess = Some(format!("{os:?}/{fs:?}"));
+                        }
+                        drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                    }
+                }
+                Some(exports)
+            },
             _ => None,
         }
     } else {
@@ -496,6 +531,12 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     } else {
         None
     };
+
+    // --- Stage 7b: RDMA presence detection ---
+    // Query rpcbind v3 GETADDR for NFS (100003) on "rdma" and "rdma6" netids
+    // (RFC 1833 sec. 2.1). Also probe TCP port 20049 (conventional NFS/RDMA port).
+    // RDMA bypasses the kernel TCP/IP stack and may evade host firewalls.
+    let rdma_detected = detect_rdma(ip, probe_timeout, portmap_reachable && portmap_reachability.has_tcp(), &job).await;
 
     // --- Stage 8: NFSv4 READDIR ---
     let has_v4 = nfs_ports_info.iter().any(|p| p.v4);
@@ -514,7 +555,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // --- Stage 9: Assembly ---
     // No trailing stealth delay here: pacing is applied before each outbound
     // probe above, so the per-host burst is already spread across the scan.
-    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, exports_v2, exports_v3, exports_v4, mounts, hint, scan_duration: start.elapsed() })
+    Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, rpc_services: dump_entries, exports_v2, exports_v3, exports_v4, mounts, hint, rdma_detected, os_guess, scan_duration: start.elapsed() })
 }
 
 /// Non-blocking TCP probe: returns true if the port accepts connections within timeout.
@@ -527,11 +568,88 @@ async fn is_port_open(addr: SocketAddr, probe_timeout: Duration, proxy: Option<&
     }
 }
 
+/// Probe all three NFS versions on a single TCP connection to `addr`.
+///
+/// Sends NULL v2, NULL v3, and COMPOUND(PUTROOTFH) for v4 sequentially over one
+/// TCP connection so only one connect is needed.  Returns `(v2, v3, v4, hint)`.
+/// The hint is the first PROG_MISMATCH version range seen, if any.
+async fn probe_nfs_versions_tcp(addr: SocketAddr, probe_timeout: Duration, proxy: Option<&str>) -> (bool, bool, bool, Option<VersionRange>) {
+    let connect_result = if let Some(p) = proxy {
+        let Ok(proxy_addr) = crate::proto::conn::parse_proxy_addr(p) else {
+            return (false, false, false, None);
+        };
+        timeout(probe_timeout, crate::proto::conn::socks5_connect(proxy_addr, addr)).await
+    } else {
+        timeout(probe_timeout, TcpStream::connect(addr)).await
+    };
+
+    let stream = match connect_result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::debug!("connect to {addr}: {e}");
+            return (false, false, false, None);
+        },
+        Err(_) => {
+            tracing::debug!("connect to {addr}: timeout");
+            return (false, false, false, None);
+        },
+    };
+
+    let mut client = RpcClient::new(TokioIo::new(stream));
+    let mut hint: Option<VersionRange> = None;
+
+    // Classifies an RPC result as accepted / PROG_MISMATCH / other failure.
+    // On connection-fatal errors, returns `Err(())` to signal that subsequent
+    // probes on this socket should be skipped.
+    let classify = |result: Result<Void, RpcError>, hint: &mut Option<VersionRange>| -> Result<bool, ()> {
+        match result {
+            Ok(Void) => Ok(true),
+            Err(RpcError::ProgMismatch { low, high }) => {
+                if hint.is_none() {
+                    *hint = Some(VersionRange { low, high });
+                }
+                Ok(false)
+            },
+            Err(ref e) if e.is_connection_reusable() => Ok(false),
+            Err(_) => Err(()),
+        }
+    };
+
+    // NULL v2: program 100003, version 2, proc 0
+    let Ok(v2) = classify(client.call::<Void, Void>(100_003, 2, 0, &Void).await, &mut hint) else {
+        return (false, false, false, hint);
+    };
+
+    // NULL v3: program 100003, version 3, proc 0
+    let Ok(v3) = classify(client.call::<Void, Void>(100_003, 3, 0, &Void).await, &mut hint) else {
+        return (v2, false, false, hint);
+    };
+
+    // COMPOUND v4: program 100003, version 4, proc 1.
+    // NotFullyParsed means v4 is supported but the reply had trailing bytes
+    // we couldn't decode -- still a positive v4 confirmation.
+    let v4_args = CompoundArgs { tag: String::new(), minorversion: 0, ops: vec![ArgOp::Putrootfh] };
+    let v4 = match client.call::<CompoundArgs, CompoundRes>(100_003, 4, 1, &v4_args).await {
+        Ok(_) | Err(RpcError::NotFullyParsed { .. }) => true,
+        Err(RpcError::ProgMismatch { low, high }) => {
+            if hint.is_none() {
+                hint = Some(VersionRange { low, high });
+            }
+            false
+        },
+        Err(_) => false,
+    };
+
+    (v2, v3, v4, hint)
+}
+
 /// Enumerate top-level NFSv4 pseudo-FS entries via COMPOUND([PUTROOTFH, READDIR]).
 ///
 /// Tries AUTH_SYS (uid=0) first since most servers require it for the pseudo-root.
 /// Falls back to AUTH_NONE if AUTH_SYS fails.
 async fn readdir_v4_pseudo_root(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Vec<V4ExportEntry>> {
+    use crate::proto::nfs4::types::ResOpData;
+
     // AUTH_SYS with uid=0 (most servers require at least AUTH_SYS for READDIR)
     let result = Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await;
     let mut client = match result {
@@ -540,5 +658,71 @@ async fn readdir_v4_pseudo_root(addr: SocketAddr, proxy: Option<&str>) -> anyhow
     };
     let root_fh = client.get_root_fh().await?;
     let entries = client.list_dir(&root_fh).await?;
-    Ok(entries.into_iter().map(|name| V4ExportEntry { path: name }).collect())
+
+    // Probe SECINFO per entry to discover auth flavors (RFC 7530 S16.31).
+    let mut v4_exports: Vec<V4ExportEntry> = Vec::with_capacity(entries.len());
+    for name in entries {
+        let ops = vec![ArgOp::Putrootfh, ArgOp::Secinfo(name.clone())];
+        let auth_flavors = match client.compound(ops).await {
+            Ok(res) if res.status == 0 => res.results.last().and_then(|op| if let ResOpData::SecFlavors(ref f) = op.data { Some(f.iter().map(|e| e.flavor).collect()) } else { None }).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        v4_exports.push(V4ExportEntry { path: name, auth_flavors });
+    }
+    Ok(v4_exports)
+}
+
+/// Detect RDMA transport availability for NFS.
+///
+/// Two independent signals:
+/// 1. rpcbind v3 GETADDR query for NFS (100003) with "rdma" or "rdma6" netid
+///    (RFC 1833 sec. 2.1) -- returns a non-empty universal address when NFS is
+///    registered on an RDMA transport.
+/// 2. TCP probe on port 20049, the conventional NFS/RDMA port.
+///
+/// RDMA bypasses the kernel's TCP/IP stack entirely, so NFS traffic over RDMA
+/// may not be subject to iptables/nftables host firewalls.
+async fn detect_rdma(ip: IpAddr, probe_timeout: Duration, rpcbind_reachable: bool, job: &ScanJob) -> bool {
+    // Signal 1: rpcbind GETADDR for RDMA netids.
+    if rpcbind_reachable {
+        let rpcbind_addr = SocketAddr::new(ip, 111);
+        for netid in ["rdma", "rdma6"] {
+            job.stealth.wait().await;
+            if let Ok(Ok(io)) = timeout(probe_timeout, connect_tcp_for_rpcbind(rpcbind_addr, job.proxy.as_deref())).await {
+                let mut rb = onc_rpcbind::RpcbindClient::new(io);
+                // Query NFS v3 on this netid; any non-empty address means RDMA is registered.
+                if let Ok(Ok(ref a)) = timeout(probe_timeout, rb.getaddr(100_003, 3, netid)).await
+                    && !a.is_empty()
+                {
+                    tracing::info!(netid, addr = %a, "RDMA transport detected via rpcbind GETADDR");
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Signal 2: TCP probe on the conventional NFS/RDMA port (20049).
+    let rdma_addr = SocketAddr::new(ip, 20049);
+    job.stealth.wait().await;
+    if is_port_open(rdma_addr, probe_timeout, job.proxy.as_deref()).await {
+        tracing::info!("NFS/RDMA port 20049 open");
+        return true;
+    }
+
+    false
+}
+
+/// Open a TCP connection to the rpcbind port, optionally through a proxy.
+///
+/// Shared helper for the RDMA detection path -- needs a fresh connection for
+/// each rpcbind query because `RpcbindClient` consumes the IO.
+async fn connect_tcp_for_rpcbind(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<TokioIo<TcpStream>> {
+    if let Some(p) = proxy {
+        let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+        let stream = crate::proto::conn::socks5_connect(proxy_addr, addr).await?;
+        Ok(TokioIo::new(stream))
+    } else {
+        let stream = TcpStream::connect(addr).await?;
+        Ok(TokioIo::new(stream))
+    }
 }

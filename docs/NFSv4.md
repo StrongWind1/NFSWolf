@@ -158,23 +158,23 @@ nfswolf's scanner sends `COMPOUND([PUTROOTFH])` to port 2049 and checks for `NFS
 
 Port 2049 (mandatory). TCP required (RFC 7530 §3.1). Defined in RFC 7530.
 
-NFSv4 has only two RPC procedures: NULL (proc 0) and COMPOUND (proc 1). All file operations are expressed as **operations** batched inside COMPOUND. RFC 7530 defines 39 operations (op numbers 3-39 + 10044).
+NFSv4 has only two RPC procedures: NULL (proc 0) and COMPOUND (proc 1). All file operations are expressed as **operations** batched inside COMPOUND. RFC 7530 defines 38 operations (37 in ops 3-39, plus ILLEGAL op 10044).
 
-nfswolf implements 9 of the 39 operations -- the subset needed for recon and read-only file access. The remaining 30 are stateful operations (OPEN/CLOSE/LOCK), delegation management, or write paths that nfswolf handles via v3 instead.
+The `nfs-v4` crate can represent all 37 NFSv4.0 operations (ops 3-39) plus ILLEGAL (op 10044) as `ArgOp` variants, plus 4 NFSv4.1 operations (EXCHANGE_ID op 42, GETDEVICEINFO op 47, GETDEVICELIST op 48, SECINFO_NO_NAME op 52). The `CompoundBuilder` has typed convenience methods for 13+ operations including SETCLIENTID, SECINFO_NO_NAME, EXCHANGE_ID, GETDEVICEINFO, GETDEVICELIST, and OPEN (open_read). The 9 operations below are the core set used by the analyzer and shell for recon and read-only access. The remaining operations are representable on the wire but not yet wired into the binary's attack modules.
 
 ### Implemented operations
 
-| Op | Name | nfswolf | Via | Correct | Purpose |
-|----|------|---------|-----|---------|---------|
-| 9 | `GETATTR` | **Yes** | Own XDR | Correct | Get file attributes (type, size, fsid, owner). Supports bitmap-based attribute requests per RFC 7530 §18.7. |
-| 10 | `GETFH` | **Yes** | Own XDR | Correct | Return current filehandle as opaque bytes. Used after PUTROOTFH or LOOKUP to capture the handle. |
-| 15 | `LOOKUP` | **Yes** | Own XDR | Correct | Resolve one path component. Sets current FH to the result. Chain multiple LOOKUPs in one COMPOUND for full path traversal. |
-| 22 | `PUTFH` | **Yes** | Own XDR | Correct | Set current FH to a known handle (from prior GETFH). Equivalent to v3's "use this handle for the next operation." |
-| 23 | `PUTPUBFH` | **Yes** | Own XDR | Correct | Set current FH to the server's public (WebNFS) handle (RFC 7530 §16.21). Similar to PUTROOTFH but the public handle is server-defined and may differ from the pseudo-root. |
-| 24 | `PUTROOTFH` | **Yes** | Own XDR | Correct | Set current FH to server's pseudo-root. The v4 replacement for MOUNT -- no export path needed, no ACL check. |
-| 25 | `READ` | **Yes** | Own XDR | Correct | Read file data using the anonymous stateid (seqid=0, other=all-zeros per RFC 7530 §9.1.4.3). No OPEN required for world-readable files. |
-| 26 | `READDIR` | **Yes** | Own XDR | Correct | List directory entries with inline attributes. Cookie-based pagination with 8-byte verifier. |
-| 33 | `SECINFO` | **Yes** | Own XDR | Correct | Query supported auth flavors for a named child path. Returns array of flavor codes (1=AUTH_SYS, 6=RPCSEC_GSS). Decodes RPCSEC_GSS sub-fields (OID, QOP, service) when present. |
+| Op | Name | nfswolf | Via | Purpose |
+|----|------|---------|-----|---------|
+| 9 | `GETATTR` | **Yes** | nfs-v4 | Get file attributes (type, size, fsid, owner). Supports bitmap-based attribute requests per RFC 7530 §18.7. |
+| 10 | `GETFH` | **Yes** | nfs-v4 | Return current filehandle as opaque bytes. Used after PUTROOTFH or LOOKUP to capture the handle. |
+| 15 | `LOOKUP` | **Yes** | nfs-v4 | Resolve one path component. Sets current FH to the result. Chain multiple LOOKUPs in one COMPOUND for full path traversal. |
+| 22 | `PUTFH` | **Yes** | nfs-v4 | Set current FH to a known handle (from prior GETFH). Equivalent to v3's "use this handle for the next operation." |
+| 23 | `PUTPUBFH` | **Yes** | nfs-v4 | Set current FH to the server's public (WebNFS) handle (RFC 7530 §16.21). Similar to PUTROOTFH but the public handle is server-defined and may differ from the pseudo-root. |
+| 24 | `PUTROOTFH` | **Yes** | nfs-v4 | Set current FH to server's pseudo-root. The v4 replacement for MOUNT -- no export path needed, no ACL check. |
+| 25 | `READ` | **Yes** | nfs-v4 | Read file data using the anonymous stateid (seqid=0, other=all-zeros per RFC 7530 §9.1.4.3). No OPEN required for world-readable files. |
+| 26 | `READDIR` | **Yes** | nfs-v4 | List directory entries with inline attributes. Cookie-based pagination with 8-byte verifier. |
+| 33 | `SECINFO` | **Yes** | nfs-v4 | Query supported auth flavors for a named child path. Returns array of flavor codes (1=AUTH_SYS, 6=RPCSEC_GSS). Decodes RPCSEC_GSS sub-fields (OID, QOP, service) when present. |
 
 ### Not implemented (with rationale)
 
@@ -204,13 +204,13 @@ nfswolf implements 9 of the 39 operations -- the subset needed for recon and rea
 | 39 | `RELEASE_LOCKOWNER` | Lock cleanup | Part of lock state machine. |
 | 10044 | `ILLEGAL` | Error sentinel | Server returns this for unrecognized op numbers. |
 
-**Implementation**: All 9 operations are nfswolf's own XDR code -- `#[derive(XdrCodec)]` Pack/Unpack implementations in `crates/nfswolf-nfs4/src/wire.rs` (re-exported as `types` via `src/proto/nfs4/mod.rs`). The `Nfs4Status` enum carries 25 named variants (Ok + 24 error codes including `BadHandle`, `WrongSec`, `Moved`, and `BadXdr`) plus an `Unknown(u32)` catch-all, and implements `Display` with RFC 7530 error names (e.g., `NFS4ERR_STALE`). nfswolf uses the `nfswolf-rpc` crate's `RpcClient` for the RPC transport layer but implements all NFSv4 XDR encoding/decoding in its own crate.
+**Implementation**: All operations use manual `Pack`/`Unpack` implementations in `crates/nfs-v4/src/wire.rs` (re-exported as `types` via `src/proto/nfs4/mod.rs`). The `Nfs4Status` enum carries 25 named variants (Ok + 24 error codes including `BadHandle`, `WrongSec`, `Moved`, and `BadXdr`) plus an `Unknown(u32)` catch-all (26 total), and implements `Display` with RFC 7530 error names (e.g., `NFS4ERR_STALE`). Classification predicates `is_permission_denied()`, `is_stale()`, and `is_not_found()` are available. `Nfs4Error<E>` (in `crates/nfs-v4/src/client.rs`) mirrors `Nfs2Error<E>` / `Nfs3Fault<E>` with three variants: `Rpc(E)`, `Status(Nfs4Status)`, and `MissingResult`. The COMPOUND response is `CompoundRes` with fields `status: u32`, `tag: String`, and `results: Vec<ResOp>`. Each `ResOp` carries `op_code: u32`, `status: u32`, and `data: ResOpData`. SECINFO / SECINFO_NO_NAME responses decode into `Vec<SecInfoEntry>`, where each `SecInfoEntry` carries the flavor number and, for RPCSEC_GSS (flavor 6), the GSS mechanism OID, QOP, and service level. The crate also supports NFSv4.1 operations: `EXCHANGE_ID` (op 42, unauthenticated vendor/version fingerprinting), `SECINFO_NO_NAME` (op 52, security flavors without needing a filename), `GETDEVICEINFO` (op 47, pNFS data-server addresses), and `GETDEVICELIST` (op 48, backend storage mapping). NFSv4.2 security labels are supported via `FATTR4_SEC_LABEL` and `SecLabel4` (RFC 7862).
 
 ### NFSv4 client variants
 
 nfswolf has two NFSv4 clients for different use cases:
 
-**`Nfs4Client`** (pool-backed, `src/proto/nfs4/compound.rs`): Used by the analyzer for SECINFO probes and pseudo-FS mapping. Shares the connection pool and circuit breaker with v3 calls.
+**`Nfs4Client`** (pool-backed, `src/proto/nfs4/compound.rs`): Used by the analyzer for SECINFO probes and pseudo-FS mapping, and by the interactive v4 shell (`--nfs-version 4`). Shares the connection pool and circuit breaker with v3 calls via `PooledTransport`.
 
 | Method | Operations | Purpose |
 |--------|-----------|---------|
@@ -219,7 +219,7 @@ nfswolf has two NFSv4 clients for different use cases:
 | `secinfo(parent, name)` | PUTROOTFH + LOOKUP chain + SECINFO | Query auth flavors for a path |
 | `map_pseudo_fs()` | PUTROOTFH + GETFH + GETATTR(fsid) | Detect Linux pseudo-root UUID |
 
-**`Nfs4DirectClient`** (direct TCP, `src/proto/nfs4/compound.rs`): Used by the interactive v4 shell (`--nfs-version 4`) and the scanner's v4 probe. Connects directly to port 2049 without the connection pool.
+**`Nfs4DirectClient`** (direct TCP, `src/proto/nfs4/compound.rs`): Used by the scanner's v4 probe (`probe_nfs4()`). Connects directly to port 2049 without the connection pool. The v4 shell previously used this client but now runs over `PooledTransport` via `Nfs4Client` (see above).
 
 | Method | Operations | Purpose |
 |--------|-----------|---------|
@@ -248,11 +248,17 @@ The interactive v4 shell (`nfswolf shell --nfs-version 4`) supports:
 | `hostname <name>` | Reconnects with new AUTH_SYS machine name |
 | `whoami` | Shows current uid/gid/hostname |
 | `handle` | (local state) -- prints current FH as hex |
+| `ll` | Alias for `ls -a` (full columns) |
+| `dir` | Alias for `ls` |
+| `type <file>` | Alias for `cat` |
+| `download <file>` | Alias for `get` |
+| `id` | Alias for `whoami` |
 | `lcd <dir>` | (local filesystem) -- change local working directory |
 | `lls [dir]` | (local filesystem) -- list local directory |
 | `lpwd` | (local filesystem) -- print local working directory |
 | `lmkdir <dir>` | (local filesystem) -- create local directory |
 | `history` | (local state) -- navigate command history via readline |
+| `help` | List available commands |
 
 **Limitations vs the v3 shell**: No `stat`, `put`, `mkdir`, `rm`, `escape-root`, `secrets-scan`, `suid-scan`, `world-writable`, `mount-handle`, recursive `get -r`/`put -r`, `tree`, `find`, `readlink`, `last`/`lastb`/`lastlog`. These require either write operations (OPEN/WRITE/CREATE) or v3-specific procedures (READDIRPLUS, FSSTAT). Local commands (`lcd`, `lls`, `lpwd`, `lmkdir`, `handle`, `history`) are fully supported. The read-only NFS commands (`stat`, `tree`, `find`, `readlink`, analysis commands) could technically work with existing COMPOUND+GETATTR+READDIR but are not yet implemented. Use the v3 shell for the full feature set.
 

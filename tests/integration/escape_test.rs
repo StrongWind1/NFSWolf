@@ -29,17 +29,17 @@
     clippy::missing_asserts_for_indexing,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use nfswolf_rpc::transport::DirectTransport;
+use onc_rpc_client::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use nfs_v3::MountClient;
+use nfs_v3::Nfs3Client;
+use nfs_v3::wire::mount::dirpath;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfswolf_nfs3::MountClient;
-use nfswolf_nfs3::Nfs3Client;
-use nfswolf_nfs3::wire::mount::dirpath;
-use nfswolf_rpc::transport::tokio::TokioIo;
-use nfswolf_xdr::Opaque;
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_xdr::Opaque;
 use tokio::net::TcpStream;
 
 // --- Server helpers ---
@@ -55,7 +55,7 @@ async fn start_server(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16)
 async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::new(DirectTransport::new(TokioIo::new(stream)))
+    MountClient::v3(DirectTransport::new(TokioIo::new(stream)))
 }
 
 async fn nfs3_client(port: u16) -> Nfs3Client<DirectTransport<TokioIo<TcpStream>>> {
@@ -139,7 +139,7 @@ async fn memfs_root_handle_is_nonempty() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
 
     assert!(!mnt.fhandle.0.as_ref().is_empty(), "server must return a non-empty root file handle");
 }
@@ -150,7 +150,7 @@ async fn memfs_advertises_at_least_one_auth_flavor() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
 
     // AUTH_SYS (flavor 1) must be present  --  the MemFs server must accept it.
     assert!(!mnt.auth_flavors.is_empty(), "server must advertise at least one auth flavor");
@@ -168,12 +168,12 @@ async fn memfs_consecutive_mounts_return_same_root_handle() {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
 
     let stream1 = TcpStream::connect(addr).await.expect("connect 1");
-    let mc1 = MountClient::new(DirectTransport::new(TokioIo::new(stream1)));
-    let mnt1 = mc1.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT 1 must succeed");
+    let mc1 = MountClient::v3(DirectTransport::new(TokioIo::new(stream1)));
+    let mnt1 = mc1.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT 1 must succeed");
 
     let stream2 = TcpStream::connect(addr).await.expect("connect 2");
-    let mc2 = MountClient::new(DirectTransport::new(TokioIo::new(stream2)));
-    let mnt2 = mc2.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT 2 must succeed");
+    let mc2 = MountClient::v3(DirectTransport::new(TokioIo::new(stream2)));
+    let mnt2 = mc2.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT 2 must succeed");
 
     assert_eq!(mnt1.fhandle.0.as_ref(), mnt2.fhandle.0.as_ref(), "root handle must be stable across mounts (bearer token property)");
 }
@@ -189,7 +189,7 @@ async fn memfs_with_files_still_returns_root_handle() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
 
     assert!(!mnt.fhandle.0.as_ref().is_empty(), "root handle must be non-empty even with files present");
 }
@@ -531,7 +531,7 @@ async fn memfs_escape_attempt_fails_gracefully() {
     // Verifies that constructing an escape handle against MemFs returns BADHANDLE or STALE,
     // confirming the handle oracle works (BADHANDLE = wrong format, STALE = wrong inode).
     // MemFs handles are synthetic and don't follow the ext4/XFS filesystem format.
-    use nfswolf_nfs3::wire::{GETATTR3args, Nfs3Result, nfsstat3};
+    use nfs_v3::wire::{GETATTR3args, Nfs3Result, nfsstat3};
 
     let config = MemFsConfig::default();
     let (_server, port) = start_server(config).await;
@@ -549,7 +549,7 @@ async fn memfs_escape_attempt_fails_gracefully() {
     // inode = 2 (ext4 root) at offset 20
     escape_handle[27] = 2;
 
-    let fake_fh = nfswolf_nfs3::wire::nfs_fh3 { data: nfswolf_xdr::Opaque::owned(escape_handle) };
+    let fake_fh = nfs_v3::wire::nfs_fh3 { data: onc_xdr::Opaque::owned(escape_handle) };
     let res = nfs.getattr(&GETATTR3args { object: fake_fh }).await.expect("GETATTR RPC must succeed at protocol level");
 
     // MemFs must reject an escape handle with BADHANDLE or STALE -- never panic or succeed.
@@ -561,5 +561,6 @@ async fn memfs_escape_attempt_fails_gracefully() {
             // If MemFs somehow accepts the handle, that's OK -- it means the format matched.
             // The important thing is no panic.
         },
+        _ => unreachable!(),
     }
 }

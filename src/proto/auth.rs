@@ -1,27 +1,30 @@
 //! AUTH_SYS stamp policy.
 //!
-//! The credential itself is RFC 5531 sec. 14 and lives in `nfswolf_rpc::auth`.
+//! The credential itself is RFC 5531 sec. 14 and lives in `onc_rpc_client::auth`.
 //! What belongs here is the part that is nfswolf's choice rather than the
 //! spec's: which stamp each encoded credential carries.
 //!
-//! The stamp is an arbitrary caller-chosen value (RFC 1057 sec. 9.2), but some
-//! servers key a duplicate-request cache on it. During a UID sweep that matters
-//! -- a fixed stamp lets the server answer a call made as uid 1001 from a
-//! cached reply to the same call made as uid 1000, so the sweep silently reads
-//! one identity's results for every candidate. Incrementing it per encode
-//! defeats that.
+//! The stamp is an arbitrary caller-chosen value (RFC 1057 sec. 9.2). It is NOT
+//! part of the Linux knfsd duplicate-request cache (DRC) key -- the DRC keys on
+//! XID + procedure + source address + version + arg length + checksum of the
+//! call body (see `fs/nfsd/nfscache.c`). XID uniqueness, which the RPC crate
+//! handles via fastrand, is what actually prevents false DRC hits.
+//!
+//! The incrementing stamp is harmless to keep but the original justification
+//! (DRC avoidance during UID sweeps) was wrong. Two calls with different UIDs
+//! already differ in their encoded AUTH_SYS body, so they produce different arg
+//! checksums and cannot collide in the DRC regardless of stamp value.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use nfswolf_rpc::rpc::opaque_auth;
+use onc_rpc_client::rpc::opaque_auth;
 
-pub(crate) use nfswolf_rpc::auth::{AuthFlavor, AuthSys};
+pub(crate) use onc_rpc_client::auth::{AuthFlavor, AuthSys};
 
 /// Stamp start value, and the floor the counter wraps back to.
 ///
-/// Wrapping to 42 rather than 0 keeps the stamp clear of the low values other
-/// clients on the network are most likely to use, so their duplicate-request
-/// cache entries and ours do not collide.
+/// Wrapping to 42 rather than 0 avoids the low values other clients commonly
+/// use. Not load-bearing (stamps are not in the DRC key), just tidy.
 const STAMP_START: u32 = 42;
 
 /// Global stamp counter, advanced once per credential encode.
@@ -43,6 +46,37 @@ impl Credential {
             Self::None => opaque_auth::default(),
             Self::Sys(auth) => auth.to_opaque_auth(next_stamp()),
         }
+    }
+}
+
+/// Human-readable name for an RPC auth flavor value.
+///
+/// Covers AUTH_NONE (0), AUTH_SYS (1), AUTH_SHORT (2), AUTH_DH (3),
+/// RPCSEC_GSS (6), AUTH_TLS (7, RFC 9289), and the Linux krb5 pseudo-flavors
+/// (390003-390005, RFC 2623 S2.1.1). Unknown values render as `flavor(N)`.
+pub(crate) fn flavor_name(flavor: u32) -> String {
+    // IANA "RPC Authentication Flavor Numbers" registry.
+    // https://www.iana.org/assignments/rpc-authentication-numbers/flavor.csv
+    match flavor {
+        0 => "AUTH_NONE".to_owned(),
+        1 => "AUTH_SYS".to_owned(),
+        2 => "AUTH_SHORT".to_owned(),
+        3 => "AUTH_DH".to_owned(),
+        4 => "AUTH_KERB".to_owned(),
+        5 => "AUTH_RSA".to_owned(),
+        6 => "RPCSEC_GSS".to_owned(),
+        7 => "AUTH_TLS".to_owned(),
+        30_001 => "AUTH_NW".to_owned(),
+        200_000 => "AUTH_SEC".to_owned(),
+        200_004 => "AUTH_ESV".to_owned(),
+        300_000 => "AUTH_NQNFS".to_owned(),
+        300_001 => "AUTH_GSSAPI".to_owned(),
+        300_002 => "AUTH_ILU_UGEN".to_owned(),
+        390_000 => "RPCSEC_GSS(SPNEGO)".to_owned(),
+        390_003 => "RPCSEC_GSS(krb5)".to_owned(),
+        390_004 => "RPCSEC_GSS(krb5i)".to_owned(),
+        390_005 => "RPCSEC_GSS(krb5p)".to_owned(),
+        _ => format!("flavor({flavor})"),
     }
 }
 
@@ -80,13 +114,13 @@ mod tests {
 
     #[test]
     fn credential_none_encodes_as_auth_none() {
-        use nfswolf_rpc::rpc::auth_flavor;
+        use onc_rpc_client::rpc::auth_flavor;
         assert_eq!(Credential::None.to_opaque_auth().flavor, auth_flavor::AUTH_NULL);
     }
 
     #[test]
     fn credential_sys_encodes_as_auth_unix() {
-        use nfswolf_rpc::rpc::auth_flavor;
+        use onc_rpc_client::rpc::auth_flavor;
         let cred = Credential::Sys(AuthSys::new(1000, 1000, "host"));
         assert_eq!(cred.to_opaque_auth().flavor, auth_flavor::AUTH_UNIX);
     }

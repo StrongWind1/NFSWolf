@@ -116,8 +116,8 @@ Port 111 (fixed). Defined in RFC 1057 Appendix A. Maps `(program, version, proto
 | 0 | `NULL` | No | -- | -- | No-op. Not needed; nfswolf never health-checks portmapper. |
 | 1 | `SET` | No | -- | -- | Register an RPC service. Server-side only. |
 | 2 | `UNSET` | No | -- | -- | Unregister an RPC service. Server-side only. |
-| 3 | `GETPORT` | **Yes** | nfswolf-rpc | Correct | Resolves mountd and NFS daemon ports by program number. Core discovery call. |
-| 4 | `DUMP` | **Yes** | nfswolf-rpc | Correct | Lists every registered RPC service (program, version, protocol, port). Reveals NFS versions, NIS presence, NetApp services, and amplification surface. |
+| 3 | `GETPORT` | **Yes** | onc-rpcbind | Correct | Resolves mountd and NFS daemon ports by program number. Core discovery call. |
+| 4 | `DUMP` | **Yes** | onc-rpcbind | Correct | Lists every registered RPC service (program, version, protocol, port). Reveals NFS versions, NIS presence, NetApp services, and amplification surface. |
 | 5 | `CALLIT` | No | -- | -- | Indirect RPC call routed through portmapper. Potential amplification vector, but nfswolf measures amplification via DUMP response size instead (F-3.2). |
 
 ### When port 111 is blocked
@@ -138,12 +138,12 @@ Dynamic port (assigned by portmapper, typically high-numbered on Linux). Defined
 
 | # | Procedure | nfswolf | Via | Correct | Purpose |
 |---|-----------|---------|-----|---------|---------|
-| 0 | `NULL` | **Yes** | nfswolf-nfs2 | Correct | No-op. Available for connectivity testing. |
-| 1 | `MNT` | **Yes** | nfswolf-nfs2 | Correct | The critical call: path in, file handle out. Also returns supported auth flavors (AUTH_SYS, RPCSEC_GSS, etc.). Handles MNT3ERR_ACCES auto-retry with privileged source ports. |
-| 2 | `DUMP` | **Yes** | nfswolf-nfs2 | Correct | Lists clients that currently have exports mounted (hostname + directory). Reveals who else is using the server. |
-| 3 | `UMNT` | **Yes** | nfswolf-nfs2 | Correct | Removes our mount entry from the server's table. Stealth cleanup -- prevents `showmount -a` from revealing our activity (F-2.5). |
-| 4 | `UMNTALL` | **Yes** | nfswolf-nfs2 | Correct | Removes ALL mount entries for our client hostname. |
-| 5 | `EXPORT` | **Yes** | nfswolf-nfs2 | Correct | Lists every export with its allowed-host ACL groups. Core recon call for the scanner and analyzer. |
+| 0 | `NULL` | **Yes** | nfs-mount | Correct | No-op. Available for connectivity testing. |
+| 1 | `MNT` | **Yes** | nfs-mount | Correct | The critical call: path in, file handle out. Also returns supported auth flavors (AUTH_SYS, RPCSEC_GSS, etc.). Handles MNT3ERR_ACCES auto-retry with privileged source ports. |
+| 2 | `DUMP` | **Yes** | nfs-mount | Correct | Lists clients that currently have exports mounted (hostname + directory). Reveals who else is using the server. |
+| 3 | `UMNT` | **Yes** | nfs-mount | Correct | Removes our mount entry from the server's table. Stealth cleanup -- prevents `showmount -a` from revealing our activity (F-2.5). |
+| 4 | `UMNTALL` | **Yes** | nfs-mount | Correct | Removes ALL mount entries for our client hostname. |
+| 5 | `EXPORT` | **Yes** | nfs-mount | Correct | Lists every export with its allowed-host ACL groups. Core recon call for the scanner and analyzer. |
 
 ### When mountd is blocked
 
@@ -167,26 +167,26 @@ Port 2049 (conventional, not fixed by the protocol). Defined in RFC 1094 §2.2. 
 
 | # | Procedure | nfswolf | Via | Correct | Purpose |
 |---|-----------|---------|-----|---------|---------|
-| 0 | `NULL` | **Yes** | nfswolf-nfs2 | Correct | No-op. Connectivity test. |
-| 1 | `GETATTR` | **Yes** | nfswolf-nfs2 | Correct | Returns file type, mode, uid, gid, size, timestamps. XDR `attrstat` union decoded correctly (status-only on error). |
-| 2 | `SETATTR` | **Yes** | nfswolf-nfs2 | Correct | Changes mode, uid, gid, size, timestamps. Uses `SATTR_UNCHANGED` sentinel (0xFFFFFFFF) per RFC 1094 §2.3.6. |
-| 3 | `ROOT` | **Yes** | nfswolf-nfs2 | Correct | **Obsolete probe.** RFC 1094 §2.2.3: *"This procedure is no longer used."* nfswolf sends it deliberately as a MOUNT-bypass check: if a server responds with a handle, any client can obtain the root handle without going through mountd's export ACLs. Linux knfsd returns an empty/error response (tested on kernel 4.4 and 4.15). |
-| 4 | `LOOKUP` | **Yes** | nfswolf-nfs2 | Correct | Resolves one filename in a directory to a new file handle. Path traversal is done by chaining repeated LOOKUPs (one component at a time). |
-| 5 | `READLINK` | **Yes** | nfswolf-nfs2 | Correct | Reads the target path of a symbolic link. |
-| 6 | `READ` | **Yes** | nfswolf-nfs2 | Correct | Reads bytes from a file. `totalcount` field set to 0 per RFC. `read_file()` helper reads entire files in 8 KB chunks (RFC 1094 MAXDATA limit) with a 256 MiB hard cap. |
-| 7 | `WRITECACHE` | No | -- | -- | **Reserved.** RFC 1094 §2.2.8: not implemented by any known server. |
-| 8 | `WRITE` | **Yes** | nfswolf-nfs2 | Correct | Writes bytes to a file. Always synchronous in v2 -- server must flush to stable storage before returning (RFC 1094 §2.2). `beginoffset` and `totalcount` set to 0 per RFC. |
-| 9 | `CREATE` | **Yes** | nfswolf-nfs2 | Correct | Creates a new file. Returns file handle + attrs. |
-| 10 | `REMOVE` | **Yes** | nfswolf-nfs2 | Correct | Deletes a file. Non-idempotent -- retry after timeout may return NOENT. |
-| 11 | `RENAME` | **Yes** | nfswolf-nfs2 | Correct | Renames or moves a file. Atomic on the server. |
-| 12 | `LINK` | **Yes** | nfswolf-nfs2 | Correct | Creates a hard link. |
-| 13 | `SYMLINK` | **Yes** | nfswolf-nfs2 | Correct | Creates a symbolic link. |
-| 14 | `MKDIR` | **Yes** | nfswolf-nfs2 | Correct | Creates a directory. Returns file handle + attrs. |
-| 15 | `RMDIR` | **Yes** | nfswolf-nfs2 | Correct | Removes a directory. Non-idempotent. |
-| 16 | `READDIR` | **Yes** | nfswolf-nfs2 | Correct | Lists directory entries (fileid + name + cookie). Cookie-based pagination with XDR boolean-preceded linked list. Handles EOF flag. |
-| 17 | `STATFS` | **Yes** | nfswolf-nfs2 | Correct | Returns filesystem stats: optimal transfer size, block size, total/free/available blocks. |
+| 0 | `NULL` | **Yes** | nfs-v2 | Correct | No-op. Connectivity test. |
+| 1 | `GETATTR` | **Yes** | nfs-v2 | Correct | Returns file type, mode, uid, gid, size, timestamps. XDR `attrstat` union decoded correctly (status-only on error). |
+| 2 | `SETATTR` | **Yes** | nfs-v2 | Correct | Changes mode, uid, gid, size, timestamps. Uses `SATTR_UNCHANGED` sentinel (0xFFFFFFFF) per RFC 1094 §2.3.6. |
+| 3 | `ROOT` | **Yes** | nfs-v2 | Correct | **Obsolete probe.** RFC 1094 §2.2.3: *"This procedure is no longer used."* nfswolf sends it deliberately as a MOUNT-bypass check: if a server responds with a handle, any client can obtain the root handle without going through mountd's export ACLs. Linux knfsd returns an empty/error response (tested on kernel 4.4 and 4.15). |
+| 4 | `LOOKUP` | **Yes** | nfs-v2 | Correct | Resolves one filename in a directory to a new file handle. Path traversal is done by chaining repeated LOOKUPs (one component at a time). |
+| 5 | `READLINK` | **Yes** | nfs-v2 | Correct | Reads the target path of a symbolic link. |
+| 6 | `READ` | **Yes** | nfs-v2 | Correct | Reads bytes from a file. `totalcount` field set to 0 per RFC. `read_file()` helper reads entire files in 8 KB chunks (RFC 1094 MAXDATA limit) with a 256 MiB hard cap. |
+| 7 | `WRITECACHE` | **Yes** | nfs-v2 | Correct | **Reserved no-op.** RFC 1094 §2.2.8: not implemented by any known server. Present for completeness alongside ROOT (same rationale). |
+| 8 | `WRITE` | **Yes** | nfs-v2 | Correct | Writes bytes to a file. Always synchronous in v2 -- server must flush to stable storage before returning (RFC 1094 §2.2). `beginoffset` and `totalcount` set to 0 per RFC. |
+| 9 | `CREATE` | **Yes** | nfs-v2 | Correct | Creates a new file. Returns file handle + attrs. |
+| 10 | `REMOVE` | **Yes** | nfs-v2 | Correct | Deletes a file. Non-idempotent -- retry after timeout may return NOENT. |
+| 11 | `RENAME` | **Yes** | nfs-v2 | Correct | Renames or moves a file. Atomic on the server. |
+| 12 | `LINK` | **Yes** | nfs-v2 | Correct | Creates a hard link. |
+| 13 | `SYMLINK` | **Yes** | nfs-v2 | Correct | Creates a symbolic link. |
+| 14 | `MKDIR` | **Yes** | nfs-v2 | Correct | Creates a directory. Returns file handle + attrs. |
+| 15 | `RMDIR` | **Yes** | nfs-v2 | Correct | Removes a directory. Non-idempotent. |
+| 16 | `READDIR` | **Yes** | nfs-v2 | Correct | Lists directory entries (fileid + name + cookie). Cookie-based pagination with XDR boolean-preceded linked list. Handles EOF flag. |
+| 17 | `STATFS` | **Yes** | nfs-v2 | Correct | Returns filesystem stats: optimal transfer size, block size, total/free/available blocks. |
 
-**Implementation**: All 18 procedures are implemented in `crates/nfswolf-nfs2/src/{wire.rs,client.rs}`, including ROOT (as a MOUNT-bypass probe) and WRITECACHE (as a reserved no-op). The binary links `nfswolf-nfs2` and `--nfs-version 2` enters a v2 shell via MOUNT v1 MNT. Identity changes (`uid`, `gid`, `hostname`, `impersonate`) are supported by tearing down the TCP session and reconnecting with new AUTH_SYS credentials -- the same pattern as the NFSv4 shell's `reconnect_with_auth`. The v2 shell defaults to mounting `/` when no export path is specified, matching v3 behavior. The v2 shell supports `--handle HEX` for MOUNT bypass (connect directly to nfsd with a known handle, skipping portmapper and mountd) and `-c "command"` for non-interactive scripting mode. `brute-handle` and `escape` automatically fall back to NFSv2 when the target server does not support v3 or when v3 enforces Kerberos. Live-tested against Ubuntu 14 (kernel 4.4) and Ubuntu 18 (kernel 4.15).
+**Implementation**: All 18 procedures are implemented in `crates/nfs-v2/src/{wire.rs,client.rs}`, including ROOT (as a MOUNT-bypass probe) and WRITECACHE (as a reserved no-op). The binary links `nfs-v2` and `--nfs-version 2` enters a v2 shell (52 commands, including the `root` command for NFSPROC_ROOT probing) via MOUNT v1 MNT. Identity changes (`uid`, `gid`, `hostname`, `impersonate`, `su`) are supported by tearing down the TCP session and reconnecting with new AUTH_SYS credentials -- the same pattern as the NFSv4 shell's `reconnect_with_auth`. The v2 shell defaults to mounting `/` when no export path is specified, matching v3 behavior. The v2 shell supports `--handle HEX` for MOUNT bypass (connect directly to nfsd with a known handle, skipping portmapper and mountd) and `-c "command"` for non-interactive scripting mode. `brute-handle` and `escape` automatically fall back to NFSv2 when the target server does not support v3 or when v3 enforces Kerberos. Live-tested against Ubuntu 14 (kernel 4.4) and Ubuntu 18 (kernel 4.15).
 
 ### When port 2049 is blocked
 
@@ -207,4 +207,4 @@ These properties make NFSv2 the preferred downgrade target for attackers when a 
 - **Synchronous writes only** -- Every WRITE must be flushed to stable storage before the server replies. No `stable_how::UNSTABLE` option. Slower than v3 but guarantees data persistence.
 - **No STALE/BADHANDLE distinction** -- NFSv2 only has `NFSERR_STALE` (error 70). There is no `BADHANDLE` error code, so the handle oracle that works on v3 (right format vs wrong format) is not available. Handle brute-forcing on v2 is blind -- STALE means "invalid" without distinguishing format errors from inode/generation misses.
 
-**Error classification**: `Nfs2Error` provides `is_permission_denied()`, `is_stale()`, and `is_not_found()` predicates matching NFSv3's `Nfs3Fault` API. `NfsStat` implements `Display` with RFC 1094 error names (e.g., `NFSERR_STALE`). These predicates are used by the escape and brute-handle fallback paths when operating against v2-only servers.
+**Error classification**: `Nfs2Error<E>` provides `is_permission_denied()`, `is_stale()`, and `is_not_found()` predicates matching NFSv3's `Nfs3Fault` API. `Nfs2Stat` implements `Display` with RFC 1094 error names (e.g., `NFSERR_STALE`). These predicates are used by the escape and brute-handle fallback paths when operating against v2-only servers.

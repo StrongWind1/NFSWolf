@@ -1,0 +1,24 @@
+[package]
+name = "onc-rpcbind"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/onc-rpcbind"
+description = "Portmapper v2 (RFC 1057) and rpcbind v3/v4 (RFC 1833) clients for ONC RPC service discovery."
+readme = "README.md"
+keywords = ["rpcbind", "portmapper", "onc", "rpc", "discovery"]
+categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md"]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+onc-xdr = { workspace = true }
+onc-rpc-client = { workspace = true }
+
+[lints]
+workspace = true

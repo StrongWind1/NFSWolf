@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::proto::mount::{ExportEntry, MountedClient};
+use crate::proto::portmap::PortmapEntry;
 
 // --- Target specification ---------------------------------------------------
 
@@ -169,6 +170,12 @@ pub(crate) struct MountPortInfo {
 pub(crate) struct V4ExportEntry {
     /// Entry name from the pseudo-root READDIR (e.g., `"srv"`, `"data"`).
     pub path: String,
+    /// Authentication flavors from SECINFO probe.
+    ///
+    /// Populated when the scanner issues SECINFO per pseudo-root entry.
+    /// Empty if NFSv4 SECINFO was not attempted or the server rejected it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub auth_flavors: Vec<u32>,
 }
 
 // --- Host result ------------------------------------------------------------
@@ -196,11 +203,24 @@ pub(crate) struct HostResult {
     pub exports_v3: Option<Vec<ExportEntry>>,
     /// NFSv4 top-level pseudo-FS entries.  `None` = v4 unreachable or READDIR failed.
     pub exports_v4: Option<Vec<V4ExportEntry>>,
+    /// All RPC services from PMAPPROC_DUMP.  Empty if portmapper was unreachable.
+    pub rpc_services: Vec<PortmapEntry>,
     /// Connected clients from MOUNT DUMP.  `None` = DUMP unavailable.
     pub mounts: Option<Vec<MountedClient>>,
     /// Version range from the first PROG_MISMATCH reply (Hint column).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<VersionRange>,
+    /// RDMA transport detected via rpcbind GETADDR or port 20049 probe.
+    ///
+    /// RDMA (Remote Direct Memory Access) NFS bypasses the kernel's TCP/IP stack
+    /// and may not be subject to host-based firewalls or iptables rules.
+    /// Detected by querying rpcbind v3 GETADDR for "rdma"/"rdma6" netids
+    /// (RFC 1833 sec. 2.1) or probing TCP port 20049 (the conventional NFS/RDMA port).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rdma_detected: bool,
+    /// OS/FS fingerprint from the first valid MOUNT handle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_guess: Option<String>,
     /// Wall-clock time for all probes on this host.
     #[serde(with = "duration_ms")]
     pub scan_duration: Duration,

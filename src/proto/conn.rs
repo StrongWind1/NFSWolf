@@ -11,11 +11,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use nfswolf_nfs3::wire::{GETATTR3args, Nfs3Result, nfs_fh3, nfsstat3};
-use nfswolf_rpc::rpc::RpcClient;
-use nfswolf_rpc::transport::net::Connector;
-use nfswolf_rpc::transport::tokio::{TokioConnector, TokioIo};
-use nfswolf_xdr::{Pack, Unpack, Void};
+use nfs_v3::wire::{GETATTR3args, Nfs3Result, nfs_fh3, nfsstat3};
+use onc_rpc_client::rpc::RpcClient;
+use onc_rpc_client::transport::net::Connector;
+use onc_rpc_client::transport::tokio::{TokioConnector, TokioIo};
+use onc_xdr::{Pack, Unpack, Void};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -23,7 +23,7 @@ use crate::proto::auth::Credential;
 
 /// NFS RPC program number and NFSv3 version, from the protocol crate rather
 /// than restated here (RFC 1813 sec. 3).
-use nfswolf_nfs3::{PROGRAM as NFS_PROGRAM, VERSION as NFS_VERSION_3};
+use nfs_v3::{PROGRAM as NFS_PROGRAM, VERSION as NFS_VERSION_3};
 
 /// `NFSPROC3_GETATTR` -- procedure 1 (RFC 1813 sec. 3.3.1).
 const NFSPROC3_GETATTR: u32 = 1;
@@ -131,7 +131,7 @@ impl NfsConnection {
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
 
         let io = Self::open(nfs_addr, proxy).await.with_context(|| format!("NFS connect to {nfs_addr}"))?;
-        let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default());
+        let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), onc_rpc_client::rpc::opaque_auth::default());
 
         Ok(Self { rpc, root: Some(mounted.handle.as_bytes().to_vec()), _auth_flavors: mounted.auth_flavors, addr, export: export.to_owned(), credential, _reconnect: reconnect, health: ConnectionHealth::new() })
     }
@@ -145,7 +145,7 @@ impl NfsConnection {
     pub(crate) async fn connect_direct(addr: SocketAddr, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
         let io = Self::open(nfs_addr, proxy).await.with_context(|| format!("direct NFS connect to {nfs_addr}"))?;
-        let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), nfswolf_rpc::rpc::opaque_auth::default());
+        let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), onc_rpc_client::rpc::opaque_auth::default());
 
         // Nothing was advertised; assume AUTH_SYS, which is what a raw handle is
         // being used with in the first place.
@@ -168,7 +168,7 @@ impl NfsConnection {
     /// Re-encodes the credential per call so each carries a fresh AUTH_SYS
     /// stamp (RFC 1057 sec. 9.2); a repeated stamp lets a server answer from its
     /// duplicate-request cache, which silently corrupts a UID sweep.
-    pub(crate) async fn call<C, R>(&mut self, program: u32, version: u32, proc: u32, args: &C) -> Result<R, nfswolf_rpc::RpcError>
+    pub(crate) async fn call<C, R>(&mut self, program: u32, version: u32, proc: u32, args: &C) -> Result<R, onc_rpc_client::RpcError>
     where
         C: Pack + Send + Sync,
         R: Unpack,
@@ -181,7 +181,7 @@ impl NfsConnection {
 
     /// Issue one call under `cred`, restoring this connection's own credential
     /// afterwards so the next pool user is not left carrying a borrowed identity.
-    pub(crate) async fn call_as<C, R>(&mut self, cred: nfswolf_rpc::rpc::opaque_auth<'static>, program: u32, version: u32, proc: u32, args: &C) -> Result<R, nfswolf_rpc::RpcError>
+    pub(crate) async fn call_as<C, R>(&mut self, cred: onc_rpc_client::rpc::opaque_auth<'static>, program: u32, version: u32, proc: u32, args: &C) -> Result<R, onc_rpc_client::RpcError>
     where
         C: Pack + Send + Sync,
         R: Unpack,
@@ -211,11 +211,11 @@ impl NfsConnection {
         let Some(root) = self.root.clone() else {
             return self.call::<Void, Void>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_NULL, &Void).await.is_ok();
         };
-        let args = GETATTR3args { object: nfs_fh3 { data: nfswolf_xdr::Opaque::owned(root) } };
-        match self.call::<_, nfswolf_nfs3::wire::GETATTR3res>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_GETATTR, &args).await {
+        let args = GETATTR3args { object: nfs_fh3 { data: onc_xdr::Opaque::owned(root) } };
+        match self.call::<_, nfs_v3::wire::GETATTR3res>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_GETATTR, &args).await {
             Ok(Nfs3Result::Ok(_)) => true,
             Ok(Nfs3Result::Err((status, _))) => matches!(status, nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM),
-            Err(_) => false,
+            Ok(_) | Err(_) => false,
         }
     }
 

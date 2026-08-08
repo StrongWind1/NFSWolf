@@ -35,17 +35,17 @@
     clippy::cast_sign_loss,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use nfswolf_rpc::transport::DirectTransport;
+use onc_rpc_client::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use nfs_v3::MountClient;
+use nfs_v3::wire::mount::dirpath;
 use nfs3_server::memfs::{MemFs, MemFsConfig};
 use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
-use nfswolf_nfs3::MountClient;
-use nfswolf_nfs3::wire::mount::dirpath;
-use nfswolf_rpc::PortmapperClient;
-use nfswolf_rpc::transport::tokio::TokioIo;
-use nfswolf_xdr::Opaque;
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_rpcbind::PortmapperClient;
+use onc_xdr::Opaque;
 use tokio::net::TcpStream;
 
 // --- Helpers ---
@@ -63,7 +63,7 @@ async fn start_memfs(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16) 
 async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::new(DirectTransport::new(TokioIo::new(stream)))
+    MountClient::v3(DirectTransport::new(TokioIo::new(stream)))
 }
 
 async fn portmap_client(port: u16) -> PortmapperClient<TokioIo<TcpStream>> {
@@ -109,7 +109,7 @@ async fn memfs_advertises_auth_sys_no_kerberos() {
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
 
-    let mount_res = mc.mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
+    let mount_res = mc.v3_mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
 
     // AUTH_SYS = 1. Must be present; RPCSEC_GSS = 6 must be absent.
     assert!(mount_res.auth_flavors.contains(&1), "MemFs must advertise AUTH_SYS (flavor 1)");
@@ -132,7 +132,7 @@ async fn memfs_root_handle_is_non_empty() {
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
 
-    let mount_res = mc.mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
+    let mount_res = mc.v3_mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
     let fh = mount_res.fhandle.0.as_ref();
 
     // Handle must be non-empty -- any length is valid since MemFs uses its own format.
@@ -177,7 +177,7 @@ async fn memfs_auth_flavors_are_valid() {
     let exports = mc.export().await.expect("MNTPROC_EXPORT must succeed");
     let first_path = exports.into_inner().into_iter().next().map(|e| e.ex_dir.0.as_ref().to_vec()).expect("at least one export");
 
-    let mount_res = mc.mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
+    let mount_res = mc.v3_mnt(dirpath(Opaque::owned(first_path))).await.expect("MNT must succeed");
     let known_flavors: &[u32] = &[0, 1, 2, 6];
     for &flavor in &mount_res.auth_flavors {
         assert!(known_flavors.contains(&flavor) || flavor >= 300_000, "unexpected auth flavor {flavor} -- not a well-known value and not in RPCSEC_GSS range");
@@ -190,8 +190,8 @@ async fn memfs_auth_flavors_are_valid() {
 async fn memfs_file_handle_usable_across_connections() {
     // Obtain a file handle on one connection, then use GETATTR with it on a
     // second independent connection. Handles are bearer tokens (RFC 1094 sec. 2.3.3).
-    use nfswolf_nfs3::Nfs3Client;
-    use nfswolf_nfs3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3, nfs_fh3};
+    use nfs_v3::Nfs3Client;
+    use nfs_v3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3, nfs_fh3};
 
     let mut config = MemFsConfig::default();
     config.add_file("/bearer.txt", b"test data");
@@ -201,7 +201,7 @@ async fn memfs_file_handle_usable_across_connections() {
 
     // Connection 1: MOUNT + LOOKUP to get a file handle.
     let mc = mount_client(port).await;
-    let mnt = mc.mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let mnt = mc.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
     let root_fh = nfs_fh3 { data: mnt.fhandle.0.clone() };
 
     let addr = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
@@ -211,6 +211,7 @@ async fn memfs_file_handle_usable_across_connections() {
     let fh = match nfs1.lookup(&LOOKUP3args { what: diropargs3 { dir: root_fh, name: filename3(Opaque::borrowed(b"bearer.txt")) } }).await.expect("LOOKUP must succeed") {
         Nfs3Result::Ok(ok) => ok.object,
         Nfs3Result::Err((stat, _)) => panic!("LOOKUP: {stat:?}"),
+        _ => unreachable!(),
     };
 
     // Connection 2: GETATTR with the handle from connection 1.
@@ -219,9 +220,10 @@ async fn memfs_file_handle_usable_across_connections() {
 
     match nfs2.getattr(&GETATTR3args { object: fh }).await.expect("GETATTR must succeed") {
         Nfs3Result::Ok(ok) => {
-            assert_eq!(ok.obj_attributes.type_, nfswolf_nfs3::wire::ftype3::NF3REG, "handle from conn 1 must work on conn 2");
+            assert_eq!(ok.obj_attributes.type_, nfs_v3::wire::ftype3::NF3REG, "handle from conn 1 must work on conn 2");
         },
         Nfs3Result::Err((stat, _)) => panic!("GETATTR on second connection: {stat:?}"),
+        _ => unreachable!(),
     }
 }
 
@@ -238,6 +240,6 @@ async fn memfs_portmapper_responds_to_nfs_getport() {
 
     let mut pm = portmap_client(port).await;
     // PMAPPROC_GETPORT for NFS v3 -- MemFs serves NFS on the same port it was bound to.
-    let nfs_port = pm.getport(100_003, 3, nfswolf_rpc::portmap::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
+    let nfs_port = pm.getport(100_003, 3, onc_rpcbind::IPPROTO_TCP).await.expect("PMAPPROC_GETPORT for NFS v3 must succeed");
     assert_eq!(nfs_port, port, "portmapper must report NFS v3 port matching server bind port");
 }

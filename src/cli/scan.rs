@@ -274,6 +274,33 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 let v2_flag = if note.contains("NFSv2") { " --nfs-version 2" } else { "" };
                 println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
+            Ok(EscapeOutcome::WebNfs { public_handle, version }) => {
+                escaped += 1;
+                let hex = public_handle.to_hex();
+                println!();
+                println!("{}", crate::output::status_ok(&format!("{}:{} WebNFS escape (NFS{version}) -- public handle accepted, MOUNT bypass", res.host, res.export)));
+                if hex.is_empty() {
+                    crate::output::print_handle("Public handle", "(zero-length)");
+                } else {
+                    crate::output::print_handle("Public handle", &hex);
+                }
+                let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
+                let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
+                let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
+                let v2_flag = if *version == "v2" { " --nfs-version 2" } else { "" };
+                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+            },
+            Ok(EscapeOutcome::Nfs4Lookupp { root_handle }) => {
+                escaped += 1;
+                let hex = root_handle.to_hex();
+                println!();
+                println!("{}", crate::output::status_ok(&format!("{}:{} escaped  --  NFSv4 LOOKUPP traversal", res.host, res.export)));
+                crate::output::print_handle("Root handle", &hex);
+                let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
+                let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
+                let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
+                println!("    {} shell {} --nfs-version 4{proxy_flag}{nfs_port_flag}{mount_port_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+            },
             Ok(EscapeOutcome::StaleNoRoot) => {
                 println!("  {}", format!("{}:{}  handle valid but root not found (raise `escape --max-root-scan`)", res.host, res.export).dimmed());
             },
@@ -299,7 +326,7 @@ fn print_table(results: &[HostResult], scan_udp: bool) {
     }
 
     // Build all rows first so we can detect blank columns.
-    let headers = ["Hostname", "IP", "RPC Port 111", "NFS Port", "NFSv2", "v2 Exports", "NFSv3", "v3 Exports", "NFSv4", "v4 Exports", "Hint", "Mount Port", "Clients"];
+    let headers = ["Hostname", "IP", "RPC Port 111", "NFS Port", "NFSv2", "v2 Exports", "NFSv3", "v3 Exports", "NFSv4", "v4 Exports", "OS", "Hint", "Mount Port", "Clients"];
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(results.len());
 
     for r in results {
@@ -314,6 +341,7 @@ fn print_table(results: &[HostResult], scan_udp: bool) {
             render_export_count(r.exports_v3.as_deref()),
             if r.has_v4() { "yes".to_owned() } else { "--".to_owned() },
             render_v4_export_count(r),
+            r.os_guess.as_deref().unwrap_or("--").to_owned(),
             render_hint(r),
             render_mount_ports(&r.mount_ports),
             render_mounts_count(r),
@@ -469,6 +497,14 @@ fn print_host_details(results: &[HostResult]) {
             println!("{}", r.ip);
         }
 
+        // RPC services from portmapper DUMP (labelled with program names).
+        print_rpc_services(r);
+
+        // RDMA transport advisory.
+        if r.rdma_detected {
+            println!("  {} RDMA transport available -- may bypass host firewalls", "[!]".bold().yellow());
+        }
+
         // Export list deduplication and display.
         print_exports(r);
 
@@ -478,6 +514,48 @@ fn print_host_details(results: &[HostResult]) {
         {
             let entries: Vec<String> = mounts.iter().map(|m| format!("{}:{}", m.hostname, m.directory)).collect();
             println!("  Clients: {}", entries.join(", "));
+        }
+    }
+}
+
+/// Print discovered RPC services with human-readable program names.
+///
+/// Groups entries by (program, port) and shows each with versions and transport.
+/// Uses `onc_rpcbind::program_name` to resolve the program number;
+/// unknown programs are shown as their bare number.
+fn print_rpc_services(r: &HostResult) {
+    if r.rpc_services.is_empty() {
+        return;
+    }
+
+    // Deduplicate into (program, port) -> (name, versions, protocols) groups.
+    // Using a BTreeMap so output is sorted by (program, port).
+    let mut groups: std::collections::BTreeMap<(u32, u16), (Vec<u32>, bool, bool)> = std::collections::BTreeMap::new();
+    for entry in &r.rpc_services {
+        let key = (entry.program, entry.port);
+        let slot = groups.entry(key).or_insert_with(|| (Vec::new(), false, false));
+        if !slot.0.contains(&entry.version) {
+            slot.0.push(entry.version);
+        }
+        if entry.protocol == onc_rpcbind::IPPROTO_TCP {
+            slot.1 = true;
+        }
+        if entry.protocol == onc_rpcbind::IPPROTO_UDP {
+            slot.2 = true;
+        }
+    }
+
+    println!("  RPC services:");
+    for ((prog, port), (versions, tcp, udp)) in &groups {
+        let name = onc_rpcbind::program_name(*prog).unwrap_or("unknown");
+        let proto = port_proto_str(*tcp, *udp);
+        let mut vers = versions.clone();
+        vers.sort_unstable();
+        let ver_str: String = vers.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+        if let Some(note) = onc_rpcbind::security_note(*prog) {
+            println!("    {prog:<8}{name:<14}v{ver_str:<8}{port}/{proto}  \x1b[33m! {note}\x1b[0m");
+        } else {
+            println!("    {prog:<8}{name:<14}v{ver_str:<8}{port}/{proto}");
         }
     }
 }
@@ -509,12 +587,29 @@ fn print_exports(r: &HostResult) {
             ExportListKind::Mount(entries) => {
                 for e in *entries {
                     let acl = if e.allowed_hosts.is_empty() { "*".to_owned() } else { e.allowed_hosts.join(",") };
-                    println!("    {:<40}{acl}", e.path);
+                    let handle_hint = if e.handle_hex.len() > 16 {
+                        format!(" fh={}...", &e.handle_hex[..16])
+                    } else if !e.handle_hex.is_empty() {
+                        format!(" fh={}", e.handle_hex)
+                    } else {
+                        String::new()
+                    };
+                    if e.auth_flavors.is_empty() {
+                        println!("    {:<40}{acl}{handle_hint}", e.path);
+                    } else {
+                        let flavors: Vec<String> = e.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
+                        println!("    {:<40}{acl:<24}[{}]{handle_hint}", e.path, flavors.join(","));
+                    }
                 }
             },
             ExportListKind::V4(entries) => {
                 for e in *entries {
-                    println!("    {}", e.path);
+                    if e.auth_flavors.is_empty() {
+                        println!("    {}", e.path);
+                    } else {
+                        let flavors: Vec<String> = e.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
+                        println!("    {:<40}[{}]", e.path, flavors.join(","));
+                    }
                 }
             },
         }
@@ -600,17 +695,30 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
             "udp": p.udp,
             "versions": p.versions,
         })).collect::<Vec<_>>(),
+        "rpc_services": r.rpc_services.iter().map(|e| serde_json::json!({
+            "program": e.program,
+            "program_name": onc_rpcbind::program_name(e.program),
+            "version": e.version,
+            "protocol": if e.protocol == onc_rpcbind::IPPROTO_TCP { "tcp" } else if e.protocol == onc_rpcbind::IPPROTO_UDP { "udp" } else { "other" },
+            "port": e.port,
+            "security_note": onc_rpcbind::security_note(e.program),
+        })).collect::<Vec<_>>(),
         "exports": {
             "v2": r.exports_v2.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,
                 "allowed": if e.allowed_hosts.is_empty() { vec!["*".to_owned()] } else { e.allowed_hosts.clone() },
+                "auth_flavors": e.auth_flavors,
+                "handle": e.handle_hex,
             })).collect::<Vec<_>>()),
             "v3": r.exports_v3.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,
                 "allowed": if e.allowed_hosts.is_empty() { vec!["*".to_owned()] } else { e.allowed_hosts.clone() },
+                "auth_flavors": e.auth_flavors,
+                "handle": e.handle_hex,
             })).collect::<Vec<_>>()),
             "v4": r.exports_v4.as_ref().map(|v| v.iter().map(|e| serde_json::json!({
                 "path": e.path,
+                "auth_flavors": e.auth_flavors,
             })).collect::<Vec<_>>()),
         },
         "mounts": r.mounts.as_ref().map(|m| m.iter().map(|c| serde_json::json!({
@@ -618,9 +726,38 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
             "directory": c.directory,
         })).collect::<Vec<_>>()),
         "mounts_available": r.mounts.is_some(),
+        "rdma_detected": r.rdma_detected,
+        "os_guess": r.os_guess,
         "hint": r.hint.as_ref().map(ToString::to_string),
         "scan_duration_ms": u64::try_from(r.scan_duration.as_millis()).unwrap_or(u64::MAX),
     })
+}
+
+/// Collect all auth flavors across v2/v3/v4 exports into a deduplicated, sorted string.
+fn build_auth_flavors(r: &HostResult) -> String {
+    let mut flavors = std::collections::BTreeSet::new();
+    if let Some(ref exports) = r.exports_v2 {
+        for e in exports {
+            for &f in &e.auth_flavors {
+                _ = flavors.insert(crate::proto::auth::flavor_name(f));
+            }
+        }
+    }
+    if let Some(ref exports) = r.exports_v3 {
+        for e in exports {
+            for &f in &e.auth_flavors {
+                _ = flavors.insert(crate::proto::auth::flavor_name(f));
+            }
+        }
+    }
+    if let Some(ref exports) = r.exports_v4 {
+        for e in exports {
+            for &f in &e.auth_flavors {
+                _ = flavors.insert(crate::proto::auth::flavor_name(f));
+            }
+        }
+    }
+    if flavors.is_empty() { "--".to_owned() } else { flavors.into_iter().collect::<Vec<_>>().join(",") }
 }
 
 // --- CSV output --------------------------------------------------------------
@@ -629,7 +766,7 @@ fn host_to_json(r: &HostResult) -> serde_json::Value {
 fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyhow::Result<()> {
     use std::fmt::Write as _;
 
-    let mut csv = String::from("Hostname,IP,:111,NFS Port,v2,v2x,v3,v3x,v4,v4x,Hint,Mount Port,Clients,HostInfo\n");
+    let mut csv = String::from("Hostname,IP,:111,NFS Port,v2,v2x,v3,v3x,v4,v4x,OS,Auth,Hint,Mount Port,Clients,HostInfo\n");
 
     for r in results {
         let hostname = r.hostname.as_deref().unwrap_or("");
@@ -642,6 +779,8 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
         let v3x = render_export_count(r.exports_v3.as_deref());
         let v4 = if r.has_v4() { "true" } else { "--" };
         let v4x = render_v4_export_count(r);
+        let os = r.os_guess.as_deref().unwrap_or("--");
+        let auth = build_auth_flavors(r);
         let hint = r.hint.as_ref().map_or_else(|| "--".to_owned(), ToString::to_string);
         let mount_port = render_mount_ports(&r.mount_ports);
         let mounts = render_mounts_count(r);
@@ -653,7 +792,7 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
         // Infallible: fmt::Write for String never fails.
         let _ = writeln!(
             csv,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_field(hostname),
             csv_field(&ip),
             csv_field(portmap),
@@ -664,6 +803,8 @@ fn write_csv(path: &PathBuf, results: &[HostResult], interrupted: bool) -> anyho
             csv_field(&v3x),
             csv_field(v4),
             csv_field(&v4x),
+            csv_field(os),
+            csv_field(&auth),
             csv_field(&hint),
             csv_field(&mount_port),
             csv_field(&mounts),

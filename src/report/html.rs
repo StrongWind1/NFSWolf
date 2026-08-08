@@ -68,6 +68,12 @@ fn push_host_section(result: &AnalysisResult, html: &mut String) {
         html.push_str("</p>\n");
     }
 
+    if let Some(fp) = &result.impl_fingerprint {
+        html.push_str("<p class=\"meta\">Server impl: ");
+        html.push_str(&html_escape(fp));
+        html.push_str("</p>\n");
+    }
+
     html.push_str("<p class=\"meta\">NFS versions: ");
     html.push_str(&html_escape(&result.nfs_versions.join(", ")));
     html.push_str("</p>\n");

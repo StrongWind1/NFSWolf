@@ -6,9 +6,11 @@
 
 <p align="center">
   <a href="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/nfswolf"><img src="https://img.shields.io/crates/v/nfswolf.svg" alt="crates.io"></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/edition-2024-informational" alt="Edition 2024"></a>
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.95-informational" alt="MSRV 1.95"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="https://docs.rs/nfswolf"><img src="https://img.shields.io/docsrs/nfswolf" alt="docs.rs"></a>
 </p>
 
 <p align="center">
@@ -31,7 +33,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 | Async / concurrent scan | yes | no | no | yes | no | no |
 | AUTH_SYS UID spraying | yes | no | yes | yes | no | no |
 | Export escape (ext4/XFS/BTRFS) | yes | no | no | no | no | no |
-| Interactive NFS shell (44+ commands) | yes | no | no | no | no | yes |
+| Interactive NFS shell (52 commands) | yes | no | no | no | no | yes |
 | FUSE mount (`nfswolf mount`) | yes | no | no | no | no | no |
 | Portmapper / mountd enumeration | yes | partial | no | no | no | no |
 | Self-contained HTML / JSON / CSV reports | yes | no | no | no | no | no |
@@ -95,13 +97,15 @@ cosign verify-blob \
   SHA256SUMS
 ```
 
+### From crates.io
+
+```sh
+cargo install nfswolf
+```
+
 ### From source
 
 ```sh
-# Option 1: cargo install from git (builds and installs to ~/.cargo/bin/)
-cargo install --git https://github.com/StrongWind1/NFSWolf
-
-# Option 2: clone and build locally
 git clone https://github.com/StrongWind1/NFSWolf
 cd NFSWolf
 make release          # optimised native build -> target/release/nfswolf
@@ -199,19 +203,34 @@ See `nfswolf <subcommand> --help` for per-subcommand flags.
 | macOS (Apple Silicon & Intel) | yes | macFUSE req. |
 | Windows x86_64 / arm64 | yes | no |
 
+## Protocol crates
+
+The NFS protocol stack is split into eight standalone crates, published on [crates.io](https://crates.io) and usable independently of the `nfswolf` binary:
+
+| Crate | Description |
+|---|---|
+| [`onc-xdr-derive`](https://crates.io/crates/onc-xdr-derive) | `#[derive(XdrCodec)]` proc macro for XDR (RFC 4506) |
+| [`onc-xdr`](https://crates.io/crates/onc-xdr) | XDR codec: `Pack`/`Unpack` traits, opaque data, length-hardened decoders |
+| [`onc-rpc-client`](https://crates.io/crates/onc-rpc-client) | ONC RPC v2 (RFC 5531) client with AUTH_SYS and async transport |
+| [`onc-rpcbind`](https://crates.io/crates/onc-rpcbind) | Portmapper v2 (RFC 1057) and rpcbind v3/v4 (RFC 1833) |
+| [`nfs-mount`](https://crates.io/crates/nfs-mount) | MOUNT v1/v3 (RFC 1094 / RFC 1813) |
+| [`nfs-v2`](https://crates.io/crates/nfs-v2) | NFSv2 (RFC 1094): all 18 procedures |
+| [`nfs-v3`](https://crates.io/crates/nfs-v3) | NFSv3 (RFC 1813): all 22 procedures + domain types |
+| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): COMPOUND, SECINFO, read-only subset |
+
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 469+ tests across 6 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 543 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (469+ tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (543 tests), doc, hygiene, machete
 ```
 
 ## Credits
 
-- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz - the NFSv3 / MOUNT / portmapper / XDR foundation that the `crates/nfswolf-*` protocol stack grew out of, released into the public domain under the Unlicense.
+- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz - the NFSv3 / MOUNT / portmapper / XDR foundation that the protocol crates (`onc-xdr`, `onc-rpc-client`, `nfs-v3`) grew out of, released into the public domain under the Unlicense.
 - Authors of RFC 1057, RFC 1094, RFC 1813, RFC 5531, RFC 7530, RFC 2623, RFC 9289.
 - Prior-art tools that inspired this consolidation: `nfsspy`, `nfsshell`, `showmount`, Metasploit NFS modules.
 
@@ -222,6 +241,7 @@ Other projects in this collection:
 - [CredWolf](https://github.com/StrongWind1/CredWolf) - Active Directory credential validation
 - [KerbWolf](https://github.com/StrongWind1/KerbWolf) - Kerberos roasting and hash extraction toolkit
 - [NTDSWolf](https://github.com/StrongWind1/NTDSWolf) - offline NTDS.dit parser and credential extractor
+- [WEPWolf](https://github.com/StrongWind1/WEPWolf) - offline WEP key recovery from 802.11 captures
 - [WPAWolf](https://github.com/StrongWind1/WPAWolf) - WPA/WPA2/WPA3-FT-PSK handshake extraction from captures
 
 ## Disclaimer

@@ -66,6 +66,8 @@ pub(crate) fn credential_ladder(caller: (u32, u32), owner: Option<(u32, u32)>) -
 pub(crate) fn credential_ladder_with(caller: (u32, u32), owner: Option<(u32, u32)>, mode: Option<u32>, observed: &[(u32, u32)]) -> Vec<(u32, u32)> {
     let mut list = Vec::with_capacity(16);
     if let Some((file_uid, file_group)) = owner {
+        // Unconditional: nfsd_permission() grants owner access regardless of mode bits
+        // (NFSD_MAY_OWNER_OVERRIDE, C702 sec. 12.3.3).
         list.push((file_uid, file_group));
         if file_group != caller.1 {
             list.push((caller.0, file_group));

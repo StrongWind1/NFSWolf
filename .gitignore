@@ -1,6 +1,5 @@
 dist/
 ref/
-docs/
 CLAUDE.md
 tasklist.md
 .vscode/
@@ -222,4 +221,3 @@ System Volume Information/
 
 # Temp directory
 [Tt]emp/
-RFC_COMPLIANCE_REVIEW.md

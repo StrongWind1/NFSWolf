@@ -466,6 +466,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -628,6 +634,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfs-mount"
+version = "1.0.0"
+dependencies = [
+ "onc-rpc-client",
+ "onc-xdr",
+]
+
+[[package]]
+name = "nfs-v2"
+version = "1.0.0"
+dependencies = [
+ "nfs-mount",
+ "onc-rpc-client",
+ "onc-xdr",
+ "tracing",
+]
+
+[[package]]
+name = "nfs-v3"
+version = "1.0.0"
+dependencies = [
+ "nfs-mount",
+ "onc-rpc-client",
+ "onc-xdr",
+ "tracing",
+]
+
+[[package]]
+name = "nfs-v4"
+version = "1.0.0"
+dependencies = [
+ "onc-rpc-client",
+ "onc-xdr",
+ "tracing",
+]
+
+[[package]]
 name = "nfs3_macros"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -661,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "nfswolf"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -673,12 +716,14 @@ dependencies = [
  "indicatif",
  "ipnet",
  "libc",
+ "nfs-mount",
+ "nfs-v2",
+ "nfs-v3",
+ "nfs-v4",
  "nfs3_server",
- "nfswolf-nfs2",
- "nfswolf-nfs3",
- "nfswolf-nfs4",
- "nfswolf-rpc",
- "nfswolf-xdr",
+ "onc-rpc-client",
+ "onc-rpcbind",
+ "onc-xdr",
  "predicates",
  "proptest",
  "rand 0.10.2",
@@ -690,57 +735,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "nfswolf-nfs2"
-version = "0.8.0"
-dependencies = [
- "nfswolf-rpc",
- "nfswolf-xdr",
- "tracing",
-]
-
-[[package]]
-name = "nfswolf-nfs3"
-version = "0.8.0"
-dependencies = [
- "nfswolf-rpc",
- "nfswolf-xdr",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "nfswolf-nfs4"
-version = "0.8.0"
-dependencies = [
- "nfswolf-xdr",
-]
-
-[[package]]
-name = "nfswolf-rpc"
-version = "0.8.0"
-dependencies = [
- "fastrand",
- "nfswolf-xdr",
- "tokio",
-]
-
-[[package]]
-name = "nfswolf-xdr"
-version = "0.8.0"
-dependencies = [
- "nfswolf-xdr-derive",
-]
-
-[[package]]
-name = "nfswolf-xdr-derive"
-version = "0.8.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
 ]
 
 [[package]]
@@ -819,6 +813,41 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "onc-rpc-client"
+version = "1.0.0"
+dependencies = [
+ "fastrand",
+ "onc-xdr",
+ "tokio",
+]
+
+[[package]]
+name = "onc-rpcbind"
+version = "1.0.0"
+dependencies = [
+ "onc-rpc-client",
+ "onc-xdr",
+]
+
+[[package]]
+name = "onc-xdr"
+version = "1.0.0"
+dependencies = [
+ "onc-xdr-derive",
+]
+
+[[package]]
+name = "onc-xdr-derive"
+version = "1.0.0"
+dependencies = [
+ "onc-xdr",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+ "trybuild",
 ]
 
 [[package]]
@@ -1225,6 +1254,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1317,6 +1355,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-triple"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1327,6 +1371,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]
@@ -1353,26 +1406,6 @@ checksum = "0f8daae29995a24f65619e19d8d31dea5b389f3d853d8bf297bbf607cd0014cc"
 dependencies = [
  "ansitok",
  "unicode-width",
-]
-
-[[package]]
-name = "thiserror"
-version = "2.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
-dependencies = [
- "thiserror-impl",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "2.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
 ]
 
 [[package]]
@@ -1413,6 +1446,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.1.4+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1441,6 +1489,12 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tracing"
@@ -1501,6 +1555,21 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "trybuild"
+version = "1.0.120"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e605bf6b39357663d8ba4e984f8be8da8df6bb32e81031d6889024ea8fd68e4"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-triple",
+ "termcolor",
+ "toml",
 ]
 
 [[package]]
@@ -1655,6 +1724,15 @@ name = "winapi-i686-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys",
+]
 
 [[package]]
 name = "winapi-x86_64-pc-windows-gnu"

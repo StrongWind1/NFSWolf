@@ -359,30 +359,17 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
     found_root
 }
 
-/// NFSv2 inode sweep using Nfs2Client + DirectTransport.
+/// NFSv2 inode sweep using the pooled Nfs2Client.
 ///
 /// NFSv2 has no BADHANDLE oracle (all rejections are NFSERR_STALE per
 /// RFC 1094 S2.3.1), so we can't distinguish format errors from wrong
 /// inode/gen. Handles are fixed 32 bytes, zero-padded.
 async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str, globals: &GlobalOpts) -> bool {
-    use crate::proto::auth::next_stamp;
-    use nfswolf_nfs2::{Nfs2Client, wire::Nfs2FileHandle};
-    use nfswolf_rpc::{rpc::opaque_auth, transport::direct::DirectTransport, transport::tokio::TokioIo};
+    use crate::cli::probe::make_v2_client_with_hostname;
+    use nfs_v2::wire::Nfs2FileHandle;
 
-    let nfs_port = globals.nfs_port.unwrap_or(2049);
-    let nfs_addr = std::net::SocketAddr::new(addr.ip(), nfs_port);
-    let stream = match tokio::net::TcpStream::connect(nfs_addr).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{}", crate::output::status_err(&format!("connect to {nfs_addr}: {e}")));
-            return false;
-        },
-    };
-    let io = TokioIo::new(stream);
-    let cred = AuthSys::new(0, 0, "nfswolf");
-    let opaque = cred.to_opaque_auth(next_stamp());
-    let transport = DirectTransport::with_auth(io, opaque, opaque_auth::default());
-    let client = Nfs2Client::new(transport);
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
 
     let mut found_root = false;
     let mut extra_hits: Vec<(u64, u32, String)> = Vec::new();
@@ -407,7 +394,7 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
             match client.getattr(&fh).await {
                 Ok(a) => {
                     let hex = cand.root_handle.to_hex();
-                    let is_dir = a.ftype == nfswolf_nfs2::wire::FType::Directory;
+                    let is_dir = a.ftype == nfs_v2::wire::FType::Directory;
                     if is_dir && !found_root {
                         report_hit_v2(&cand, &format!("inode {inode} gen {generation}"), host);
                         found_root = true;
@@ -416,7 +403,7 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
                     }
                 },
                 Err(e) => {
-                    if matches!(e.status(), Some(nfswolf_nfs2::NfsStat::Stale)) {
+                    if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) {
                         stale += 1;
                     }
                 },

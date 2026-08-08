@@ -36,7 +36,7 @@ use std::io::Cursor;
 
 use proptest::prelude::*;
 
-use nfswolf_xdr::{Opaque, Pack, Unpack};
+use onc_xdr::{Opaque, Pack, Unpack};
 
 // --- Configuration ---
 
@@ -86,27 +86,27 @@ proptest! {
 
     #[test]
     fn fuzz_nfsstat3_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs3::wire::nfsstat3::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v3::wire::nfsstat3::unpack(&mut Cursor::new(&data));
     }
 
     #[test]
     fn fuzz_ftype3_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs3::wire::ftype3::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v3::wire::ftype3::unpack(&mut Cursor::new(&data));
     }
 
     #[test]
     fn fuzz_fattr3_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs3::wire::fattr3::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v3::wire::fattr3::unpack(&mut Cursor::new(&data));
     }
 
     #[test]
     fn fuzz_nfs_fh3_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs3::wire::nfs_fh3::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v3::wire::nfs_fh3::unpack(&mut Cursor::new(&data));
     }
 
     #[test]
     fn fuzz_mountres3_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs3::wire::mount::mountres3::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v3::wire::mount::mountres3::unpack(&mut Cursor::new(&data));
     }
 }
 
@@ -118,13 +118,13 @@ proptest! {
     #[test]
     #[ignore]
     fn fuzz_compound_res_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs4::CompoundRes::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v4::CompoundRes::unpack(&mut Cursor::new(&data));
     }
 
     #[test]
     fn fuzz_nfs4_status_from_u32(v: u32) {
         // Total function: must never panic for any input.
-        let _ = nfswolf_nfs4::Nfs4Status::from_u32(v);
+        let _ = nfs_v4::Nfs4Status::from_u32(v);
     }
 }
 
@@ -136,12 +136,12 @@ proptest! {
     #[test]
     #[ignore]
     fn fuzz_rpc_msg_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_rpc::rpc::rpc_msg::unpack(&mut Cursor::new(&data));
+        let _ = onc_rpc_client::rpc::rpc_msg::unpack(&mut Cursor::new(&data));
     }
 
     #[test]
     fn fuzz_accepted_reply_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_rpc::rpc::accepted_reply::unpack(&mut Cursor::new(&data));
+        let _ = onc_rpc_client::rpc::accepted_reply::unpack(&mut Cursor::new(&data));
     }
 }
 
@@ -152,17 +152,17 @@ proptest! {
 
     #[test]
     fn fuzz_nfs2_nfsstat_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs2::NfsStat::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v2::Nfs2Stat::unpack(&mut Cursor::new(&data));
     }
 
     #[test]
     fn fuzz_nfs2_diropres_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs2::wire::DirOpRes::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v2::wire::DirOpRes::unpack(&mut Cursor::new(&data));
     }
 
     #[test]
     fn fuzz_nfs2_attrstatres_unpack(data in fuzz_bytes()) {
-        let _ = nfswolf_nfs2::wire::AttrStatRes::unpack(&mut Cursor::new(&data));
+        let _ = nfs_v2::wire::AttrStatRes::unpack(&mut Cursor::new(&data));
     }
 }
 

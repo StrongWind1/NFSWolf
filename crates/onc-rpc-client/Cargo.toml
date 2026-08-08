@@ -1,0 +1,26 @@
+[package]
+name = "onc-rpc-client"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/onc-rpc-client"
+description = "ONC RPC v2 (RFC 5531) client and a runtime-agnostic async transport layer."
+readme = "README.md"
+keywords = ["rpc", "onc", "sunrpc", "client", "network"]
+categories = ["network-programming", "parser-implementations"]
+include = ["src/**", "README.md", "NOTICE"]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+onc-xdr = { workspace = true }
+
+fastrand = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

@@ -2,9 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use nfswolf_nfs3::Nfs3Fault;
-use nfswolf_nfs3::wire::{MKNOD3args, Nfs3Option, Nfs3Result, devicedata3, diropargs3, filename3, mknoddata3, sattr3, set_atime, set_mtime, specdata3, stable_how};
-use nfswolf_xdr::Opaque;
+use nfs_v3::Nfs3Fault;
+use nfs_v3::wire::{MKNOD3args, Nfs3Option, Nfs3Result, devicedata3, diropargs3, filename3, mknoddata3, sattr3, set_atime, set_mtime, specdata3, stable_how};
+use onc_xdr::Opaque;
 
 use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
@@ -60,6 +60,7 @@ fn v3_info(a: &FileAttrs) -> ShellFileInfo {
             FileType::Symlink => ShellFileType::Symlink,
             FileType::Socket => ShellFileType::Socket,
             FileType::Fifo => ShellFileType::Fifo,
+            _ => ShellFileType::Unknown,
         },
         mode: a.mode,
         nlink: a.nlink,
@@ -268,10 +269,10 @@ impl ShellOps for V3Ops {
                 }
             },
             Ok(Nfs3Result::Err((status, _))) => {
-                let err = nfswolf_nfs3::Nfs3Error::from_nfsstat3(status).unwrap_or(nfswolf_nfs3::Nfs3Error::ServerFault);
+                let err = nfs_v3::Nfs3Error::from_nfsstat3(status).unwrap_or(nfs_v3::Nfs3Error::ServerFault);
                 Err(anyhow::anyhow!("{err}"))
             },
-            Err(e) => Err(anyhow::anyhow!("{e}")),
+            Ok(_) | Err(_) => Err(anyhow::anyhow!("unexpected server response")),
         }
     }
 
@@ -318,6 +319,11 @@ impl ShellOps for V3Ops {
 
     fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter> {
         Box::new(Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) })
+    }
+
+    async fn write_verifier(&self, fh: &ShellHandle) -> anyhow::Result<Option<[u8; 8]>> {
+        let verf = self.nfs3.commit_verifier(&to_v3_fh(fh)).await.map_err(fault_to_anyhow)?;
+        Ok(Some(verf))
     }
 }
 

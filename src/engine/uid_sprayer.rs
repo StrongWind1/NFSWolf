@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nfswolf_nfs3::wire::ACCESS3args;
+use nfs_v3::wire::ACCESS3args;
 use tracing::{debug, warn};
 
 use crate::proto::circuit::CircuitBreaker;
@@ -135,13 +135,7 @@ impl UidSprayer {
                 // that accepts the TCP connection and then stops answering
                 // would otherwise wedge the loop forever on a single await,
                 // holding the pool's admission permit with it.
-                let call = conn.call_as::<_, nfswolf_nfs3::wire::ACCESS3res>(
-                    crate::proto::auth::AuthSys::with_groups(uid, gid, &config.auxiliary_gids, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()),
-                    nfswolf_nfs3::PROGRAM,
-                    nfswolf_nfs3::VERSION,
-                    nfswolf_nfs3::wire::NFS_PROGRAM::NFSPROC3_ACCESS as u32,
-                    &args,
-                );
+                let call = conn.call_as::<_, nfs_v3::wire::ACCESS3res>(crate::proto::auth::AuthSys::with_groups(uid, gid, &config.auxiliary_gids, "nfswolf").to_opaque_auth(crate::proto::auth::next_stamp()), nfs_v3::PROGRAM, nfs_v3::VERSION, nfs_v3::wire::NFS_PROGRAM::NFSPROC3_ACCESS as u32, &args);
                 let Ok(outcome) = tokio::time::timeout(SPRAY_RPC_TIMEOUT, call).await else {
                     warn!(uid, gid, "spray: RPC timed out; abandoning the sweep");
                     conn.poison();
@@ -150,16 +144,17 @@ impl UidSprayer {
                 };
                 match outcome {
                     Ok(res) => match res {
-                        nfswolf_nfs3::wire::Nfs3Result::Ok(ok) => {
+                        nfs_v3::wire::Nfs3Result::Ok(ok) => {
                             let granted = ok.access;
                             debug!(uid, gid, access = granted, "spray: access granted");
                             if granted & config.required_access != 0 {
                                 results.push(SprayResult { uid, gid, access: granted });
                             }
                         },
-                        nfswolf_nfs3::wire::Nfs3Result::Err((stat, _)) => {
+                        nfs_v3::wire::Nfs3Result::Err((stat, _)) => {
                             debug!(uid, gid, ?stat, "spray: access denied");
                         },
+                        _ => {},
                     },
                     Err(e) => {
                         warn!(uid, gid, err = %e, "spray: RPC error");

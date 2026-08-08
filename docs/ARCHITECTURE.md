@@ -6,7 +6,7 @@ For vision and goals, see [DESIGN.md](DESIGN.md). For security rationale, see [F
 ## Document Traceability
 
 ```
-FINDINGS.md (41 findings with RFC-cited analysis, F-1.1 through F-7.6)
+FINDINGS.md (47 findings with RFC-cited analysis, F-1.1 through F-7.6)
     └── findings/ (detailed write-ups per finding)
         └── REQUIREMENTS.md (what the tool must detect, R1-R7)
             └── DESIGN.md (vision, goals, threat model)
@@ -54,7 +54,7 @@ nfswolf scan 10.0.0.0/8 -c 500 --json results.json --csv results.csv
 nfswolf scan 192.168.0.0/24 --auto-escape       # break out of every export found
 ```
 
-**Architecture** (src/engine/scanner.rs, src/engine/scan_types.rs, src/proto/rpc_probe.rs):
+**Architecture** (src/engine/scanner.rs, src/engine/scan_types.rs):
 - tokio::spawn fan-out with Semaphore-based concurrency limit
 - Per-host 9-stage probe sequence with panic isolation
 - SIGINT handling: partial results collected via Arc<Mutex<Vec>>, exit code 130
@@ -265,38 +265,44 @@ nfswolf convert --format html --input results.json -o report.html
 
 ## Core NFS Engine Design
 
-### Protocol Layer: Six Workspace Crates
+### Protocol Layer: Eight Workspace Crates
 
-nfswolf owns its entire NFS wire stack in-tree, layered as six workspace crates with no edges between the version crates:
+nfswolf owns its entire NFS wire stack in-tree, layered as eight workspace crates with no edges between the version crates:
 
 ```
-nfswolf-xdr-derive        #[derive(XdrCodec)] proc macro
+onc-xdr-derive             #[derive(XdrCodec)] proc macro
         |
-nfswolf-xdr               RFC 4506 codec, length-hardened decoders
+onc-xdr                    RFC 4506 codec, length-hardened decoders
         |
-nfswolf-rpc               ONC RPC v2, portmapper, AuthSys, RpcTransport seam
+onc-rpc-client             ONC RPC v2, AuthSys, RpcTransport seam
         |
-+-------+-------+
-|       |       |
-nfs2    nfs3    nfs4       one crate per NFS version, each standalone
++-------+-------+-------+
+|       |       |       |
+rpcbind mount   |       |     onc-rpcbind (portmapper/rpcbind), nfs-mount (MOUNT v1/v3)
+        |       |       |
++-------+-------+       |
+|       |       |       |
+nfs-v2  nfs-v3  nfs-v4        one crate per NFS version, each standalone
 ```
 
 Each version crate owns its own MOUNT protocol (v1 in nfs2, v3 in nfs3; v4 has no MOUNT) because the handle types genuinely differ (v1 fixed 32 bytes, v3 variable-length) and they are defined in different RFCs.
 
 This began as a dependency on [`nfs3-rs`](https://github.com/Vaiz/nfs3) (Unlicense). In v0.6.0 the code was absorbed outright and the vendor patch tree deleted. `ref/nfs3/` remains for diffing against upstream. Each crate carries a NOTICE with the file-level provenance mapping.
 
-**The layer boundary is strict.** The protocol crates hold no policy -- no pooling, no retries, no circuit breaking, no stealth delays, no credential escalation. All of that lives in `src/proto/` and reaches the protocol crates through one seam, `nfswolf_rpc::RpcTransport`. Two implementations ship: `DirectTransport` (one socket, no policy -- makes each library standalone) and `PooledTransport` (the binary's single policy struct: connection reuse, circuit breaker, stealth pacing, deadlines).
+**The layer boundary is strict.** The protocol crates hold no policy -- no pooling, no retries, no circuit breaking, no stealth delays, no credential escalation. All of that lives in `src/proto/` and reaches the protocol crates through one seam, `onc_rpc_client::RpcTransport`. Two implementations ship: `DirectTransport` (one socket, no policy -- makes each library standalone) and `PooledTransport` (the binary's single policy struct: connection reuse, circuit breaker, stealth pacing, deadlines).
 
 **What the protocol crates provide:**
 
 | Crate | Contents |
 |-------|----------|
-| `nfswolf-xdr-derive` | `#[derive(XdrCodec)]` proc macro |
-| `nfswolf-xdr` | `Pack`/`Unpack` traits, `Opaque`, `List`, `BoundedList`, `Void`, length-hardened readers (`PREALLOC_CAP`) |
-| `nfswolf-rpc` | `RpcClient`, `RpcTransport` trait, `DirectTransport`, portmapper v2, `AuthSys`, `AuthFlavor`, fragment headers, `AsyncRead`/`AsyncWrite` with tokio backend |
-| `nfswolf-nfs2` | All 18 NFSv2 procedures (RFC 1094), fixed 32-byte handles, `Nfs2Client`, `Nfs2Error` with classification predicates, `Display` for `NfsStat` |
-| `nfswolf-nfs3` | All 22 NFSv3 procedures + MOUNT v3, domain API (`FileHandle`, `FileAttrs`, `Nfs3Fault`), `Nfs3Error` with handle-oracle predicates |
-| `nfswolf-nfs4` | NFSv4.0 COMPOUND (RFC 7530) read-only subset, `Display` for `Nfs4Status` |
+| `onc-xdr-derive` | `#[derive(XdrCodec)]` proc macro |
+| `onc-xdr` | `Pack`/`Unpack` traits, `Opaque`, `List`, `BoundedList`, `Void`, length-hardened readers (`PREALLOC_CAP`) |
+| `onc-rpc-client` | `RpcClient`, `RpcTransport` trait, `DirectTransport`, `AuthSys`, `AuthFlavor`, fragment headers, `AsyncRead`/`AsyncWrite` with tokio backend |
+| `onc-rpcbind` | Portmapper v2 (RFC 1057), rpcbind v3/v4 (RFC 1833), `PortmapperClient`, `RpcbindClient` |
+| `nfs-mount` | MOUNT v1/v3 (RFC 1094 Appendix A / RFC 1813 Appendix I), `MountV1Client`, `MountClient` |
+| `nfs-v2` | All 18 NFSv2 procedures (RFC 1094), fixed 32-byte handles, `Nfs2Client`, `Nfs2Error` with classification predicates, `Display` for `NfsStat` |
+| `nfs-v3` | All 22 NFSv3 procedures, domain API (`FileHandle`, `FileAttrs`, `Nfs3Fault`), `Nfs3Error` with handle-oracle predicates |
+| `nfs-v4` | NFSv4.0 COMPOUND (RFC 7530) read-only subset, `Display` for `Nfs4Status` |
 
 **What is deliberately absent:**
 - A server implementation -- integration tests use the published `nfs3_server` crate as a mock
@@ -326,7 +332,7 @@ This began as a dependency on [`nfs3-rs`](https://github.com/Vaiz/nfs3) (Unlicen
 
 niffler's v4 path (manual FFI to libnfs) has 52 unsafe blocks, manual struct layout assertions, RAII wrappers for C pointers, and `spawn_blocking` on every operation. We avoid all of this.
 
-**Why not NetApp nfs-rs?** [`nfs-rs`](https://github.com/NetAppLabs/nfs-rs) is synchronous -- a non-starter for a tokio architecture. It covers NFSv3 + NFSv4.1 via the nfs4p1-rs submodule, whose `ArgOp`/`ResOp` enums and COMPOUND structs were a useful reference when writing `nfswolf-nfs4`, but it encodes with `serde-xdr` (an incompatible codec), so the types were adapted rather than depended on.
+**Why not NetApp nfs-rs?** [`nfs-rs`](https://github.com/NetAppLabs/nfs-rs) is synchronous -- a non-starter for a tokio architecture. It covers NFSv3 + NFSv4.1 via the nfs4p1-rs submodule, whose `ArgOp`/`ResOp` enums and COMPOUND structs were a useful reference when writing `nfs-v4`, but it encodes with `serde-xdr` (an incompatible codec), so the types were adapted rather than depended on.
 
 ### RPC Layer
 
@@ -424,9 +430,9 @@ File handles obtained during the directory walk are reused across all credential
 
 ### NFSv3 Protocol Client
 
-The library crate (`nfswolf-nfs3`) exposes a domain API that takes and returns `FileHandle`, `FileAttrs` and friends rather than raw XDR. Failures are reported as `Nfs3Fault<E>`, which separates "no answer from the server" (`Rpc(E)`) from "the server answered and refused" (`Status(Nfs3Error)`).
+The library crate (`nfs-v3`) exposes a domain API that takes and returns `FileHandle`, `FileAttrs` and friends rather than raw XDR. Failures are reported as `Nfs3Fault<E>`, which separates "no answer from the server" (`Rpc(E)`) from "the server answered and refused" (`Status(Nfs3Error)`).
 
-In the binary, `Nfs3Client` is a type alias: `nfswolf_nfs3::Nfs3Client<PooledTransport>`. The domain methods (`attrs`, `resolve`, `read_at`, `write_at`, `list_dir`, `read_all`, `walk`, etc.) are inherent methods on the library's `Nfs3Client<T>`. The `PooledNfs3` extension trait adds pool-specific accessors (`host`, `uid`, `gid`, `machinename`, `with_credential`) that let the shell, FUSE, and offensive subcommands switch credentials mid-session.
+In the binary, `Nfs3Client` is a type alias: `nfs_v3::Nfs3Client<PooledTransport>`. The domain methods (`attrs`, `resolve`, `read_at`, `write_at`, `list_dir`, `read_all`, `walk`, etc.) are inherent methods on the library's `Nfs3Client<T>`. The `PooledNfs3` extension trait adds pool-specific accessors (`host`, `uid`, `gid`, `machinename`, `with_credential`) that let the shell, FUSE, and offensive subcommands switch credentials mid-session.
 
 ### File Handle Analysis
 
@@ -592,7 +598,7 @@ done from `shell` or `mount`.
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
 | Language | **Rust** | Zero-cost abstractions, no GC, memory safety, single binary |
-| NFS protocol stack | **`crates/nfswolf-*`** (6 crates, in-tree) | NFSv2/v3/v4 + RPC + XDR + portmapper, pure Rust, tokio async, no C deps |
+| NFS protocol stack | **`crates/`** (8 crates, in-tree) | NFSv2/v3/v4 + RPC + XDR + portmapper + MOUNT + rpcbind, pure Rust, tokio async, no C deps |
 | Async runtime | tokio | Industry standard, excellent for network I/O |
 | CLI framework | clap | Derive macros, subcommands, shell completions |
 | FUSE binding | fuser | Pure Rust FUSE implementation |
@@ -609,18 +615,20 @@ done from `shell` or `mount`.
 
 ```
 nfswolf/
-├── Cargo.toml                     # Workspace root (6 library crates + 1 binary)
+├── Cargo.toml                     # Workspace root (8 library crates + 1 binary)
 ├── crates/
-│   ├── nfswolf-xdr-derive/        # #[derive(XdrCodec)] proc macro
-│   ├── nfswolf-xdr/               # RFC 4506 codec: Pack, Unpack, Opaque, List, hardened readers
-│   ├── nfswolf-rpc/               # ONC RPC v2, portmapper, AuthSys, RpcTransport seam
-│   ├── nfswolf-nfs2/              # RFC 1094: all 18 procedures, fixed 32-byte handles
-│   ├── nfswolf-nfs3/              # RFC 1813: 22 procedures + MOUNT v3 + domain API
-│   └── nfswolf-nfs4/              # RFC 7530: COMPOUND encoder, stateless read-only subset
+│   ├── onc-xdr-derive/            # #[derive(XdrCodec)] proc macro
+│   ├── onc-xdr/                   # RFC 4506 codec: Pack, Unpack, Opaque, List, hardened readers
+│   ├── onc-rpc-client/            # ONC RPC v2, AuthSys, RpcTransport seam
+│   ├── onc-rpcbind/               # Portmapper v2 (RFC 1057) / rpcbind v3/v4 (RFC 1833)
+│   ├── nfs-mount/                 # MOUNT v1/v3 (RFC 1094 App A / RFC 1813 App I)
+│   ├── nfs-v2/                    # RFC 1094: all 18 procedures, fixed 32-byte handles
+│   ├── nfs-v3/                    # RFC 1813: 22 procedures + domain API
+│   └── nfs-v4/                    # RFC 7530: COMPOUND encoder, stateless read-only subset
 ├── src/
 │   ├── main.rs                    # CLI entry point with tracing + subcommand dispatch
 │   ├── output.rs                  # status_info/warn/err, print_handle, print_handle_next_steps
-│   ├── shell/                     # NfsShell: 44+ commands, tab completion, readline REPL
+│   ├── shell/                     # NfsShell: 52 commands, tab completion, readline REPL
 │   │   ├── mod.rs                 # Shell REPL loop, command dispatch, tab completion
 │   │   ├── complete.rs            # Tab completion for remote/local paths
 │   │   ├── ops.rs                 # ShellOps trait + version-neutral types
@@ -647,9 +655,9 @@ nfswolf/
 │   │   ├── circuit.rs             # CircuitBreaker: sliding window, exponential cooldown
 │   │   ├── transport.rs           # PooledTransport: the single RpcTransport impl in the binary
 │   │   ├── udp.rs                 # call_rpc_udp(): single-shot UDP RPC + NULL probe
-│   │   ├── rpc_probe.rs           # Multi-fragment RPC probe for PROG_MISMATCH version ranges
 │   │   ├── mount.rs               # NfsMountClient: EXPORT, MNT, UMNT, auth-flavor extraction
 │   │   ├── portmap.rs             # PortmapClient: DUMP, GETPORT, NIS detection, amplification
+│   │   ├── nfs2.rs                # Nfs2Client type alias (library client + PooledTransport)
 │   │   ├── nfs3/mod.rs            # Nfs3Client type alias (library client + PooledTransport)
 │   │   └── nfs4/{mod,compound}.rs # Nfs4DirectClient (pool-free, direct port 2049)
 │   ├── engine/
@@ -680,12 +688,12 @@ nfswolf/
 │   ├── credential_test.rs
 │   └── xdr_fuzz_test.rs
 ├── docs/
-│   ├── FINDINGS.md                # Finding catalog (41 findings, F-1.1 through F-7.6)
+│   ├── FINDINGS.md                # Finding catalog (47 findings, F-1.1 through F-7.6 plus F-3.7, F-3.8, F-4.6, F-5.6, F-5.7, F-5.8)
 │   ├── REQUIREMENTS.md            # Tool requirements (R1 through R7)
 │   ├── DESIGN.md                  # Vision, goals, threat model
 │   ├── ARCHITECTURE.md            # This file
 │   ├── NFSv2.md, NFSv3.md, NFSv4.md  # Protocol reference notes
-│   └── findings/                  # Detailed finding write-ups (42 files: 41 findings + README)
+│   └── findings/                  # Detailed finding write-ups (48 files: 47 findings + README)
 └── ref/
     ├── nfs3/                      # Read-only Vaiz/nfs3 checkout (for upstream diffing)
     └── rfc/                       # NFS/RPC/XDR RFCs (1057, 1094, 1813, 1831, 2623, 5531, 7530, 9289)
@@ -732,6 +740,22 @@ Commands:
 
 The categories above are display groupings in `--help` (via `after_help`); every
 command is still invoked flat, e.g. `nfswolf scan ...`, `nfswolf brute-handle ...`.
+
+### NFS Version Selection (`--nfs-version`)
+
+Only `shell` exposes `--nfs-version` (2, 3, or 4). The other subcommands either auto-negotiate or are tied to a specific version by design:
+
+| Subcommand | NFS version used | Why no `--nfs-version` flag |
+|------------|-----------------|----------------------------|
+| `shell` | 2, 3, or 4 (user's choice, default 3) | **Has the flag.** Each version is a fundamentally different shell with different wire ops. |
+| `mount` | v3 only | The FUSE adapter (`fuse.rs`) is wired to `Nfs3Client` throughout. Use `shell --nfs-version 2` for interactive v2 access. |
+| `escape` | Auto: v3 matrix, v2 fallback, v4 LOOKUPP | Tries all versions automatically. Forcing one would reduce coverage. |
+| `analyze` | v3 (with v1 handle acquisition fallback) | The 25+ checks use v3-only procedures (READDIRPLUS, COMMIT, PATHCONF, FSINFO). v2 lacks most of them. |
+| `brute-handle` | Auto: v3 first, v2 fallback | Auto-falls back. Forcing v2 would lose the STALE/BADHANDLE oracle (v2 has only STALE). |
+| `uid-spray` | v3 only | ACCESS procedure is v3-only (does not exist in NFSv2). |
+| `scan` | Probes v2+v3+v4, reports all | Recon tool -- version enumeration is the point. |
+
+**MOUNT version selection** is separate from NFS version selection. MOUNT v1 (32-byte handles, fsid_type 0/1/3/4/5) and MOUNT v3 (variable-length handles, fsid_type 0/1/2/3/6/7) are both tried automatically by the handle acquisition matrix in `escape` and `analyze`. The `shell` uses MOUNT v3 by default, falling back to MOUNT v1 when v3 is unavailable.
 
 ### Example Workflows
 
@@ -902,7 +926,7 @@ nfswolf is the only tool that combines all of the following in a single binary:
 
 | Tool | Language | Stars | Relationship to nfswolf |
 |------|----------|-------|-------------------------|
-| [**nfs3-rs**](https://github.com/Vaiz/nfs3) | **Rust** | 20 | **Absorbed in v0.6.0** -- the NFSv3 + MOUNT + portmapper + XDR code is now spread across `crates/nfswolf-{xdr,xdr-derive,rpc,nfs3}` (Unlicense; see each crate's NOTICE). Its `nfs3_server` crate remains a dev-dependency for integration testing. |
+| [**nfs3-rs**](https://github.com/Vaiz/nfs3) | **Rust** | 20 | **Absorbed in v0.6.0** -- the NFSv3 + MOUNT + portmapper + XDR code is now spread across `crates/{onc-xdr,onc-xdr-derive,onc-rpc-client,nfs-v3,nfs-mount,onc-rpcbind}` (Unlicense; see each crate's NOTICE). Its `nfs3_server` crate remains a dev-dependency for integration testing. |
 | [niffler](https://github.com/evilsocket/niffler) | Rust | -- | **Companion tool** -- deep credential/secret scanning with rule engine, UID cycling, web dashboard. nfswolf finds attack paths, niffler finds secrets. |
 | [libnfs](https://github.com/sahlberg/libnfs) | C | 595 | Foundation for fuse_nfs/niffler v4 path; NOT used by nfswolf (C dep breaks static binary goal) |
 | [anfs](https://github.com/skelsec/anfs) | Python | 29 | Async NFSv3 (OctoPwn); dynamic UID impersonation per directory; powers fuse_nfs |

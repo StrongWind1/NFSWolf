@@ -66,7 +66,7 @@ nfswolf targets the following threat scenario:
 ## Document Hierarchy
 
 ```
-FINDINGS.md (41 findings with RFC-cited vulnerability analysis, F-1.1 through F-7.6)
+FINDINGS.md (47 findings with RFC-cited vulnerability analysis, F-1.1 through F-7.6)
     └── findings/ (detailed write-ups per finding)
         └── REQUIREMENTS.md (what the tool must detect, R1-R7)
             └── DESIGN.md (vision, goals, threat model)     <- you are here
@@ -155,13 +155,13 @@ nfswolf implements the entire RPC/NFS stack in userspace. This means:
 
 ### 2. Own the Protocol Stack -- No libnfs, No Third-Party Wire Layer
 
-The NFS wire protocol lives in-tree, split one crate per version over a shared foundation: `nfswolf-xdr-derive` and `nfswolf-xdr` (RFC 4506 codec), `nfswolf-rpc` (ONC RPC v2, portmapper, transport), then `nfswolf-nfs2`, `nfswolf-nfs3`, and `nfswolf-nfs4`. No edges between the version crates. Pure Rust, zero C dependencies, preserving the single static binary goal.
+The NFS wire protocol lives in-tree, split one crate per version over a shared foundation: `onc-xdr-derive` and `onc-xdr` (RFC 4506 codec), `onc-rpc-client` (ONC RPC v2, transport), `onc-rpcbind` (portmapper/rpcbind), `nfs-mount` (MOUNT v1/v3), then `nfs-v2`, `nfs-v3`, and `nfs-v4`. No edges between the version crates. Pure Rust, zero C dependencies, preserving the single static binary goal.
 
 This started as a dependency on the pure-Rust [`nfs3-rs`](https://github.com/Vaiz/nfs3) workspace, which is public domain under the Unlicense. That was the right call while nfswolf only needed NFSv3: it supplied all 22 procedures, a complete XDR codec, and async I/O for free. The dependency stopped paying for itself once nfswolf had built NFSv2 and NFSv4 on top of it and needed four behaviours upstream did not expose -- mid-session credential swapping for UID spraying, `PROG_MISMATCH` version ranges as an enumeration oracle, ownership of the IO stream, and per-call deadlines. Three of those could not be wrapped, so nfswolf carried a `vendor/` patch tree and a hand-rolled RPC prober to work around them. In v0.6.0 the code was absorbed outright and both workarounds were deleted.
 
 The deeper reason is that a security tool wants different defaults from a filesystem client. A permission denial is a result to record, not an error to retry. A malformed reply is a finding, not a fault. A rejection that leaks the server's supported version range is signal, not noise. Those judgements belong to whoever owns the code.
 
-The layer boundary is strict: the protocol crates hold no policy -- no pooling, no retries, no circuit breaking, no stealth delays, no credential escalation. `src/proto/` supplies all of it through a single seam, `nfswolf_rpc::RpcTransport`, plus AUTH_SYS stamp injection, SOCKS5 transport, UDP probes, and privileged port binding.
+The layer boundary is strict: the protocol crates hold no policy -- no pooling, no retries, no circuit breaking, no stealth delays, no credential escalation. `src/proto/` supplies all of it through a single seam, `onc_rpc_client::RpcTransport`, plus AUTH_SYS stamp injection, SOCKS5 transport, UDP probes, and privileged port binding.
 
 NFSv4 remains a read-only subset -- enough to walk the pseudo-filesystem, read attributes, list directories, and query SECINFO. The stateful half (OPEN, CLOSE, LOCK, delegations, v4.1 sessions) is not implemented and is not needed for the attack path.
 
@@ -177,7 +177,7 @@ nfswolf and [niffler](https://github.com/evilsocket/niffler) are complementary. 
 
 NFSv2 (RFC 1094) has zero security negotiation -- no auth flavor enforcement, no ACCESS procedure -- and some server implementations skip `root_squash` on the v2 code path (RFC 2623 §2.7). When `scan` or `analyze` detects v2 support alongside v3/v4 with RPCSEC_GSS, that combination is flagged as F-1.6 because v2 provides a downgrade path that bypasses the v3/v4 security policy entirely.
 
-The NFSv2 wire protocol lives in `nfswolf-nfs2` (all 18 procedures, fixed 32-byte handles, 32-bit sizes) and the binary links it. `--nfs-version 2` enters a v2 shell backed by `V2Ops`, which obtains a 32-byte root handle via MOUNT v1 MNT (`MountV1Client` in `crates/nfswolf-nfs2/src/mount.rs`) and wraps an `Nfs2Client<DirectTransport>` -- no connection pooling, no ACCESS procedure to drive a credential ladder, but identity changes are supported by reconnecting with new AUTH_SYS credentials (same pattern as the v4 shell's `reconnect_with_auth()`). `--handle HEX` also works, bypassing MOUNT entirely. All 44 shell commands are available through the unified `NfsShell<V2Ops>` architecture. `escape` and `brute-handle` fall back to NFSv2 automatically when MOUNT v3 fails, so v2-only servers are covered without an explicit `--nfs-version 2` flag. Live-tested against four VMs spanning kernels 2.6.32 through 4.15; Linux knfsd enforces `sec=krb5` on v2 NFS operations while MOUNT v1 leaks the handle without krb5 auth, confirming the downgrade gap documented in F-1.6.
+The NFSv2 wire protocol lives in `nfs-v2` (all 18 procedures, fixed 32-byte handles, 32-bit sizes) and the binary links it. `--nfs-version 2` enters a v2 shell backed by `V2Ops`, which obtains a 32-byte root handle via MOUNT v1 MNT (`MountV1Client` in `crates/nfs-mount/src/client.rs`) and wraps an `Nfs2Client<DirectTransport>` -- no connection pooling, no ACCESS procedure to drive a credential ladder, but identity changes are supported by reconnecting with new AUTH_SYS credentials (same pattern as the v4 shell's `reconnect_with_auth()`). `--handle HEX` also works, bypassing MOUNT entirely. All 52 shell commands are available through the unified `NfsShell<V2Ops>` architecture. `escape` and `brute-handle` fall back to NFSv2 automatically when MOUNT v3 fails, so v2-only servers are covered without an explicit `--nfs-version 2` flag. Live-tested against four VMs spanning kernels 2.6.32 through 4.15; Linux knfsd enforces `sec=krb5` on v2 NFS operations while MOUNT v1 leaks the handle without krb5 auth, confirming the downgrade gap documented in F-1.6.
 
 ### 5. Export Escape Lives in One Place -- `nfswolf escape`
 
@@ -213,11 +213,11 @@ The NFSv3 ACCESS procedure is explicitly advisory (RFC 1813 §3.3.4). nfswolf ne
 
 ### 9. Handle Oracle Exploitation
 
-NFSv3 distinguishes NFS3ERR_BADHANDLE from NFS3ERR_STALE (RFC 1813 §2.6). nfswolf uses this oracle during handle brute-force: BADHANDLE means "wrong format, keep trying different structures"; STALE means "right format, wrong inode/generation, keep trying different values." `nfswolf_nfs3::Nfs3Error` preserves this distinction and exposes it as `is_handle_oracle_hit()` / `is_handle_oracle_miss()`.
+NFSv3 distinguishes NFS3ERR_BADHANDLE from NFS3ERR_STALE (RFC 1813 §2.6). nfswolf uses this oracle during handle brute-force: BADHANDLE means "wrong format, keep trying different structures"; STALE means "right format, wrong inode/generation, keep trying different values." `nfs_v3::Nfs3Error` preserves this distinction and exposes it as `is_handle_oracle_hit()` / `is_handle_oracle_miss()`.
 
 ### 10. Connection Pool with Health Eviction
 
-Per-(host, export, uid, gid) connection pools with health-aware lifecycle. Idle connections older than 5 seconds get a GETATTR health check before reuse. Failed connections are "poisoned" (discarded on return). Backpressure via `Notify` prevents thundering herd at max connections.
+Per-(host, export, uid, gid) connection pools with health-aware lifecycle. Idle connections older than 5 seconds get a GETATTR health check before reuse. Failed connections are "poisoned" (discarded on return). Backpressure via `Semaphore` prevents thundering herd at max connections.
 
 ### 11. Circuit Breaker per Host
 
@@ -229,7 +229,7 @@ See [ARCHITECTURE.md -- Comparison table](ARCHITECTURE.md#comparison-with-existi
 
 ## References
 
-- [FINDINGS.md](FINDINGS.md) -- All 41 findings grouped by attack type (RFC-cited)
+- [FINDINGS.md](FINDINGS.md) -- All 47 findings grouped by attack type (RFC-cited)
 - [findings/](findings/README.md) -- Detailed write-ups per finding
 - [REQUIREMENTS.md](REQUIREMENTS.md) -- Tool requirements with finding traceability
 - [ARCHITECTURE.md](ARCHITECTURE.md) -- Implementation architecture and module layout

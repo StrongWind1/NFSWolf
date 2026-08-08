@@ -1,0 +1,124 @@
+<h1 align="center">nfs-v4</h1>
+
+<p align="center">
+  <strong>NFS version 4 (RFC 7530 / 8881 / 7862): v4.0 COMPOUND, v4.1 recon operations, v4.2 security labels.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/nfs-v4"><img src="https://img.shields.io/crates/v/nfs-v4.svg" alt="crates.io"></a>
+  <a href="../../rust-toolchain.toml"><img src="https://img.shields.io/badge/edition-2024-informational" alt="Edition 2024"></a>
+  <a href="../../Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.95-informational" alt="MSRV 1.95"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="https://docs.rs/nfs-v4"><img src="https://img.shields.io/docsrs/nfs-v4" alt="docs.rs"></a>
+</p>
+
+<p align="center">
+  <a href="#usage">Usage</a> &bull;
+  <a href="#api-reference">API reference</a> &bull;
+  <a href="#protocol-coverage">Protocol coverage</a> &bull;
+  <a href="#safety-and-hardening">Safety</a>
+</p>
+
+---
+
+Part of the [NFSWolf](https://github.com/StrongWind1/NFSWolf) protocol stack.
+
+NFSv4 is a different shape from v2 and v3. Rather than one RPC per operation, the client batches operations into a single `COMPOUND` call that the server executes in order against a "current file handle" the operations mutate as they go, so `PUTROOTFH; LOOKUP "etc"; GETFH` is one round trip. MOUNT is gone -- the server exports a single pseudo-filesystem tree reached from `PUTROOTFH`. Generic over `onc_rpc_client::RpcTransport`, so it carries no connection policy of its own.
+
+## Usage
+
+```rust
+use nfs_v4::{Nfs4Client, CompoundBuilder, ArgOp, AttrRequest, ResOpData};
+use onc_rpc_client::DirectTransport;
+
+let stream = tokio::net::TcpStream::connect("server:2049").await?;
+let nfs = Nfs4Client::new(DirectTransport::new(stream));
+
+// Walk to /etc and get its file handle in one round trip.
+let fh = nfs.lookup_fh(&["etc"]).await?;
+
+// List directory entries.
+let names = nfs.list_dir(&fh).await?;
+
+// Read a file chunk using the anonymous stateid.
+let (data, eof) = nfs.read_chunk(&file_fh, 0, 65536).await?;
+```
+
+## API reference
+
+### Client types
+
+| Type | Description |
+|------|-------------|
+| `Nfs4Client<T>` | Client with `compound()`, `get_root_fh()`, `lookup_fh()`, `list_dir()`, `read_chunk()` |
+| `Nfs4Error<E>` | Error type: `Rpc`, `Status`, `MissingResult` |
+
+### COMPOUND builder and wire types
+
+| Type | Description |
+|------|-------------|
+| `CompoundBuilder` | Chainable builder: `putrootfh()`, `putpubfh()`, `putfh()`, `lookup()`, `getfh()`, `getattr()`, `secinfo()`, `setclientid()`, `secinfo_no_name()`, `exchange_id()`, `getdeviceinfo()`, `getdevicelist()`, `open_read()` |
+| `CompoundArgs` / `CompoundRes` | Wire-level COMPOUND request and response |
+| `ArgOp` | Enum of all 37 NFSv4.0 operations (ops 3-39) plus ILLEGAL (10044) |
+| `ResOp` / `ResOpData` | Result operation with typed payloads (Fh, Readdir, Read, Secinfo, Getattr, ...) |
+| `Nfs4Status` | Status codes with `Display` impl |
+
+### Attribute and security types
+
+| Type | Description |
+|------|-------------|
+| `AttrRequest` | Bitmask for requesting specific file attributes |
+| `DirEntry4` | Directory entry (name, cookie, optional attributes) |
+| `NfsImplId4` | Server implementation ID (NFSv4.1+) |
+| `SecInfoEntry` | SECINFO response entry (flavor, OID, QOP, service, context) |
+| `SecLabel4` | Security label (LFS + PI + label bytes, [RFC 7862] S12.2.4) |
+| `FATTR4_SEC_LABEL` | Attribute number 80 for requesting security labels |
+
+### Constants
+
+| Constant | Description |
+|------|-------------|
+| `PROGRAM` | NFS program number (100003) |
+| `VERSION` | NFSv4 version (4) |
+| `NFS4_PROC_COMPOUND` | COMPOUND procedure number (1) |
+
+## Protocol coverage
+
+**Implemented (stateless, read-only):** PUTROOTFH, PUTPUBFH, PUTFH, LOOKUP, LOOKUPP, GETFH, GETATTR, READDIR, READLINK, READ, SECINFO, SAVEFH, RESTOREFH, NVERIFY, VERIFY, ACCESS, SETCLIENTID, SETCLIENTID_CONFIRM, RENEW. All 37 v4.0 operation codes (ops 3-39, [RFC 7530] sec. 16) are representable in `ArgOp` -- operations without typed fields carry opaque payloads so every valid op code can be serialised and round-tripped.
+
+**NFSv4.1/4.2 extensions:** SECINFO_NO_NAME (op 52, [RFC 5661]), EXCHANGE_ID (op 42, [RFC 5661]), GETDEVICEINFO (op 47, [RFC 5661] S18.40), and GETDEVICELIST (op 48, [RFC 5661] S18.41) are supported for probing server capabilities and pNFS device enumeration. `AttrRequest` supports `FATTR4_SEC_LABEL` (attribute 80, [RFC 7862] S12.2.4) for requesting security labels, with the `SecLabel4` type for decoding the response.
+
+**Not implemented:** the stateful half -- `OPEN`, `CLOSE`, `LOCK`, delegations, and the v4.1 session machinery of [RFC 8881]. Those require clientid and stateid tracking, `OPEN_CONFIRM`, and lease renewal.
+
+## Safety and hardening
+
+- `list_dir()` caps accumulated entries at 1 million and detects non-advancing cookies to prevent infinite loops against hostile servers.
+- `read_chunk()` uses the anonymous stateid ([RFC 7530] sec. 9.1.4.3), avoiding the OPEN/CLOSE state machine for read-only access.
+- `Nfs4Error::Status` preserves the NFSv4 status code for automated classification. Permission denials are expected during credential probing and must not trip circuit breakers.
+
+## Crate position
+
+```
+onc-xdr-derive
+  +-- onc-xdr
+       +-- onc-rpc-client
+            +-- onc-rpcbind
+            +-- nfs-mount
+            |    +-- nfs-v2
+            |    +-- nfs-v3
+            +-- nfs-v4       <-- this crate
+```
+
+## Provenance
+
+Original NFSWolf work (Apache-2.0). Implements NFSv4.0 directly from the RFC with no upstream-derived code. Builds on `onc-xdr`, which carries code from [Vaiz/nfs3](https://github.com/Vaiz/nfs3); see its NOTICE file.
+
+## License
+
+[Apache License 2.0](../../LICENSE)
+
+[RFC 7530]: https://www.rfc-editor.org/rfc/rfc7530
+[RFC 5661]: https://www.rfc-editor.org/rfc/rfc5661
+[RFC 7862]: https://www.rfc-editor.org/rfc/rfc7862
+[RFC 8881]: https://www.rfc-editor.org/rfc/rfc8881

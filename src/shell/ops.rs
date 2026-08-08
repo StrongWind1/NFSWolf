@@ -188,9 +188,9 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
 
     /// Switch the AUTH_SYS identity for subsequent calls.
     ///
-    /// V3Ops rebuilds the pooled client and flushes the credential cache.
-    /// V2Ops tears down the TCP session, re-mounts the export with the new
-    /// credential, and opens a fresh `DirectTransport` connection.
+    /// Both V2Ops and V3Ops swap the credential on the pooled transport --
+    /// zero network round trips. File handles are bearer tokens (RFC 1094
+    /// S2.3.3), so they stay valid across identity changes.
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()>;
 
     // -- Capabilities --
@@ -205,6 +205,13 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
     /// V2-only: probe NFSPROC_ROOT (obsolete MOUNT bypass check).
     /// Returns `Ok(None)` on versions that don't support it.
     fn probe_root(&self) -> impl Future<Output = anyhow::Result<Option<ShellHandle>>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Retrieve the server's write verifier (reboot oracle, RFC 1813 S3.3.21).
+    ///
+    /// Only NFSv3 supports COMMIT; v2 returns `Ok(None)`.
+    fn write_verifier(&self, _fh: &ShellHandle) -> impl Future<Output = anyhow::Result<Option<[u8; 8]>>> + Send {
         async { Ok(None) }
     }
 }

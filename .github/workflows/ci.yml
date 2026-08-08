@@ -204,6 +204,55 @@ jobs:
         run: cargo test --all-targets ${{ matrix.flags }}
 
   # ---------------------------------------------------------------------------
+  # feature-powerset -- does the code compile for every feature combination?
+  # cargo-hack systematically tries every subset of features (the "powerset"),
+  # catching feature flags that only compile when another feature happens to
+  # be enabled. --no-dev-deps avoids compiling test harnesses, keeping this
+  # fast (check only, no codegen).
+  # ---------------------------------------------------------------------------
+  feature-powerset:
+    name: cargo hack (feature powerset)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install FUSE headers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libfuse3-dev pkg-config
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-cargo-hack-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ubuntu-cargo-hack-
+            ubuntu-cargo-
+
+      - name: Install cargo-hack
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-hack > /dev/null 2>&1; then
+            cargo install cargo-hack --locked
+          fi
+
+      - name: cargo hack --feature-powerset check
+        run: cargo hack --feature-powerset --no-dev-deps check
+
+  # ---------------------------------------------------------------------------
   # cross-platform-check -- does the code still COMPILE on macOS and Windows?
   # We do not run tests on these platforms; that would more than double CI
   # runtime for little extra coverage, since the protocol logic is OS-agnostic.
