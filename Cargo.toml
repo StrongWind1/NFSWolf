@@ -53,7 +53,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/nfswolf"
+documentation = "https://github.com/StrongWind1/NFSWolf/tree/main/docs"
 description = "Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an interactive shell for authorized red-team and pentest work."
 keywords = ["nfs", "security", "pentest", "scanner", "rpc"]
 categories = ["command-line-utilities", "network-programming", "filesystem"]
@@ -67,10 +67,6 @@ include = [
   "/LICENSE",
   "/CHANGELOG.md",
 ]
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 tokio = { workspace = true }
