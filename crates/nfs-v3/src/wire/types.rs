@@ -795,75 +795,164 @@ impl PartialEq<[u8]> for nfspath3<'_> {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, XdrCodec)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum nfsstat3 {
     #[default]
-    NFS3_OK = 0,
-    NFS3ERR_PERM = 1,
-    NFS3ERR_NOENT = 2,
-    NFS3ERR_IO = 5,
-    NFS3ERR_NXIO = 6,
-    NFS3ERR_ACCES = 13,
-    NFS3ERR_EXIST = 17,
-    NFS3ERR_XDEV = 18,
-    NFS3ERR_NODEV = 19,
-    NFS3ERR_NOTDIR = 20,
-    NFS3ERR_ISDIR = 21,
-    NFS3ERR_INVAL = 22,
-    NFS3ERR_FBIG = 27,
-    NFS3ERR_NOSPC = 28,
-    NFS3ERR_ROFS = 30,
-    NFS3ERR_MLINK = 31,
-    NFS3ERR_NAMETOOLONG = 63,
-    NFS3ERR_NOTEMPTY = 66,
-    NFS3ERR_DQUOT = 69,
-    NFS3ERR_STALE = 70,
-    NFS3ERR_REMOTE = 71,
-    NFS3ERR_BADHANDLE = 10001,
-    NFS3ERR_NOT_SYNC = 10002,
-    NFS3ERR_BAD_COOKIE = 10003,
-    NFS3ERR_NOTSUPP = 10004,
-    NFS3ERR_TOOSMALL = 10005,
-    NFS3ERR_SERVERFAULT = 10006,
-    NFS3ERR_BADTYPE = 10007,
-    NFS3ERR_JUKEBOX = 10008,
+    NFS3_OK,
+    NFS3ERR_PERM,
+    NFS3ERR_NOENT,
+    NFS3ERR_IO,
+    NFS3ERR_NXIO,
+    NFS3ERR_ACCES,
+    NFS3ERR_EXIST,
+    NFS3ERR_XDEV,
+    NFS3ERR_NODEV,
+    NFS3ERR_NOTDIR,
+    NFS3ERR_ISDIR,
+    NFS3ERR_INVAL,
+    NFS3ERR_FBIG,
+    NFS3ERR_NOSPC,
+    NFS3ERR_ROFS,
+    NFS3ERR_MLINK,
+    NFS3ERR_NAMETOOLONG,
+    NFS3ERR_NOTEMPTY,
+    NFS3ERR_DQUOT,
+    NFS3ERR_STALE,
+    NFS3ERR_REMOTE,
+    NFS3ERR_BADHANDLE,
+    NFS3ERR_NOT_SYNC,
+    NFS3ERR_BAD_COOKIE,
+    NFS3ERR_NOTSUPP,
+    NFS3ERR_TOOSMALL,
+    NFS3ERR_SERVERFAULT,
+    NFS3ERR_BADTYPE,
+    NFS3ERR_JUKEBOX,
+    Unknown(u32),
+}
+
+impl nfsstat3 {
+    const fn from_u32(v: u32) -> Self {
+        match v {
+            0 => Self::NFS3_OK,
+            1 => Self::NFS3ERR_PERM,
+            2 => Self::NFS3ERR_NOENT,
+            5 => Self::NFS3ERR_IO,
+            6 => Self::NFS3ERR_NXIO,
+            13 => Self::NFS3ERR_ACCES,
+            17 => Self::NFS3ERR_EXIST,
+            18 => Self::NFS3ERR_XDEV,
+            19 => Self::NFS3ERR_NODEV,
+            20 => Self::NFS3ERR_NOTDIR,
+            21 => Self::NFS3ERR_ISDIR,
+            22 => Self::NFS3ERR_INVAL,
+            27 => Self::NFS3ERR_FBIG,
+            28 => Self::NFS3ERR_NOSPC,
+            30 => Self::NFS3ERR_ROFS,
+            31 => Self::NFS3ERR_MLINK,
+            63 => Self::NFS3ERR_NAMETOOLONG,
+            66 => Self::NFS3ERR_NOTEMPTY,
+            69 => Self::NFS3ERR_DQUOT,
+            70 => Self::NFS3ERR_STALE,
+            71 => Self::NFS3ERR_REMOTE,
+            10001 => Self::NFS3ERR_BADHANDLE,
+            10002 => Self::NFS3ERR_NOT_SYNC,
+            10003 => Self::NFS3ERR_BAD_COOKIE,
+            10004 => Self::NFS3ERR_NOTSUPP,
+            10005 => Self::NFS3ERR_TOOSMALL,
+            10006 => Self::NFS3ERR_SERVERFAULT,
+            10007 => Self::NFS3ERR_BADTYPE,
+            10008 => Self::NFS3ERR_JUKEBOX,
+            _ => Self::Unknown(v),
+        }
+    }
+
+    const fn to_u32(self) -> u32 {
+        match self {
+            Self::NFS3_OK => 0,
+            Self::NFS3ERR_PERM => 1,
+            Self::NFS3ERR_NOENT => 2,
+            Self::NFS3ERR_IO => 5,
+            Self::NFS3ERR_NXIO => 6,
+            Self::NFS3ERR_ACCES => 13,
+            Self::NFS3ERR_EXIST => 17,
+            Self::NFS3ERR_XDEV => 18,
+            Self::NFS3ERR_NODEV => 19,
+            Self::NFS3ERR_NOTDIR => 20,
+            Self::NFS3ERR_ISDIR => 21,
+            Self::NFS3ERR_INVAL => 22,
+            Self::NFS3ERR_FBIG => 27,
+            Self::NFS3ERR_NOSPC => 28,
+            Self::NFS3ERR_ROFS => 30,
+            Self::NFS3ERR_MLINK => 31,
+            Self::NFS3ERR_NAMETOOLONG => 63,
+            Self::NFS3ERR_NOTEMPTY => 66,
+            Self::NFS3ERR_DQUOT => 69,
+            Self::NFS3ERR_STALE => 70,
+            Self::NFS3ERR_REMOTE => 71,
+            Self::NFS3ERR_BADHANDLE => 10001,
+            Self::NFS3ERR_NOT_SYNC => 10002,
+            Self::NFS3ERR_BAD_COOKIE => 10003,
+            Self::NFS3ERR_NOTSUPP => 10004,
+            Self::NFS3ERR_TOOSMALL => 10005,
+            Self::NFS3ERR_SERVERFAULT => 10006,
+            Self::NFS3ERR_BADTYPE => 10007,
+            Self::NFS3ERR_JUKEBOX => 10008,
+            Self::Unknown(v) => v,
+        }
+    }
+}
+
+impl Pack for nfsstat3 {
+    fn packed_size(&self) -> usize {
+        4
+    }
+    fn pack(&self, out: &mut impl Write) -> onc_xdr::Result<usize> {
+        self.to_u32().pack(out)
+    }
+}
+
+impl Unpack for nfsstat3 {
+    fn unpack(input: &mut impl Read) -> onc_xdr::Result<(Self, usize)> {
+        let (v, n) = u32::unpack(input)?;
+        Ok((Self::from_u32(v), n))
+    }
 }
 
 impl std::fmt::Display for nfsstat3 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            Self::NFS3_OK => "NFS3_OK",
-            Self::NFS3ERR_PERM => "NFS3ERR_PERM",
-            Self::NFS3ERR_NOENT => "NFS3ERR_NOENT",
-            Self::NFS3ERR_IO => "NFS3ERR_IO",
-            Self::NFS3ERR_NXIO => "NFS3ERR_NXIO",
-            Self::NFS3ERR_ACCES => "NFS3ERR_ACCES",
-            Self::NFS3ERR_EXIST => "NFS3ERR_EXIST",
-            Self::NFS3ERR_XDEV => "NFS3ERR_XDEV",
-            Self::NFS3ERR_NODEV => "NFS3ERR_NODEV",
-            Self::NFS3ERR_NOTDIR => "NFS3ERR_NOTDIR",
-            Self::NFS3ERR_ISDIR => "NFS3ERR_ISDIR",
-            Self::NFS3ERR_INVAL => "NFS3ERR_INVAL",
-            Self::NFS3ERR_FBIG => "NFS3ERR_FBIG",
-            Self::NFS3ERR_NOSPC => "NFS3ERR_NOSPC",
-            Self::NFS3ERR_ROFS => "NFS3ERR_ROFS",
-            Self::NFS3ERR_MLINK => "NFS3ERR_MLINK",
-            Self::NFS3ERR_NAMETOOLONG => "NFS3ERR_NAMETOOLONG",
-            Self::NFS3ERR_NOTEMPTY => "NFS3ERR_NOTEMPTY",
-            Self::NFS3ERR_DQUOT => "NFS3ERR_DQUOT",
-            Self::NFS3ERR_STALE => "NFS3ERR_STALE",
-            Self::NFS3ERR_REMOTE => "NFS3ERR_REMOTE",
-            Self::NFS3ERR_BADHANDLE => "NFS3ERR_BADHANDLE",
-            Self::NFS3ERR_NOT_SYNC => "NFS3ERR_NOT_SYNC",
-            Self::NFS3ERR_BAD_COOKIE => "NFS3ERR_BAD_COOKIE",
-            Self::NFS3ERR_NOTSUPP => "NFS3ERR_NOTSUPP",
-            Self::NFS3ERR_TOOSMALL => "NFS3ERR_TOOSMALL",
-            Self::NFS3ERR_SERVERFAULT => "NFS3ERR_SERVERFAULT",
-            Self::NFS3ERR_BADTYPE => "NFS3ERR_BADTYPE",
-            Self::NFS3ERR_JUKEBOX => "NFS3ERR_JUKEBOX",
-        };
-        write!(f, "{name}")
+        match self {
+            Self::NFS3_OK => f.write_str("NFS3_OK"),
+            Self::NFS3ERR_PERM => f.write_str("NFS3ERR_PERM"),
+            Self::NFS3ERR_NOENT => f.write_str("NFS3ERR_NOENT"),
+            Self::NFS3ERR_IO => f.write_str("NFS3ERR_IO"),
+            Self::NFS3ERR_NXIO => f.write_str("NFS3ERR_NXIO"),
+            Self::NFS3ERR_ACCES => f.write_str("NFS3ERR_ACCES"),
+            Self::NFS3ERR_EXIST => f.write_str("NFS3ERR_EXIST"),
+            Self::NFS3ERR_XDEV => f.write_str("NFS3ERR_XDEV"),
+            Self::NFS3ERR_NODEV => f.write_str("NFS3ERR_NODEV"),
+            Self::NFS3ERR_NOTDIR => f.write_str("NFS3ERR_NOTDIR"),
+            Self::NFS3ERR_ISDIR => f.write_str("NFS3ERR_ISDIR"),
+            Self::NFS3ERR_INVAL => f.write_str("NFS3ERR_INVAL"),
+            Self::NFS3ERR_FBIG => f.write_str("NFS3ERR_FBIG"),
+            Self::NFS3ERR_NOSPC => f.write_str("NFS3ERR_NOSPC"),
+            Self::NFS3ERR_ROFS => f.write_str("NFS3ERR_ROFS"),
+            Self::NFS3ERR_MLINK => f.write_str("NFS3ERR_MLINK"),
+            Self::NFS3ERR_NAMETOOLONG => f.write_str("NFS3ERR_NAMETOOLONG"),
+            Self::NFS3ERR_NOTEMPTY => f.write_str("NFS3ERR_NOTEMPTY"),
+            Self::NFS3ERR_DQUOT => f.write_str("NFS3ERR_DQUOT"),
+            Self::NFS3ERR_STALE => f.write_str("NFS3ERR_STALE"),
+            Self::NFS3ERR_REMOTE => f.write_str("NFS3ERR_REMOTE"),
+            Self::NFS3ERR_BADHANDLE => f.write_str("NFS3ERR_BADHANDLE"),
+            Self::NFS3ERR_NOT_SYNC => f.write_str("NFS3ERR_NOT_SYNC"),
+            Self::NFS3ERR_BAD_COOKIE => f.write_str("NFS3ERR_BAD_COOKIE"),
+            Self::NFS3ERR_NOTSUPP => f.write_str("NFS3ERR_NOTSUPP"),
+            Self::NFS3ERR_TOOSMALL => f.write_str("NFS3ERR_TOOSMALL"),
+            Self::NFS3ERR_SERVERFAULT => f.write_str("NFS3ERR_SERVERFAULT"),
+            Self::NFS3ERR_BADTYPE => f.write_str("NFS3ERR_BADTYPE"),
+            Self::NFS3ERR_JUKEBOX => f.write_str("NFS3ERR_JUKEBOX"),
+            Self::Unknown(v) => write!(f, "NFS3ERR_UNKNOWN({v})"),
+        }
     }
 }
 

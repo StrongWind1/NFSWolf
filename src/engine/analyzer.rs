@@ -850,13 +850,8 @@ async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &s
     // successfully (Some(N) != None) fabricate a Critical F-2.1.
     let export_count = count_readdirplus(nfs3, export_fh).await?;
 
-    // Build the full candidate list: XFS 128+64, then generic escape, then BTRFS.
-    let mut candidates = FileHandleAnalyzer::construct_xfs_escape_candidates(export_fh);
-    if candidates.is_empty()
-        && let Some(r) = FileHandleAnalyzer::construct_escape_handle(export_fh)
-    {
-        candidates.push(r);
-    }
+    // Build the full candidate list: fs-appropriate root first, then XFS/BTRFS.
+    let mut candidates = FileHandleAnalyzer::construct_root_candidates(export_fh);
     // Also try BTRFS subvolumes (first 4 are cheap).
     candidates.extend(FileHandleAnalyzer::construct_btrfs_subvol_handles(export_fh, 4));
 

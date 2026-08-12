@@ -386,8 +386,12 @@ async fn connect_privileged_or_fallback(addr: SocketAddr) -> std::io::Result<cra
                 tracing::debug!(%addr, "no privilege to bind <1024, falling back to ephemeral");
                 break;
             },
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tracing::trace!(%addr, port = local_port, "source port in use, trying next");
+            },
             Err(e) => {
-                tracing::trace!(%addr, port = local_port, %e, "privileged mountd connect failed, trying next port");
+                tracing::debug!(%addr, %e, "destination connect failed, not retrying other source ports");
+                break;
             },
         }
     }

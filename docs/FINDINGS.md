@@ -98,6 +98,19 @@ The NFS security model trusts client-supplied credentials without verification.
 
 **What nfswolf tests**: `analyze` checks the auth-flavor list returned by MOUNT EXPORT and flags exports that accept AUTH_SYS alongside any RPCSEC_GSS flavor.
 
+### F-1.8: AUTH_TOOWEAK Oracle (Kerberos Enforcement Detection)
+
+| Field | Value |
+|-------|-------|
+| Severity | High |
+| RFC Basis | RFC 5531 §7.4, RFC 2623 §2.3.2 |
+| Precondition | Export requires sec=krb5 (or krb5i/krb5p) |
+| Detection | Send GETATTR with AUTH_SYS after MOUNT succeeds; observe AUTH_TOOWEAK error |
+
+**Why the RFC allows this**: When no configured security flavor matches the request, the server returns `nfserr_wrongsec` (wire: `AUTH_TOOWEAK`, RFC 5531 §7.4). This is a definitive oracle: it tells the attacker the export exists but requires stronger authentication. Combined with the RFC 2623 §2.3.2 GSS bypass for root directory operations, MOUNT still succeeds with AUTH_SYS and leaks the root handle — only subsequent operations fail with AUTH_TOOWEAK.
+
+**What nfswolf tests**: NFSv4 SECINFO scanner and MOUNT auth-flavor list analysis detect whether AUTH_TOOWEAK is returned. The scanner's v4 SECINFO probing enumerates all per-directory security flavors. The MOUNT MNT auth_flavors list reveals which flavors the export accepts.
+
 ---
 
 ## Category 2: Access Control Bypass (File Handle Exploitation)
@@ -216,6 +229,21 @@ File handles are bearer tokens -- possession is authorization.
 
 **What nfswolf tests**: `analyze` probes for the WebNFS public handle on each target and flags the finding when the server responds to the zero-handle LOOKUP.
 
+### F-2.10: SIGN_FH Root Handle Exemption (FILEID_ROOT MAC Bypass)
+
+| Field | Value |
+|-------|-------|
+| Severity | Medium |
+| RFC Basis | Implementation-specific (SIGN_FH is a Linux-only extension) |
+| Precondition | Export has `sign_fh` enabled with a valid `fh_key` |
+| Detection | Construct a root handle (fileid_type=0x00) and send GETATTR |
+
+**Why this exists**: Linux knfsd's handle signing (NFSEXP_SIGN_FH) appends a SipHash-2-4 MAC to non-root file handles. However, root handles (FILEID_ROOT, type 0) are explicitly exempt: `nfsd_set_fh_dentry()` at line 294-296 of `fs/nfsd/nfsfh.c` says "We don't sign or verify the root, no per-file identity" and returns the export root dentry directly, skipping all MAC verification.
+
+**Attack**: An attacker who knows the export's fsid (discoverable via GETATTR or MOUNT) can construct `{version=1, auth_type=0, fsid_type=N, fileid_type=0, fsid=known_value}` — no MAC needed. Combined with `shell --handle` (F-2.7), this bypasses MOUNT host ACLs even when `sign_fh` is deployed. From the root, standard LOOKUP operations return legitimately signed child handles, enabling full directory traversal.
+
+**What nfswolf tests**: `shell --handle <constructed_root_hex>` demonstrates the bypass. `sign_fh` still blocks handle construction for non-root inodes (F-2.1, F-2.2).
+
 ---
 
 ## Category 3: Network-Level Attacks
@@ -316,6 +344,19 @@ File handles are bearer tokens -- possession is authorization.
 
 **What nfswolf tests**: Sends a NULL RPC to NFS program (100003 v3 proc 0) with `auth_flavor=AUTH_TLS` (7) and a verifier containing the STARTTLS token. If accepted, emits an informational finding.
 
+### F-3.9: AUTH_SHORT Session Credentials
+
+| Field | Value |
+|-------|-------|
+| Severity | Info |
+| RFC Basis | RFC 5531 §14, RFC 1057 §9.3 |
+| Precondition | NFS server issues AUTH_SHORT verifiers in replies |
+| Detection | Check MOUNT MNT auth_flavors and NFSv4 SECINFO for flavor value 2 |
+
+**Why this exists**: AUTH_SHORT (flavor 2) allows servers to return abbreviated session tokens as verifiers, which clients then use for subsequent requests instead of full AUTH_SYS credentials. Linux knfsd defines `RPC_AUTH_SHORT=2` at `include/linux/sunrpc/msg_prot.h:19` but never issues or accepts AUTH_SHORT credentials — the `authtab[2]` slot is NULL.
+
+**What nfswolf tests**: `analyze` checks for AUTH_SHORT in MOUNT auth_flavors and NFSv4 SECINFO responses. Finding is informational — relevant only for non-Linux NFS server implementations that may use AUTH_SHORT session tokens.
+
 ---
 
 ## Category 4: Privilege Escalation
@@ -330,6 +371,8 @@ File handles are bearer tokens -- possession is authorization.
 | Detection | Create file as uid=0, check ownership |
 
 **Why the RFC allows this**: "This superuser permission may not be allowed on the server, since anyone who can become superuser on their client could gain access to all remote files." (RFC 1813 §4.4). When no_root_squash is set, uid=0 credentials are not remapped -- full root access.
+
+**Kernel capability escalation**: NFS root gets `CAP_NFSD_SET` (`capability.h:69`), which includes `CAP_FS_MASK | CAP_SYS_RESOURCE`. `CAP_FS_MASK` grants `CAP_MAC_OVERRIDE`, meaning NFS root bypasses ALL mandatory access controls (SELinux, AppArmor, SMACK) — a file labeled `system_u:object_r:shadow_t:s0` is fully readable over NFS. `CAP_SYS_RESOURCE` lets NFS root bypass disk quotas that even local root cannot override, making NFS root strictly more powerful than local root in the quota dimension.
 
 **What nfswolf tests**: Write test file as uid=0, verify it's owned by root on server.
 
@@ -375,7 +418,7 @@ File handles are bearer tokens -- possession is authorization.
 | Precondition | SELinux/Smack enforcing, NFS-mounted files |
 | Detection | Check if NFS-created files get default labels instead of intended labels |
 
-**Why this exists**: "RPCSEC_GSSv3 is not a complete solution for labeling: it conveys the labels of actors but not the labels of objects." (RFC 7861 §4). Without labeled NFS (extremely rare), NFS-created files get default SELinux contexts, bypassing mandatory access control.
+**Why this exists**: "RPCSEC_GSSv3 is not a complete solution for labeling: it conveys the labels of actors but not the labels of objects." (RFC 7861 §4). Without labeled NFS (extremely rare), NFS-created files get default SELinux contexts, bypassing mandatory access control. Worse, NFS root on `no_root_squash` exports receives `CAP_MAC_OVERRIDE` via `CAP_NFSD_SET` (`fs/nfsd/auth.c:80`), which bypasses SELinux/AppArmor enforcement entirely — even files with restrictive security labels (e.g., `shadow_t`) are fully accessible. See F-4.1 for the capability chain.
 
 ### F-4.6: Unrestricted chown (Any User Can Change File Ownership)
 
@@ -462,6 +505,8 @@ File handles are bearer tokens -- possession is authorization.
 
 **What nfswolf tests**: Extracts `post_op_attr` from NFS3ERR_ACCES and NFS3ERR_PERM failure responses in `probe_file_access()`. Deduplicates by (operation, path) and reports all leaked metadata.
 
+**NFSv4 ACL dimension**: On NFSv4 servers, `NFS4_ANYONE_MODE` (`fs/nfsd/nfs4acl.c:54`) unconditionally includes `READ_ATTRIBUTES | READ_ACL | SYNCHRONIZE` in every ALLOW ACE. Even `mode 0000` files leak their ACL contents and attributes via NFSv4 GETATTR, because the ACL grants everyone read-attribute access by design.
+
 ### F-5.7: Case-Insensitive Filesystem (Windows NFS / NTFS Fingerprint)
 
 | Field | Value |
@@ -488,6 +533,19 @@ File handles are bearer tokens -- possession is authorization.
 
 **What nfswolf tests**: Creates a temporary NFS client with AUTH_NONE credentials (DirectTransport default) and sends GETATTR against the export root handle.
 
+### F-5.9: Execute-Only File Content Disclosure (Read-If-Exec Fallback)
+
+| Field | Value |
+|-------|-------|
+| Severity | Low |
+| RFC Basis | Implementation-specific (no RFC requires this behavior) |
+| Precondition | File has execute permission but no read permission (e.g., mode 0111) |
+| Detection | Attempt NFS READ on an execute-only file; observe success |
+
+**Why this exists**: When `nfsd_permission()` denies a READ request (`-EACCES`) and the file is regular and the request carries `NFSD_MAY_READ_IF_EXEC`, the server retries the permission check with `MAY_EXEC` instead of `MAY_READ` (`fs/nfsd/vfs.c:2894-2898`). If any execute bit is set, the read succeeds. This is intentional — the server allows downloading executables for local execution — but it violates the POSIX permission model where mode 0111 means "execute but not read."
+
+**Practical impact**: Limited. Few files are deliberately set to execute-only. Affects hardened environments that use execute-only permissions on proprietary binaries or license-protected software.
+
 ---
 
 ## Category 6: Denial of Service (out of scope)
@@ -496,7 +554,11 @@ NLM/NSM lock attacks (F-6.1), NFSv4 grace-period blocking (F-6.2), and
 SETCLIENTID state destruction (F-6.3) were initially scoped but are
 intentionally not implemented. The lock-DoS module was removed along with
 the NLM and NSM clients, and grace-period / SETCLIENTID DoS were never
-implemented. Detailed write-ups remain in `docs/findings/F-6.1-*.md`,
+implemented.
+
+**F-6.3 kernel detail**: The `same_creds()` check at `fs/nfsd/nfs4state.c:2689` compares `cr_uid`, `cr_gid`, `cr_group_info`, and `cr_principal`. Under AUTH_SYS, the attacker controls all of these fields. Most NFS clients run as root (uid=0), so passing the credential check is trivial. At line 4784-4794, confirming a new client with matching name and credentials destroys all of the old client's open state, locks, and delegations via `expire_client()`. The kernel comment "XXX: check that cr_targ_princ fields match?" (line 2696) confirms the developers' own uncertainty about this check.
+
+Detailed write-ups remain in `docs/findings/F-6.1-*.md`,
 `F-6.2-*.md`, and `F-6.3-*.md` for completeness, but no nfswolf
 subcommand exercises these findings.
 
@@ -570,6 +632,17 @@ subcommand exercises these findings.
 
 **Why this matters**: The Linux NFS kernel server processes file operations in kernel space, bypassing the auditd framework. No file access logs are generated for NFS operations regardless of audit rules. All NFS attacks operate in a detection blind spot.
 
+### F-7.7: xprtsec Permissive Default (TLS/Plaintext Coexistence)
+
+| Field | Value |
+|-------|-------|
+| Severity | Medium |
+| RFC Basis | RFC 9289 §1 (opt-in nature), §6.1.1 (STRIPTLS) |
+| Precondition | Export configured with `xprtsec=tls` or `xprtsec=mtls` |
+| Detection | Connect without TLS; observe that NFS operations succeed |
+
+**Why this matters**: The default value for `ex_xprtsec_modes` is `NFSEXP_XPRTSEC_ALL` (`export.c:647`), which sets all three bits: `NFSEXP_XPRTSEC_NONE | NFSEXP_XPRTSEC_TLS | NFSEXP_XPRTSEC_MTLS`. The `check_xprtsec_policy()` function (`export.c:1100-1118`) accepts the connection if ANY one of the enabled modes matches. Because `NFSEXP_XPRTSEC_NONE` is enabled by default, adding `xprtsec=tls` to an export doesn't remove plaintext acceptance — an attacker simply connects without TLS and proceeds in plaintext. No active STRIPTLS attack (F-3.4) is needed. This is the transport-layer equivalent of F-1.7 (RPCSEC_GSS flavor downgrade). To actually require TLS, the admin must explicitly set `xprtsec=tls` and NOT include `xprtsec=none`.
+
 ---
 
 ## Finding ID Cross-Reference
@@ -583,6 +656,7 @@ subcommand exercises these findings.
 | F-1.5 | [Credential Replay](findings/F-1.5-credential-replay.md) | High | Passive only -- precondition detected via F-3.1 |
 | F-1.6 | [NFSv2 Downgrade](findings/F-1.6-nfsv2-downgrade.md) | High | `scan` (portmapper version matrix), `analyze` |
 | F-1.7 | [RPCSEC_GSS Flavor Downgrade](findings/F-1.7-rpcsec-gss-flavor-downgrade.md) | High | `analyze` (mixed auth flavor detection) |
+| F-1.8 | [AUTH_TOOWEAK Oracle](findings/F-1.8-auth-tooweak-kerberos-enforced.md) | High | `analyze` (NFSv4 SECINFO scanner, MOUNT auth-flavor list) |
 | F-2.1 | [Export Escape](findings/F-2.1-export-escape.md) | Critical | `escape`, `analyze`, `shell escape-root` |
 | F-2.2 | [File Handle Guessing](findings/F-2.2-file-handle-guessing.md) | High | `analyze` (entropy), `brute-handle` |
 | F-2.3 | [Windows Handle Signing](findings/F-2.3-windows-handle-signing.md) | Critical | `analyze` (`FileHandleAnalyzer::check_windows_signing`) |
@@ -592,6 +666,7 @@ subcommand exercises these findings.
 | F-2.7 | [NFS Daemon ACL Blindness](findings/F-2.7-nfsd-acl-blindness.md) | Critical | `shell --handle <hex>` / `mount --handle <hex>` (port 2049, no MOUNT -- handle resolves from any IP) |
 | F-2.8 | [Sibling Export Lateral Access](findings/F-2.8-sibling-export-lateral-access.md) | Critical | `escape` + `shell` (`escape-root`, then `cd` to a peer export, `ls`/`cat`) |
 | F-2.9 | [WebNFS Public File Handle](findings/F-2.9-webnfs-public-handle.md) | Critical | `analyze` (WebNFS public handle probe) |
+| F-2.10 | [SIGN_FH Root Handle Exemption](findings/F-2.10-sign-fh-root-exemption.md) | Medium | `shell --handle <constructed_root_hex>` |
 | F-3.1 | [Plaintext Wire Protocol](findings/F-3.1-plaintext-wire-protocol.md) | High | `analyze` (Info: flags exports that advertise no RPCSEC_GSS; RFC 9289 TLS itself is not actively probed) |
 | F-3.2 | [Portmapper Amplification](findings/F-3.2-portmapper-amplification.md) | Medium | `scan` (UDP DUMP amplification factor), `analyze` |
 | F-3.3 | [IP Spoofing](findings/F-3.3-ip-spoofing-host-trust.md) | High | `analyze` (host-based ACL detection; no active exploit) |
@@ -600,6 +675,7 @@ subcommand exercises these findings.
 | F-3.6 | [UDP MOUNT Handle Theft](findings/F-3.6-udp-mount-handle-theft.md) | Critical | `scan --scan-udp` (mountd UDP availability) |
 | F-3.7 | [AUTH_DH Advertised (Cryptographically Broken)](findings/F-3.7-auth-dh-broken.md) | Medium | `analyze` (MOUNT auth_flavors + NFSv4 SECINFO flavor 3 detection) |
 | F-3.8 | [RPC-with-TLS Supported (RFC 9289)](findings/F-3.8-rpc-with-tls.md) | Info | `analyze` (AUTH_TLS NULL probe on NFS program) |
+| F-3.9 | [AUTH_SHORT Session Credentials](findings/F-3.9-auth-short-session-credentials.md) | Info | `analyze` (MOUNT auth_flavors + NFSv4 SECINFO flavor 2 detection) |
 | F-4.1 | [no_root_squash](findings/F-4.1-no-root-squash.md) | Critical | `analyze`, `mount --uid 0 --allow-write`, `shell uid 0` |
 | F-4.2 | [SUID/SGID Escalation](findings/F-4.2-suid-sgid-escalation.md) | High | `shell suid-scan`, `mount` + `chmod u+s` via regular tools |
 | F-4.3 | [Device Node Creation](findings/F-4.3-device-node-creation.md) | High | `shell mknod` |
@@ -614,6 +690,7 @@ subcommand exercises these findings.
 | F-5.6 | Metadata Disclosed on Access Denial | Low | `analyze` (harvests `post_op_attr` from NFS3ERR_ACCES/PERM responses) |
 | F-5.7 | [Case-Insensitive Filesystem](findings/F-5.7-case-insensitive-filesystem.md) | Low | `analyze` (PATHCONF `case_insensitive` check per export) |
 | F-5.8 | [Export Root Attributes Leaked via AUTH_NONE](findings/F-5.8-auth-none-attr-leak.md) | Low | `analyze` (GETATTR with AUTH_NONE on export root handle) |
+| F-5.9 | [Execute-Only File Content Disclosure](findings/F-5.9-read-if-exec-content-disclosure.md) | Low | Not implemented -- documented for awareness |
 | F-6.1 | [NLM Lock Attacks](findings/F-6.1-nlm-lock-attacks.md) | Medium | Out of scope -- lock-DoS module removed |
 | F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | Out of scope -- never implemented |
 | F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | Out of scope -- never implemented |
@@ -623,3 +700,4 @@ subcommand exercises these findings.
 | F-7.4 | [Missing nosuid/nodev](findings/F-7.4-missing-nosuid-nodev.md) | High | Not server-observable -- `nosuid`/`nodev` are client-side mount options, absent from MNTPROC_EXPORT, so `analyze` cannot detect them remotely (documented gap, no detection) |
 | F-7.5 | [Squash Misconfiguration](findings/F-7.5-squash-misconfiguration.md) | Critical | `analyze` (all_squash + anonuid=0 detection) |
 | F-7.6 | [No Audit Logging](findings/F-7.6-no-audit-logging.md) | Medium | Not remotely detectable -- documented for awareness |
+| F-7.7 | [xprtsec Permissive Default](findings/F-7.7-xprtsec-permissive-default.md) | Medium | Not implemented -- documented for awareness |

@@ -1,6 +1,6 @@
 //! Provides wrappers for tokio's types
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use tokio::io::{AsyncRead as TokioAsyncRead, AsyncWrite as TokioAsyncWrite};
 use tokio::net::{TcpSocket, TcpStream};
@@ -55,8 +55,7 @@ impl Connector for TokioConnector {
     }
 
     async fn connect_with_port(&self, addr: SocketAddr, local_port: u16) -> std::io::Result<Self::Connection> {
-        let socket = TcpSocket::new_v4()?;
-        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), local_port);
+        let (socket, local_addr) = if addr.is_ipv4() { (TcpSocket::new_v4()?, SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), local_port)) } else { (TcpSocket::new_v6()?, SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), local_port)) };
         socket.bind(local_addr)?;
 
         let stream = socket.connect(addr).await?;
