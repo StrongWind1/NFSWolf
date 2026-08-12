@@ -535,6 +535,7 @@ File handles are bearer tokens -- possession is authorization.
 
 ### F-5.9: Execute-Only File Content Disclosure (Read-If-Exec Fallback)
 
+
 | Field | Value |
 |-------|-------|
 | Severity | Low |
@@ -545,6 +546,19 @@ File handles are bearer tokens -- possession is authorization.
 **Why this exists**: When `nfsd_permission()` denies a READ request (`-EACCES`) and the file is regular and the request carries `NFSD_MAY_READ_IF_EXEC`, the server retries the permission check with `MAY_EXEC` instead of `MAY_READ` (`fs/nfsd/vfs.c:2894-2898`). If any execute bit is set, the read succeeds. This is intentional — the server allows downloading executables for local execution — but it violates the POSIX permission model where mode 0111 means "execute but not read."
 
 **Practical impact**: Limited. Few files are deliberately set to execute-only. Affects hardened environments that use execute-only permissions on proprietary binaries or license-protected software.
+
+### F-5.10: pNFS Flex-File Layout Security Downgrade
+
+| Field | Value |
+|-------|-------|
+| Severity | Medium |
+| RFC Basis | RFC 8435 (Flexible File Layout), RFC 5661 §12.9 |
+| Precondition | Export has `pnfs` flag set; client has NFSv4.1 session |
+| Detection | Issue LAYOUTGET on a pNFS-enabled export; check for NFSv3 handle in response |
+
+**Why this exists**: Linux knfsd's flex-file layout driver responds to LAYOUTGET by handing the client the raw NFS file handle (`flexfilelayout.c:64-65`) plus instructions to contact the data server via NFSv3 AUTH_SYS (`da->version = 3`, line 95). This downgrades the security model from NFSv4.1 (sessions, RPCSEC_GSS) to NFSv3 AUTH_SYS on the data path. Device IDs are sequential from 1 (`nfsd_devid_seq`, `nfs4layouts.c:48`), enabling enumeration of all pNFS exports. The `.disable_recalls = true` flag (`flexfilelayout.c:138`) means granted layouts cannot be recalled or fenced.
+
+**Attack chain**: A client authenticated via krb5p on the MDS obtains a layout containing an NFSv3 file handle and DS address. The client (or attacker) then contacts the DS directly via NFSv3 AUTH_SYS with forged UID/GID credentials (F-1.1), bypassing all Kerberos enforcement. The layout and handle are irrevocable.
 
 ---
 
@@ -691,6 +705,7 @@ subcommand exercises these findings.
 | F-5.7 | [Case-Insensitive Filesystem](findings/F-5.7-case-insensitive-filesystem.md) | Low | `analyze` (PATHCONF `case_insensitive` check per export) |
 | F-5.8 | [Export Root Attributes Leaked via AUTH_NONE](findings/F-5.8-auth-none-attr-leak.md) | Low | `analyze` (GETATTR with AUTH_NONE on export root handle) |
 | F-5.9 | [Execute-Only File Content Disclosure](findings/F-5.9-read-if-exec-content-disclosure.md) | Low | Not implemented -- documented for awareness |
+| F-5.10 | [pNFS Layout Security Downgrade](findings/F-5.10-pnfs-layout-security-downgrade.md) | Medium | Not implemented -- documented for awareness |
 | F-6.1 | [NLM Lock Attacks](findings/F-6.1-nlm-lock-attacks.md) | Medium | Out of scope -- lock-DoS module removed |
 | F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | Out of scope -- never implemented |
 | F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | Out of scope -- never implemented |

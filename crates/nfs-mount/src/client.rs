@@ -177,16 +177,20 @@ impl<T: RpcTransport> MountClient<T> {
         }
     }
 
-    // --- MOUNT v3 additional procedures ---
+    // --- Version-neutral additional procedures ---
 
-    /// `MNTPROC3_DUMP` -- list currently mounted clients (RFC 1813 Appendix I sec. 4.3).
+    /// `MNTPROC_DUMP` / `MNTPROC3_DUMP` -- list currently mounted clients.
+    ///
+    /// The wire format (mountlist) is identical between v1 and v3.
     pub async fn dump(&self) -> Result<mountlist<'static, 'static>, T::Error> {
-        self.transport.call::<Void, mountlist<'_, '_>>(PROGRAM, MOUNT_V3, MOUNT_V3_PROC::MOUNTPROC3_DUMP as u32, &Void).await
+        self.raw_call(2, &Void).await
     }
 
-    /// `MNTPROC3_UMNTALL` -- remove all mount entries for this client (RFC 1813 Appendix I sec. 4.5).
+    /// `MNTPROC_UMNTALL` / `MNTPROC3_UMNTALL` -- remove all mount entries for this client.
+    ///
+    /// The wire format (void -> void) is identical between v1 and v3.
     pub async fn umntall(&self) -> Result<(), T::Error> {
-        let _: Void = self.transport.call::<Void, Void>(PROGRAM, MOUNT_V3, MOUNT_V3_PROC::MOUNTPROC3_UMNTALL as u32, &Void).await?;
+        let _: Void = self.raw_call(4, &Void).await?;
         Ok(())
     }
 

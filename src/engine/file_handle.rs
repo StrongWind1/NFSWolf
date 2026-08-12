@@ -319,11 +319,11 @@ impl FileHandleAnalyzer {
         // Linux knfsd with UUID-based exports uses a two-layer handle format:
         //
         //   FILEID_ROOT (fileid_type=0, 28 bytes)  -- returned by MOUNT for export dir:
-        //     [01][00][07][00] | export_dir_inode(4LE) | export_dir_gen(4LE) | UUID(16)
+        //     [01][00][07][00] | inode_low(4LE) | inode_high(4LE) | UUID(16)
         //
         //   FILEID_INO32_GEN_PARENT (fileid_type=2, 44 bytes) -- canonical escape format per
         //   the nfs-security-tooling wiki and nfs_analyze reference implementation:
-        //     [01][00][07][02] | export_dir_inode(4LE) | export_dir_gen(4LE) | UUID(16)
+        //     [01][00][07][02] | inode_low(4LE) | inode_high(4LE) | UUID(16)
         //                      | file_inode(4LE) | file_gen(4LE)
         //                      | parent_inode(4LE) | parent_gen(4LE)
         //   The root directory is its own parent, so parent_inode == inode, parent_gen == gen.
