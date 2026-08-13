@@ -157,7 +157,7 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
 
 /// Single-result escape: try every method, print the first success.
 ///
-/// Cascade: WebNFS → v3 MOUNT → handle matrix → v2 MOUNT → v4 handle → v4 LOOKUPP.
+/// Cascade: WebNFS -> v3 MOUNT -> handle matrix -> v2 MOUNT -> v4 handle -> v4 LOOKUPP.
 /// Delegates to `find_escape_any` for the cascade logic, then handles output.
 async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<()> {
     eprintln!("{}", crate::output::status_info(&format!("Escaping export {host}:{export}")));
@@ -352,7 +352,7 @@ async fn acquire_v4_lookup_handle(host: &str, export: &str, globals: &GlobalOpts
     let addr = parse_addr_with_port(host, globals.nfs_port).ok()?;
     let nfs_port = globals.nfs_port.unwrap_or(2049);
 
-    // Build the same PooledTransport the shell uses — this handles auth
+    // Build the same PooledTransport the shell uses --this handles auth
     // context correctly across export junction crossings.
     let pool = std::sync::Arc::new(match &globals.proxy {
         Some(p) => ConnectionPool::with_proxy(p.clone()),
@@ -367,7 +367,7 @@ async fn acquire_v4_lookup_handle(host: &str, export: &str, globals: &GlobalOpts
     let client = PooledNfs4Client::new(transport);
 
     // Navigate component-by-component. The pooled transport handles auth
-    // context at each junction — same as the shell's `cd` command.
+    // context at each junction --same as the shell's `cd` command.
     let components: Vec<&str> = export.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
     let mut fh = client.get_root_fh().await.ok()?;
     let root_fh = fh.clone();
@@ -593,7 +593,7 @@ async fn find_escape_v4(host: &str, export: &str, btrfs_subvols: u32, max_root_s
         eprintln!("{}", crate::output::status_info(&format!("Trying NFSv4 handle escape on {host}:{nfs_port}")));
     }
 
-    // Build a pooled v4 transport — same as the shell, so junction crossings work.
+    // Build a pooled v4 transport --same as the shell, so junction crossings work.
     let pool = std::sync::Arc::new(match &globals.proxy {
         Some(p) => ConnectionPool::with_proxy(p.clone()),
         None => ConnectionPool::default_config(),
@@ -621,14 +621,18 @@ async fn find_escape_v4(host: &str, export: &str, btrfs_subvols: u32, max_root_s
     }
 
     if announce {
-        let fh_hex = fh.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        use std::fmt::Write as _;
+        let fh_hex = fh.iter().fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
         eprintln!("{}", crate::output::status_info(&format!("NFSv4 seed handle ({} bytes): {fh_hex}", fh.len())));
     }
 
-    // Probe candidates using NFSv4 GETATTR (not v3 — the handle's fsid
+    // Probe candidates using NFSv4 GETATTR (not v3 --the handle's fsid
     // may only be valid in the v4 export context).
     let probe = Nfs4EscapeProbe { client };
-    let config = EscapeConfig { btrfs_subvols, max_root_scan, announce, ..EscapeConfig::default() };
+    let config = EscapeConfig { btrfs_subvols, max_root_scan, announce };
     let seed = FileHandle::from_bytes(&fh);
 
     match find_escape_root(&probe, seed.as_bytes(), &config).await {

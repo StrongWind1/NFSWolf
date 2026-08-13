@@ -64,12 +64,12 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
     //
     // Exception: when the seed has fileid_type=0 (MOUNT/LOOKUP root handle),
     // skip the fileid check. The escape constructs a fileid_type=1 handle for
-    // the SAME root directory — the fileid will match but the handle bytes
+    // the SAME root directory --the fileid will match but the handle bytes
     // differ. This is the desired behavior: converting a type-0 root handle
     // into a type-1 handle that can be further manipulated.
     let seed_fileid_type = export_handle.get(3).copied().unwrap_or(0);
     let export_fileid = if seed_fileid_type == 0 {
-        None // type-0 root handle — fileid identity check would reject valid escapes
+        None // type-0 root handle --fileid identity check would reject valid escapes
     } else {
         probe.probe_getattr(export_handle).await.ok().map(|(_, id)| id)
     };
