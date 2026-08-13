@@ -151,7 +151,7 @@ AUTH_SHORT opaque tokens captured from wire traffic can be replayed to impersona
 
 ### OPEN for honest write testing (op 18, v4.0)
 
-Not done. Wire building blocks exist (`ArgOp::Open`, `encode_open_read()`, `CompoundBuilder::setclientid()`) but no analyzer integration. Requires SETCLIENTID for state management before OPEN can be issued. Medium-high effort.
+Done in the crate. `Nfs4Client` has `open_read()`, `open_write()`, `close_file()`, `read_via_open()`, `write_via_open()`, `read_file()`, `write_file()` with full `Nfs4Session` (SETCLIENTID lifecycle, seqid sequencing, lease tracking). The V4Ops shell backend uses these for all file I/O. Remaining gap: analyzer integration for honest write testing (not yet wired into the `analyze` subcommand).
 
 ---
 

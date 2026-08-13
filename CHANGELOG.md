@@ -6,6 +6,18 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ### Added
 
+- **Unified escape engine** -- `EscapeProbe` trait and `find_escape_root()` algorithm in `src/engine/escape.rs`, shared by both the `escape` subcommand and the `escape-root` shell command. Supports 18 of 19 Linux filesystem types (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660; only tmpfs resists). INO32_GEN candidate table with 9 labeled entries, plus filesystem-specific constructors for ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660.
+- **`escape --all` mode** -- acquires seed handles from MOUNT v3, MOUNT v1, and NFSv4 LOOKUP, runs the full escape against each, and reports every working root handle instead of stopping at the first.
+- **NFSv4 handle escape path** (`find_escape_v4`) -- pure-NFSv4 escape when MOUNT is firewalled. Connects via PooledTransport, navigates to the export with component-by-component LOOKUP, and constructs root handles from the v4-acquired seed.
+- **`exports` shell command** -- discovers sibling exports via LOOKUPP traversal of the NFSv4 pseudo-root (F-2.12 cross-export lateral access).
+- **NFSv4 crate completion** -- all 8 phases of the NFSv4 completion plan implemented: all 37 ops fully typed with response decoders, 66 named status codes, stateful infrastructure (SETCLIENTID lifecycle, OPEN/CLOSE/LOCK state, crash recovery), domain types (`Nfs4FileInfo`, `Nfs4DirEntry`, `Nfs4FileType`), and a shell-ready `Nfs4Client` with 47 public methods (244 crate tests).
+- **NFSv4 shell integration** -- `V4Ops: ShellOps` in `src/shell/v4.rs` integrates all 52 shell commands over NFSv4 with credential escalation via `try_with_escalation()`. NFSv2, v3, and v4 now share the full unified shell.
+- **Auto-version detection** -- probes v3 -> v2 -> v4 when `--nfs-version` is omitted, using portmapper GETPORT + TCP NULL verification for v2/v3 and direct COMPOUND for v4.
+- **F-2.11: NFSv4 LOOKUPP export escape** -- critical severity. LOOKUPP from a subdirectory export reaches the filesystem root, bypassing export boundaries without MOUNT.
+- **F-2.12: NFSv4 LOOKUPP cross-export lateral access** -- high severity. LOOKUPP traversal through the pseudo-root reaches sibling exports.
+- **F-5.10: pNFS flex-file layout security downgrade** -- medium severity. pNFS data servers may bypass NFSv4 security enforcement.
+- **Filesystem escape research matrix** -- `docs/research/FILESYSTEM_ESCAPE_MATRIX.md`, 335-line analysis of 23 Linux filesystem types with kernel source references, handle formats, root inodes, and generation check behavior.
+- **Linux kernel NFS breakdown** -- `ref/linux-kernel/BREAKDOWN.md`, 3200-line function-level walkthrough of Linux 7.1.8 knfsd mapping every security-relevant kernel code path to nfswolf findings.
 - **NFSv4 escape via LOOKUPP** -- pseudo-filesystem traversal to the real filesystem root, bypassing export boundaries without MOUNT.
 - **Handle acquisition matrix** -- MOUNT v1/v3 cross-version handle probing with pad/trim variants and per-variant GETATTR validation against both NFSv3 and NFSv2.
 - **SECINFO_NO_NAME fallback** (op 52, RFC 5661) -- probes auth requirements on the pseudo-root when per-name SECINFO fails; WRONGSEC oracle detects per-path Kerberos enforcement.
@@ -17,6 +29,9 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ### Changed
 
+- **Credential escalation deduplication** -- 9 copy-pasted 25-line escalation loops across v2/v3/v4 shell backends replaced by shared `CredCache` and `try_with_escalation()` in `shell/ops.rs`. Credential results are cached per-handle.
+- **Version-agnostic shell dispatch** -- `ShellSetup`, `run_repl`, `connect_v2`/`connect_v3`/`connect_v4` replace 3 copy-pasted REPL setup blocks. `ShellArgs.nfs_version` changed from `u32` to `Option<u32>`.
+- **`escape-root` uses cwd as seed** -- previously used `self.export_root` (pseudo-root on v4), now uses `self.cwd` so escape works from any directory.
 - All 8 protocol crates bumped to v1.0.0.
 - Standardized crate READMEs: centered headers, badges (CI, crates.io, edition, MSRV, license, docs.rs), nav links, API reference tables, ASCII dependency graph, protocol/codec coverage, safety sections.
 - Removed `publish = false` from all crates; added `documentation` field (docs.rs).
@@ -24,6 +39,15 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - Fixed provenance text for nfs-v2 and nfs-v4 READMEs (incorrectly said "Derived from Vaiz/nfs3"; NOTICE files say "Original NFSWolf work").
 - Top-level README: added crates.io and docs.rs badges, `cargo install nfswolf` option, protocol crates table, WEPWolf in related tools.
 - Scanner stores handles from MOUNT for cross-version testing; MOUNT v1 MNT runs per export.
+
+### Fixed
+
+- **Analyzer ext4 escape false negative** -- XFS-first candidate ordering caused ext4 exports to be misclassified; fixed candidate ordering.
+- **IPv6 privileged-port binding** -- `onc-rpc-client` now binds to IPv6 addresses correctly when `--privileged-port` is used.
+- **nfsstat3 Unknown(u32) catch-all** -- unknown NFS status codes no longer cause deserialization failures.
+- **NFSv4 LOOKUPP pseudo-FS vs real-FS root** -- correctly distinguishes pseudo-root from filesystem root in LOOKUPP output.
+- **clippy format_collect and needless_update** -- resolved CI-breaking clippy lints.
+- **Non-ASCII em-dashes in source** -- replaced with ASCII `--` to pass the hygiene gate.
 
 ## [1.0.0] - 2026-08-03
 
