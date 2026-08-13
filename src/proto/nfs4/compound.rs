@@ -182,7 +182,7 @@ impl Nfs4DirectClient {
     ///
     /// Like `lookup_fh` but uses PUTFH instead of PUTROOTFH, enabling
     /// relative path resolution from the current working directory.
-    #[expect(dead_code, reason = "v4 shell LOOKUP-from-cwd path not yet wired up")]
+    #[expect(dead_code, reason = "used by escape --all v4 seed acquisition when Nfs4DirectClient is chosen over PooledTransport")]
     pub(crate) async fn lookup_from_fh(&mut self, start_fh: &[u8], components: &[&str]) -> anyhow::Result<Vec<u8>> {
         if components.is_empty() {
             return Ok(start_fh.to_vec());
