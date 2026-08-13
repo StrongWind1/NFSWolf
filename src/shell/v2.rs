@@ -217,6 +217,10 @@ impl ShellOps for V2Ops {
         true
     }
 
+    fn commands(&self) -> &'static [&'static str] {
+        crate::shell::V2_SHELL_COMMANDS
+    }
+
     fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter> {
         Box::new(V2RemoteCompleter { client: Arc::clone(&self.client) })
     }

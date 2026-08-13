@@ -200,6 +200,9 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
 
     fn supports_identity_change(&self) -> bool;
 
+    /// Tab-completable command list for this NFS version.
+    fn commands(&self) -> &'static [&'static str];
+
     fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter>;
 
     /// V2-only: probe NFSPROC_ROOT (obsolete MOUNT bypass check).

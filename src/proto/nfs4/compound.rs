@@ -15,7 +15,7 @@ use onc_rpc_client::transport::net::Connector as _;
 use onc_rpc_client::transport::tokio::{TokioConnector, TokioIo};
 use tokio::net::TcpStream;
 
-use crate::proto::nfs4::types::{ArgOp, AttrRequest, CompoundArgs, CompoundRes, NFS4_PROC_COMPOUND, NFS4_PROGRAM, NFS4_VERSION, ResOpData};
+use crate::proto::nfs4::types::{ArgOp, AttrRequest, CompoundArgs, CompoundBuilder, CompoundRes, NFS4_PROC_COMPOUND, NFS4_PROGRAM, NFS4_VERSION, ResOpData, Stateid4};
 use crate::util::stealth::StealthConfig;
 
 // =============================================================================
@@ -166,13 +166,11 @@ impl Nfs4DirectClient {
         if components.is_empty() {
             return self.get_root_fh().await;
         }
-        let mut ops = Vec::with_capacity(components.len() + 2);
-        ops.push(ArgOp::Putrootfh);
+        let mut b = CompoundBuilder::new().putrootfh();
         for &c in components {
-            ops.push(ArgOp::Lookup(c.to_owned()));
+            b = b.lookup(c);
         }
-        ops.push(ArgOp::Getfh);
-        let res = self.compound(ops).await?;
+        let res = self.compound(b.getfh().build()).await?;
         anyhow::ensure!(res.status == 0, "LOOKUP failed: NFSv4 status={}", res.status);
         match res.results.last().map(|op| &op.data) {
             Some(ResOpData::Fh(fh)) => Ok(fh.clone()),
@@ -189,13 +187,11 @@ impl Nfs4DirectClient {
         if components.is_empty() {
             return Ok(start_fh.to_vec());
         }
-        let mut ops = Vec::with_capacity(components.len() + 2);
-        ops.push(ArgOp::Putfh(start_fh.to_vec()));
+        let mut b = CompoundBuilder::new().putfh(start_fh.to_vec());
         for &c in components {
-            ops.push(ArgOp::Lookup(c.to_owned()));
+            b = b.lookup(c);
         }
-        ops.push(ArgOp::Getfh);
-        let res = self.compound(ops).await?;
+        let res = self.compound(b.getfh().build()).await?;
         anyhow::ensure!(res.status == 0, "LOOKUP failed: NFSv4 status={}", res.status);
         match res.results.last().map(|op| &op.data) {
             Some(ResOpData::Fh(fh)) => Ok(fh.clone()),
@@ -272,9 +268,7 @@ impl Nfs4DirectClient {
     /// allows reading without a prior OPEN call on most servers.
     #[expect(dead_code, reason = "v4 shell READ path not yet wired up")]
     pub(crate) async fn read_chunk(&mut self, file_fh: &[u8], offset: u64, count: u32) -> anyhow::Result<(Vec<u8>, bool)> {
-        // Anonymous stateid: seqid=0, other=[0;12] (RFC 7530 S9.1.4.3).
-        let stateid = [0u8; 16];
-        let ops = vec![ArgOp::Putfh(file_fh.to_vec()), ArgOp::Read { stateid, offset, count }];
+        let ops = vec![ArgOp::Putfh(file_fh.to_vec()), ArgOp::Read { stateid: Stateid4::ANONYMOUS.to_bytes(), offset, count }];
         let res = self.compound(ops).await?;
         anyhow::ensure!(res.status == 0, "READ failed: NFSv4 status={}", res.status);
         match res.results.get(1).map(|op| &op.data) {

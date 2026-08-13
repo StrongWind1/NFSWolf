@@ -2,7 +2,13 @@
 
 Phased plan to bring `crates/nfs-v4` to full RFC 7530 spec compliance. Each phase is independently shippable — later phases build on earlier ones but earlier ones are useful alone.
 
-Current state: 37/37 ops sendable, ~17 fully decoded, 25/49 status codes named, no stateful infrastructure. 48 tests passing.
+## Goal
+
+The end state is a crate that exposes everything a consumer needs to implement a full interactive NFS file browser when only NFSv4 is available: directory listing with inline attributes, file read and write through proper OPEN/CLOSE lifecycles, credential switching, recursive traversal, and error classification on par with what `nfs-v3` provides. All work stays inside this crate — downstream wiring in `src/` is a separate effort that depends on this plan completing.
+
+The crate must provide domain types (`Nfs4FileInfo`, `Nfs4DirEntry`, `Nfs4FileType`) and high-level client methods (`lookup`, `readdir_plus`, `open_read`, `close`, `read_file`) so that consumers work with handles and file-info structs, not raw COMPOUND sequences and XDR bitmaps. The anonymous-stateid read path (`read_chunk`) stays for servers that allow it, but the stateful path (OPEN → READ/WRITE → CLOSE) is required for servers that enforce share reservations.
+
+Current state: **COMPLETE.** All 8 phases implemented. 37/37 ops fully typed and decoded, 66 named status codes, stateful infrastructure (SETCLIENTID lifecycle, OPEN/CLOSE/LOCK state), domain types, shell-ready client API with 47 public methods, crash recovery. 244 nfs-v4 crate tests, 722+ total project tests. V4Ops:ShellOps integrated into `src/shell/v4.rs` — all 52 shell commands work over NFSv4. Live-validated against 4 Linux knfsd servers.
 
 ---
 
@@ -392,7 +398,40 @@ Replace `{ fsid: Option<(u64, u64)>, sec_label: Option<SecLabel4> }` with `Fattr
 
 ### 4.4 READDIR entry attributes
 
-Currently `DirEntry4` has only `cookie` and `name`. Extend to optionally carry decoded attributes when the READDIR request included an `attr_request`.
+Currently `DirEntry4` has only `cookie` and `name`. Extend to carry decoded attributes and optionally a file handle when the READDIR request included an `attr_request`.
+
+The wire format per entry (RFC 7530 S16.24.5) is: `cookie(u64) + name(string) + attrs(bitmap + attrvals)`. When the bitmap includes FATTR4_RDATTR_ERROR (attribute 48, word 1 bit 16), the server may return a per-entry error instead of the requested attributes — handle gracefully (store `None` for the entry's attributes rather than failing the whole READDIR).
+
+Updated type:
+
+```rust
+#[derive(Debug, Clone)]
+pub struct DirEntry4 {
+    pub cookie: u64,
+    pub name: String,
+    pub attrs: Option<Fattr4Decoded>,
+    pub fh: Option<Vec<u8>>,
+}
+```
+
+The `fh` field is populated when the READDIR `attr_request` includes FATTR4_FILEHANDLE (attribute 19, word 0 bit 19) — this is the v4 equivalent of v3 READDIRPLUS returning a file handle per entry, avoiding a separate LOOKUP + GETFH round trip per entry.
+
+Key attributes to request for directory-listing use cases:
+
+| Attr ID | Name | Why |
+|---------|------|-----|
+| 1 | type | File vs directory vs symlink |
+| 4 | size | File size for display |
+| 19 | filehandle | Avoid per-entry LOOKUP round trips |
+| 20 | fileid | Inode equivalent |
+| 33 | mode | Permission bits |
+| 35 | numlinks | Hard link count |
+| 36 | owner | Owner string |
+| 37 | owner_group | Group string |
+| 47 | time_access | atime |
+| 52 | time_metadata | ctime |
+| 53 | time_modify | mtime |
+| 48 | rdattr_error | Per-entry error handling |
 
 ---
 
@@ -436,42 +475,124 @@ Add builder methods for every typed operation. Currently only 15 ops have builde
 
 ---
 
-## Phase 6 — Client API methods (3–5 days)
+## Phase 6 — Domain types and shell-ready client API (1–2 weeks)
 
-Add higher-level `Nfs4Client` methods for common operations. These compose COMPOUND sequences and return domain types.
+The protocol crate must expose domain types and high-level client methods that let a consumer build a full interactive file browser without touching wire types directly. This is the bridge between "every op is sendable" (Phases 1–5) and "a consumer can implement a complete NFS shell" — the crate owns the COMPOUND sequencing, attribute decoding, and error classification so consumers work with handles, file info structs, and byte slices.
 
-### 6.1 File operations
+Existing client methods (`get_root_fh`, `lookup_fh`, `lookup_from_fh`, `list_dir`, `read_chunk`) stay unchanged. Everything here is additive.
+
+### 6.1 Domain types
+
+Counterparts to the types `nfs-v3` exposes (`FileHandle`, `FileAttrs`, `FileType`, `DirEntryPlus`):
 
 ```rust
-pub async fn getattr(&self, fh: &[u8], attrs: AttrRequest) -> Result<Fattr4Decoded, ...>
-pub async fn read_file(&self, fh: &[u8]) -> Result<Vec<u8>, ...>  // read entire file
-pub async fn write(&self, fh: &[u8], stateid: Stateid4, offset: u64, data: &[u8]) -> Result<WriteRes, ...>
-pub async fn setattr(&self, fh: &[u8], stateid: Stateid4, attrs: Fattr4) -> Result<Vec<u32>, ...>
-pub async fn readlink(&self, fh: &[u8]) -> Result<String, ...>
-pub async fn access(&self, fh: &[u8], mask: u32) -> Result<(u32, u32), ...>
-pub async fn commit(&self, fh: &[u8], offset: u64, count: u32) -> Result<[u8; 8], ...>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nfs4FileType {
+    Regular, Directory, Symlink, BlockDev, CharDev, Socket, Fifo, NamedAttr, AttrDir,
+}
+
+#[derive(Debug, Clone)]
+pub struct Nfs4FileInfo {
+    pub ftype: Option<Nfs4FileType>,
+    pub size: Option<u64>,
+    pub mode: Option<u32>,
+    pub owner: Option<String>,
+    pub owner_group: Option<String>,
+    pub numlinks: Option<u32>,
+    pub fileid: Option<u64>,
+    pub fsid: Option<(u64, u64)>,
+    pub time_access: Option<(i64, u32)>,
+    pub time_modify: Option<(i64, u32)>,
+    pub time_metadata: Option<(i64, u32)>,
+    pub change: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Nfs4DirEntry {
+    pub name: String,
+    pub cookie: u64,
+    pub fh: Option<Vec<u8>>,
+    pub info: Option<Nfs4FileInfo>,
+}
 ```
 
-### 6.2 Directory operations
+`Nfs4FileInfo` is constructed from `Fattr4Decoded` (Phase 4) but is a stable public type that won't change when new fattr4 attributes are added to the decoder. `Nfs4DirEntry` is the client-API counterpart of the wire-level `DirEntry4` — the wire type stays internal to the READDIR decoder.
+
+Provide a standard `AttrRequest` constructor that requests the full shell attribute set (type, size, mode, owner, owner_group, numlinks, fileid, fsid, time_access, time_modify, time_metadata, change, filehandle):
 
 ```rust
-pub async fn create_dir(&self, dir_fh: &[u8], name: &str) -> Result<(Vec<u8>, ChangeInfo4), ...>
+impl AttrRequest {
+    pub fn shell_attrs() -> Self { ... }
+    pub fn shell_attrs_with_fh() -> Self { ... }  // adds FATTR4_FILEHANDLE for READDIR
+}
+```
+
+### 6.2 Path resolution and attribute queries
+
+Methods that compose LOOKUP + GETFH + GETATTR into single calls, returning domain types:
+
+```rust
+pub async fn lookup(&self, dir_fh: &[u8], name: &str) -> Result<(Vec<u8>, Nfs4FileInfo), ...>
+pub async fn getattr(&self, fh: &[u8]) -> Result<Nfs4FileInfo, ...>
+pub async fn readlink(&self, fh: &[u8]) -> Result<String, ...>
+pub async fn access(&self, fh: &[u8], mask: u32) -> Result<(u32, u32), ...>
+```
+
+`lookup` issues `PUTFH; LOOKUP name; GETFH; GETATTR(shell_attrs)` in one COMPOUND — one round trip for what v3 does with LOOKUP + GETATTR. The returned `Nfs4FileInfo` carries the full shell attribute set.
+
+### 6.3 Directory listing with attributes
+
+The READDIR-with-attrs equivalent of v3's READDIRPLUS:
+
+```rust
+pub async fn readdir_plus(&self, dir_fh: &[u8]) -> Result<Vec<Nfs4DirEntry>, ...>
+```
+
+Requests inline attrs + filehandle per entry via READDIR `attr_request` using `AttrRequest::shell_attrs_with_fh()`. Handles RDATTR_ERROR per entry (RFC 7530 S16.24.4) — entries with per-entry errors get `info: None`. Paginates internally like `list_dir()` already does, bounded by `MAX_READDIR_ENTRIES`. Returns `Nfs4DirEntry` with populated `fh` and `info` fields.
+
+### 6.4 Directory and file mutation (stateless ops)
+
+These operations don't require OPEN state — they use the current file handle directly:
+
+```rust
+pub async fn mkdir(&self, dir_fh: &[u8], name: &str) -> Result<(Vec<u8>, ChangeInfo4), ...>
 pub async fn remove(&self, dir_fh: &[u8], name: &str) -> Result<ChangeInfo4, ...>
 pub async fn rename(&self, src_fh: &[u8], oldname: &str, dst_fh: &[u8], newname: &str) -> Result<(ChangeInfo4, ChangeInfo4), ...>
 pub async fn link(&self, src_fh: &[u8], dir_fh: &[u8], newname: &str) -> Result<ChangeInfo4, ...>
+pub async fn symlink(&self, dir_fh: &[u8], name: &str, target: &str) -> Result<(Vec<u8>, ChangeInfo4), ...>
+pub async fn setattr(&self, fh: &[u8], stateid: Stateid4, attrs: Fattr4) -> Result<Vec<u32>, ...>
+pub async fn commit(&self, fh: &[u8], offset: u64, count: u32) -> Result<[u8; 8], ...>
 ```
 
-### 6.3 Security
+`mkdir` and `symlink` issue CREATE + GETFH in one COMPOUND and return the new object's handle. `rename` uses SAVEFH/RESTOREFH to reference both source and target directories in one COMPOUND.
+
+### 6.5 Security
 
 ```rust
 pub async fn secinfo(&self, dir_fh: &[u8], name: &str) -> Result<Vec<SecInfoEntry>, ...>
 ```
 
+### 6.6 Error classification on `Nfs4Error<E>`
+
+Extend `Nfs4Error<E>` with classification methods matching what `nfs-v3` exposes through `Nfs3Error`:
+
+```rust
+impl<E> Nfs4Error<E> {
+    pub fn is_transient(&self) -> bool { ... }
+    pub fn is_permission_denied(&self) -> bool { ... }
+    pub fn is_not_found(&self) -> bool { ... }
+    pub fn is_stale(&self) -> bool { ... }
+    pub fn nfs_status(&self) -> Option<Nfs4Status> { ... }
+}
+```
+
+These delegate to `Nfs4Status` classification methods when the variant is `Status`, return false for `Rpc`/`MissingResult`. Consumers classify errors without matching into the enum manually — critical for credential escalation logic and circuit breaker integration.
+
 ---
 
-## Phase 7 — Stateful infrastructure (2–4 weeks)
+## Phase 7 — Stateful infrastructure and stateful client API (3–5 weeks)
 
-The biggest phase. Adds SETCLIENTID lifecycle, stateid tracking, and OPEN/CLOSE/LOCK state management.
+The biggest phase. Adds SETCLIENTID lifecycle, stateid tracking, OPEN/CLOSE/LOCK state management, and the high-level client methods that use them. Without this phase, write operations and servers that enforce share reservations are unreachable — the crate can only do anonymous-stateid reads.
 
 ### 7.1 Client ID lifecycle
 
@@ -530,6 +651,47 @@ Track delegation stateids per file handle. DELEGRETURN method. DELEGPURGE for re
 
 No callback server (CB_RECALL requires a listening RPC service on the client) — this remains out of scope. Delegations can be returned but not recalled.
 
+### 7.5 Stateful client API methods
+
+High-level `Nfs4Client` methods that compose the stateful infrastructure from 7.1–7.4 with Phase 6's domain types into a usable file I/O surface. These are the methods a consumer calls to read and write files through proper v4 sessions.
+
+#### Session establishment
+
+```rust
+pub async fn establish(&self, client_name: &str, callback_addr: &str) -> Result<Nfs4Session, ...>
+pub async fn renew(&self, session: &Nfs4Session) -> Result<(), ...>
+```
+
+`establish` issues SETCLIENTID + SETCLIENTID_CONFIRM in one sequence and returns a live session. `renew` issues RENEW with the session's clientid.
+
+#### File open/close lifecycle
+
+```rust
+pub async fn open_read(&self, session: &Nfs4Session, dir_fh: &[u8], name: &str) -> Result<(OpenState, Vec<u8>, Nfs4FileInfo), ...>
+pub async fn open_write(&self, session: &Nfs4Session, dir_fh: &[u8], name: &str) -> Result<(OpenState, Vec<u8>, Nfs4FileInfo), ...>
+pub async fn close(&self, state: OpenState) -> Result<(), ...>
+```
+
+`open_read` / `open_write` issue `PUTFH; OPEN; GETFH; GETATTR` in one COMPOUND, handle OPEN_CONFIRM on first use per open-owner, and return the open state, file handle, and attributes. `close` issues CLOSE with the open stateid.
+
+#### Stateid-aware read/write
+
+```rust
+pub async fn read_via_open(&self, fh: &[u8], state: &OpenState, offset: u64, count: u32) -> Result<(Vec<u8>, bool), ...>
+pub async fn write_via_open(&self, fh: &[u8], state: &OpenState, offset: u64, data: &[u8]) -> Result<WriteRes, ...>
+```
+
+These use the open stateid instead of the anonymous one — required on servers that enforce share reservations (RFC 7530 S9.9).
+
+#### Convenience wrappers
+
+```rust
+pub async fn read_file(&self, session: &Nfs4Session, dir_fh: &[u8], name: &str) -> Result<(Vec<u8>, Nfs4FileInfo), ...>
+pub async fn write_file(&self, session: &Nfs4Session, dir_fh: &[u8], name: &str, data: &[u8]) -> Result<Nfs4FileInfo, ...>
+```
+
+`read_file`: OPEN(read) → loop READ → CLOSE, returns full file contents + attributes. `write_file`: OPEN(write) → loop WRITE → COMMIT → CLOSE, returns final attributes. These handle the entire lifecycle so consumers don't manage open state for simple operations.
+
 ---
 
 ## Phase 8 — Crash recovery and grace period (1 week)
@@ -558,17 +720,19 @@ Phase 2 (wire types: Stateid4, ChangeInfo4, owner types, Fattr4)
     +---> Phase 3 (type all 10 opaque ops, decode all responses)
     |         |
     |         +---> Phase 5 (CompoundBuilder methods for all ops)
-    |         |         |
-    |         |         +---> Phase 6 (client API methods)
-    |         |                   |
-    |         |                   +---> Phase 7 (stateful infrastructure)
-    |         |                             |
-    |         |                             +---> Phase 8 (crash recovery)
+    |                   |
+    +---> Phase 4 (generalized GETATTR decode + READDIR attrs)
     |         |
-    +---> Phase 4 (generalized GETATTR decode)
+    |         +-------+
+    |                 |
+    +---> Phase 6 (domain types + stateless client API) [needs 4 + 5]
+                      |
+                Phase 7 (stateful infra + stateful client API) [needs 5 + 6]
+                      |
+                Phase 8 (crash recovery)
 ```
 
-Phases 3 and 4 are independent of each other. Phases 5-8 are sequential.
+Phases 3 and 4 are independent of each other and can be developed in parallel. Phase 6 needs both Phase 4 (for `Fattr4Decoded` → `Nfs4FileInfo` conversion) and Phase 5 (for builder methods). Phase 7 needs Phase 5 (typed OPEN/LOCK/CLOSE ops) and Phase 6 (domain types returned by the stateful API methods).
 
 ---
 
@@ -579,14 +743,14 @@ Phases 3 and 4 are independent of each other. Phases 5-8 are sequential.
 | 1 | Status codes + enums | 1 day | +50 |
 | 2 | Supporting wire types | 2–3 days | +30 |
 | 3 | Type all 10 opaque ops + decode | 1 week | +60 |
-| 4 | Generalized GETATTR decode | 3–5 days | +20 |
+| 4 | Generalized GETATTR decode + READDIR attrs | 1 week | +30 |
 | 5 | CompoundBuilder completeness | 2 days | +30 |
-| 6 | Client API methods | 3–5 days | +20 |
-| 7 | Stateful infrastructure | 2–4 weeks | +40 |
+| 6 | Domain types + shell-ready client API | 1–2 weeks | +40 |
+| 7 | Stateful infrastructure + stateful client API | 3–5 weeks | +50 |
 | 8 | Crash recovery | 1 week | +15 |
-| **Total** | | **6–10 weeks** | **+265** |
+| **Total** | | **8–13 weeks** | **+305** |
 
-Phases 1–5 bring the crate to full wire-level spec compliance (every type, every op, every status code). Phases 6–8 add the stateful engine for OPEN/LOCK workflows.
+Phases 1–5 bring the crate to full wire-level spec compliance (every type, every op, every status code). Phase 6 adds the domain types and stateless client API surface — enough for a read-only file browser over v4. Phase 7 adds the stateful engine and its client API — required for write operations and servers that enforce share reservations. Phase 8 adds resilience. After Phase 7, the crate exposes everything a consumer needs to build a fully functional NFS shell over a v4-only server.
 
 ---
 
@@ -594,8 +758,11 @@ Phases 1–5 bring the crate to full wire-level spec compliance (every type, eve
 
 | Item | Reason |
 |------|--------|
+| `src/` shell wiring (`V4Ops: ShellOps`) | Separate effort that consumes the API surface this plan builds; depends on this plan completing through Phase 7 |
 | CB_RECALL callback server | Requires a listening RPC service on the client; different architecture |
 | NFSv4.1 session management (RFC 8881) | Different protocol version; the 4 v4.1 ops already present are sufficient for recon |
 | Full ACL encoding/decoding | Complex attribute with many edge cases; encode as opaque for now |
 | All 76 fattr4 attributes | Decode the ~15 key attributes; others remain opaque |
 | RPCSEC_GSS integration | Separate crate concern (onc-rpc-client) |
+| Credential escalation logic | Policy that belongs in `src/`, not in the protocol crate (layer boundary rule) |
+| v4 FUSE mount | Requires both stateful infrastructure and a FUSE adapter; separate from the shell goal |

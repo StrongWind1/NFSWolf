@@ -1642,7 +1642,7 @@ fn emit_secinfo_findings(entries: &[nfs_v4::SecInfoEntry], source: &str, export_
 /// Best-effort: silently returns on timeout or PROG_MISMATCH (NFSv3-only server).
 async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
-    use crate::proto::nfs4::types::{ArgOp, ResOpData};
+    use crate::proto::nfs4::types::{CompoundBuilder, ResOpData};
 
     let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
     let timeout = std::time::Duration::from_secs(5);
@@ -1660,12 +1660,11 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
     let Some((secinfo_name, parent)) = components.split_last() else { return };
 
     // --- Attempt 1: SECINFO (op 33, v4.0) ---
-    let mut ops: Vec<ArgOp> = Vec::with_capacity(parent.len() + 2);
-    ops.push(ArgOp::Putrootfh);
+    let mut b = CompoundBuilder::new().putrootfh();
     for &c in parent {
-        ops.push(ArgOp::Lookup(c.to_owned()));
+        b = b.lookup(c);
     }
-    ops.push(ArgOp::Secinfo((*secinfo_name).to_owned()));
+    let ops = b.secinfo(secinfo_name).build();
 
     let result = tokio::time::timeout(timeout, client.compound(ops)).await;
     let Ok(Ok(res)) = result else { return };
@@ -1691,13 +1690,12 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
     };
     let mut client_v41 = client_v41.with_stealth(stealth.clone());
 
-    let mut v41_ops: Vec<ArgOp> = Vec::with_capacity(components.len() + 2);
-    v41_ops.push(ArgOp::Putrootfh);
-    for &c in &components {
-        v41_ops.push(ArgOp::Lookup(c.to_owned()));
-    }
     // style=0 = SECINFO_STYLE4_CURRENT_FH (RFC 5661 S18.45.3).
-    v41_ops.push(ArgOp::SecinfoNoName { style: 0 });
+    let mut b = CompoundBuilder::new().putrootfh();
+    for &c in &components {
+        b = b.lookup(c);
+    }
+    let v41_ops = b.secinfo_no_name(0).build();
 
     let v41_result = tokio::time::timeout(timeout, client_v41.compound_v41(v41_ops)).await;
     if let Ok(Ok(v41_res)) = v41_result
@@ -1726,7 +1724,7 @@ async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut 
 /// and success (or any other error) when the flavor is accepted for this export.
 async fn wrongsec_flavor_oracle(nfs4_addr: SocketAddr, export_path: &str, components: &[&str], findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig, timeout: std::time::Duration) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
-    use crate::proto::nfs4::types::ArgOp;
+    use crate::proto::nfs4::types::CompoundBuilder;
 
     /// Auth flavors to probe: (flavor_number, uid, gid).
     /// AUTH_NONE (0) uses uid=0/gid=0 but connects with AUTH_NONE.
@@ -1751,13 +1749,12 @@ async fn wrongsec_flavor_oracle(nfs4_addr: SocketAddr, export_path: &str, compon
         let mut probe_client = probe_client.with_stealth(stealth.clone());
 
         // Build PUTROOTFH + LOOKUP chain for the export path.
-        let mut ops: Vec<ArgOp> = Vec::with_capacity(components.len() + 1);
-        ops.push(ArgOp::Putrootfh);
+        let mut b = CompoundBuilder::new().putrootfh();
         for &c in components {
-            ops.push(ArgOp::Lookup(c.to_owned()));
+            b = b.lookup(c);
         }
 
-        let probe_result = tokio::time::timeout(timeout, probe_client.compound(ops)).await;
+        let probe_result = tokio::time::timeout(timeout, probe_client.compound(b.build())).await;
         let Ok(Ok(res)) = probe_result else { continue };
 
         // NFS4ERR_WRONGSEC (10016) means this flavor is explicitly rejected.
@@ -1873,7 +1870,7 @@ async fn probe_pnfs_topology(addr: SocketAddr, findings: &mut Vec<Finding>, prox
 /// Best-effort: silently returns on any error.
 async fn check_nfs4_secinfo_per_path(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
-    use crate::proto::nfs4::types::{ArgOp, ResOpData};
+    use crate::proto::nfs4::types::{CompoundBuilder, ResOpData};
 
     let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
     let timeout = std::time::Duration::from_secs(5);
@@ -1889,12 +1886,11 @@ async fn check_nfs4_secinfo_per_path(addr: SocketAddr, export_path: &str, findin
     }
     let Some((&secinfo_name, parent)) = components.split_last() else { return };
 
-    let mut root_ops: Vec<ArgOp> = Vec::with_capacity(parent.len() + 2);
-    root_ops.push(ArgOp::Putrootfh);
+    let mut b = CompoundBuilder::new().putrootfh();
     for &c in parent {
-        root_ops.push(ArgOp::Lookup(c.to_owned()));
+        b = b.lookup(c);
     }
-    root_ops.push(ArgOp::Secinfo(secinfo_name.to_owned()));
+    let root_ops = b.secinfo(secinfo_name).build();
 
     let root_result = tokio::time::timeout(timeout, client.compound(root_ops)).await;
     let Ok(Ok(root_res)) = root_result else { return };
@@ -1920,7 +1916,7 @@ async fn check_nfs4_secinfo_per_path(addr: SocketAddr, export_path: &str, findin
     // Cap the number of subdirectories to probe (avoid hammering large dirs).
     for subdir_name in subdirs.iter().take(20) {
         // SECINFO requires the parent FH as current + the child name.
-        let sub_ops = vec![ArgOp::Putfh(export_fh.clone()), ArgOp::Secinfo(subdir_name.clone())];
+        let sub_ops = CompoundBuilder::new().putfh(export_fh.clone()).secinfo(subdir_name).build();
         let sub_result = tokio::time::timeout(timeout, client2.compound(sub_ops)).await;
         let Ok(Ok(sub_res)) = sub_result else { continue };
         if sub_res.status != 0 {
@@ -1977,7 +1973,7 @@ async fn check_nfs4_secinfo_per_path(addr: SocketAddr, export_path: &str, findin
 /// Best-effort: silently returns if GETATTR for sec_label is not supported.
 async fn check_nfs4_sec_label(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
-    use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
+    use crate::proto::nfs4::types::{AttrRequest, CompoundBuilder, ResOpData};
 
     let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
     let timeout = std::time::Duration::from_secs(5);
@@ -1988,12 +1984,11 @@ async fn check_nfs4_sec_label(addr: SocketAddr, export_path: &str, findings: &mu
 
     // Build LOOKUP chain to reach the export directory, then GETATTR with sec_label.
     let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
-    let mut ops: Vec<ArgOp> = Vec::with_capacity(components.len() + 2);
-    ops.push(ArgOp::Putrootfh);
+    let mut b = CompoundBuilder::new().putrootfh();
     for &c in &components {
-        ops.push(ArgOp::Lookup(c.to_owned()));
+        b = b.lookup(c);
     }
-    ops.push(ArgOp::Getattr(AttrRequest::sec_label()));
+    let ops = b.getattr(AttrRequest::sec_label()).build();
 
     let result = tokio::time::timeout(timeout, client.compound(ops)).await;
     let Ok(Ok(res)) = result else { return };
@@ -2002,7 +1997,7 @@ async fn check_nfs4_sec_label(addr: SocketAddr, export_path: &str, findings: &mu
     }
 
     // The GETATTR result is the last op in the compound.
-    let sec_label = res.results.last().and_then(|op| if let ResOpData::Getattr { sec_label, .. } = &op.data { sec_label.as_ref() } else { None });
+    let sec_label = res.results.last().and_then(|op| if let ResOpData::Getattr(attrs) = &op.data { attrs.sec_label.as_ref() } else { None });
 
     let Some(label) = sec_label else { return };
 
@@ -2039,7 +2034,7 @@ async fn check_nfs4_sec_label(addr: SocketAddr, export_path: &str, findings: &mu
 /// (NFS4ERR_NOTSUPP) or if no named attributes exist (NFS4ERR_NOENT).
 async fn check_nfs4_xattrs(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
-    use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
+    use crate::proto::nfs4::types::{AttrRequest, CompoundBuilder, ResOpData};
 
     let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
     let timeout = std::time::Duration::from_secs(5);
@@ -2050,15 +2045,13 @@ async fn check_nfs4_xattrs(addr: SocketAddr, export_path: &str, findings: &mut V
 
     // Navigate to the export directory, then OPENATTR(create=false) + READDIR.
     let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
-    let mut ops: Vec<ArgOp> = Vec::with_capacity(components.len() + 3);
-    ops.push(ArgOp::Putrootfh);
+    let mut b = CompoundBuilder::new().putrootfh();
     for &c in &components {
-        ops.push(ArgOp::Lookup(c.to_owned()));
+        b = b.lookup(c);
     }
     // OPENATTR changes the current FH to the named attribute directory.
-    ops.push(ArgOp::Openattr { createdir: false });
     // READDIR on the named attribute directory to list xattr names.
-    ops.push(ArgOp::Readdir { cookie: 0, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() });
+    let ops = b.openattr(false).readdir(0, 0, 4096, 65536, AttrRequest::empty()).build();
 
     let result = tokio::time::timeout(timeout, client.compound(ops)).await;
     let Ok(Ok(res)) = result else { return };

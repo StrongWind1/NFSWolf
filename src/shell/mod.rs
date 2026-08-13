@@ -8,6 +8,7 @@ pub(crate) mod complete;
 pub(crate) mod ops;
 pub(crate) mod v2;
 pub(crate) mod v3;
+pub(crate) mod v4;
 
 use ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
 
@@ -35,6 +36,65 @@ const CHUNK_SIZE: u32 = 65_536; // 64 KiB
 
 /// All commands available in the NFSv3 interactive shell (for Tab completion of the first token).
 pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
+    "ls",
+    "ll",
+    "dir",
+    "cd",
+    "pwd",
+    "tree",
+    "find",
+    "cat",
+    "type",
+    "get",
+    "download",
+    "put",
+    "upload",
+    "rm",
+    "del",
+    "mkdir",
+    "rmdir",
+    "mv",
+    "rename",
+    "cp",
+    "copy",
+    "chmod",
+    "chown",
+    "stat",
+    "readlink",
+    "symlink",
+    "link",
+    "uid",
+    "gid",
+    "hostname",
+    "whoami",
+    "id",
+    "impersonate",
+    "su",
+    "mknod",
+    "suid-scan",
+    "world-writable",
+    "secrets-scan",
+    "last",
+    "lastb",
+    "lastlog",
+    "escape-root",
+    "mount-handle",
+    "handle",
+    "verifier",
+    "lcd",
+    "lls",
+    "lpwd",
+    "lmkdir",
+    "history",
+    "help",
+    "exit",
+    "quit",
+];
+
+/// All commands available in the NFSv4 interactive shell (for Tab completion).
+///
+/// Identical to `V3_SHELL_COMMANDS` -- v4 supports mknod and verifier.
+pub(crate) const V4_SHELL_COMMANDS: &[&str] = &[
     "ls",
     "ll",
     "dir",
@@ -169,7 +229,8 @@ pub(crate) struct NfsShell<O: ShellOps> {
 impl<O: ShellOps> NfsShell<O> {
     /// Create a new shell rooted at `root` with the given ops backend.
     #[must_use]
-    pub(crate) fn new(ops: O, root: ShellHandle, allow_write: bool, hostname: String, commands: &'static [&'static str]) -> Self {
+    pub(crate) fn new(ops: O, root: ShellHandle, allow_write: bool, hostname: String) -> Self {
+        let commands = ops.commands();
         let tab_cache = Arc::new(Mutex::new(complete::TabCache { cwd: root.as_bytes().to_vec(), entries: Vec::new() }));
         Self { ops, export_root: root.clone(), cwd: root, cwd_path: "/".to_owned(), allow_write, hostname, history: Vec::new(), tab_cache, commands }
     }

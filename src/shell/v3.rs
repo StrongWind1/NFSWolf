@@ -317,6 +317,10 @@ impl ShellOps for V3Ops {
         true
     }
 
+    fn commands(&self) -> &'static [&'static str] {
+        crate::shell::V3_SHELL_COMMANDS
+    }
+
     fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter> {
         Box::new(Nfs3RemoteCompleter { nfs3: Arc::clone(&self.nfs3) })
     }

@@ -36,7 +36,7 @@ use tokio::time::timeout;
 use crate::engine::scan_types::{HostResult, MountPortInfo, NfsPortInfo, PortReachability, TargetSpec, V4ExportEntry, VersionRange};
 use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs4::compound::Nfs4DirectClient;
-use crate::proto::nfs4::types::{ArgOp, CompoundArgs, CompoundRes};
+use crate::proto::nfs4::types::{ArgOp, CompoundArgs, CompoundBuilder, CompoundRes};
 use crate::proto::portmap::PortmapClient;
 use crate::util::stealth::StealthConfig;
 
@@ -662,8 +662,7 @@ async fn readdir_v4_pseudo_root(addr: SocketAddr, proxy: Option<&str>) -> anyhow
     // Probe SECINFO per entry to discover auth flavors (RFC 7530 S16.31).
     let mut v4_exports: Vec<V4ExportEntry> = Vec::with_capacity(entries.len());
     for name in entries {
-        let ops = vec![ArgOp::Putrootfh, ArgOp::Secinfo(name.clone())];
-        let auth_flavors = match client.compound(ops).await {
+        let auth_flavors = match client.compound(CompoundBuilder::new().putrootfh().secinfo(&name).build()).await {
             Ok(res) if res.status == 0 => res.results.last().and_then(|op| if let ResOpData::SecFlavors(ref f) = op.data { Some(f.iter().map(|e| e.flavor).collect()) } else { None }).unwrap_or_default(),
             _ => Vec::new(),
         };
