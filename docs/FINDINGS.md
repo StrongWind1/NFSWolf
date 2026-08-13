@@ -246,6 +246,40 @@ File handles are bearer tokens -- possession is authorization.
 
 ---
 
+### F-2.11: NFSv4 LOOKUPP Export Escape
+
+| Field | Value |
+|-------|-------|
+| Severity | Critical |
+| RFC Basis | RFC 7530 §16.14 (LOOKUPP), RFC 7530 §7.3 (pseudo-FS) |
+| Precondition | NFSv4 export of a subdirectory (not the filesystem mount point), `no_subtree_check` (Linux default) |
+| Detection | LOOKUPP from export root, GETATTR on parent directory |
+
+**Why this exists**: NFSv4's LOOKUPP operation returns the parent directory of any file handle. When a server exports a subdirectory (e.g., `/srv/nfs/data/exported`), LOOKUPP from the export root reaches the filesystem root -- escaping the export boundary without any handle construction or filesystem fingerprinting. This is the NFSv4 equivalent of F-2.1 but requires zero protocol-level sophistication: a single `cd ..` is sufficient.
+
+**Attack**: `cd ..` from any NFSv4 export subdirectory. Read `secret.txt`, `shadow`, or any file outside the exported path. Confirmed on ext4, ZFS, BTRFS, f2fs, and all other filesystem types with subdirectory exports. The pseudo-root boundary stops upward traversal at the top of the export tree (cannot reach host `/`), but within any individual filesystem the escape is complete.
+
+**What nfswolf tests**: `escape-root` in the v4 shell uses LOOKUPP as the primary escape mechanism. `cd ..` in the v4 shell issues LOOKUPP automatically. The `escape` subcommand's `try_nfs4_escape()` performs LOOKUPP traversal as a fallback.
+
+---
+
+### F-2.12: NFSv4 LOOKUPP Cross-Export Lateral Access
+
+| Field | Value |
+|-------|-------|
+| Severity | High |
+| RFC Basis | RFC 7530 §7.3 (pseudo-FS namespace), RFC 7530 §16.14 (LOOKUPP), RFC 7530 §16.13 (LOOKUP) |
+| Precondition | NFSv4 access to any export, multiple exports sharing a pseudo-FS parent |
+| Detection | LOOKUPP to pseudo-root parent, READDIR, LOOKUP into sibling exports |
+
+**Why this exists**: The NFSv4 pseudo-filesystem connects all exports under a shared namespace tree. A client with access to any one export can LOOKUPP to the shared parent directory (e.g., `/srv/nfs/`) and then LOOKUP into any sibling export. No MOUNT protocol is involved -- the entire traversal happens over a single TCP connection. This bypasses MOUNT-level IP ACLs entirely because NFSv4 does not use MOUNT.
+
+**Attack**: From `/srv/nfs/public` (open to everyone), issue `cd ..` to reach `/srv/nfs/`, then `cd data/etc` to enter a different export, then `cat passwd` to read credentials. Confirmed: starting from `public`, traversed to `data/etc/passwd` in 3 operations. The pseudo-root READDIR also reveals the names of ALL exports (F-5.5), including IP-restricted ones.
+
+**What nfswolf tests**: The `exports` shell command (planned) will enumerate reachable sibling exports via LOOKUPP. Standard `cd ..` + `cd <sibling>` demonstrates the lateral movement manually.
+
+---
+
 ## Category 3: Network-Level Attacks
 
 ### F-3.1: Plaintext Traffic Interception
@@ -681,6 +715,8 @@ subcommand exercises these findings.
 | F-2.8 | [Sibling Export Lateral Access](findings/F-2.8-sibling-export-lateral-access.md) | Critical | `escape` + `shell` (`escape-root`, then `cd` to a peer export, `ls`/`cat`) |
 | F-2.9 | [WebNFS Public File Handle](findings/F-2.9-webnfs-public-handle.md) | Critical | `analyze` (WebNFS public handle probe) |
 | F-2.10 | [SIGN_FH Root Handle Exemption](findings/F-2.10-sign-fh-root-exemption.md) | Medium | `shell --handle <constructed_root_hex>` |
+| F-2.11 | [NFSv4 LOOKUPP Export Escape](findings/F-2.11-nfsv4-lookupp-export-escape.md) | Critical | `escape-root` (v4 shell), `cd ..` from subdirectory export |
+| F-2.12 | [NFSv4 LOOKUPP Cross-Export Lateral](findings/F-2.12-nfsv4-lookupp-cross-export-lateral.md) | High | `cd ..` + `cd <sibling>` in v4 shell, `exports` command (planned) |
 | F-3.1 | [Plaintext Wire Protocol](findings/F-3.1-plaintext-wire-protocol.md) | High | `analyze` (Info: flags exports that advertise no RPCSEC_GSS; RFC 9289 TLS itself is not actively probed) |
 | F-3.2 | [Portmapper Amplification](findings/F-3.2-portmapper-amplification.md) | Medium | `scan` (UDP DUMP amplification factor), `analyze` |
 | F-3.3 | [IP Spoofing](findings/F-3.3-ip-spoofing-host-trust.md) | High | `analyze` (host-based ACL detection; no active exploit) |
