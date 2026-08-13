@@ -6,6 +6,7 @@
 
 pub(crate) mod analyzer;
 pub(crate) mod credential;
+pub(crate) mod escape;
 pub(crate) mod file_handle;
 pub(crate) mod scan_types;
 pub(crate) mod scanner;
