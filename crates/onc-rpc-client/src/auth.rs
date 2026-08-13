@@ -153,49 +153,41 @@ impl AuthSys {
     }
 }
 
-// --- AUTH_DH (RFC 2695, RFC 5531 sec 8.2) ---
+// --- AUTH_DH (RFC 2695 sec 2.4, RFC 5531 sec 8.2) ---
 
-/// AUTH_DH credential body (RFC 2695 sec 2.1).
+/// AUTH_DH credential body (RFC 2695 sec 2.4).
 ///
-/// The timestamp is DES-CBC encrypted with the conversation key.  The
-/// `window` field is the maximum clock skew (in seconds) the server
-/// should accept.  On the first call, `fullname` carries the client's
-/// network name; subsequent calls use `nickname` instead.
+/// The credential and verifier are separate `opaque_auth` fields in
+/// the RPC message.  Use [`to_opaque_auth`](Self::to_opaque_auth) for
+/// the credential and [`AuthDesVerf::to_opaque_auth`] for the verifier.
 ///
-/// This crate provides the wire encoding only.  The DES encryption and
-/// Diffie-Hellman key exchange needed to populate these fields are
-/// caller-provided -- the library does not pull in a crypto dependency
-/// for a protocol that RFC 5531 sec. 14 declares deprecated.
+/// This crate provides the wire encoding only.  DES encryption and DH
+/// key exchange are caller-provided (RFC 5531 sec. 14 declares AUTH_DH
+/// deprecated).
 #[derive(Debug, Clone)]
 pub enum AuthDesCred {
-    /// First call: full network name + DES-encrypted timestamp + window.
+    /// First call: full network name + encrypted key + window (RFC 2695 sec 2.4.1).
     Fullname {
         /// Client's network name (e.g., "unix.1000@domain").
         name: String,
-        /// DES-CBC encrypted timestamp (8 bytes).
-        encrypted_timestamp: [u8; 8],
+        /// Encrypted conversation key (8 bytes, DES-ECB encrypted with the common key).
+        encrypted_key: [u8; 8],
         /// Maximum acceptable clock skew in seconds.
         window: u32,
-        /// Window verifier: `window - 1`, encrypted with the conversation key (4 bytes, XDR-padded).
-        encrypted_window_verifier: [u8; 4],
     },
-    /// Subsequent calls: server-assigned nickname + DES-encrypted timestamp.
+    /// Subsequent calls: server-assigned nickname (RFC 2695 sec 2.4.2).
     Nickname {
         /// Opaque nickname assigned by the server.
         nickname: u32,
-        /// DES-CBC encrypted timestamp (8 bytes).
-        encrypted_timestamp: [u8; 8],
-        /// Window verifier (4 bytes, XDR-padded).
-        encrypted_window_verifier: [u8; 4],
     },
 }
 
 impl AuthDesCred {
-    /// Encode as an [`opaque_auth`] with flavor AUTH_DES (3).
+    /// Encode as the credential [`opaque_auth`] with flavor AUTH_DES (3).
     #[must_use]
     #[expect(clippy::expect_used, reason = "Vec::Write is infallible")]
     pub fn to_opaque_auth(&self) -> opaque_auth<'static> {
-        let mut body = Vec::with_capacity(48);
+        let mut body = Vec::with_capacity(32);
         let _ = self.pack(&mut body).expect("failed to pack AuthDesCred");
         opaque_auth { flavor: auth_flavor::AUTH_DES, body: Opaque::owned(body) }
     }
@@ -204,36 +196,26 @@ impl AuthDesCred {
 impl Pack for AuthDesCred {
     fn packed_size(&self) -> usize {
         match self {
-            Self::Fullname { name, .. } => {
-                // discriminant(4) + name_len(4) + name_bytes(padded) + encrypted_timestamp(8) + window(4) + encrypted_window_verifier(4)
-                4 + onc_xdr::string_packed_size(name) + 8 + 4 + 4
-            },
-            Self::Nickname { .. } => {
-                // discriminant(4) + nickname(4) + encrypted_timestamp(8) + encrypted_window_verifier(4)
-                4 + 4 + 8 + 4
-            },
+            // discriminant(4) + name string (4+padded) + encrypted_key(8) + window(4)
+            Self::Fullname { name, .. } => 4 + onc_xdr::string_packed_size(name) + 8 + 4,
+            // discriminant(4) + nickname(4)
+            Self::Nickname { .. } => 4 + 4,
         }
     }
 
     fn pack(&self, out: &mut impl std::io::Write) -> onc_xdr::Result<usize> {
         match self {
-            Self::Fullname { name, encrypted_timestamp, window, encrypted_window_verifier } => {
+            Self::Fullname { name, encrypted_key, window } => {
                 let mut n = 0u32.pack(out)?; // ADN_FULLNAME = 0
                 n += onc_xdr::pack_string(name, out)?;
-                out.write_all(encrypted_timestamp).map_err(onc_xdr::Error::Io)?;
+                out.write_all(encrypted_key).map_err(onc_xdr::Error::Io)?;
                 n += 8;
                 n += window.pack(out)?;
-                out.write_all(encrypted_window_verifier).map_err(onc_xdr::Error::Io)?;
-                n += 4;
                 Ok(n)
             },
-            Self::Nickname { nickname, encrypted_timestamp, encrypted_window_verifier } => {
+            Self::Nickname { nickname } => {
                 let mut n = 1u32.pack(out)?; // ADN_NICKNAME = 1
                 n += nickname.pack(out)?;
-                out.write_all(encrypted_timestamp).map_err(onc_xdr::Error::Io)?;
-                n += 8;
-                out.write_all(encrypted_window_verifier).map_err(onc_xdr::Error::Io)?;
-                n += 4;
                 Ok(n)
             },
         }
@@ -247,64 +229,99 @@ impl Unpack for AuthDesCred {
         n += b;
         match disc {
             0 => {
-                // ADN_FULLNAME
                 let (name, b) = onc_xdr::unpack_string(input)?;
                 n += b;
-                let (encrypted_timestamp, b) = <[u8; 8]>::unpack(input)?;
+                let (encrypted_key, b) = <[u8; 8]>::unpack(input)?;
                 n += b;
                 let (window, b) = u32::unpack(input)?;
                 n += b;
-                let (encrypted_window_verifier, b) = <[u8; 4]>::unpack(input)?;
-                n += b;
-                Ok((Self::Fullname { name, encrypted_timestamp, window, encrypted_window_verifier }, n))
+                Ok((Self::Fullname { name, encrypted_key, window }, n))
             },
             1 => {
-                // ADN_NICKNAME
                 let (nickname, b) = u32::unpack(input)?;
                 n += b;
-                let (encrypted_timestamp, b) = <[u8; 8]>::unpack(input)?;
-                n += b;
-                let (encrypted_window_verifier, b) = <[u8; 4]>::unpack(input)?;
-                n += b;
-                Ok((Self::Nickname { nickname, encrypted_timestamp, encrypted_window_verifier }, n))
+                Ok((Self::Nickname { nickname }, n))
             },
             _ => Err(onc_xdr::Error::InvalidEnumValue(disc)),
         }
     }
 }
 
-/// AUTH_DH verifier body (RFC 2695 sec 2.1).
+/// AUTH_DH verifier body (RFC 2695 sec 2.4).
 ///
-/// The server verifier echoes back the encrypted timestamp minus one
-/// second and assigns a nickname for subsequent calls.
+/// Carried in the verifier `opaque_auth` field, separate from the
+/// credential.  The client verifier carries the DES-CBC encrypted
+/// timestamp; the server verifier carries the encrypted timestamp
+/// minus one second and a nickname.
 #[derive(Debug, Clone, Copy)]
-pub struct AuthDesVerf {
-    /// DES-CBC encrypted timestamp minus one second (8 bytes).
-    pub encrypted_timestamp_minus_one: [u8; 8],
-    /// Server-assigned nickname for use in subsequent calls.
-    pub nickname: u32,
+pub enum AuthDesVerf {
+    /// Client verifier: DES-CBC encrypted timestamp + window verifier.
+    Client {
+        /// DES-CBC encrypted timestamp (8 bytes: seconds + useconds).
+        encrypted_timestamp: [u8; 8],
+        /// Encrypted `window - 1` (4 bytes, XDR-padded to 4).
+        encrypted_window_verifier: [u8; 4],
+    },
+    /// Server verifier: DES-CBC encrypted `timestamp - 1` + nickname.
+    Server {
+        /// DES-CBC encrypted (timestamp.seconds - 1) (8 bytes).
+        encrypted_timestamp_minus_one: [u8; 8],
+        /// Server-assigned nickname for subsequent calls.
+        nickname: u32,
+    },
+}
+
+impl AuthDesVerf {
+    /// Encode as the verifier [`opaque_auth`] with flavor AUTH_DES (3).
+    #[must_use]
+    #[expect(clippy::expect_used, reason = "Vec::Write is infallible")]
+    pub fn to_opaque_auth(self) -> opaque_auth<'static> {
+        let mut body = Vec::with_capacity(12);
+        let _ = self.pack(&mut body).expect("failed to pack AuthDesVerf");
+        opaque_auth { flavor: auth_flavor::AUTH_DES, body: Opaque::owned(body) }
+    }
 }
 
 impl Pack for AuthDesVerf {
     fn packed_size(&self) -> usize {
-        8 + 4
+        12
     }
 
     fn pack(&self, out: &mut impl std::io::Write) -> onc_xdr::Result<usize> {
-        out.write_all(&self.encrypted_timestamp_minus_one).map_err(onc_xdr::Error::Io)?;
-        let n = 8 + self.nickname.pack(out)?;
-        Ok(n)
+        match self {
+            Self::Client { encrypted_timestamp, encrypted_window_verifier } => {
+                out.write_all(encrypted_timestamp).map_err(onc_xdr::Error::Io)?;
+                out.write_all(encrypted_window_verifier).map_err(onc_xdr::Error::Io)?;
+                Ok(12)
+            },
+            Self::Server { encrypted_timestamp_minus_one, nickname } => {
+                out.write_all(encrypted_timestamp_minus_one).map_err(onc_xdr::Error::Io)?;
+                let n = 8 + nickname.pack(out)?;
+                Ok(n)
+            },
+        }
     }
 }
 
 impl Unpack for AuthDesVerf {
     fn unpack(input: &mut impl std::io::Read) -> onc_xdr::Result<(Self, usize)> {
         let mut n = 0;
-        let (encrypted_timestamp_minus_one, b) = <[u8; 8]>::unpack(input)?;
+        let (first_8, b) = <[u8; 8]>::unpack(input)?;
         n += b;
-        let (nickname, b) = u32::unpack(input)?;
+        let (last_4, b) = <[u8; 4]>::unpack(input)?;
         n += b;
-        Ok((Self { encrypted_timestamp_minus_one, nickname }, n))
+        Ok((Self::Client { encrypted_timestamp: first_8, encrypted_window_verifier: last_4 }, n))
+    }
+}
+
+impl AuthDesVerf {
+    /// Decode as a server verifier (nickname is in the last 4 bytes).
+    #[must_use]
+    pub fn as_server(self) -> Self {
+        match self {
+            Self::Client { encrypted_timestamp, encrypted_window_verifier } => Self::Server { encrypted_timestamp_minus_one: encrypted_timestamp, nickname: u32::from_be_bytes(encrypted_window_verifier) },
+            s @ Self::Server { .. } => s,
+        }
     }
 }
 
@@ -494,66 +511,96 @@ mod tests {
         assert_eq!(decoded.gids, vec![500, 42, 27]);
     }
 
-    // --- AUTH_DH (RFC 2695) ---
+    // --- AUTH_DH (RFC 2695 sec 2.4) ---
 
     #[test]
     fn auth_des_cred_fullname_round_trip() {
         use onc_xdr::{Pack as _, Unpack as _};
-        let cred = AuthDesCred::Fullname { name: "unix.1000@domain".to_owned(), encrypted_timestamp: [1, 2, 3, 4, 5, 6, 7, 8], window: 300, encrypted_window_verifier: [0xAA, 0xBB, 0xCC, 0xDD] };
+        let cred = AuthDesCred::Fullname { name: "unix.1000@domain".to_owned(), encrypted_key: [1, 2, 3, 4, 5, 6, 7, 8], window: 300 };
         let mut buf = Vec::new();
         let written = cred.pack(&mut buf).expect("pack");
         assert_eq!(written, cred.packed_size());
         let (decoded, consumed) = AuthDesCred::unpack(&mut buf.as_slice()).expect("unpack");
         assert_eq!(consumed, written);
         match decoded {
-            AuthDesCred::Fullname { name, encrypted_timestamp, window, encrypted_window_verifier } => {
+            AuthDesCred::Fullname { name, encrypted_key, window } => {
                 assert_eq!(name, "unix.1000@domain");
-                assert_eq!(encrypted_timestamp, [1, 2, 3, 4, 5, 6, 7, 8]);
+                assert_eq!(encrypted_key, [1, 2, 3, 4, 5, 6, 7, 8]);
                 assert_eq!(window, 300);
-                assert_eq!(encrypted_window_verifier, [0xAA, 0xBB, 0xCC, 0xDD]);
             },
             AuthDesCred::Nickname { .. } => panic!("expected Fullname"),
         }
     }
 
     #[test]
+    fn auth_des_cred_fullname_is_separate_from_verifier() {
+        // RFC 2695 sec 2.4.1: credential body is discriminant(4) + name + key(8) + window(4).
+        // The verifier (timestamp + window_verifier) is a separate opaque_auth.
+        let cred = AuthDesCred::Fullname { name: "unix.0@host".to_owned(), encrypted_key: [0; 8], window: 60 };
+        let auth = cred.to_opaque_auth();
+        // disc(4) + string_len(4) + "unix.0@host"(11) + pad(1) + key(8) + window(4) = 32
+        assert_eq!(auth.body.as_ref().len(), 32);
+
+        let verf = AuthDesVerf::Client { encrypted_timestamp: [0xAA; 8], encrypted_window_verifier: [0xBB; 4] };
+        let verf_auth = verf.to_opaque_auth();
+        // 8 + 4 = 12 bytes
+        assert_eq!(verf_auth.body.as_ref().len(), 12);
+    }
+
+    #[test]
     fn auth_des_cred_nickname_round_trip() {
         use onc_xdr::{Pack as _, Unpack as _};
-        let cred = AuthDesCred::Nickname { nickname: 42, encrypted_timestamp: [8, 7, 6, 5, 4, 3, 2, 1], encrypted_window_verifier: [0x11, 0x22, 0x33, 0x44] };
+        let cred = AuthDesCred::Nickname { nickname: 42 };
         let mut buf = Vec::new();
         let written = cred.pack(&mut buf).expect("pack");
+        // RFC 2695 sec 2.4.2: discriminant(4) + nickname(4) = 8 bytes
+        assert_eq!(written, 8);
         assert_eq!(written, cred.packed_size());
         let (decoded, consumed) = AuthDesCred::unpack(&mut buf.as_slice()).expect("unpack");
         assert_eq!(consumed, written);
         match decoded {
-            AuthDesCred::Nickname { nickname, encrypted_timestamp, encrypted_window_verifier } => {
-                assert_eq!(nickname, 42);
-                assert_eq!(encrypted_timestamp, [8, 7, 6, 5, 4, 3, 2, 1]);
-                assert_eq!(encrypted_window_verifier, [0x11, 0x22, 0x33, 0x44]);
-            },
+            AuthDesCred::Nickname { nickname } => assert_eq!(nickname, 42),
             AuthDesCred::Fullname { .. } => panic!("expected Nickname"),
         }
     }
 
     #[test]
     fn auth_des_cred_to_opaque_auth_has_des_flavor() {
-        let cred = AuthDesCred::Nickname { nickname: 1, encrypted_timestamp: [0; 8], encrypted_window_verifier: [0; 4] };
+        let cred = AuthDesCred::Nickname { nickname: 1 };
         let auth = cred.to_opaque_auth();
         assert_eq!(auth.flavor, auth_flavor::AUTH_DES);
         assert!(!auth.body.as_ref().is_empty());
     }
 
     #[test]
-    fn auth_des_verf_round_trip() {
+    fn auth_des_verf_client_round_trip() {
         use onc_xdr::{Pack as _, Unpack as _};
-        let verf = AuthDesVerf { encrypted_timestamp_minus_one: [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE], nickname: 99 };
+        let verf = AuthDesVerf::Client { encrypted_timestamp: [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE], encrypted_window_verifier: [0x11, 0x22, 0x33, 0x44] };
         let mut buf = Vec::new();
         let written = verf.pack(&mut buf).expect("pack");
         assert_eq!(written, 12);
         let (decoded, consumed) = AuthDesVerf::unpack(&mut buf.as_slice()).expect("unpack");
         assert_eq!(consumed, 12);
-        assert_eq!(decoded.encrypted_timestamp_minus_one, verf.encrypted_timestamp_minus_one);
-        assert_eq!(decoded.nickname, 99);
+        match decoded {
+            AuthDesVerf::Client { encrypted_timestamp, encrypted_window_verifier } => {
+                assert_eq!(encrypted_timestamp, [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
+                assert_eq!(encrypted_window_verifier, [0x11, 0x22, 0x33, 0x44]);
+            },
+            AuthDesVerf::Server { .. } => panic!("expected Client"),
+        }
+    }
+
+    #[test]
+    fn auth_des_verf_server_conversion() {
+        let verf = AuthDesVerf::Client { encrypted_timestamp: [1; 8], encrypted_window_verifier: 99u32.to_be_bytes() };
+        let server = verf.as_server();
+        match server {
+            AuthDesVerf::Server { encrypted_timestamp_minus_one, nickname } => {
+                assert_eq!(encrypted_timestamp_minus_one, [1; 8]);
+                assert_eq!(nickname, 99);
+            },
+            AuthDesVerf::Client { .. } => panic!("expected Server"),
+        }
     }
 
     #[test]

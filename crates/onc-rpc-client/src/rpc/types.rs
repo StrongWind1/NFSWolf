@@ -2,7 +2,9 @@
 #![expect(missing_docs, reason = "these are mechanical transcriptions of the RFC's XDR type table -- per-field prose would restate the field name and nothing more. The module doc cites the defining RFC section, which is the real documentation")]
 #![expect(single_use_lifetimes, reason = "newtype wrappers over Opaque<'a> genuinely need the parameter; the lint counts the declaration and the single use and misreads it as removable")]
 
-//! This module contains the definitions of the RPC protocol as defined in RFC 1057.
+//! ONC RPC v2 message types -- [RFC 5531] (supersedes RFC 1831 / RFC 1057).
+//!
+//! [RFC 5531]: https://www.rfc-editor.org/rfc/rfc5531
 
 use std::io::{Read, Write};
 

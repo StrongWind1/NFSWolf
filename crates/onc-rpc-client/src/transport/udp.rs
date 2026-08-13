@@ -94,28 +94,77 @@ where
 
 /// Send one RPC call over UDP with automatic retransmission (RFC 5531 sec 5).
 ///
-/// Retries `max_retries` times with exponential backoff starting from
-/// `timeout`.  Each attempt doubles the timeout.  Returns the first
-/// successful result, or the last error if all attempts fail.
+/// Retries up to `max_retries` times with exponential backoff starting from
+/// `timeout`.  The same XID is reused across retries so the server's
+/// duplicate-request cache can deduplicate (RFC 5531 sec 5).  Only
+/// transport-level timeouts trigger a retry; definitive server rejections
+/// (PROG_UNAVAIL, AUTH_ERROR, etc.) are returned immediately.
 pub async fn call_rpc_udp_retry<C, R>(addr: SocketAddr, program: u32, version: u32, proc: u32, args: &C, timeout: Duration, max_retries: u32) -> Result<R, RpcError>
 where
     C: Pack + Sync,
     R: Unpack,
 {
-    let mut current_timeout = timeout;
-    let mut last_err = None;
+    let xid: u32 = fastrand::u32(..);
 
-    for _ in 0..=max_retries {
-        match call_rpc_udp::<C, R>(addr, program, version, proc, args, current_timeout).await {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                last_err = Some(e);
+    let null_auth = opaque_auth::default();
+    let call = call_body { rpcvers: RPC_VERSION_2, prog: program, vers: version, proc, cred: null_auth.borrow(), verf: null_auth.borrow() };
+    let msg = rpc_msg { xid, body: msg_body::CALL(call) };
+
+    let mut send_buf = Vec::with_capacity(msg.packed_size() + args.packed_size());
+    let _ = msg.pack(&mut send_buf)?;
+    let _ = args.pack(&mut send_buf)?;
+
+    let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
+    socket.connect(addr).await?;
+
+    let mut current_timeout = timeout;
+
+    for attempt in 0..=max_retries {
+        let _ = socket.send(&send_buf).await?;
+
+        let mut recv_buf = vec![0u8; MAX_UDP_DATAGRAM];
+        let recv_result = tokio::time::timeout(current_timeout, socket.recv(&mut recv_buf)).await;
+        match recv_result {
+            Err(_) => {
+                // Timeout -- retry with doubled timeout (unless last attempt).
+                if attempt == max_retries {
+                    return Err(RpcError::Io(io::Error::new(io::ErrorKind::TimedOut, "UDP RPC retry exhausted")));
+                }
                 current_timeout = current_timeout.saturating_mul(2);
+            },
+            Ok(Err(e)) => return Err(RpcError::Io(e)),
+            Ok(Ok(n)) => {
+                recv_buf.truncate(n);
+                let mut cursor = io::Cursor::new(recv_buf);
+                let (resp_msg, _) = rpc_msg::unpack(&mut cursor)?;
+
+                if resp_msg.xid != xid {
+                    // Wrong XID -- may be a stale reply from a prior call. Retry.
+                    if attempt == max_retries {
+                        return Err(RpcError::UnexpectedXid);
+                    }
+                    current_timeout = current_timeout.saturating_mul(2);
+                    continue;
+                }
+
+                let reply = match resp_msg.body {
+                    msg_body::REPLY(reply_body::MSG_ACCEPTED(r)) => r,
+                    msg_body::REPLY(reply_body::MSG_DENIED(r)) => return Err(RpcError::from(r)),
+                    msg_body::CALL(_) => return Err(RpcError::UnexpectedCall),
+                };
+
+                if let Ok(err) = RpcError::try_from(reply.reply_data) {
+                    return Err(err);
+                }
+
+                let (result, _) = R::unpack(&mut cursor)?;
+                return Ok(result);
             },
         }
     }
 
-    Err(last_err.unwrap_or_else(|| RpcError::Io(io::Error::new(io::ErrorKind::TimedOut, "UDP RPC retry exhausted"))))
+    Err(RpcError::Io(io::Error::new(io::ErrorKind::TimedOut, "UDP RPC retry exhausted")))
 }
 
 /// Send a broadcast RPC call over UDP and collect all replies

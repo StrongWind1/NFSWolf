@@ -159,7 +159,8 @@ impl Nfs3Error {
             nfsstat3::NFS3ERR_BAD_COOKIE => Some(Self::BadCookie),
             nfsstat3::NFS3ERR_NOTSUPP => Some(Self::NotSupp),
             nfsstat3::NFS3ERR_TOOSMALL => Some(Self::TooSmall),
-            nfsstat3::NFS3ERR_SERVERFAULT | nfsstat3::Unknown(_) => Some(Self::ServerFault),
+            nfsstat3::NFS3ERR_SERVERFAULT => Some(Self::ServerFault),
+            nfsstat3::Unknown(code) => Some(Self::Unknown(code)),
             nfsstat3::NFS3ERR_BADTYPE => Some(Self::BadType),
             nfsstat3::NFS3ERR_JUKEBOX => Some(Self::Jukebox),
         }

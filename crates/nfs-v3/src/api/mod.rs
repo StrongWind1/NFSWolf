@@ -231,7 +231,7 @@ pub struct DirEntry {
     pub cookie: u64,
 }
 
-/// Dynamic filesystem statistics, from `FSSTAT`.
+/// Dynamic filesystem statistics, from `FSSTAT` (RFC 1813 sec 3.3.18).
 #[derive(Debug, Clone, Copy)]
 pub struct FsStat {
     /// Total size of the filesystem in bytes.
@@ -246,6 +246,8 @@ pub struct FsStat {
     pub free_files: u64,
     /// File slots available to this caller.
     pub avail_files: u64,
+    /// Seconds for which the filesystem is unchanged (RFC 1813 sec 3.3.18).
+    pub invarsec: u32,
 }
 
 /// Static filesystem limits and capabilities, from `FSINFO`.

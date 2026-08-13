@@ -272,7 +272,7 @@ impl<T: RpcTransport> Nfs3Client<T> {
     /// Dynamic filesystem statistics.
     pub async fn stat_fs(&self, fh: &FileHandle) -> Result<super::FsStat, Nfs3Fault<T::Error>> {
         let ok = flatten(self.fsstat(&FSSTAT3args { fsroot: fh.to_nfs_fh3() }).await)?;
-        Ok(super::FsStat { total_bytes: ok.tbytes, free_bytes: ok.fbytes, avail_bytes: ok.abytes, total_files: ok.tfiles, free_files: ok.ffiles, avail_files: ok.afiles })
+        Ok(super::FsStat { total_bytes: ok.tbytes, free_bytes: ok.fbytes, avail_bytes: ok.abytes, total_files: ok.tfiles, free_files: ok.ffiles, avail_files: ok.afiles, invarsec: ok.invarsec })
     }
 
     /// Static filesystem limits and capabilities.

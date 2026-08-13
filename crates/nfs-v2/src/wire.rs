@@ -31,6 +31,14 @@ pub const FHSIZE: usize = 32;
 pub const NFS_PROGRAM: u32 = 100_003;
 /// NFSv2 program version number.
 pub const NFS_VERSION: u32 = 2;
+/// Maximum data transfer size for READ/WRITE (RFC 1094 sec 3.5).
+pub const MAXDATA: usize = 8192;
+/// Maximum pathname length (RFC 1094 sec 3.5).
+pub const MAXPATHLEN: usize = 1024;
+/// Maximum filename component length (RFC 1094 sec 3.5).
+pub const MAXNAMLEN: usize = 255;
+/// Cookie size in bytes for READDIR (RFC 1094 sec 3.5).
+pub const COOKIESIZE: usize = 4;
 
 /// NFSv2 procedure numbers (RFC 1094 S2.2).
 pub mod proc {
@@ -240,13 +248,16 @@ pub enum FType {
     Bad = 7,
     /// Named pipe (FIFO). NF2FIFO = 8 (Linux extension).
     Fifo = 8,
+    /// Unrecognised file type from the wire.
+    Unknown(u32),
 }
 
 impl FType {
-    /// Decode from wire u32.
+    /// Decode from wire u32, preserving unknown values.
     #[must_use]
     pub const fn from_u32(v: u32) -> Self {
         match v {
+            0 => Self::NonFile,
             1 => Self::Regular,
             2 => Self::Directory,
             3 => Self::Block,
@@ -255,7 +266,22 @@ impl FType {
             6 => Self::Socket,
             7 => Self::Bad,
             8 => Self::Fifo,
-            _ => Self::NonFile,
+            _ => Self::Unknown(v),
+        }
+    }
+
+    const fn to_u32(self) -> u32 {
+        match self {
+            Self::NonFile => 0,
+            Self::Regular => 1,
+            Self::Directory => 2,
+            Self::Block => 3,
+            Self::Character => 4,
+            Self::Symlink => 5,
+            Self::Socket => 6,
+            Self::Bad => 7,
+            Self::Fifo => 8,
+            Self::Unknown(v) => v,
         }
     }
 }
@@ -265,7 +291,7 @@ impl Pack for FType {
         4
     }
     fn pack(&self, out: &mut impl Write) -> onc_xdr::Result<usize> {
-        (*self as u32).pack(out)
+        self.to_u32().pack(out)
     }
 }
 
@@ -834,7 +860,7 @@ mod tests {
         assert_eq!(FType::from_u32(3), FType::Block);
         assert_eq!(FType::from_u32(4), FType::Character);
         assert_eq!(FType::from_u32(5), FType::Symlink);
-        assert_eq!(FType::from_u32(99), FType::NonFile);
+        assert_eq!(FType::from_u32(99), FType::Unknown(99));
     }
 
     // --- XDR pack size tests ---
@@ -1409,11 +1435,13 @@ impl Unpack for readlinkres {
     }
 }
 
-/// READDIR result: status + entry list + eof flag.
+/// READDIR result: status + entry list + eof flag (RFC 1094 sec 2.2.17).
 #[derive(Debug)]
 pub struct readdirres {
     pub status: Nfs2Stat,
     pub entries: Vec<ReaddirEntry>,
+    /// Whether the server has returned all remaining entries.
+    pub eof: bool,
 }
 
 impl Unpack for readdirres {
@@ -1422,7 +1450,7 @@ impl Unpack for readdirres {
     fn unpack(input: &mut impl Read) -> onc_xdr::Result<(Self, usize)> {
         let (status, mut n) = Nfs2Stat::unpack(input)?;
         if status != Nfs2Stat::Ok {
-            return Ok((Self { status, entries: Vec::new() }, n));
+            return Ok((Self { status, entries: Vec::new(), eof: true }, n));
         }
         let mut entries = Vec::new();
         loop {
@@ -1435,9 +1463,9 @@ impl Unpack for readdirres {
             n += en;
             entries.push(entry);
         }
-        // EOF flag
-        let (_, dn) = u32::unpack(input)?;
+        // EOF flag (RFC 1094 sec 2.2.17)
+        let (eof, dn) = bool::unpack(input)?;
         n += dn;
-        Ok((Self { status, entries }, n))
+        Ok((Self { status, entries, eof }, n))
     }
 }

@@ -56,11 +56,12 @@ pub struct RpcbindStatEntry {
     /// rpcbind version this entry covers (2, 3, or 4).
     pub rpcb_version: u32,
     /// Per-procedure call counts (index = procedure number).
-    pub info: Vec<u32>,
-    /// Total SET calls.
-    pub setinfo: u32,
-    /// Total UNSET calls.
-    pub unsetinfo: u32,
+    /// RFC 1833 sec 2.2.2: `typedef int rpcbs_proc[RPCBSTAT_HIGHPROC]`.
+    pub info: Vec<i32>,
+    /// Total SET calls (RFC 1833: `int setinfo`).
+    pub setinfo: i32,
+    /// Total UNSET calls (RFC 1833: `int unsetinfo`).
+    pub unsetinfo: i32,
 }
 
 /// XDR type for `rpcb_stat_byvers` (RFC 1833 sec. 2.2.2): fixed array of
@@ -84,18 +85,18 @@ impl Unpack for RpcbStatByvers {
         let mut total_bytes = 0usize;
 
         for ver_idx in 0..RPCBVERS_STAT {
-            // info[RPCBSTAT_HIGHPROC]: fixed array of 13 u32
+            // info[RPCBSTAT_HIGHPROC]: fixed array of 13 signed ints (RFC 1833 sec 2.2.2)
             let mut info = Vec::with_capacity(RPCBSTAT_HIGHPROC);
             for _ in 0..RPCBSTAT_HIGHPROC {
-                let (v, n) = u32::unpack(input)?;
+                let (v, n) = i32::unpack(input)?;
                 info.push(v);
                 total_bytes += n;
             }
-            // setinfo: u32
-            let (setinfo, n) = u32::unpack(input)?;
+            // setinfo: int (RFC 1833 sec 2.2.2)
+            let (setinfo, n) = i32::unpack(input)?;
             total_bytes += n;
-            // unsetinfo: u32
-            let (unsetinfo, n) = u32::unpack(input)?;
+            // unsetinfo: int (RFC 1833 sec 2.2.2)
+            let (unsetinfo, n) = i32::unpack(input)?;
             total_bytes += n;
             // addrinfo: rpcbs_addrlist* (optional linked list)
             loop {
@@ -341,7 +342,7 @@ pub struct RpcbAddrEntry {
     pub maddr: String,
     /// Network id (e.g., "tcp", "udp").
     pub nc_netid: String,
-    /// Transport semantics (e.g., NC_TPI_CLTS=3, NC_TPI_COTS_ORD=6).
+    /// Transport semantics (NC_TPI_CLTS=1, NC_TPI_COTS=2, NC_TPI_COTS_ORD=3, NC_TPI_RAW=4).
     pub nc_semantics: u32,
     /// Protocol family (e.g., "inet", "inet6", "loopback").
     pub nc_protofmly: String,
