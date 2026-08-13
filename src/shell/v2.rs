@@ -7,20 +7,21 @@ use nfs_v2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs2::{Nfs2Client, PooledNfs2 as _};
 
-use super::ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
+use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, try_with_escalation};
 
 /// NFSv2 backend wrapping a `Nfs2Client` over `PooledTransport`.
-///
-/// Like `V3Ops`, credential changes are a zero-round-trip swap on the pooled
-/// transport. File handles are bearer tokens (RFC 1094 S2.3.3), so they stay
-/// valid across identity changes without re-MOUNT.
 pub(crate) struct V2Ops {
     client: Arc<Nfs2Client>,
+    cred_cache: CredCache,
 }
 
 impl V2Ops {
     pub(crate) fn new(client: Arc<Nfs2Client>) -> Self {
-        Self { client }
+        Self { client, cred_cache: CredCache::new() }
+    }
+
+    fn make_v2(&self, uid: u32, gid: u32) -> Nfs2Client {
+        self.client.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.client.machinename())), uid, gid)
     }
 
     /// Probe NFSPROC_ROOT (proc 3) -- obsolete MOUNT bypass check.
@@ -94,38 +95,56 @@ impl ShellOps for V2Ops {
 
     async fn list_dir(&self, dir: &ShellHandle) -> anyhow::Result<Vec<ShellEntry>> {
         let v2dir = to_v2_fh(dir);
-        let mut all_entries = Vec::new();
-        let mut cookie = 0u32;
-        loop {
-            let entries = self.client.readdir(&v2dir, cookie, 4096).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-            if entries.is_empty() {
-                break;
-            }
-            cookie = entries.last().map_or(0, |e| e.cookie);
-            all_entries.extend(entries);
-            if all_entries.len() > 100_000 {
-                break;
-            }
-        }
-        let mut result = Vec::with_capacity(all_entries.len());
-        for e in &all_entries {
-            let (info, handle) = match self.client.lookup(&v2dir, &e.name).await {
-                Ok((fh, attrs)) => (Some(v2_info(&attrs)), Some(from_v2_fh(&fh))),
-                Err(_) => (None, None),
-            };
-            result.push(ShellEntry { name: e.name.clone(), info, handle });
-        }
-        Ok(result)
+        try_with_escalation(
+            (self.client.uid(), self.client.gid()),
+            &self.cred_cache,
+            dir,
+            getattr_owner_v2(&self.client, &v2dir),
+            is_v2_acces,
+            |uid, gid| {
+                let c = self.make_v2(uid, gid);
+                let fh = v2dir;
+                async move { list_dir_v2(&c, &fh).await }
+            },
+            "NFS2ERR_ACCES: cannot list directory (exhausted credential ladder)",
+        )
+        .await
     }
 
     async fn read_file(&self, fh: &ShellHandle) -> anyhow::Result<Vec<u8>> {
-        self.client.read_file(&to_v2_fh(fh)).await.map_err(|e| anyhow::anyhow!("{e}"))
+        let v2fh = to_v2_fh(fh);
+        try_with_escalation(
+            (self.client.uid(), self.client.gid()),
+            &self.cred_cache,
+            fh,
+            getattr_owner_v2(&self.client, &v2fh),
+            is_v2_acces,
+            |uid, gid| {
+                let c = self.make_v2(uid, gid);
+                let fh = v2fh;
+                async move { read_file_v2(&c, &fh).await }
+            },
+            "NFS2ERR_ACCES: permission denied reading file",
+        )
+        .await
     }
 
     async fn read_chunk(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
-        let off32 = u32::try_from(offset).unwrap_or(u32::MAX);
-        let (_, data) = self.client.read(&to_v2_fh(fh), off32, count.min(8192)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(data)
+        let v2fh = to_v2_fh(fh);
+        try_with_escalation(
+            (self.client.uid(), self.client.gid()),
+            &self.cred_cache,
+            fh,
+            getattr_owner_v2(&self.client, &v2fh),
+            is_v2_acces,
+            |uid, gid| {
+                let c = self.make_v2(uid, gid);
+                let fh = v2fh;
+                async move { read_chunk_v2(&c, &fh, offset, count).await }
+            },
+            "NFS2ERR_ACCES: permission denied reading file chunk",
+        )
+        .await
     }
 
     async fn write_chunk(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
@@ -199,10 +218,9 @@ impl ShellOps for V2Ops {
     }
 
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
-        // PooledTransport swaps credentials without any network round trips.
-        // File handles are bearer tokens (RFC 1094 S2.3.3), so they stay valid.
         let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
         self.client = Arc::new(self.client.with_credential(cred, uid, gid));
+        self.cred_cache.flush();
         Ok(())
     }
 
@@ -240,6 +258,53 @@ fn v2_sattr_owner(uid: Option<u32>, gid: Option<u32>) -> Nfs2SetAttr {
     use nfs_v2::wire::{SATTR_UNCHANGED, Timeval};
     let unchanged_time = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
     Nfs2SetAttr { mode: SATTR_UNCHANGED, uid: uid.unwrap_or(SATTR_UNCHANGED), gid: gid.unwrap_or(SATTR_UNCHANGED), size: SATTR_UNCHANGED, atime: unchanged_time, mtime: unchanged_time }
+}
+
+// --- Free helper functions for credential-escalated operations ---------------
+
+fn is_v2_acces(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}");
+    msg.contains("ACCES") || msg.contains("PERM")
+}
+
+async fn getattr_owner_v2(client: &Nfs2Client, fh: &Nfs2FileHandle) -> Option<((u32, u32), u32)> {
+    let attrs = client.getattr(fh).await.ok()?;
+    Some(((attrs.uid, attrs.gid), attrs.mode))
+}
+
+async fn list_dir_v2(client: &Nfs2Client, dir: &Nfs2FileHandle) -> anyhow::Result<Vec<ShellEntry>> {
+    let mut all_entries = Vec::new();
+    let mut cookie = 0u32;
+    loop {
+        let entries = client.readdir(dir, cookie, 4096).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        if entries.is_empty() {
+            break;
+        }
+        cookie = entries.last().map_or(0, |e| e.cookie);
+        all_entries.extend(entries);
+        if all_entries.len() > 100_000 {
+            break;
+        }
+    }
+    let mut result = Vec::with_capacity(all_entries.len());
+    for e in &all_entries {
+        let (info, handle) = match client.lookup(dir, &e.name).await {
+            Ok((fh, attrs)) => (Some(v2_info(&attrs)), Some(from_v2_fh(&fh))),
+            Err(_) => (None, None),
+        };
+        result.push(ShellEntry { name: e.name.clone(), info, handle });
+    }
+    Ok(result)
+}
+
+async fn read_file_v2(client: &Nfs2Client, fh: &Nfs2FileHandle) -> anyhow::Result<Vec<u8>> {
+    client.read_file(fh).await.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+async fn read_chunk_v2(client: &Nfs2Client, fh: &Nfs2FileHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
+    let off32 = u32::try_from(offset).unwrap_or(u32::MAX);
+    let (_, data) = client.read(fh, off32, count.min(8192)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(data)
 }
 
 // --- Remote completion for tab-complete in the v2 shell ----------------------

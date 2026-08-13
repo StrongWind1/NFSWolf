@@ -5,6 +5,16 @@
 //! both versions for free.
 
 // ---------------------------------------------------------------------------
+// Shared constants
+// ---------------------------------------------------------------------------
+
+/// Read/write chunk size used by `get`, `put`, and the `read_file` helpers.
+pub(crate) const CHUNK_SIZE: u32 = 65_536; // 64 KiB
+
+/// Maximum bytes read by `read_file` / `download_file` before bailing.
+pub(crate) const READ_ALL_MAX: u64 = 256 * 1024 * 1024; // 256 MiB
+
+// ---------------------------------------------------------------------------
 // Version-neutral types
 // ---------------------------------------------------------------------------
 
@@ -125,6 +135,82 @@ impl ShellHandle {
 pub(crate) enum ShellDeviceType {
     Char,
     Block,
+}
+
+// ---------------------------------------------------------------------------
+// Credential escalation cache
+// ---------------------------------------------------------------------------
+
+use std::sync::Mutex;
+
+use crate::engine::credential::credential_ladder_with;
+
+/// Caches the winning (uid, gid) for each file handle so the escalation
+/// ladder is only walked once per file. Shared across V2Ops, V3Ops, V4Ops.
+pub(crate) struct CredCache {
+    map: Mutex<std::collections::HashMap<Vec<u8>, (u32, u32)>>,
+}
+
+impl CredCache {
+    pub(crate) fn new() -> Self {
+        Self { map: Mutex::new(std::collections::HashMap::new()) }
+    }
+
+    pub(crate) fn flush(&self) {
+        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    }
+
+    pub(crate) fn get(&self, fh: &[u8]) -> Option<(u32, u32)> {
+        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(fh).copied()
+    }
+
+    pub(crate) fn insert(&self, fh: &[u8], uid: u32, gid: u32) {
+        let mut lock = self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = lock.insert(fh.to_vec(), (uid, gid));
+    }
+}
+
+/// Run an operation with credential escalation: cached -> base -> ladder.
+///
+/// `op` is called with `(uid, gid)` -- it must build an ephemeral client with
+/// those credentials and perform the operation. On success, the winning
+/// credential is cached for future calls on the same file handle.
+pub(crate) async fn try_with_escalation<T, F, Fut>(caller: (u32, u32), cache: &CredCache, fh: &ShellHandle, get_owner: impl Future<Output = Option<((u32, u32), u32)>> + Send, is_acces: fn(&anyhow::Error) -> bool, op: F, bail_msg: &str) -> anyhow::Result<T>
+where
+    F: Fn(u32, u32) -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    // 1. Try cached credential.
+    if let Some((uid, gid)) = cache.get(fh.as_bytes()) {
+        match op(uid, gid).await {
+            Ok(v) => return Ok(v),
+            Err(e) if !is_acces(&e) => return Err(e),
+            Err(_) => {},
+        }
+    }
+
+    // 2. Try base credential.
+    match op(caller.0, caller.1).await {
+        Ok(v) => return Ok(v),
+        Err(e) if !is_acces(&e) => return Err(e),
+        Err(_) => {},
+    }
+
+    // 3. Walk the credential ladder.
+    let facts = get_owner.await;
+    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
+        match op(uid, gid).await {
+            Ok(v) => {
+                tracing::debug!(uid, gid, "credential escalation succeeded");
+                cache.insert(fh.as_bytes(), uid, gid);
+                return Ok(v);
+            },
+            Err(e) if !is_acces(&e) => return Err(e),
+            Err(_) => {},
+        }
+    }
+
+    anyhow::bail!("{bail_msg}")
 }
 
 // ---------------------------------------------------------------------------

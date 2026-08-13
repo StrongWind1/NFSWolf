@@ -9,14 +9,14 @@
 use std::sync::Arc;
 
 use nfs_v4::client::Nfs4Error;
-use nfs_v4::wire::{AttrRequest, CreateMode4, CreateType4, Fattr4, OpenClaim4, OpenFlag4, Stateid4};
+use nfs_v4::wire::{ArgOp, AttrRequest, CreateMode4, CreateType4, Fattr4, OpenClaim4, OpenFlag4, ResOpData, Stateid4};
 use nfs_v4::{Nfs4FileInfo, Nfs4FileType, Nfs4Session};
 use onc_xdr::Pack;
 
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs4::{Nfs4Client, PooledNfs4 as _};
 
-use super::ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
+use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, try_with_escalation};
 
 /// NFSv4 backend wrapping a pooled `Nfs4Client` with lazy session establishment.
 ///
@@ -26,14 +26,17 @@ use super::ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, Shel
 pub(crate) struct V4Ops {
     client: Arc<Nfs4Client>,
     /// Lazily initialized session for stateful operations (OPEN/WRITE/CLOSE).
-    /// Protected by an async Mutex because `ShellOps` methods take `&self` but
-    /// session establishment mutates the inner `Option`.
     session: tokio::sync::Mutex<Option<Nfs4Session>>,
+    cred_cache: CredCache,
 }
 
 impl V4Ops {
     pub(crate) fn new(client: Arc<Nfs4Client>) -> Self {
-        Self { client, session: tokio::sync::Mutex::new(None) }
+        Self { client, session: tokio::sync::Mutex::new(None), cred_cache: CredCache::new() }
+    }
+
+    fn make_v4(&self, uid: u32, gid: u32) -> Nfs4Client {
+        self.client.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.client.machinename())), uid, gid)
     }
 
     /// Ensure a session exists, creating one on first call.
@@ -149,9 +152,6 @@ fn pack_fattr4(fattr: &Fattr4) -> Vec<u8> {
     buf
 }
 
-/// Maximum bytes in a single `read_file` call.
-const READ_ALL_MAX: u64 = 256 * 1024 * 1024;
-
 // --- ShellOps implementation ------------------------------------------------
 
 impl ShellOps for V4Ops {
@@ -178,18 +178,18 @@ impl ShellOps for V4Ops {
                 "." => {},
                 ".." => {
                     // NFSv4 LOOKUPP to navigate to parent.
-                    let ops = vec![nfs_v4::ArgOp::Putfh(cur.0.clone()), nfs_v4::ArgOp::Lookupp, nfs_v4::ArgOp::Getfh, nfs_v4::ArgOp::Getattr(AttrRequest::shell_attrs())];
+                    let ops = vec![ArgOp::Putfh(cur.0.clone()), ArgOp::Lookupp, ArgOp::Getfh, ArgOp::Getattr(AttrRequest::shell_attrs())];
                     let res = self.client.compound(ops).await.map_err(rpc_err)?;
                     if res.status != 0 {
                         anyhow::bail!("LOOKUPP failed: NFSv4 status={}", res.status);
                     }
                     let fh = match res.results.get(2).map(|op| &op.data) {
-                        Some(nfs_v4::ResOpData::Fh(fh)) => fh.clone(),
+                        Some(ResOpData::Fh(fh)) => fh.clone(),
                         _ => anyhow::bail!("LOOKUPP: GETFH result missing"),
                     };
                     if i == last_idx {
                         let info = match res.results.get(3).map(|op| &op.data) {
-                            Some(nfs_v4::ResOpData::Getattr(a)) => v4_info(&Nfs4FileInfo::from(a.clone())),
+                            Some(ResOpData::Getattr(a)) => v4_info(&Nfs4FileInfo::from(a.clone())),
                             _ => v4_info(&Nfs4FileInfo::default()),
                         };
                         return Ok((ShellHandle(fh), info));
@@ -218,41 +218,67 @@ impl ShellOps for V4Ops {
     // -- Directory listing --
 
     async fn list_dir(&self, dir: &ShellHandle) -> anyhow::Result<Vec<ShellEntry>> {
-        let entries = self.client.readdir_plus(dir.as_bytes()).await.map_err(v4_err)?;
-        Ok(entries.into_iter().map(|e| ShellEntry { name: e.name, info: e.info.as_ref().map(v4_info), handle: e.fh.map(ShellHandle) }).collect())
+        let base = &self.client;
+        let d = dir.clone();
+        try_with_escalation(
+            (base.uid(), base.gid()),
+            &self.cred_cache,
+            dir,
+            getattr_owner_v4(base, dir.as_bytes()),
+            is_v4_acces,
+            |uid, gid| {
+                let rd = self.make_v4(uid, gid);
+                let b = Arc::clone(base);
+                let fh = d.clone();
+                async move { list_dir_v4(&b, &rd, &fh).await }
+            },
+            "NFS4ERR_ACCESS: cannot list directory (exhausted credential ladder)",
+        )
+        .await
     }
 
     // -- File I/O --
 
     async fn read_file(&self, fh: &ShellHandle) -> anyhow::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        let mut offset = 0u64;
-        loop {
-            let (data, eof) = self.client.read_chunk(fh.as_bytes(), offset, 65_536).await.map_err(v4_err)?;
-            if data.is_empty() {
-                break;
-            }
-            buf.extend_from_slice(&data);
-            if buf.len() as u64 > READ_ALL_MAX {
-                anyhow::bail!("file exceeds 256 MiB read cap");
-            }
-            offset += data.len() as u64;
-            if eof {
-                break;
-            }
-        }
-        Ok(buf)
+        let handle_bytes = fh.as_bytes().to_vec();
+        try_with_escalation(
+            (self.client.uid(), self.client.gid()),
+            &self.cred_cache,
+            fh,
+            getattr_owner_v4(&self.client, fh.as_bytes()),
+            is_v4_acces,
+            |uid, gid| {
+                let c = self.make_v4(uid, gid);
+                let h = handle_bytes.clone();
+                async move { read_all_v4(&c, &h).await }
+            },
+            "NFS4ERR_ACCESS: permission denied reading file",
+        )
+        .await
     }
 
     async fn read_chunk(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
-        let (data, _eof) = self.client.read_chunk(fh.as_bytes(), offset, count).await.map_err(v4_err)?;
-        Ok(data)
+        let handle_bytes = fh.as_bytes().to_vec();
+        try_with_escalation(
+            (self.client.uid(), self.client.gid()),
+            &self.cred_cache,
+            fh,
+            getattr_owner_v4(&self.client, fh.as_bytes()),
+            is_v4_acces,
+            |uid, gid| {
+                let c = self.make_v4(uid, gid);
+                let h = handle_bytes.clone();
+                async move { read_chunk_v4(&c, &h, offset, count).await }
+            },
+            "NFS4ERR_ACCESS: permission denied reading file chunk",
+        )
+        .await
     }
 
     async fn write_chunk(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
         // Try anonymous-stateid write first (knfsd allows this for AUTH_SYS
         // with no_root_squash). Falls back to READ_BYPASS stateid if rejected.
-        let ops = vec![nfs_v4::ArgOp::Putfh(fh.0.clone()), nfs_v4::ArgOp::Write { stateid: Stateid4::ANONYMOUS.to_bytes(), offset, stable: 2, data: data.to_vec() }];
+        let ops = vec![ArgOp::Putfh(fh.0.clone()), ArgOp::Write { stateid: Stateid4::ANONYMOUS.to_bytes(), offset, stable: 2, data: data.to_vec() }];
         let res = self.client.compound(ops).await.map_err(rpc_err)?;
         if res.status != 0 {
             // Anonymous write failed (NFS4ERR_OPENMODE etc.) -- fall back to
@@ -261,7 +287,7 @@ impl ShellOps for V4Ops {
             return self.write_chunk_via_open(fh, offset, data).await;
         }
         match res.results.get(1).map(|op| &op.data) {
-            Some(nfs_v4::ResOpData::WriteRes { count, .. }) => Ok(*count),
+            Some(ResOpData::WriteRes { count, .. }) => Ok(*count),
             _ => anyhow::bail!("WRITE result missing"),
         }
     }
@@ -277,30 +303,29 @@ impl ShellOps for V4Ops {
         let attrs = fattr4_with_mode(mode);
         let attrs_bytes = pack_fattr4(&attrs);
         let seqid = session.next_seqid();
-        let ops =
-            vec![nfs_v4::ArgOp::Putfh(dir.0.clone()), nfs_v4::ArgOp::Open { seqid, share_access: 3, share_deny: 0, owner: session.open_owner().clone(), openhow: OpenFlag4::Create { mode: CreateMode4::Unchecked, attrs: attrs_bytes }, claim: OpenClaim4::Null(name.to_owned()) }, nfs_v4::ArgOp::Getfh];
+        let ops = vec![ArgOp::Putfh(dir.0.clone()), ArgOp::Open { seqid, share_access: 3, share_deny: 0, owner: session.open_owner().clone(), openhow: OpenFlag4::Create { mode: CreateMode4::Unchecked, attrs: attrs_bytes }, claim: OpenClaim4::Null(name.to_owned()) }, ArgOp::Getfh];
         let res = self.client.compound(ops).await.map_err(rpc_err)?;
         if res.status != 0 {
             anyhow::bail!("OPEN(CREATE) failed: NFSv4 status={}", res.status);
         }
         // Extract open stateid for CLOSE.
         let (stateid, rflags) = match res.results.get(1).map(|op| &op.data) {
-            Some(nfs_v4::ResOpData::Open { stateid, rflags, .. }) => (*stateid, *rflags),
+            Some(ResOpData::Open { stateid, rflags, .. }) => (*stateid, *rflags),
             _ => anyhow::bail!("OPEN result missing"),
         };
         let fh = match res.results.get(2).map(|op| &op.data) {
-            Some(nfs_v4::ResOpData::Fh(fh)) => fh.clone(),
+            Some(ResOpData::Fh(fh)) => fh.clone(),
             _ => anyhow::bail!("GETFH result missing after OPEN"),
         };
         // OPEN_CONFIRM if requested (bit 1 of rflags).
         let final_stateid = if rflags & 0x0002 != 0 {
             let confirm_seqid = session.next_seqid();
-            let cres = self.client.compound(vec![nfs_v4::ArgOp::Putfh(fh.clone()), nfs_v4::ArgOp::OpenConfirm { stateid: stateid.to_bytes(), seqid: confirm_seqid }]).await.map_err(rpc_err)?;
+            let cres = self.client.compound(vec![ArgOp::Putfh(fh.clone()), ArgOp::OpenConfirm { stateid: stateid.to_bytes(), seqid: confirm_seqid }]).await.map_err(rpc_err)?;
             if cres.status != 0 {
                 anyhow::bail!("OPEN_CONFIRM failed: NFSv4 status={}", cres.status);
             }
             match cres.results.get(1).map(|op| &op.data) {
-                Some(nfs_v4::ResOpData::Stateid(sid)) => *sid,
+                Some(ResOpData::Stateid(sid)) => *sid,
                 _ => stateid,
             }
         } else {
@@ -309,7 +334,7 @@ impl ShellOps for V4Ops {
         // CLOSE the open state -- we only needed it to create the file.
         let close_seqid = session.next_seqid();
         // Best-effort CLOSE; ignore errors (file was already created).
-        drop(self.client.compound(vec![nfs_v4::ArgOp::Putfh(fh.clone()), nfs_v4::ArgOp::Close { seqid: close_seqid, stateid: final_stateid.to_bytes() }]).await);
+        drop(self.client.compound(vec![ArgOp::Putfh(fh.clone()), ArgOp::Close { seqid: close_seqid, stateid: final_stateid.to_bytes() }]).await);
         Ok(ShellHandle(fh))
     }
 
@@ -351,13 +376,13 @@ impl ShellOps for V4Ops {
             ShellDeviceType::Char => CreateType4::Chr { specdata1: major, specdata2: minor },
             ShellDeviceType::Block => CreateType4::Blk { specdata1: major, specdata2: minor },
         };
-        let ops = vec![nfs_v4::ArgOp::Putfh(dir.0.clone()), nfs_v4::ArgOp::Create { objtype, objname: name.to_owned(), createattrs: fattr4_with_mode(mode) }, nfs_v4::ArgOp::Getfh];
+        let ops = vec![ArgOp::Putfh(dir.0.clone()), ArgOp::Create { objtype, objname: name.to_owned(), createattrs: fattr4_with_mode(mode) }, ArgOp::Getfh];
         let res = self.client.compound(ops).await.map_err(rpc_err)?;
         if res.status != 0 {
             anyhow::bail!("CREATE(device) failed: NFSv4 status={}", res.status);
         }
         match res.results.get(2).map(|op| &op.data) {
-            Some(nfs_v4::ResOpData::Fh(fh)) => Ok(ShellHandle(fh.clone())),
+            Some(ResOpData::Fh(fh)) => Ok(ShellHandle(fh.clone())),
             _ => anyhow::bail!("GETFH result missing after CREATE"),
         }
     }
@@ -391,9 +416,8 @@ impl ShellOps for V4Ops {
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         let cred = Credential::Sys(AuthSys::new(uid, gid, hostname));
         self.client = Arc::new(self.client.with_credential(cred, uid, gid));
-        // Invalidate any existing session -- the new identity needs its own
-        // clientid for stateful operations.
         *self.session.get_mut() = None;
+        self.cred_cache.flush();
         Ok(())
     }
 
@@ -431,16 +455,83 @@ impl V4Ops {
         // NFSv4.0 cannot OPEN by file handle (CLAIM_FH is v4.1 only). Try the
         // read-bypass stateid (seqid=0xFFFFFFFF, other=0xFF) which bypasses
         // share reservations on some servers.
-        let ops = vec![nfs_v4::ArgOp::Putfh(fh.0.clone()), nfs_v4::ArgOp::Write { stateid: Stateid4::READ_BYPASS.to_bytes(), offset, stable: 2, data: data.to_vec() }];
+        let ops = vec![ArgOp::Putfh(fh.0.clone()), ArgOp::Write { stateid: Stateid4::READ_BYPASS.to_bytes(), offset, stable: 2, data: data.to_vec() }];
         let res = self.client.compound(ops).await.map_err(rpc_err)?;
         if res.status != 0 {
             anyhow::bail!("WRITE failed: NFSv4 status={} (server requires OPEN but file handle parent is unknown)", res.status);
         }
         match res.results.get(1).map(|op| &op.data) {
-            Some(nfs_v4::ResOpData::WriteRes { count, .. }) => Ok(*count),
+            Some(ResOpData::WriteRes { count, .. }) => Ok(*count),
             _ => anyhow::bail!("WRITE result missing"),
         }
     }
+}
+
+// --- Free helper functions for credential-escalated operations ---------------
+
+fn is_v4_acces(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}");
+    msg.contains("NFS4ERR_ACCESS") || msg.contains("NFS4ERR_PERM")
+}
+
+async fn getattr_owner_v4(client: &Nfs4Client, fh: &[u8]) -> Option<((u32, u32), u32)> {
+    let info = client.getattr(fh).await.ok()?;
+    let uid = parse_v4_owner_id(info.owner.as_deref());
+    let gid = parse_v4_owner_id(info.owner_group.as_deref());
+    let mode = info.mode.unwrap_or(0);
+    Some(((uid, gid), mode))
+}
+
+async fn list_dir_v4(base_client: &Nfs4Client, rd_client: &Nfs4Client, dir: &ShellHandle) -> anyhow::Result<Vec<ShellEntry>> {
+    let entries = rd_client.readdir_plus(dir.as_bytes()).await.map_err(v4_err)?;
+
+    let dot_info = base_client.getattr(dir.as_bytes()).await.ok().map(|i| v4_info(&i));
+    let mut result = vec![ShellEntry { name: ".".to_owned(), info: dot_info, handle: Some(dir.clone()) }];
+
+    let dotdot_res = base_client.compound(vec![ArgOp::Putfh(dir.0.clone()), ArgOp::Lookupp, ArgOp::Getfh, ArgOp::Getattr(AttrRequest::shell_attrs())]).await;
+    if let Ok(res) = dotdot_res
+        && res.status == 0
+    {
+        let fh = res.results.get(2).and_then(|op| match &op.data {
+            ResOpData::Fh(f) => Some(f.clone()),
+            _ => None,
+        });
+        let info = res.results.get(3).and_then(|op| match &op.data {
+            ResOpData::Getattr(a) => Some(v4_info(&Nfs4FileInfo::from(a.clone()))),
+            _ => None,
+        });
+        result.push(ShellEntry { name: "..".to_owned(), info, handle: fh.map(ShellHandle) });
+    }
+
+    for e in entries {
+        result.push(ShellEntry { name: e.name, info: e.info.as_ref().map(v4_info), handle: e.fh.map(ShellHandle) });
+    }
+    Ok(result)
+}
+
+async fn read_all_v4(client: &Nfs4Client, fh: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let (data, eof) = client.read_chunk(fh, offset, super::ops::CHUNK_SIZE).await.map_err(v4_err)?;
+        if data.is_empty() {
+            break;
+        }
+        buf.extend_from_slice(&data);
+        if buf.len() as u64 > super::ops::READ_ALL_MAX {
+            anyhow::bail!("file exceeds 256 MiB read cap");
+        }
+        offset += data.len() as u64;
+        if eof {
+            break;
+        }
+    }
+    Ok(buf)
+}
+
+async fn read_chunk_v4(client: &Nfs4Client, fh: &[u8], offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
+    let (data, _eof) = client.read_chunk(fh, offset, count).await.map_err(v4_err)?;
+    Ok(data)
 }
 
 // --- Remote completion for tab-complete in the v4 shell ----------------------

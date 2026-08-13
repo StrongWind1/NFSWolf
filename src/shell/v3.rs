@@ -1,44 +1,30 @@
 //! NFSv3 backend for the unified shell.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nfs_v3::Nfs3Fault;
 use nfs_v3::wire::{MKNOD3args, Nfs3Option, Nfs3Result, devicedata3, diropargs3, filename3, mknoddata3, sattr3, set_atime, set_mtime, specdata3, stable_how};
 use onc_xdr::Opaque;
 
-use crate::engine::credential::credential_ladder_with;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 
-use super::ops::{ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps};
+use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, try_with_escalation};
 
 /// NFSv3 backend wrapping a pooled `Nfs3Client` with credential escalation.
 pub(crate) struct V3Ops {
     pub nfs3: Arc<Nfs3Client>,
-    cred_cache: Mutex<std::collections::HashMap<Vec<u8>, (u32, u32)>>,
+    cred_cache: CredCache,
 }
 
 impl V3Ops {
     pub(crate) fn new(nfs3: Arc<Nfs3Client>) -> Self {
-        Self { nfs3, cred_cache: Mutex::new(std::collections::HashMap::new()) }
+        Self { nfs3, cred_cache: CredCache::new() }
     }
 
-    pub(crate) fn flush_cred_cache(&self) {
-        self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
-    }
-
-    fn cached_client(&self, fh: &ShellHandle) -> Option<Nfs3Client> {
-        let lock = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (uid, gid) = *lock.get(fh.as_bytes())?;
-        drop(lock);
-        Some(self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid))
-    }
-
-    fn cache_winner(&self, fh: &ShellHandle, uid: u32, gid: u32) {
-        let mut lock = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Previous value (if any) from the HashMap is not needed.
-        let _ = lock.insert(fh.as_bytes().to_vec(), (uid, gid));
+    fn make_v3(&self, uid: u32, gid: u32) -> Nfs3Client {
+        self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid)
     }
 }
 
@@ -115,99 +101,61 @@ impl ShellOps for V3Ops {
     }
 
     async fn list_dir(&self, dir: &ShellHandle) -> anyhow::Result<Vec<ShellEntry>> {
-        if let Some(client) = self.cached_client(dir) {
-            match list_dir_v3(&client, &to_v3_fh(dir)).await {
-                Ok(entries) => return Ok(to_shell_entries(entries)),
-                Err(e) if !is_nfs_acces(&e) => return Err(e),
-                Err(_) => {},
-            }
-        }
-        match list_dir_v3(&self.nfs3, &to_v3_fh(dir)).await {
-            Ok(entries) => return Ok(to_shell_entries(entries)),
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
         let fh3 = to_v3_fh(dir);
-        let facts = getattr_owner(&self.nfs3, &fh3).await;
-        let caller = (self.nfs3.uid(), self.nfs3.gid());
-        for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-            let esc = self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid);
-            match list_dir_v3(&esc, &fh3).await {
-                Ok(entries) => {
-                    tracing::debug!(uid, gid, "READDIRPLUS escalated");
-                    self.cache_winner(dir, uid, gid);
-                    return Ok(to_shell_entries(entries));
-                },
-                Err(e) if !is_nfs_acces(&e) => return Err(e),
-                Err(_) => {},
-            }
-        }
-        anyhow::bail!("NFS3ERR_ACCES: cannot list directory (exhausted credential ladder)")
+        let nfs3 = &self.nfs3;
+        let entries = try_with_escalation(
+            (nfs3.uid(), nfs3.gid()),
+            &self.cred_cache,
+            dir,
+            getattr_owner(nfs3, &fh3),
+            is_nfs_acces,
+            |uid, gid| {
+                let c = self.make_v3(uid, gid);
+                let fh = fh3.clone();
+                async move { list_dir_v3(&c, &fh).await }
+            },
+            "NFS3ERR_ACCES: cannot list directory (exhausted credential ladder)",
+        )
+        .await?;
+        Ok(to_shell_entries(entries))
     }
 
     async fn read_file(&self, fh: &ShellHandle) -> anyhow::Result<Vec<u8>> {
-        if let Some(client) = self.cached_client(fh) {
-            match read_all_v3(&client, &to_v3_fh(fh)).await {
-                Ok(buf) => return Ok(buf),
-                Err(e) if !is_nfs_acces(&e) => return Err(e),
-                Err(_) => {},
-            }
-        }
-        match read_all_v3(&self.nfs3, &to_v3_fh(fh)).await {
-            Ok(buf) => return Ok(buf),
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
         let fh3 = to_v3_fh(fh);
-        let facts = getattr_owner(&self.nfs3, &fh3).await;
-        let caller = (self.nfs3.uid(), self.nfs3.gid());
-        for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-            let esc = self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid);
-            match read_all_v3(&esc, &fh3).await {
-                Ok(buf) => {
-                    tracing::debug!(uid, gid, "read_all escalated");
-                    self.cache_winner(fh, uid, gid);
-                    return Ok(buf);
-                },
-                Err(e) if !is_nfs_acces(&e) => return Err(e),
-                Err(_) => {},
-            }
-        }
-        anyhow::bail!("NFS3ERR_ACCES: permission denied reading file")
+        let nfs3 = &self.nfs3;
+        try_with_escalation(
+            (nfs3.uid(), nfs3.gid()),
+            &self.cred_cache,
+            fh,
+            getattr_owner(nfs3, &fh3),
+            is_nfs_acces,
+            |uid, gid| {
+                let c = self.make_v3(uid, gid);
+                let fh = fh3.clone();
+                async move { read_all_v3(&c, &fh).await }
+            },
+            "NFS3ERR_ACCES: permission denied reading file",
+        )
+        .await
     }
 
     async fn read_chunk(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
-        // Credential escalation mirrors read_file(): cached cred -> base -> ladder.
-        // The cred_cache persists across loop iterations in download_file(), so
-        // only the first chunk pays the escalation cost.
-        if let Some(client) = self.cached_client(fh) {
-            match read_chunk_v3(&client, &to_v3_fh(fh), offset, count).await {
-                Ok(data) => return Ok(data),
-                Err(e) if !is_nfs_acces(&e) => return Err(e),
-                Err(_) => {},
-            }
-        }
-        match read_chunk_v3(&self.nfs3, &to_v3_fh(fh), offset, count).await {
-            Ok(data) => return Ok(data),
-            Err(e) if !is_nfs_acces(&e) => return Err(e),
-            Err(_) => {},
-        }
         let fh3 = to_v3_fh(fh);
-        let facts = getattr_owner(&self.nfs3, &fh3).await;
-        let caller = (self.nfs3.uid(), self.nfs3.gid());
-        for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-            let esc = self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid);
-            match read_chunk_v3(&esc, &fh3, offset, count).await {
-                Ok(data) => {
-                    tracing::debug!(uid, gid, "read_chunk escalated");
-                    self.cache_winner(fh, uid, gid);
-                    return Ok(data);
-                },
-                Err(e) if !is_nfs_acces(&e) => return Err(e),
-                Err(_) => {},
-            }
-        }
-        anyhow::bail!("NFS3ERR_ACCES: permission denied reading file chunk")
+        let nfs3 = &self.nfs3;
+        try_with_escalation(
+            (nfs3.uid(), nfs3.gid()),
+            &self.cred_cache,
+            fh,
+            getattr_owner(nfs3, &fh3),
+            is_nfs_acces,
+            |uid, gid| {
+                let c = self.make_v3(uid, gid);
+                let fh = fh3.clone();
+                async move { read_chunk_v3(&c, &fh, offset, count).await }
+            },
+            "NFS3ERR_ACCES: permission denied reading file chunk",
+        )
+        .await
     }
 
     async fn write_chunk(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
@@ -302,7 +250,7 @@ impl ShellOps for V3Ops {
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
         let cred = Credential::Sys(AuthSys::new(uid, gid, hostname));
         self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
-        self.flush_cred_cache();
+        self.cred_cache.flush();
         Ok(())
     }
 
@@ -390,18 +338,16 @@ async fn read_chunk_v3(nfs3: &Nfs3Client, fh: &FileHandle, offset: u64, count: u
     Ok(chunk.data)
 }
 
-const READ_ALL_MAX: u64 = 256 * 1024 * 1024;
-
 async fn read_all_v3(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut offset = 0u64;
     loop {
-        let chunk = nfs3.read_at(fh, offset, 65_536).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let chunk = nfs3.read_at(fh, offset, super::ops::CHUNK_SIZE).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         if chunk.data.is_empty() {
             break;
         }
         buf.extend_from_slice(&chunk.data);
-        if buf.len() as u64 > READ_ALL_MAX {
+        if buf.len() as u64 > super::ops::READ_ALL_MAX {
             anyhow::bail!("file exceeds 256 MiB read cap");
         }
         offset += chunk.data.len() as u64;
