@@ -40,7 +40,7 @@ pub mod transport;
 
 mod error;
 
-pub use auth::{AuthFlavor, AuthSys};
+pub use auth::{AuthDesCred, AuthDesVerf, AuthFlavor, AuthSys};
 pub use error::RpcError;
 pub use rpc::RpcClient;
 pub use transport::{DirectTransport, RpcTransport};

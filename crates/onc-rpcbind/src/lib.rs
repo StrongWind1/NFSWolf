@@ -33,5 +33,5 @@ pub mod types;
 pub use client::PortmapperClient;
 pub use error::PortmapError;
 pub use programs::{known_programs, program_name, security_note};
-pub use rpcbind::RpcbindClient;
+pub use rpcbind::{Netbuf, RpcbAddrEntry, RpcbAddrList, RpcbEntry, RpcbList, RpcbRmtCallArgs, RpcbRmtCallRes, RpcbStatByvers, RpcbindClient, RpcbindStatEntry};
 pub use types::{IPPROTO_TCP, IPPROTO_UDP, PMAP_PORT, PMAP_PROG, PROGRAM, VERSION, call_args, call_result, mapping, pmaplist};

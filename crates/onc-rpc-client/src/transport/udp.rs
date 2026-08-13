@@ -92,6 +92,91 @@ where
     Ok(result)
 }
 
+/// Send one RPC call over UDP with automatic retransmission (RFC 5531 sec 5).
+///
+/// Retries `max_retries` times with exponential backoff starting from
+/// `timeout`.  Each attempt doubles the timeout.  Returns the first
+/// successful result, or the last error if all attempts fail.
+pub async fn call_rpc_udp_retry<C, R>(addr: SocketAddr, program: u32, version: u32, proc: u32, args: &C, timeout: Duration, max_retries: u32) -> Result<R, RpcError>
+where
+    C: Pack + Sync,
+    R: Unpack,
+{
+    let mut current_timeout = timeout;
+    let mut last_err = None;
+
+    for _ in 0..=max_retries {
+        match call_rpc_udp::<C, R>(addr, program, version, proc, args, current_timeout).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_err = Some(e);
+                current_timeout = current_timeout.saturating_mul(2);
+            },
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| RpcError::Io(io::Error::new(io::ErrorKind::TimedOut, "UDP RPC retry exhausted"))))
+}
+
+/// Send a broadcast RPC call over UDP and collect all replies
+/// (RFC 5531 sec 8.4.2).
+///
+/// Sends to the given broadcast/multicast address and collects all replies
+/// that arrive within `timeout`.  Each reply is returned with the source
+/// address it came from.  The socket is NOT connected (so it accepts
+/// replies from any source).
+pub async fn broadcast_rpc_udp<C, R>(addr: SocketAddr, program: u32, version: u32, proc: u32, args: &C, timeout: Duration) -> Result<Vec<(SocketAddr, R)>, RpcError>
+where
+    C: Pack + Sync,
+    R: Unpack,
+{
+    let xid: u32 = fastrand::u32(..);
+
+    let null_auth = opaque_auth::default();
+    let call = call_body { rpcvers: RPC_VERSION_2, prog: program, vers: version, proc, cred: null_auth.borrow(), verf: null_auth.borrow() };
+    let msg = rpc_msg { xid, body: msg_body::CALL(call) };
+
+    let mut buf = Vec::with_capacity(msg.packed_size() + args.packed_size());
+    let _ = msg.pack(&mut buf)?;
+    let _ = args.pack(&mut buf)?;
+
+    let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
+    socket.set_broadcast(true)?;
+    let _ = socket.send_to(&buf, addr).await?;
+
+    let mut results = Vec::new();
+    let mut recv_buf = vec![0u8; MAX_UDP_DATAGRAM];
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        match tokio::time::timeout(remaining, socket.recv_from(&mut recv_buf)).await {
+            Ok(Ok((n, src))) => {
+                let Some(slice) = recv_buf.get(..n) else { continue };
+                let mut cursor = io::Cursor::new(slice);
+                let Ok((resp_msg, _)) = rpc_msg::unpack(&mut cursor) else { continue };
+                if resp_msg.xid != xid {
+                    continue;
+                }
+                if let msg_body::REPLY(reply_body::MSG_ACCEPTED(ref reply)) = resp_msg.body
+                    && RpcError::try_from(reply.reply_data).is_err()
+                    && let Ok((result, _)) = R::unpack(&mut cursor)
+                {
+                    results.push((src, result));
+                }
+            },
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    Ok(results)
+}
+
 /// Probe whether `addr` responds to an RPC NULL procedure over UDP.
 ///
 /// Sends program/version NULL (proc 0) and returns true if a valid reply

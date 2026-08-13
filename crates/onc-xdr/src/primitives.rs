@@ -40,6 +40,30 @@ impl Unpack for Vec<u32> {
     }
 }
 
+// --- Signed integer (RFC 4506 sec 4.1) ---
+
+impl Pack for i32 {
+    fn packed_size(&self) -> usize {
+        4
+    }
+
+    fn pack(&self, out: &mut impl Write) -> Result<usize> {
+        let bytes = self.to_be_bytes();
+        out.write_all(&bytes).map_err(Error::Io)?;
+        Ok(4)
+    }
+}
+
+impl Unpack for i32 {
+    fn unpack(input: &mut impl Read) -> Result<(Self, usize)> {
+        let mut bytes = [0u8; 4];
+        input.read_exact(&mut bytes).map_err(Error::Io)?;
+        Ok((Self::from_be_bytes(bytes), 4))
+    }
+}
+
+// --- Unsigned integer (RFC 4506 sec 4.2) ---
+
 impl Pack for u32 {
     fn packed_size(&self) -> usize {
         4
@@ -60,6 +84,30 @@ impl Unpack for u32 {
     }
 }
 
+// --- Signed hyper integer (RFC 4506 sec 4.5) ---
+
+impl Pack for i64 {
+    fn packed_size(&self) -> usize {
+        8
+    }
+
+    fn pack(&self, out: &mut impl Write) -> Result<usize> {
+        let bytes = self.to_be_bytes();
+        out.write_all(&bytes).map_err(Error::Io)?;
+        Ok(8)
+    }
+}
+
+impl Unpack for i64 {
+    fn unpack(input: &mut impl Read) -> Result<(Self, usize)> {
+        let mut bytes = [0u8; 8];
+        input.read_exact(&mut bytes).map_err(Error::Io)?;
+        Ok((Self::from_be_bytes(bytes), 8))
+    }
+}
+
+// --- Unsigned hyper integer (RFC 4506 sec 4.5) ---
+
 impl Pack for u64 {
     fn packed_size(&self) -> usize {
         8
@@ -79,6 +127,52 @@ impl Unpack for u64 {
         Ok((Self::from_be_bytes(bytes), 8))
     }
 }
+
+// --- Floating-point (RFC 4506 sec 4.6) ---
+
+impl Pack for f32 {
+    fn packed_size(&self) -> usize {
+        4
+    }
+
+    fn pack(&self, out: &mut impl Write) -> Result<usize> {
+        let bytes = self.to_be_bytes();
+        out.write_all(&bytes).map_err(Error::Io)?;
+        Ok(4)
+    }
+}
+
+impl Unpack for f32 {
+    fn unpack(input: &mut impl Read) -> Result<(Self, usize)> {
+        let mut bytes = [0u8; 4];
+        input.read_exact(&mut bytes).map_err(Error::Io)?;
+        Ok((Self::from_be_bytes(bytes), 4))
+    }
+}
+
+// --- Double-precision floating-point (RFC 4506 sec 4.7) ---
+
+impl Pack for f64 {
+    fn packed_size(&self) -> usize {
+        8
+    }
+
+    fn pack(&self, out: &mut impl Write) -> Result<usize> {
+        let bytes = self.to_be_bytes();
+        out.write_all(&bytes).map_err(Error::Io)?;
+        Ok(8)
+    }
+}
+
+impl Unpack for f64 {
+    fn unpack(input: &mut impl Read) -> Result<(Self, usize)> {
+        let mut bytes = [0u8; 8];
+        input.read_exact(&mut bytes).map_err(Error::Io)?;
+        Ok((Self::from_be_bytes(bytes), 8))
+    }
+}
+
+// --- Boolean (RFC 4506 sec 4.4) ---
 
 impl Pack for bool {
     fn packed_size(&self) -> usize {
@@ -143,6 +237,128 @@ impl<const N: usize> Unpack for [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- i32 (RFC 4506 sec 4.1) ---
+
+    #[test]
+    fn i32_round_trip() {
+        for val in [0i32, 1, -1, i32::MIN, i32::MAX] {
+            let mut buf = Vec::new();
+            let written = val.pack(&mut buf).unwrap();
+            assert_eq!(written, 4);
+            let (decoded, read) = i32::unpack(&mut buf.as_slice()).unwrap();
+            assert_eq!(decoded, val);
+            assert_eq!(read, 4);
+        }
+    }
+
+    #[test]
+    fn i32_big_endian_on_wire() {
+        let mut buf = Vec::new();
+        let _ = (-1i32).pack(&mut buf).unwrap();
+        assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn i32_packed_size_is_four() {
+        assert_eq!(42i32.packed_size(), 4);
+    }
+
+    // --- i64 (RFC 4506 sec 4.5) ---
+
+    #[test]
+    fn i64_round_trip() {
+        for val in [0i64, 1, -1, i64::MIN, i64::MAX] {
+            let mut buf = Vec::new();
+            let written = val.pack(&mut buf).unwrap();
+            assert_eq!(written, 8);
+            let (decoded, read) = i64::unpack(&mut buf.as_slice()).unwrap();
+            assert_eq!(decoded, val);
+            assert_eq!(read, 8);
+        }
+    }
+
+    #[test]
+    fn i64_big_endian_on_wire() {
+        let mut buf = Vec::new();
+        let _ = (-1i64).pack(&mut buf).unwrap();
+        assert_eq!(buf, [0xFF; 8]);
+    }
+
+    #[test]
+    fn i64_packed_size_is_eight() {
+        assert_eq!(99i64.packed_size(), 8);
+    }
+
+    // --- f32 (RFC 4506 sec 4.6) ---
+
+    #[test]
+    fn f32_round_trip() {
+        for val in [0.0f32, 1.0, -1.0, f32::MIN, f32::MAX, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut buf = Vec::new();
+            let written = val.pack(&mut buf).unwrap();
+            assert_eq!(written, 4);
+            let (decoded, read) = f32::unpack(&mut buf.as_slice()).unwrap();
+            assert_eq!(decoded.to_bits(), val.to_bits());
+            assert_eq!(read, 4);
+        }
+    }
+
+    #[test]
+    fn f32_nan_round_trip() {
+        let mut buf = Vec::new();
+        let _ = f32::NAN.pack(&mut buf).unwrap();
+        let (decoded, _) = f32::unpack(&mut buf.as_slice()).unwrap();
+        assert!(decoded.is_nan());
+    }
+
+    #[test]
+    fn f32_big_endian_on_wire() {
+        // IEEE 754: 1.0f32 = 0x3F800000
+        let mut buf = Vec::new();
+        let _ = 1.0f32.pack(&mut buf).unwrap();
+        assert_eq!(buf, [0x3F, 0x80, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn f32_packed_size_is_four() {
+        assert_eq!(1.0f32.packed_size(), 4);
+    }
+
+    // --- f64 (RFC 4506 sec 4.7) ---
+
+    #[test]
+    fn f64_round_trip() {
+        for val in [0.0f64, 1.0, -1.0, f64::MIN, f64::MAX, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut buf = Vec::new();
+            let written = val.pack(&mut buf).unwrap();
+            assert_eq!(written, 8);
+            let (decoded, read) = f64::unpack(&mut buf.as_slice()).unwrap();
+            assert_eq!(decoded.to_bits(), val.to_bits());
+            assert_eq!(read, 8);
+        }
+    }
+
+    #[test]
+    fn f64_nan_round_trip() {
+        let mut buf = Vec::new();
+        let _ = f64::NAN.pack(&mut buf).unwrap();
+        let (decoded, _) = f64::unpack(&mut buf.as_slice()).unwrap();
+        assert!(decoded.is_nan());
+    }
+
+    #[test]
+    fn f64_big_endian_on_wire() {
+        // IEEE 754: 1.0f64 = 0x3FF0000000000000
+        let mut buf = Vec::new();
+        let _ = 1.0f64.pack(&mut buf).unwrap();
+        assert_eq!(buf, [0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn f64_packed_size_is_eight() {
+        assert_eq!(1.0f64.packed_size(), 8);
+    }
 
     // --- u32 (RFC 4506 sec 4.2) ---
 

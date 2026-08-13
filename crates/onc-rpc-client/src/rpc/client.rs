@@ -105,34 +105,38 @@ where
         Ok(())
     }
 
+    /// Read one complete RPC reply, reassembling multiple record fragments
+    /// if needed (RFC 5531 sec 11).
     async fn recv_reply<T>(io: &mut IO, xid: u32) -> Result<T, RpcError>
     where
         T: Unpack,
     {
-        let mut buf = [0u8; 4];
-        io.async_read_exact(&mut buf).await?;
-        let fragment_header: fragment_header = buf.into();
-        if !fragment_header.eof() {
-            return Err(RpcError::FragmentedReply);
+        let mut assembled = Vec::new();
+
+        loop {
+            let mut hdr_buf = [0u8; 4];
+            io.async_read_exact(&mut hdr_buf).await?;
+            let frag: fragment_header = hdr_buf.into();
+            let frag_len = frag.fragment_length();
+
+            // Guard total assembled size against allocation amplification.
+            let new_total = assembled.len().saturating_add(frag_len as usize);
+            if new_total > MAX_REPLY_BYTES as usize {
+                return Err(RpcError::WrongLength);
+            }
+
+            let start = assembled.len();
+            assembled.resize(new_total, 0);
+            #[expect(clippy::indexing_slicing, reason = "start..new_total is in range: start was the old len, new_total is the current len")]
+            io.async_read_exact(&mut assembled[start..]).await?;
+
+            if frag.eof() {
+                break;
+            }
         }
 
-        let total_len = fragment_header.fragment_length();
-        // A fragment header can declare up to 2 GiB, and the peer chooses the
-        // value. Allocating from it directly lets four bytes from a hostile or
-        // simply non-RPC listener cost 2 GiB of zeroed memory before a single
-        // payload byte arrives -- fatal during a concurrent scan, where one bad
-        // host on port 2049 would take the whole sweep down (CWE-789).
-        //
-        // Real NFS replies are bounded by the server's advertised rtmax, which
-        // is at most a few MiB in practice, so anything past this ceiling is
-        // not a reply we could have used.
-        if total_len > MAX_REPLY_BYTES {
-            return Err(RpcError::WrongLength);
-        }
-        let mut buf = vec![0u8; total_len as usize];
-        io.async_read_exact(&mut buf).await?;
-
-        let mut cursor = std::io::Cursor::new(buf);
+        let total_len = assembled.len();
+        let mut cursor = std::io::Cursor::new(assembled);
         let (resp_msg, _) = rpc_msg::unpack(&mut cursor)?;
 
         if resp_msg.xid != xid {
@@ -152,10 +156,26 @@ where
         }
 
         let (final_value, _) = T::unpack(&mut cursor)?;
-        if cursor.position() != u64::from(total_len) {
+        if cursor.position() != total_len as u64 {
             let pos = cursor.position();
             return Err(RpcError::NotFullyParsed { buf: cursor.into_inner(), pos });
         }
         Ok(final_value)
+    }
+
+    /// Send a batched call without waiting for a reply (RFC 5531 sec 8.4.1).
+    ///
+    /// Batching allows sending an arbitrarily large sequence of call
+    /// messages without waiting for replies.  The batch is typically
+    /// flushed by a final non-batched call.
+    #[expect(clippy::similar_names, reason = "prog and proc are fields of call_body")]
+    pub async fn send_batch<C>(&mut self, prog: u32, vers: u32, proc: u32, args: &C) -> Result<(), RpcError>
+    where
+        C: Pack + Send + Sync,
+    {
+        let call = call_body { rpcvers: RPC_VERSION_2, prog, vers, proc, cred: self.credential.borrow(), verf: self.verifier.borrow() };
+        let msg = rpc_msg { xid: self.xid, body: msg_body::CALL(call) };
+        self.xid = self.xid.wrapping_add(1);
+        Self::send_call(&mut self.io, &msg, args).await
     }
 }

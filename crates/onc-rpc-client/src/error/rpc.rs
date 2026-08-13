@@ -57,11 +57,10 @@ pub enum RpcError {
     ProcUnavail,
     /// The server could not decode the procedure arguments.
     GarbageArgs,
-    /// The server sent a fragmented reply, which is not supported.
+    /// The server sent a fragmented reply that could not be reassembled.
     ///
-    /// Handling fragmented replies would require significant changes to the
-    /// receive logic because subsequent fragments are not guaranteed to arrive
-    /// immediately after the first one.
+    /// Multi-fragment replies are reassembled automatically (RFC 5531 sec 11).
+    /// This error is retained for edge cases where reassembly fails.
     FragmentedReply,
     /// An unspecified server-side system error occurred.
     SystemErr,
