@@ -182,9 +182,9 @@ Permissions:   chmod, chown, stat
 Identity:      uid <n>, gid <n>, hostname <name>, whoami, impersonate <uid>:<gid>,
                handle
 Devices:       mknod <name> c|b <major> <minor>
-Analysis:      suid-scan, world-writable, secrets-scan
+Analysis:      suid-scan, world-writable, secrets-scan, exports
 Forensics:     last, lastb, lastlog
-Escape:        escape-root, mount-handle <hex>
+Escape:        escape-root, mount-handle <hex>, exports
 Local:         lcd, lls, lpwd, lmkdir
 Session:       help, history, exit, quit
 ```
@@ -216,11 +216,11 @@ subcommands.
 
 | Subcommand | Description | Findings |
 |------------|-------------|----------|
-| `escape` | Construct escape handles across 18/19 filesystem types to break out of an export | F-2.1, F-2.4, F-2.6 |
+| `escape` | Construct escape handles across 18/19 filesystem types to break out of an export; `--all` for comprehensive multi-seed probing | F-2.1, F-2.4, F-2.6, F-2.11 |
 | `brute-handle` | Brute-force file handles using the STALE / BADHANDLE oracle | F-2.2, F-2.5 |
 | `uid-spray` | Last-resort UID / GID + auxiliary-group brute force when the auto-UID ladder doesn't pin down a working credential | F-1.1, F-1.2, F-1.3 |
 
-`escape` is the single entry point for crossing the export boundary. It delegates to the unified escape engine (`src/engine/escape.rs`) which works through the `EscapeProbe` trait, making the algorithm version-neutral. The escape engine supports 18 of 19 Linux filesystem types: ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, and ISO9660 -- only tmpfs resists (no stable inode-to-handle mapping). The `find_escape_root()` function runs the full algorithm: known-root candidates -> BTRFS subvol scan -> filesystem-specific constructors (ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660) -> brute-force inode scan. The `escape-root` shell command uses the same `find_escape_root()` algorithm via a `ShellOps`-based `EscapeProbe` adapter. The subcommand tries NFSv3 first (MOUNT v3 + `Nfs3Client` probes), then falls back automatically to NFSv2 (MOUNT v1 + `Nfs2Client`) when MOUNT v3 fails. The `find_escape_any` function encapsulates this two-version fallback and is shared by `scan --auto-escape`. Once `escape` returns a hex handle, feed that handle into `shell --handle HEX` or `mount --handle HEX` to read, write, or recursively walk anything on the underlying filesystem.
+`escape` is the single entry point for crossing the export boundary. It delegates to the unified escape engine (`src/engine/escape.rs`) which works through the `EscapeProbe` trait, making the algorithm version-neutral. The escape engine supports 18 of 19 Linux filesystem types: ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, and ISO9660 -- only tmpfs resists (random 32-bit generation per mount). The `find_escape_root()` function runs the full algorithm: INO32_GEN candidate table (9 entries) -> BTRFS subvol scan -> filesystem-specific constructors (ZFS zfid_short_t, EROFS INO64_GEN, NILFS2 0x61, bcachefs 0xb1, UDF 0x51, ISO9660 custom) -> brute-force inode scan (inodes 1-5 with gen 0-5, then 6-200 with gen=0). All constructors produce compound-UUID dual variants (fsid_type=7 and fsid_type=6) for maximum compatibility. The escape cascade in `find_escape_any` tries: WebNFS public handles -> v3 MOUNT + handle construction -> handle matrix (MOUNT v1/v3 cross-version) -> v2 MOUNT -> v4 handle escape (`find_escape_v4` via PooledTransport + Nfs4EscapeProbe) -> v4 LOOKUPP traversal (F-2.11). `--all` mode acquires seed handles from all sources (MOUNT v3, MOUNT v1, NFSv4 LOOKUP), runs `find_escape_root_all` on each, and reports every working root handle. The `escape-root` shell command uses the same `find_escape_root()` via a `ShellOps`-based `EscapeProbe` adapter, using `self.cwd` as the seed (enabling pure-NFSv4 escape when the shell navigates into an export). The `exports` shell command (F-2.12) uses LOOKUPP to discover sibling exports reachable from the current position.
 
 ```bash
 # Step 1: construct the escape handle for the underlying filesystem (F-2.1)

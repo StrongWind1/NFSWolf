@@ -45,8 +45,8 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 - **Documented security findings** across export, transport, file-handle, and credential attack categories - full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
 - **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2.
 - **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
-- **Offensive subcommands**: `escape` (export breakout across 18 filesystem types -- ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs -- with NFSv2 fallback), `brute-handle` (inode/generation cross-product sweep with handle oracle), `uid-spray` (last-resort credential discovery).
-- **Interactive shell** across NFSv2, NFSv3, and NFSv4 with tab completion, `get -r` / `put -r`, `--verify <sha256>`, `--handle` MOUNT bypass, `-c` scripting mode, auto-version detection when `--nfs-version` is omitted, and all standard POSIX-style verbs.
+- **Offensive subcommands**: `escape` (export breakout across 18 filesystem types -- ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs -- cascading through v3 MOUNT, handle matrix, v2 MOUNT, v4 handle escape, and v4 LOOKUPP; `--all` reports every working root handle from all seed sources), `brute-handle` (inode/generation cross-product sweep with handle oracle), `uid-spray` (last-resort credential discovery).
+- **Interactive shell** across NFSv2, NFSv3, and NFSv4 with tab completion, `get -r` / `put -r`, `--verify <sha256>`, `--handle` MOUNT bypass, `-c` scripting mode, auto-version detection when `--nfs-version` is omitted, `exports` command for cross-export lateral discovery (F-2.12), `escape-root` for in-shell filesystem escape, and all standard POSIX-style verbs.
 - **FUSE**: mount any NFS export locally with spoofed credentials via `nfswolf mount`.
 - **Six report formats**: HTML, JSON, CSV, Markdown, plain-text, ANSI console.
 
@@ -156,8 +156,8 @@ nfswolf convert -i results.json --format console
 |---|---|---|
 | Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
 | Recon | `analyze` | Per-host security audit against the documented finding catalog |
-| Recon | `escape` | Construct escape handles across 18 filesystem types (ext2/3/4, XFS, BTRFS subvols, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs; auto-falls back to NFSv2) |
-| Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4, with `get -r` / `put -r` / `--verify` / `--handle` / `-c` |
+| Recon | `escape` | Construct escape handles across 18 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs); cascades through v3 MOUNT, handle matrix, v2 MOUNT, v4 handle escape, and v4 LOOKUPP; `--all` reports every working root handle from all seed sources |
+| Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4 (auto-detected when `--nfs-version` is omitted); 52 commands incl. `escape-root`, `exports` (F-2.12 sibling discovery), `suid-scan`, `secrets-scan`; `get -r` / `put -r` / `--verify` / `--handle` / `-c` |
 | Connect | `mount` | FUSE mount with spoofed AUTH_SYS credentials (`--features fuse`) |
 | Advanced | `brute-handle` | Brute-force file handles via inode/generation cross-product sweep with STALE / BADHANDLE oracle; reports all discovered handles; NFSv2 auto-fallback |
 | Advanced | `uid-spray` | Last-resort UID/GID brute force when auto-UID escalation fails |
