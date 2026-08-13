@@ -31,7 +31,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 | NFSv2 / v3 / v4 | yes | no | v3 | v3 | v3 | v3 |
 | Async / concurrent scan | yes | no | no | yes | no | no |
 | AUTH_SYS UID spraying | yes | no | yes | yes | no | no |
-| Export escape (ext4/XFS/BTRFS) | yes | no | no | no | no | no |
+| Export escape (18 filesystem types) | yes | no | no | no | no | no |
 | Interactive NFS shell (52 commands) | yes | no | no | no | no | yes |
 | FUSE mount (`nfswolf mount`) | yes | no | no | no | no | no |
 | Portmapper / mountd enumeration | yes | partial | no | no | no | no |
@@ -45,8 +45,8 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 - **Documented security findings** across export, transport, file-handle, and credential attack categories - full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
 - **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2.
 - **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
-- **Offensive subcommands**: `escape` (export breakout with ext4/XFS/BTRFS subvol detection and NFSv2 fallback), `brute-handle` (inode/generation cross-product sweep with handle oracle), `uid-spray` (last-resort credential discovery).
-- **Interactive shell** across NFSv2, NFSv3, and NFSv4 with tab completion, `get -r` / `put -r`, `--verify <sha256>`, `--handle` MOUNT bypass, `-c` scripting mode, and all standard POSIX-style verbs.
+- **Offensive subcommands**: `escape` (export breakout across 18 filesystem types -- ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs -- with NFSv2 fallback), `brute-handle` (inode/generation cross-product sweep with handle oracle), `uid-spray` (last-resort credential discovery).
+- **Interactive shell** across NFSv2, NFSv3, and NFSv4 with tab completion, `get -r` / `put -r`, `--verify <sha256>`, `--handle` MOUNT bypass, `-c` scripting mode, auto-version detection when `--nfs-version` is omitted, and all standard POSIX-style verbs.
 - **FUSE**: mount any NFS export locally with spoofed credentials via `nfswolf mount`.
 - **Six report formats**: HTML, JSON, CSV, Markdown, plain-text, ANSI console.
 
@@ -156,7 +156,7 @@ nfswolf convert -i results.json --format console
 |---|---|---|
 | Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
 | Recon | `analyze` | Per-host security audit against the documented finding catalog |
-| Recon | `escape` | Construct ext4 / XFS / BTRFS escape handles (probes ext4 first, then XFS, then BTRFS subvols; auto-falls back to NFSv2) |
+| Recon | `escape` | Construct escape handles across 18 filesystem types (ext2/3/4, XFS, BTRFS subvols, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs; auto-falls back to NFSv2) |
 | Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4, with `get -r` / `put -r` / `--verify` / `--handle` / `-c` |
 | Connect | `mount` | FUSE mount with spoofed AUTH_SYS credentials (`--features fuse`) |
 | Advanced | `brute-handle` | Brute-force file handles via inode/generation cross-product sweep with STALE / BADHANDLE oracle; reports all discovered handles; NFSv2 auto-fallback |
@@ -215,16 +215,16 @@ The NFS protocol stack is split into eight standalone crates, published on [crat
 | [`nfs-mount`](https://crates.io/crates/nfs-mount) | MOUNT v1/v3 (RFC 1094 / RFC 1813) |
 | [`nfs-v2`](https://crates.io/crates/nfs-v2) | NFSv2 (RFC 1094): all 18 procedures |
 | [`nfs-v3`](https://crates.io/crates/nfs-v3) | NFSv3 (RFC 1813): all 22 procedures + domain types |
-| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): COMPOUND, SECINFO, read-only subset |
+| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): complete implementation -- all 37 ops, stateful client, 45 methods |
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 543 tests across 8 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 722 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (543 tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (722 tests), doc, hygiene, machete
 ```
 
 ## Credits

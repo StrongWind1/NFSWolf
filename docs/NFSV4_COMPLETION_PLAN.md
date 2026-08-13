@@ -754,15 +754,20 @@ Phases 1–5 bring the crate to full wire-level spec compliance (every type, eve
 
 ---
 
+## Completed Beyond This Plan
+
+| Item | Status |
+|------|--------|
+| `src/` shell wiring (`V4Ops: ShellOps`) | Done -- `src/shell/v4.rs` implements all 52 shell commands over NFSv4 |
+| Credential escalation logic | Done -- `try_with_escalation()` shared across v2/v3/v4 in `src/shell/ops.rs` |
+
 ## What Remains Out of Scope
 
 | Item | Reason |
 |------|--------|
-| `src/` shell wiring (`V4Ops: ShellOps`) | Separate effort that consumes the API surface this plan builds; depends on this plan completing through Phase 7 |
 | CB_RECALL callback server | Requires a listening RPC service on the client; different architecture |
 | NFSv4.1 session management (RFC 8881) | Different protocol version; the 4 v4.1 ops already present are sufficient for recon |
 | Full ACL encoding/decoding | Complex attribute with many edge cases; encode as opaque for now |
 | All 76 fattr4 attributes | Decode the ~15 key attributes; others remain opaque |
 | RPCSEC_GSS integration | Separate crate concern (onc-rpc-client) |
-| Credential escalation logic | Policy that belongs in `src/`, not in the protocol crate (layer boundary rule) |
 | v4 FUSE mount | Requires both stateful infrastructure and a FUSE adapter; separate from the shell goal |

@@ -111,7 +111,7 @@ Output split: `analyze` prints an ANSI-coloured human-readable summary on stdout
 | Root squash | Test no_root_squash (creates and removes a temp dir) | F-4.1 |
 | Squash probe | Detect anonuid/anongid, root_squash, all_squash | F-7.5 |
 | Root squash bypass | Test non-root UID access (file owner impersonation) | F-1.2 |
-| Subtree escape | Filesystem root access (ext4/xfs/btrfs handle construction) | F-2.1 |
+| Subtree escape | Filesystem root access (18/19 FS types via unified escape engine) | F-2.1 |
 | Escape confirmation | Compare READDIRPLUS child count to verify escape | F-2.1 |
 | BTRFS subvolume escape | Construct handles for subvol IDs 256+ | F-2.4 |
 | Bind mount escape | *(disabled -- equality check was unsound; F-2.6 is exercised by `escape`, not `analyze`)* | F-2.6 |
@@ -202,7 +202,8 @@ Session:       help, history, exit, quit
 - **Symlink creation**: Create symlinks pointing outside export boundaries (F-4.4)
 - **Inline escape**: `escape-root` constructs filesystem root handle from current session (F-2.1)
 - **NFSv2 mode**: `--nfs-version 2` drops into an NFSv2 shell via MOUNT v1 + `Nfs2Client`. Supports `--handle HEX` for MOUNT bypass. Includes the `root` probe (NFSPROC_ROOT bypass check, RFC 1094 sec. 2.2.3) which is not available in the v3 shell.
-- **NFSv4 mode**: `--nfs-version 4` drops into an NFSv4 shell (ls/cd/cat/get/handle/lcd/lls/lpwd/lmkdir/history) without MOUNT -- read-only NFS operations plus local commands
+- **NFSv4 mode**: `--nfs-version 4` (or auto-detected when v3 and v2 are unavailable) drops into a full NFSv4 shell via `NfsShell<V4Ops>` with all 52 commands -- no MOUNT protocol needed, stateful OPEN/CLOSE/LOCK lifecycle, credential escalation via `try_with_escalation()`
+- **Auto-version detection**: When `--nfs-version` is omitted, `resolve_version` probes v3 -> v2 -> v4 (portmapper GETPORT + NULL verification for v2/v3, direct COMPOUND for v4) and selects the first responding version
 
 ### 5. Offensive subcommands -- `escape`, `brute-handle`, `uid-spray`
 
@@ -215,11 +216,11 @@ subcommands.
 
 | Subcommand | Description | Findings |
 |------------|-------------|----------|
-| `escape` | Construct ext4 / XFS / BTRFS escape handles to break out of an export | F-2.1, F-2.4, F-2.6 |
+| `escape` | Construct escape handles across 18/19 filesystem types to break out of an export | F-2.1, F-2.4, F-2.6 |
 | `brute-handle` | Brute-force file handles using the STALE / BADHANDLE oracle | F-2.2, F-2.5 |
 | `uid-spray` | Last-resort UID / GID + auxiliary-group brute force when the auto-UID ladder doesn't pin down a working credential | F-1.1, F-1.2, F-1.3 |
 
-`escape` is the single entry point for crossing the export boundary. It tries NFSv3 first (MOUNT v3 + `Nfs3Client` probes), then falls back automatically to NFSv2 (MOUNT v1 + `Nfs2Client`) when MOUNT v3 fails. The `find_escape_any` function encapsulates this two-version fallback and is shared by `scan --auto-escape`. Once `escape` returns a hex handle, feed that handle into `shell --handle HEX` or `mount --handle HEX` to read, write, or recursively walk anything on the underlying filesystem.
+`escape` is the single entry point for crossing the export boundary. It delegates to the unified escape engine (`src/engine/escape.rs`) which works through the `EscapeProbe` trait, making the algorithm version-neutral. The escape engine supports 18 of 19 Linux filesystem types: ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, and ISO9660 -- only tmpfs resists (no stable inode-to-handle mapping). The `find_escape_root()` function runs the full algorithm: known-root candidates -> BTRFS subvol scan -> filesystem-specific constructors (ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660) -> brute-force inode scan. The `escape-root` shell command uses the same `find_escape_root()` algorithm via a `ShellOps`-based `EscapeProbe` adapter. The subcommand tries NFSv3 first (MOUNT v3 + `Nfs3Client` probes), then falls back automatically to NFSv2 (MOUNT v1 + `Nfs2Client`) when MOUNT v3 fails. The `find_escape_any` function encapsulates this two-version fallback and is shared by `scan --auto-escape`. Once `escape` returns a hex handle, feed that handle into `shell --handle HEX` or `mount --handle HEX` to read, write, or recursively walk anything on the underlying filesystem.
 
 ```bash
 # Step 1: construct the escape handle for the underlying filesystem (F-2.1)
@@ -285,7 +286,7 @@ rpcbind mount   |       |     onc-rpcbind (portmapper/rpcbind), nfs-mount (MOUNT
 nfs-v2  nfs-v3  nfs-v4        one crate per NFS version, each standalone
 ```
 
-Each version crate owns its own MOUNT protocol (v1 in nfs2, v3 in nfs3; v4 has no MOUNT) because the handle types genuinely differ (v1 fixed 32 bytes, v3 variable-length) and they are defined in different RFCs.
+Each version crate owns its own MOUNT protocol (v1 in nfs2, v3 in nfs3; v4 has no MOUNT) because the handle types genuinely differ (v1 fixed 32 bytes, v3 variable-length) and they are defined in different RFCs. The nfs-v4 crate is fully complete: all 37 operations are typed with response decoders, 66 status codes are named, stateful infrastructure covers the SETCLIENTID lifecycle, OPEN/CLOSE/LOCK state tracking, and crash recovery, and 47 public client methods expose domain types (`Nfs4FileInfo`, `Nfs4DirEntry`, `Nfs4FileType`) for building a complete interactive NFS shell over NFSv4.
 
 This began as a dependency on [`nfs3-rs`](https://github.com/Vaiz/nfs3) (Unlicense). In v0.6.0 the code was absorbed outright and the vendor patch tree deleted. `ref/nfs3/` remains for diffing against upstream. Each crate carries a NOTICE with the file-level provenance mapping.
 
@@ -302,11 +303,12 @@ This began as a dependency on [`nfs3-rs`](https://github.com/Vaiz/nfs3) (Unlicen
 | `nfs-mount` | MOUNT v1/v3 (RFC 1094 Appendix A / RFC 1813 Appendix I), `MountV1Client`, `MountClient` |
 | `nfs-v2` | All 18 NFSv2 procedures (RFC 1094), fixed 32-byte handles, `Nfs2Client`, `Nfs2Error` with classification predicates, `Display` for `NfsStat` |
 | `nfs-v3` | All 22 NFSv3 procedures, domain API (`FileHandle`, `FileAttrs`, `Nfs3Fault`), `Nfs3Error` with handle-oracle predicates |
-| `nfs-v4` | NFSv4.0 COMPOUND (RFC 7530) read-only subset, `Display` for `Nfs4Status` |
+| `nfs-v4` | NFSv4.0 (RFC 7530): all 37 ops typed with response decoders, 66 named `Nfs4Status` codes, stateful infrastructure (SETCLIENTID lifecycle, OPEN/CLOSE/LOCK state, crash recovery), domain types (`Nfs4FileInfo`, `Nfs4DirEntry`, `Nfs4FileType`), shell-ready client API with 47 public methods, 244 tests |
 
 **What is deliberately absent:**
 - A server implementation -- integration tests use the published `nfs3_server` crate as a mock
-- The stateful half of NFSv4: OPEN, CLOSE, LOCK, delegations, v4.1 sessions (RFC 8881)
+- NFSv4.1 sessions (RFC 8881) -- the 4 v4.1 ops already present are sufficient for recon
+- CB_RECALL callback server -- requires a listening RPC service on the client; different architecture
 - RPCSEC_GSS / Kerberos (RFC 2203) -- detection only, via MOUNT auth flavors and NFSv4 SECINFO
 - NLM and NSM -- removed in v0.2.0 with the lock-DoS module; F-6.x is out of scope
 
@@ -624,7 +626,7 @@ nfswolf/
 │   ├── nfs-mount/                 # MOUNT v1/v3 (RFC 1094 App A / RFC 1813 App I)
 │   ├── nfs-v2/                    # RFC 1094: all 18 procedures, fixed 32-byte handles
 │   ├── nfs-v3/                    # RFC 1813: 22 procedures + domain API
-│   └── nfs-v4/                    # RFC 7530: COMPOUND encoder, stateless read-only subset
+│   └── nfs-v4/                    # RFC 7530: all 37 ops, stateful infra, domain types, 244 tests
 ├── src/
 │   ├── main.rs                    # CLI entry point with tracing + subcommand dispatch
 │   ├── output.rs                  # status_info/warn/err, print_handle, print_handle_next_steps
@@ -633,7 +635,8 @@ nfswolf/
 │   │   ├── complete.rs            # Tab completion for remote/local paths
 │   │   ├── ops.rs                 # ShellOps trait + version-neutral types
 │   │   ├── v2.rs                  # V2Ops: ShellOps impl for NFSv2 with identity change via TCP reconnect
-│   │   └── v3.rs                  # V3Ops: ShellOps impl for NFSv3 with credential escalation (read_file and read_chunk)
+│   │   ├── v3.rs                  # V3Ops: ShellOps impl for NFSv3 with credential escalation (read_file and read_chunk)
+│   │   └── v4.rs                  # V4Ops: ShellOps impl for NFSv4 with credential escalation via try_with_escalation()
 │   ├── fuse.rs                    # NfsFuse: full FUSE Filesystem trait, inode map, attr cache
 │   ├── cli/
 │   │   ├── mod.rs                 # Cli, Command enum, GlobalOpts, H_* help-section constants
@@ -642,8 +645,8 @@ nfswolf/
 │   │   ├── scan.rs                # nfswolf scan
 │   │   ├── analyze.rs             # nfswolf analyze
 │   │   ├── mount.rs               # nfswolf mount (FUSE) -- daemonises
-│   │   ├── shell.rs               # nfswolf shell (NFSv2, NFSv3, and NFSv4 dispatch)
-│   │   ├── escape.rs              # nfswolf escape
+│   │   ├── shell.rs               # nfswolf shell: ShellSetup + run_repl + connect_v2/v3/v4 + auto-detect
+│   │   ├── escape.rs              # nfswolf escape (delegates to engine/escape.rs via Nfs3EscapeProbe)
 │   │   ├── brute_handle.rs        # nfswolf brute-handle
 │   │   ├── uid_spray.rs           # nfswolf uid-spray (last-resort fallback)
 │   │   └── convert.rs             # nfswolf convert
@@ -659,13 +662,14 @@ nfswolf/
 │   │   ├── portmap.rs             # PortmapClient: DUMP, GETPORT, NIS detection, amplification
 │   │   ├── nfs2.rs                # Nfs2Client type alias (library client + PooledTransport)
 │   │   ├── nfs3/mod.rs            # Nfs3Client type alias (library client + PooledTransport)
-│   │   └── nfs4/{mod,compound}.rs # Nfs4DirectClient (pool-free, direct port 2049)
+│   │   └── nfs4/{mod,compound}.rs # Nfs4DirectClient (pool-free, direct port 2049); re-exports nfs_v4 types
 │   ├── engine/
 │   │   ├── mod.rs
 │   │   ├── scanner.rs             # Parallel host scanner (R1.1-R1.3); ScanOutput, ScanConfig
 │   │   ├── scan_types.rs          # HostResult, TargetSpec, NfsPortInfo, MountPortInfo, PortReachability, V4ExportEntry, VersionRange
 │   │   ├── analyzer.rs            # Security check engine (R2-R4)
-│   │   ├── file_handle.rs         # Handle analysis + escape (F-2.1-F-2.6)
+│   │   ├── escape.rs              # Unified escape engine: EscapeProbe trait + find_escape_root() (18/19 FS types)
+│   │   ├── file_handle.rs         # Handle analysis + escape construction (F-2.1-F-2.6, all 18 FS types)
 │   │   ├── uid_sprayer.rs         # UID/GID brute-force (F-1.1-F-1.3)
 │   │   └── credential.rs          # credential_ladder() / credential_ladder_with() / observed_identities()
 │   ├── report/
@@ -693,7 +697,9 @@ nfswolf/
 │   ├── DESIGN.md                  # Vision, goals, threat model
 │   ├── ARCHITECTURE.md            # This file
 │   ├── NFSv2.md, NFSv3.md, NFSv4.md  # Protocol reference notes
-│   └── findings/                  # Detailed finding write-ups (48 files: 47 findings + README)
+│   ├── findings/                  # Detailed finding write-ups (48 files: 47 findings + README)
+│   └── research/
+│       └── FILESYSTEM_ESCAPE_MATRIX.md  # Escape coverage across 19 Linux filesystem types
 └── ref/
     ├── nfs3/                      # Read-only Vaiz/nfs3 checkout (for upstream diffing)
     └── rfc/                       # NFS/RPC/XDR RFCs (1057, 1094, 1813, 1831, 2623, 5531, 7530, 9289)
@@ -743,11 +749,11 @@ command is still invoked flat, e.g. `nfswolf scan ...`, `nfswolf brute-handle ..
 
 ### NFS Version Selection (`--nfs-version`)
 
-Only `shell` exposes `--nfs-version` (2, 3, or 4). The other subcommands either auto-negotiate or are tied to a specific version by design:
+Only `shell` exposes `--nfs-version` (2, 3, or 4). When omitted, `resolve_version` auto-detects by probing v3 -> v2 -> v4. The other subcommands either auto-negotiate or are tied to a specific version by design:
 
 | Subcommand | NFS version used | Why no `--nfs-version` flag |
 |------------|-----------------|----------------------------|
-| `shell` | 2, 3, or 4 (user's choice, default 3) | **Has the flag.** Each version is a fundamentally different shell with different wire ops. |
+| `shell` | 2, 3, or 4 (auto-detected or user's choice) | **Has the flag.** Auto-detects when omitted. All three versions share the full 52-command shell via `NfsShell<V2Ops>` / `NfsShell<V3Ops>` / `NfsShell<V4Ops>`. |
 | `mount` | v3 only | The FUSE adapter (`fuse.rs`) is wired to `Nfs3Client` throughout. Use `shell --nfs-version 2` for interactive v2 access. |
 | `escape` | Auto: v3 matrix, v2 fallback, v4 LOOKUPP | Tries all versions automatically. Forcing one would reduce coverage. |
 | `analyze` | v3 (with v1 handle acquisition fallback) | The 25+ checks use v3-only procedures (READDIRPLUS, COMMIT, PATHCONF, FSINFO). v2 lacks most of them. |
@@ -945,6 +951,6 @@ nfswolf is the only tool that combines all of the following in a single binary:
 | **FUSE Mount** | fuse_nfs | Escape + auto-UID + SOCKS proxy + stealth in one tool |
 | **Interactive Shell** | nfscli | Aux GIDs, handle construction escape, machine name spoof -- all in one binary |
 | **Secret Harvesting** | niffler | Companion tool -- nfswolf provides escape + shell + mount to reach files; niffler's rule engine finds secrets in them |
-| **Export Breakout** | Manual (nfscli + nfs_analyze) | Dedicated `escape` subcommand for ext4 / XFS / BTRFS; hand the resulting handle to `shell` or `mount` |
+| **Export Breakout** | Manual (nfscli + nfs_analyze) | Dedicated `escape` subcommand covering 18/19 filesystem types; hand the resulting handle to `shell` or `mount` |
 | **Privilege Escalation** | nfscli (manual) | Spoofed AUTH_SYS UID/GID/aux-GIDs and `mknod` are first-class in `shell` and `mount` |
 | **Reporting** | niffler (SQLite+Web+FTS5), nfs_analyze (JSON) | HTML + JSON + TXT + CSV + MD with Finding IDs and RFC citations |
