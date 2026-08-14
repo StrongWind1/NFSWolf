@@ -50,7 +50,7 @@ impl PooledNfs2 for Nfs2Client {
         match self.transport().credential() {
             crate::proto::auth::Credential::Sys(a) => &a.machinename,
             // Same rationale as PooledNfs3: avoid a blank machinename on the wire.
-            crate::proto::auth::Credential::None => DEFAULT_MACHINENAME,
+            crate::proto::auth::Credential::None | crate::proto::auth::Credential::Short(_) => DEFAULT_MACHINENAME,
         }
     }
 

@@ -153,6 +153,20 @@ impl AuthSys {
     }
 }
 
+// --- AUTH_SHORT (RFC 1057 sec 9.2) ---
+
+/// Build an AUTH_SHORT credential from a server-issued opaque token.
+///
+/// The server issues the token in the reply verifier after a successful
+/// AUTH_SYS call. The client replays it verbatim as the credential on
+/// subsequent calls, avoiding the overhead of re-sending the full
+/// UID/GID/groups structure on every RPC. The token is a bearer credential
+/// -- anyone who possesses the bytes can impersonate the session.
+#[must_use]
+pub fn short_credential(token: &[u8]) -> opaque_auth<'static> {
+    opaque_auth { flavor: auth_flavor::AUTH_SHORT, body: Opaque::owned(token.to_vec()) }
+}
+
 // --- AUTH_DH (RFC 2695 sec 2.4, RFC 5531 sec 8.2) ---
 
 /// AUTH_DH credential body (RFC 2695 sec 2.4).

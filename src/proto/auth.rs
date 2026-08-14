@@ -37,6 +37,9 @@ pub(crate) enum Credential {
     None,
     /// AUTH_SYS: client-asserted UID and GID, which the server does not verify.
     Sys(AuthSys),
+    /// AUTH_SHORT: server-issued opaque session token (RFC 1057 S9.2).
+    #[expect(dead_code, reason = "constructed by --short-token CLI flag and analyzer active probe")]
+    Short(Vec<u8>),
 }
 
 impl Credential {
@@ -45,6 +48,7 @@ impl Credential {
         match self {
             Self::None => opaque_auth::default(),
             Self::Sys(auth) => auth.to_opaque_auth(next_stamp()),
+            Self::Short(token) => onc_rpc_client::auth::short_credential(token),
         }
     }
 }

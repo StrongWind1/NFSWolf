@@ -34,6 +34,13 @@ pub struct RpcClient<IO> {
     /// AUTH_SYS has nothing to verify and always sends AUTH_NONE here
     /// (RFC 5531 sec. 14.2); the field matters only for RPCSEC_GSS.
     pub verifier: opaque_auth<'static>,
+    /// Reply verifier from the most recent successful call.
+    ///
+    /// When the server returns a reply verifier with flavor AUTH_SHORT (2),
+    /// the body is an opaque session token that can be replayed as a
+    /// credential on subsequent calls (RFC 1057 S9.2). This field captures
+    /// the reply verifier so callers can detect and extract SHORT tokens.
+    pub reply_verf: Option<opaque_auth<'static>>,
 }
 
 impl<IO> Debug for RpcClient<IO> {
@@ -53,7 +60,7 @@ where
 
     /// Create a new RPC client with custom credential and verifier.
     pub fn new_with_auth(io: IO, credential: opaque_auth<'static>, verifier: opaque_auth<'static>) -> Self {
-        Self { io, xid: fastrand::u32(..), credential, verifier }
+        Self { io, xid: fastrand::u32(..), credential, verifier, reply_verf: None }
     }
 
     /// Call an RPC procedure
@@ -75,7 +82,9 @@ where
         self.xid = self.xid.wrapping_add(1);
 
         Self::send_call(&mut self.io, &msg, args).await?;
-        Self::recv_reply::<R>(&mut self.io, msg.xid).await
+        let (result, verf) = Self::recv_reply_with_verf::<R>(&mut self.io, msg.xid).await?;
+        self.reply_verf = verf;
+        Ok(result)
     }
 
     async fn send_call<T>(io: &mut IO, msg: &rpc_msg<'_, '_>, args: &T) -> Result<(), RpcError>
@@ -106,8 +115,9 @@ where
     }
 
     /// Read one complete RPC reply, reassembling multiple record fragments
-    /// if needed (RFC 5531 sec 11).
-    async fn recv_reply<T>(io: &mut IO, xid: u32) -> Result<T, RpcError>
+    /// if needed (RFC 5531 sec 11). Returns the decoded result and the
+    /// reply verifier (if any -- servers may return AUTH_SHORT tokens here).
+    async fn recv_reply_with_verf<T>(io: &mut IO, xid: u32) -> Result<(T, Option<opaque_auth<'static>>), RpcError>
     where
         T: Unpack,
     {
@@ -149,6 +159,8 @@ where
             msg_body::CALL(_) => return Err(RpcError::UnexpectedCall),
         };
 
+        let reply_verf = opaque_auth { flavor: reply.verf.flavor, body: onc_xdr::Opaque::owned(reply.verf.body.as_ref().to_vec()) };
+
         // try_from fails only for SUCCESS -- every other accept_stat maps to an
         // error, so falling through means the call was accepted.
         if let Ok(err) = RpcError::try_from(reply.reply_data) {
@@ -160,7 +172,9 @@ where
             let pos = cursor.position();
             return Err(RpcError::NotFullyParsed { buf: cursor.into_inner(), pos });
         }
-        Ok(final_value)
+        // Surface the reply verifier -- AUTH_SHORT tokens live here.
+        let verf = if reply_verf.flavor == crate::rpc::auth_flavor::AUTH_NULL { None } else { Some(reply_verf) };
+        Ok((final_value, verf))
     }
 
     /// Send a batched call without waiting for a reply (RFC 5531 sec 8.4.1).
