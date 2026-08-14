@@ -223,7 +223,9 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     // are not Tokio tasks; passing this handle in lets those threads dispatch
     // async NFS calls onto the runtime that owns the connection pool.
     let rt_handle = tokio::runtime::Handle::current();
-    let fs = crate::fuse::NfsFuse::new(crate::fuse::NfsFuseConfig { nfs3, root_fh, allow_write: args.allow_write, default_cred: cred, rt: rt_handle });
+    let shell_root_fh = crate::shell::ops::ShellHandle(root_fh.as_bytes().to_vec());
+    let v3_ops = crate::shell::v3::V3Ops::new(nfs3);
+    let fs = crate::fuse::NfsFuse::new(crate::fuse::NfsFuseConfig { ops: v3_ops, root_fh: shell_root_fh, allow_write: args.allow_write, rt: rt_handle });
 
     // The status banner and `# rerun:` line have already been emitted from
     // `main` before daemonization, so the operator sees them BEFORE their

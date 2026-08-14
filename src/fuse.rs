@@ -1,23 +1,22 @@
 //! FUSE filesystem adapter  --  mounts an NFS export as a local filesystem.
 //!
-//! Wires every `Nfs3Client` procedure through a fuser callback so the local
-//! mount behaves like a normal POSIX filesystem (subject to `--allow-write`
-//! for destructive operations). Always-on behaviors:
+//! Generic over `ShellOps`, so the same FUSE adapter works for NFSv2, v3,
+//! and v4 backends. Wires every `ShellOps` method through a fuser callback
+//! so the local mount behaves like a normal POSIX filesystem (subject to
+//! `--allow-write` for destructive operations). Always-on behaviors:
 //!
 //! - **Server-side symlink resolution.** When `lookup` lands on a symlink,
-//!   we issue NFSv3 READLINK and re-resolve the target relative to the
-//!   parent (or the FUSE root for absolute paths). The local kernel never
-//!   sees the underlying symlink, so `cd /mnt/link` enters the server-side
-//!   target rather than dereferencing locally. A depth cap blocks loops.
-//! - **Null-attr READDIRPLUS fix-up.** Some servers (notably NetApp on
-//!   nested exports) return entries with `name_attributes = None` /
-//!   `name_handle = None`. We re-LOOKUP those entries so the kernel sees
+//!   we issue READLINK and re-resolve the target relative to the parent (or
+//!   the FUSE root for absolute paths). The local kernel never sees the
+//!   underlying symlink, so `cd /mnt/link` enters the server-side target
+//!   rather than dereferencing locally. A depth cap blocks loops.
+//! - **Null-attr readdir fix-up.** Some servers return entries with missing
+//!   attributes or handles. We re-LOOKUP those entries so the kernel sees
 //!   complete metadata.
-//! - **Auto-UID ladder (always on).** Any callback that returns
-//!   NFS3ERR_ACCES triggers the same credential-escalation ladder the
-//!   interactive shell uses (`engine::credential::credential_ladder`),
-//!   and the resolved (uid, gid) is cached per inode so future calls
-//!   skip the search.
+//! - **Auto-UID ladder (always on).** Any callback that returns EACCES
+//!   triggers the same credential-escalation ladder the interactive shell
+//!   uses (`engine::credential::credential_ladder`), and the resolved
+//!   (uid, gid) is cached per inode so future calls skip the search.
 //!
 //! fuser calls are synchronous but the NFS client is async. We capture a
 //! `tokio::runtime::Handle` at construction time and call `block_on` on
@@ -28,29 +27,21 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle as FuseFileHandle, FileType as FuseFileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request,
     TimeOrNow, WriteFlags,
 };
-use nfs_v3::Nfs3Error;
-use nfs_v3::wire::{
-    ACCESS3args, COMMIT3args, CREATE3args, FSSTAT3args, GETATTR3args, LINK3args, LOOKUP3args, MKDIR3args, MKNOD3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3, createhow3,
-    devicedata3, diropargs3, filename3, mknoddata3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime, specdata3, stable_how, symlinkdata3,
-};
-use onc_xdr::Opaque;
 
 use crate::engine::credential::credential_ladder_with;
-use crate::proto::auth::{AuthSys, Credential};
-use crate::proto::nfs3::types::{FileAttrs, FileHandle, FileType};
-use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
+use crate::shell::ops::{ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, shell_err_to_errno};
 
-/// One directory entry paged from READDIRPLUS, owned so it outlives the
+/// One directory entry paged from the server, owned so it outlives the
 /// per-page response buffer and can be cached across readdir callbacks:
 /// `(name bytes, optional attributes, optional file handle)`.
-type ReaddirEntry = (Vec<u8>, Option<FileAttrs>, Option<FileHandle>);
+type ReaddirEntry = (Vec<u8>, Option<ShellFileInfo>, Option<ShellHandle>);
 
 /// TTL for FUSE attribute cache entries.
 ///
@@ -61,7 +52,7 @@ const ATTR_TTL: Duration = Duration::from_secs(1);
 /// (`&self`) can be implemented safely across concurrent FUSE threads.
 struct InodeMapState {
     /// inode -> NFS file handle
-    inodes: HashMap<u64, FileHandle>,
+    inodes: HashMap<u64, ShellHandle>,
     /// NFS file handle bytes -> inode (reverse lookup)
     handles: HashMap<Vec<u8>, u64>,
     /// child inode -> parent inode (for `..` in readdir)
@@ -75,7 +66,7 @@ struct InodeMapState {
 }
 
 impl InodeMapState {
-    fn new(root_fh: &FileHandle) -> Self {
+    fn new(root_fh: &ShellHandle) -> Self {
         let mut inodes = HashMap::new();
         let mut handles = HashMap::new();
         let mut parents = HashMap::new();
@@ -87,7 +78,7 @@ impl InodeMapState {
     }
 
     /// Allocate or reuse an inode for a file handle.
-    fn intern_handle(&mut self, fh: FileHandle, parent_ino: u64) -> u64 {
+    fn intern_handle(&mut self, fh: ShellHandle, parent_ino: u64) -> u64 {
         let key = fh.as_bytes().to_vec();
         if let Some(&ino) = self.handles.get(&key) {
             return ino;
@@ -100,7 +91,7 @@ impl InodeMapState {
         ino
     }
 
-    fn fh_for(&self, ino: u64) -> Option<&FileHandle> {
+    fn fh_for(&self, ino: u64) -> Option<&ShellHandle> {
         self.inodes.get(&ino)
     }
 
@@ -108,7 +99,7 @@ impl InodeMapState {
     /// interning a new one. readdir uses this to reuse the inode of an entry
     /// the kernel has already referenced while avoiding permanent state for
     /// entries that are merely listed.
-    fn ino_for_handle(&self, fh: &FileHandle) -> Option<u64> {
+    fn ino_for_handle(&self, fh: &ShellHandle) -> Option<u64> {
         self.handles.get(fh.as_bytes()).copied()
     }
 
@@ -127,11 +118,6 @@ impl InodeMapState {
     }
 
     /// Record a kernel lookup reference on `ino`.
-    ///
-    /// FUSE bumps an inode's lookup count by one for every entry reply
-    /// (`lookup` / `create` / `mknod` / `mkdir` / `symlink` / `link`) and
-    /// releases that many on the matching `forget`. Tracking the count lets
-    /// us reclaim the inode/handle/parent maps once the kernel is done.
     fn record_lookup(&mut self, ino: u64) {
         *self.lookups.entry(ino).or_insert(0) += 1;
     }
@@ -164,20 +150,23 @@ impl InodeMapState {
 ///
 /// The credential ladder, owner-bit elevation, and root-credential rungs are
 /// always enabled: this is a security toolkit, the goal is unobstructed
-/// access. Callers configure write-mode and supply the default credential
-/// + runtime handle.
-#[derive(Debug)]
-pub(crate) struct NfsFuseConfig {
-    /// Pool-backed NFS client (the default-credential client).
-    pub nfs3: Arc<Nfs3Client>,
+/// access. Callers configure write-mode and supply the ops backend + runtime
+/// handle.
+pub(crate) struct NfsFuseConfig<O: ShellOps> {
+    /// Version-neutral NFS backend.
+    pub ops: O,
     /// Root file handle (becomes FUSE inode 1).
-    pub root_fh: FileHandle,
+    pub root_fh: ShellHandle,
     /// Forward write/modify operations through to the server.
     pub allow_write: bool,
-    /// Default credential (the one rejected before ladder kicks in).
-    pub default_cred: Credential,
     /// Tokio runtime handle (fuser threads are not Tokio tasks).
     pub rt: tokio::runtime::Handle,
+}
+
+impl<O: ShellOps> std::fmt::Debug for NfsFuseConfig<O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NfsFuseConfig").field("root_fh", &self.root_fh.to_hex()).field("allow_write", &self.allow_write).finish_non_exhaustive()
+    }
 }
 
 /// NFS FUSE adapter  --  presents an NFS export as a local FUSE mount.
@@ -186,74 +175,63 @@ pub(crate) struct NfsFuseConfig {
 /// credential ladder runs unconditionally on every callback; per-inode
 /// (uid, gid) winners are cached so we don't re-walk the ladder for the
 /// same inode twice.
-pub(crate) struct NfsFuse {
-    /// Default-credential pool-backed NFS client.
-    nfs3: Arc<Nfs3Client>,
+pub(crate) struct NfsFuse<O: ShellOps> {
+    /// Version-neutral NFS backend.
+    ops: O,
     /// Mutable inode mapping.
     state: Mutex<InodeMapState>,
     /// Root file handle (inode 1).
-    root_fh: FileHandle,
+    root_fh: ShellHandle,
     /// When true, WRITE / SETATTR / CREATE / etc. are forwarded; otherwise EACCES.
     allow_write: bool,
-    /// Default credential (used until a per-inode override is cached).
-    default_cred: Credential,
     /// Per-inode (uid, gid) override discovered by the ladder.
     cred_cache: Mutex<HashMap<u64, (u32, u32)>>,
     /// Per-directory readdir page cache, keyed by directory inode.
-    ///
-    /// Populated by the `offset == 0` `readdir` callback (the whole directory
-    /// is paged from the server exactly once) and served on every subsequent
-    /// `offset > 0` callback, so a single listing pages the server only once
-    /// instead of re-enumerating from cookie 0 on each kernel callback.
-    /// Evicted in `forget` when the kernel releases the directory inode.
     readdir_cache: Mutex<HashMap<u64, Vec<ReaddirEntry>>>,
     /// Tokio runtime handle captured at construction.
-    ///
-    /// fuser invokes `Filesystem` callbacks on its own worker threads, which
-    /// have no Tokio runtime context. Storing an explicit handle lets us
-    /// dispatch async NFS calls onto the parent runtime via `block_on`,
-    /// avoiding the `Handle::current()` panic on fuser-0.
     rt: tokio::runtime::Handle,
 }
 
-impl std::fmt::Debug for NfsFuse {
+impl<O: ShellOps> std::fmt::Debug for NfsFuse<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NfsFuse").field("root_fh", &self.root_fh.to_hex()).finish_non_exhaustive()
     }
 }
 
-// `significant_drop_tightening` and `redundant_clone` are inherent to the
-// `Fn(Nfs3Client) -> Fut` ladder closures: each rung clones captured values
-// fresh, but a single rung looks "redundant" to clippy.
+/// Return `true` when the error represents a permission denial (EACCES or
+/// EPERM), meaning the credential ladder should try the next rung.
+fn is_permission_denied(e: &anyhow::Error) -> bool {
+    let errno = shell_err_to_errno(e);
+    errno == libc::EACCES || errno == libc::EPERM
+}
+
+// `significant_drop_tightening` is inherent to the credential ladder
+// closures: each rung clones captured values fresh, but a single rung
+// looks "redundant" to clippy.
 #[expect(clippy::significant_drop_tightening, reason = "credential ladder closures")]
-impl NfsFuse {
+impl<O: ShellOps> NfsFuse<O> {
     /// Create a new FUSE adapter from a config bundle.
-    ///
-    /// `cfg.rt` must be a handle to the Tokio runtime that owns `cfg.nfs3`'s
-    /// connection pool; it is used to drive async NFS calls from fuser's
-    /// worker threads.
     #[must_use]
-    pub(crate) fn new(cfg: NfsFuseConfig) -> Self {
+    pub(crate) fn new(cfg: NfsFuseConfig<O>) -> Self {
         let state = Mutex::new(InodeMapState::new(&cfg.root_fh));
-        Self { nfs3: cfg.nfs3, state, root_fh: cfg.root_fh, allow_write: cfg.allow_write, default_cred: cfg.default_cred, cred_cache: Mutex::new(HashMap::new()), readdir_cache: Mutex::new(HashMap::new()), rt: cfg.rt }
+        Self { ops: cfg.ops, state, root_fh: cfg.root_fh, allow_write: cfg.allow_write, cred_cache: Mutex::new(HashMap::new()), readdir_cache: Mutex::new(HashMap::new()), rt: cfg.rt }
     }
 
-    /// Convert our `FileAttrs` to a fuser `FileAttr`.
-    fn make_attr(ino: u64, a: &FileAttrs) -> FileAttr {
+    /// Convert `ShellFileInfo` to a fuser `FileAttr`.
+    fn make_attr(ino: u64, a: &ShellFileInfo) -> FileAttr {
         let kind = to_fuse_type(a.file_type);
         let mode16 = u16::try_from(a.mode & u32::from(u16::MAX)).unwrap_or(0);
         // Always-on owner-bit elevation: copy owner rwx bits (bits 6-8) into
         // the other-rwx slot (bits 0-2) so unprivileged local users can reach
-        // every file through FUSE. Server-side permissions are unchanged
-        // -- this is purely a kernel-facing widening.
+        // every file through FUSE.
         let perm = mode16 | ((mode16 >> 6) & 0o007);
         FileAttr {
             ino: INodeNo(ino),
             size: a.size,
             blocks: a.used / 512,
-            atime: nfs_time_to_system(a.atime.seconds, a.atime.nseconds),
-            mtime: nfs_time_to_system(a.mtime.seconds, a.mtime.nseconds),
-            ctime: nfs_time_to_system(a.ctime.seconds, a.ctime.nseconds),
+            atime: nfs_time_to_system(a.atime_secs, a.atime_nsecs),
+            mtime: nfs_time_to_system(a.mtime_secs, a.mtime_nsecs),
+            ctime: nfs_time_to_system(a.ctime_secs, a.ctime_nsecs),
             crtime: UNIX_EPOCH,
             kind,
             perm,
@@ -267,12 +245,6 @@ impl NfsFuse {
     }
 
     /// Run an async block on the captured Tokio runtime, blocking this thread.
-    ///
-    /// fuser calls are synchronous and arrive on fuser-owned worker threads
-    /// (`fuser-0`, ...) which have no Tokio runtime context, so we cannot
-    /// rely on `Handle::current()`. Instead we dispatch onto the runtime
-    /// captured at `NfsFuse::new`. Safe because fuser worker threads are
-    /// not Tokio tasks -- blocking one does not stall the scheduler.
     fn block<F, T>(&self, fut: F) -> T
     where
         F: Future<Output = T>,
@@ -280,15 +252,9 @@ impl NfsFuse {
         self.rt.block_on(fut)
     }
 
-    /// Build an NFS client with the given (uid, gid), reusing the default
-    /// hostname from `default_cred`. Used to retry calls during the ladder.
-    fn client_for(&self, uid: u32, gid: u32) -> Nfs3Client {
-        let hostname = match &self.default_cred {
-            Credential::Sys(a) => a.machinename.clone(),
-            Credential::None => String::from("nfswolf"),
-        };
-        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], &hostname));
-        self.nfs3.with_credential(cred, uid, gid)
+    /// Build an ephemeral ops instance with the given (uid, gid).
+    fn ops_for(&self, uid: u32, gid: u32) -> O {
+        self.ops.with_credential(uid, gid, self.ops.machinename())
     }
 
     /// Look up the cached `(uid, gid)` for `ino`, if any.
@@ -301,25 +267,18 @@ impl NfsFuse {
         _ = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(ino, (uid, gid));
     }
 
-    /// Bump the kernel lookup-reference count for `ino` (FUSE forget
-    /// lifecycle). Called whenever we hand an inode to the kernel via an
-    /// entry reply so a later `forget` can release it.
+    /// Bump the kernel lookup-reference count for `ino`.
     fn record_lookup(&self, ino: u64) {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_lookup(ino);
     }
 
     /// Build the credential-escalation ladder for `subject_ino`.
-    ///
-    /// Mirrors the shell's behavior in `engine::credential::credential_ladder`:
-    /// owner first (when known via GETATTR), then root, then well-known
-    /// service UIDs. Root rungs are always included -- this is a security
-    /// toolkit, the goal is unobstructed access.
     async fn ladder_for(&self, subject_ino: u64) -> Vec<(u32, u32)> {
-        let caller = (self.nfs3.uid(), self.nfs3.gid());
+        let caller = (self.ops.uid(), self.ops.gid());
         let owner = {
             let fh_opt = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fh_for(subject_ino).cloned();
             match fh_opt {
-                Some(fh) => self.nfs3.attrs(&fh).await.ok().map(|a| ((a.uid, a.gid), a.mode)),
+                Some(fh) => self.ops.getattr(&fh).await.ok().map(|a| ((a.uid, a.gid), a.mode)),
                 None => None,
             }
         };
@@ -327,129 +286,38 @@ impl NfsFuse {
     }
 
     /// Retrieve the file handle for inode `ino` from the inode map.
-    fn fh_for_ino(&self, ino: u64) -> Option<FileHandle> {
+    fn fh_for_ino(&self, ino: u64) -> Option<ShellHandle> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fh_for(ino).cloned()
     }
 
     /// Intern a child handle, returning the assigned inode.
-    fn intern(&self, child_fh: FileHandle, parent_ino: u64) -> u64 {
+    fn intern(&self, child_fh: ShellHandle, parent_ino: u64) -> u64 {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).intern_handle(child_fh, parent_ino)
     }
 
     /// Maximum symlink resolution depth before we give up to prevent loops.
     const SYMLINK_DEPTH_LIMIT: u32 = 16;
 
-    /// Hard cap on entries accumulated across READDIRPLUS pages.
-    ///
-    /// READDIRPLUS is looped until the server signals `eof` (RFC 1813 sec.
-    /// 3.3.17); this cap bounds memory and CPU if a hostile or buggy server
-    /// never sets eof (or keeps advancing the cookie forever). It is far
-    /// above any realistic directory size.
+    /// Hard cap on entries accumulated across readdir pages.
     const MAX_READDIR_ENTRIES: usize = 1_000_000;
 
-    /// Resolve a symlink chain server-side, starting from `link_fh` whose
-    /// parent is inode `parent_ino`. Returns the eventual non-symlink
-    /// `(file_handle, attrs)` or an error if the depth limit is hit, the
-    /// chain leaves the export, or any RPC fails.
-    ///
-    /// Absolute targets (those starting with `/`) are resolved relative to
-    /// the FUSE root (the export root); relative targets are resolved
-    /// relative to the symlink's containing directory. If the target
-    /// happens to also be a symlink we recurse until we hit a regular file
-    /// or directory.
-    async fn follow_symlink(&self, link_fh: FileHandle, parent_ino: u64, depth: u32) -> Result<(FileHandle, FileAttrs, u64), nfsstat3> {
-        if depth >= Self::SYMLINK_DEPTH_LIMIT {
-            return Err(nfsstat3::NFS3ERR_NAMETOOLONG);
-        }
-
-        // Read the symlink target.
-        let args = READLINK3args { symlink: link_fh.to_nfs_fh3() };
-        let target_bytes: Vec<u8> = match self.nfs3.readlink(&args).await {
-            Ok(Nfs3Result::Ok(ok)) => ok.data.0.as_ref().to_vec(),
-            Ok(Nfs3Result::Err((stat, _))) => return Err(stat),
-            Ok(_) | Err(_) => return Err(nfsstat3::NFS3ERR_IO),
-        };
-
-        // Decide where to start resolving from.
-        let (start_ino, target_str) = if target_bytes.first() == Some(&b'/') {
-            // Absolute target -- start at FUSE root (which corresponds to the
-            // export root or whatever handle the user provided).
-            (1u64, String::from_utf8_lossy(target_bytes.get(1..).unwrap_or(&[])).into_owned())
-        } else {
-            (parent_ino, String::from_utf8_lossy(&target_bytes).into_owned())
-        };
-
-        // Walk components, handling `.` and `..` along the way.
-        let (mut cur_fh, mut cur_ino) = {
-            let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let fh = st.fh_for(start_ino).cloned().ok_or(nfsstat3::NFS3ERR_STALE)?;
-            (fh, start_ino)
-        };
-
-        for component in target_str.split('/').filter(|c| !c.is_empty()) {
-            if component == "." {
-                continue;
-            }
-            if component == ".." {
-                let parent = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).parents.get(&cur_ino).copied().unwrap_or(1);
-                let parent_fh = self.fh_for_ino(parent).ok_or(nfsstat3::NFS3ERR_STALE)?;
-                cur_fh = parent_fh;
-                cur_ino = parent;
-                continue;
-            }
-            let lookup = LOOKUP3args { what: diropargs3 { dir: cur_fh.to_nfs_fh3(), name: filename3(Opaque::owned(component.as_bytes().to_vec())) } };
-            match self.nfs3.lookup(&lookup).await {
-                Ok(Nfs3Result::Ok(ok)) => {
-                    let next_fh = FileHandle::from_nfs_fh3(&ok.object);
-                    let next_ino = self.intern(next_fh.clone(), cur_ino);
-                    cur_fh = next_fh;
-                    cur_ino = next_ino;
-                },
-                Ok(Nfs3Result::Err((stat, _))) => return Err(stat),
-                Ok(_) | Err(_) => return Err(nfsstat3::NFS3ERR_IO),
-            }
-        }
-
-        // Final GETATTR to learn the type. If still a symlink, recurse.
-        let attrs = match self.nfs3.getattr(&GETATTR3args { object: cur_fh.to_nfs_fh3() }).await {
-            Ok(Nfs3Result::Ok(ok)) => FileAttrs::from_fattr3(&ok.obj_attributes),
-            Ok(Nfs3Result::Err((stat, _))) => return Err(stat),
-            Ok(_) | Err(_) => return Err(nfsstat3::NFS3ERR_IO),
-        };
-
-        if attrs.file_type == FileType::Symlink {
-            let parent_of_link = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).parents.get(&cur_ino).copied().unwrap_or(1);
-            return Box::pin(self.follow_symlink(cur_fh, parent_of_link, depth + 1)).await;
-        }
-
-        Ok((cur_fh, attrs, cur_ino))
-    }
-
-    /// Run an NFS3 operation with the credential-escalation ladder.
+    /// Run an NFS operation with the credential-escalation ladder.
     ///
     /// Tries, in order: any per-inode cached credential, then the default
-    /// credential. Only if BOTH are rejected with `NFS3ERR_ACCES` /
-    /// `NFS3ERR_PERM` does it walk the rungs of `credential_ladder(caller,
-    /// owner)` -- so the happy path never pays for the owner-discovery
-    /// GETATTR inside `ladder_for`. The first attempt that does not return
-    /// `NFS3ERR_ACCES` / `NFS3ERR_PERM` wins; the winning credential is
-    /// cached for `subject_ino` so subsequent calls skip the search.
+    /// credential. Only if BOTH are rejected with EACCES / EPERM does it
+    /// walk the rungs of `credential_ladder` -- so the happy path never
+    /// pays for the owner-discovery GETATTR. The first attempt that does
+    /// not return EACCES / EPERM wins; the winning credential is cached.
     ///
-    /// `op` is invoked with a fresh `Nfs3Client` that carries the credential
-    /// for the rung being tried; the closure builds the args and calls the
-    /// matching NFS3 procedure.
-    async fn try_with_ladder<F, Fut, T, U>(&self, subject_ino: u64, op: F) -> Result<Nfs3Result<T, U>, onc_rpc_client::RpcError>
+    /// The closure receives an owned `O` (constructed by `ops_for`) so the
+    /// returned future is `'static` and does not borrow from the closure
+    /// parameter -- this sidesteps the RPITIT lifetime issue.
+    async fn try_with_ladder<F, Fut, T>(&self, subject_ino: u64, op: F) -> anyhow::Result<T>
     where
-        F: Fn(Nfs3Client) -> Fut,
-        Fut: Future<Output = Result<Nfs3Result<T, U>, onc_rpc_client::RpcError>>,
+        F: Fn(O) -> Fut,
+        Fut: Future<Output = anyhow::Result<T>>,
     {
-        // Primary credentials: any per-inode cached winner, then the default.
-        // We only fall back to the escalation ladder -- which costs an
-        // owner-discovery GETATTR in `ladder_for` -- after BOTH of these are
-        // rejected with NFS3ERR_ACCES / NFS3ERR_PERM. This keeps the common
-        // path a single RPC instead of speculatively probing the file owner
-        // on every callback.
-        let default = (self.nfs3.uid(), self.nfs3.gid());
+        let default = (self.ops.uid(), self.ops.gid());
         let mut primary: Vec<(u32, u32)> = Vec::new();
         if let Some(pair) = self.cached_cred(subject_ino) {
             primary.push(pair);
@@ -459,289 +327,188 @@ impl NfsFuse {
         }
 
         let mut tried: Vec<(u32, u32)> = Vec::new();
-        let mut last: Option<Result<Nfs3Result<T, U>, onc_rpc_client::RpcError>> = None;
+        let mut last_err: Option<anyhow::Error> = None;
         for (u, g) in primary {
             tried.push((u, g));
-            let c = self.client_for(u, g);
-            let r = op(c).await;
-            match r {
-                // Only a permission refusal is worth another rung. Any other
-                // status is a real answer -- climbing the ladder would just
-                // repeat it under identities that cannot change it.
-                Ok(Nfs3Result::Err((status, _))) if Nfs3Error::from_nfsstat3(status).is_some_and(Nfs3Error::is_permission_denied) => {
-                    last = Some(r);
-                },
-                Ok(_) => {
+            let ephemeral = self.ops_for(u, g);
+            match op(ephemeral).await {
+                Ok(v) => {
                     if (u, g) != default {
                         self.cache_cred(subject_ino, u, g);
                     }
-                    return r;
+                    return Ok(v);
                 },
-                Err(_) => return r,
+                Err(e) if is_permission_denied(&e) => {
+                    last_err = Some(e);
+                },
+                Err(e) => return Err(e),
             }
         }
 
-        // Primary credentials were denied; now walk the escalation ladder
-        // (this is where the owner-discovery GETATTR is paid for).
+        // Primary credentials were denied; walk the escalation ladder.
         for (u, g) in self.ladder_for(subject_ino).await {
             if tried.contains(&(u, g)) {
                 continue;
             }
-            let c = self.client_for(u, g);
-            let r = op(c).await;
-            match r {
-                // Only a permission refusal is worth another rung. Any other
-                // status is a real answer -- climbing the ladder would just
-                // repeat it under identities that cannot change it.
-                Ok(Nfs3Result::Err((status, _))) if Nfs3Error::from_nfsstat3(status).is_some_and(Nfs3Error::is_permission_denied) => {
-                    last = Some(r);
-                },
-                Ok(_) => {
+            let ephemeral = self.ops_for(u, g);
+            match op(ephemeral).await {
+                Ok(v) => {
                     if (u, g) != default {
                         self.cache_cred(subject_ino, u, g);
                     }
-                    return r;
+                    return Ok(v);
                 },
-                Err(_) => return r,
+                Err(e) if is_permission_denied(&e) => {
+                    last_err = Some(e);
+                },
+                Err(e) => return Err(e),
             }
         }
-        last.unwrap_or_else(|| {
-            // Unreachable in practice: the ladder always has at least the
-            // default rung. Reported as an error rather than a panic so a
-            // FUSE callback cannot take the mount down.
-            Err(onc_rpc_client::RpcError::Io(std::io::Error::other(format!("no credential rungs to try for inode {subject_ino}"))))
-        })
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no credential rungs to try for inode {subject_ino}")))
     }
 
     /// LOOKUP with the credential-escalation ladder, with server-side
     /// symlink follow on success.
-    ///
-    /// Allocates an inode for the resolved object, fills in attrs (via a
-    /// follow-up GETATTR if the LOOKUP didn't return them), and chases
-    /// symlink chains with `follow_symlink`.
-    async fn try_lookup_with_ladder(&self, parent_fh: &FileHandle, name_bytes: &[u8], parent_ino: u64) -> Result<(FileHandle, FileAttrs, u64), nfsstat3> {
-        let result = self
-            .try_with_ladder(parent_ino, |c| {
+    async fn try_lookup_with_ladder(&self, parent_fh: &ShellHandle, name: &str, parent_ino: u64) -> anyhow::Result<(ShellHandle, ShellFileInfo, u64)> {
+        let (child_fh, info) = self
+            .try_with_ladder(parent_ino, |ops: O| {
                 let parent_fh = parent_fh.clone();
-                let name_bytes = name_bytes.to_vec();
-                async move {
-                    let args = LOOKUP3args { what: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) } };
-                    c.lookup(&args).await
-                }
+                let name = name.to_owned();
+                async move { ops.lookup(&parent_fh, &name).await }
             })
-            .await
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-
-        let (child_fh, attrs_opt) = match result {
-            Nfs3Result::Ok(ok) => {
-                let fh = FileHandle::from_nfs_fh3(&ok.object);
-                let attrs = post_op_attr_to_attrs(ok.obj_attributes);
-                (fh, attrs)
-            },
-            Nfs3Result::Err((stat, _)) => return Err(stat),
-            _ => return Err(nfsstat3::NFS3ERR_IO),
-        };
+            .await?;
 
         let child_ino = self.intern(child_fh.clone(), parent_ino);
 
-        let attrs = match attrs_opt {
-            Some(a) => a,
-            None => self.try_getattr(child_ino).await.ok_or(nfsstat3::NFS3ERR_IO)?,
-        };
-
-        if attrs.file_type == FileType::Symlink {
+        if info.file_type == ShellFileType::Symlink {
             return self.follow_symlink(child_fh, parent_ino, 0).await;
         }
-        Ok((child_fh, attrs, child_ino))
+        Ok((child_fh, info, child_ino))
     }
 
     /// LOOKUP that resolves `(handle, attrs)` WITHOUT interning an inode.
     ///
-    /// Used by the readdir null-attr/null-handle fix-up: a merely-listed entry
-    /// takes no kernel lookup reference, so it must not be permanently interned
-    /// (that would leak -- `forget` only reclaims lookup-counted inodes). Unlike
-    /// `try_lookup_with_ladder`, this neither interns nor follows symlinks (the
-    /// listing shows the link itself); the kernel's later explicit LOOKUP does
-    /// the authoritative, lookup-counted intern.
-    async fn lookup_no_intern(&self, parent_fh: &FileHandle, name_bytes: &[u8], parent_ino: u64) -> Result<(FileHandle, FileAttrs), nfsstat3> {
-        let result = self
-            .try_with_ladder(parent_ino, |c| {
-                let parent_fh = parent_fh.clone();
-                let name_bytes = name_bytes.to_vec();
-                async move {
-                    let args = LOOKUP3args { what: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) } };
-                    c.lookup(&args).await
-                }
-            })
-            .await
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-
-        let (child_fh, attrs_opt) = match result {
-            Nfs3Result::Ok(ok) => (FileHandle::from_nfs_fh3(&ok.object), post_op_attr_to_attrs(ok.obj_attributes)),
-            Nfs3Result::Err((stat, _)) => return Err(stat),
-            _ => return Err(nfsstat3::NFS3ERR_IO),
-        };
-
-        let attrs = if let Some(a) = attrs_opt {
-            a
-        } else {
-            // GETATTR the child handle directly (no intern) via the ladder.
-            let fh = child_fh.clone();
-            let r = self
-                .try_with_ladder(parent_ino, move |c| {
-                    let fh = fh.clone();
-                    async move { c.getattr(&GETATTR3args { object: fh.to_nfs_fh3() }).await }
-                })
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-            match r {
-                Nfs3Result::Ok(ok) => FileAttrs::from_fattr3(&ok.obj_attributes),
-                Nfs3Result::Err((stat, _)) => return Err(stat),
-                _ => return Err(nfsstat3::NFS3ERR_IO),
-            }
-        };
-        Ok((child_fh, attrs))
+    /// Used by the readdir null-attr/null-handle fix-up.
+    async fn lookup_no_intern(&self, parent_fh: &ShellHandle, name: &str, parent_ino: u64) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
+        self.try_with_ladder(parent_ino, |ops: O| {
+            let parent_fh = parent_fh.clone();
+            let name = name.to_owned();
+            async move { ops.lookup(&parent_fh, &name).await }
+        })
+        .await
     }
 
-    /// GETATTR helper that runs the credential ladder. Returns `None` on
-    /// any error so the caller can map to a single ENOENT/EIO reply.
-    async fn try_getattr(&self, ino: u64) -> Option<FileAttrs> {
+    /// GETATTR helper that runs the credential ladder.
+    async fn try_getattr(&self, ino: u64) -> Option<ShellFileInfo> {
         let fh = self.fh_for_ino(ino)?;
-        let result = self
-            .try_with_ladder(ino, |c| {
-                let fh = fh.clone();
-                async move {
-                    let args = GETATTR3args { object: fh.to_nfs_fh3() };
-                    c.getattr(&args).await
-                }
-            })
-            .await
-            .ok()?;
-        match result {
-            Nfs3Result::Ok(ok) => Some(FileAttrs::from_fattr3(&ok.obj_attributes)),
-            Nfs3Result::Err(_) | _ => None,
-        }
+        self.try_with_ladder(ino, |ops: O| {
+            let fh = fh.clone();
+            async move { ops.getattr(&fh).await }
+        })
+        .await
+        .ok()
     }
 
-    /// Intern a new entry returned by CREATE / MKNOD / MKDIR / SYMLINK,
-    /// falling back to LOOKUP when the server's response left out either
-    /// the post-op file handle or the post-op attributes (RFC 1813 makes
-    /// both optional for compactness).
-    fn intern_with_lookup_fallback(&self, parent_ino: u64, parent_fh: &FileHandle, name_bytes: &[u8], fh_opt: Option<FileHandle>, attrs_opt: Option<FileAttrs>) -> Option<(FileHandle, u64, FileAttrs)> {
-        if let (Some(fh), Some(a)) = (fh_opt, attrs_opt) {
-            let ino = self.intern(fh.clone(), parent_ino);
-            return Some((fh, ino, a));
+    /// Resolve a symlink chain server-side. Returns the eventual non-symlink
+    /// `(file_handle, info, inode)` or an error.
+    async fn follow_symlink(&self, link_fh: ShellHandle, parent_ino: u64, depth: u32) -> anyhow::Result<(ShellHandle, ShellFileInfo, u64)> {
+        if depth >= Self::SYMLINK_DEPTH_LIMIT {
+            anyhow::bail!("symlink depth limit exceeded");
         }
-        let (fh, a, ino) = self.block(self.try_lookup_with_ladder(parent_fh, name_bytes, parent_ino)).ok()?;
-        Some((fh, ino, a))
-    }
 
-    /// Page an entire directory via a looped READDIRPLUS, returning owned
-    /// entry tuples. NFSv3 READDIRPLUS (RFC 1813 sec. 3.3.17) returns at most
-    /// `maxcount` bytes per call and clears `eof` when more entries remain, so
-    /// we carry the server cookie + cookieverf forward until eof. Accumulation
-    /// is capped at `MAX_READDIR_ENTRIES` to stay safe against a hostile or
-    /// buggy server that never sets eof (or never advances the cookie). Each
-    /// page still runs through the credential-escalation ladder. Called once
-    /// per listing (on the `offset == 0` readdir callback) so the server is
-    /// paged a single time rather than re-enumerated on every kernel callback.
-    fn page_directory(&self, ino: u64, dir_fh: &FileHandle) -> Result<Vec<ReaddirEntry>, Errno> {
-        let mut entries: Vec<ReaddirEntry> = Vec::new();
-        let mut cookie: u64 = 0;
-        let mut cookieverf: [u8; 8] = [0u8; 8];
-        loop {
-            let result = self.block(self.try_with_ladder(ino, |c| {
-                let dir_fh = dir_fh.clone();
-                async move {
-                    let args = READDIRPLUS3args { dir: dir_fh.to_nfs_fh3(), cookie, cookieverf: cookieverf3(cookieverf), dircount: 4096, maxcount: 65_536 };
-                    c.readdirplus(&args).await
-                }
-            }));
+        // Read the symlink target.
+        let target = self.ops.readlink(&link_fh).await?;
 
-            match result {
-                Ok(Nfs3Result::Ok(ok)) => {
-                    cookieverf = ok.cookieverf.0;
-                    let eof = ok.reply.eof;
-                    let page = ok.reply.entries.into_inner();
-                    let last_cookie = page.last().map(|e| e.cookie);
-                    for e in page {
-                        let name = e.name.as_ref().to_vec();
-                        let attrs = match e.name_attributes {
-                            Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-                            Nfs3Option::None | _ => None,
-                        };
-                        let handle = match e.name_handle {
-                            Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
-                            Nfs3Option::None | _ => None,
-                        };
-                        entries.push((name, attrs, handle));
-                    }
-                    // Stop at eof, on the entry cap, on an empty page, or if the
-                    // cookie fails to advance (defensive: a buggy server must
-                    // not spin us forever).
-                    let at_cap = entries.len() >= Self::MAX_READDIR_ENTRIES;
-                    match last_cookie {
-                        Some(c) if !eof && !at_cap && c != cookie => cookie = c,
-                        _ => break,
-                    }
-                },
-                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => {
-                    tracing::debug!(?ino, "READDIRPLUS denied: NFS3ERR_ACCES");
-                    return Err(Errno::EACCES);
-                },
-                Ok(Nfs3Result::Err((stat, _))) => {
-                    tracing::debug!(?ino, ?stat, "READDIRPLUS failed");
-                    return Err(Errno::EIO);
-                },
-                Ok(_) | Err(_) => {
-                    tracing::debug!(?ino, "READDIRPLUS failed");
-                    return Err(Errno::EIO);
-                },
+        // Decide where to start resolving from.
+        let (start_ino, target_str) = if let Some(stripped) = target.strip_prefix('/') { (1u64, stripped.to_owned()) } else { (parent_ino, target) };
+
+        // Walk components, handling `.` and `..`.
+        let (mut cur_fh, mut cur_ino) = {
+            let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let fh = st.fh_for(start_ino).cloned().ok_or_else(|| anyhow::anyhow!("stale handle"))?;
+            (fh, start_ino)
+        };
+
+        for component in target_str.split('/').filter(|c| !c.is_empty()) {
+            if component == "." {
+                continue;
             }
+            if component == ".." {
+                let parent = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).parents.get(&cur_ino).copied().unwrap_or(1);
+                let parent_fh = self.fh_for_ino(parent).ok_or_else(|| anyhow::anyhow!("stale handle"))?;
+                cur_fh = parent_fh;
+                cur_ino = parent;
+                continue;
+            }
+            let (next_fh, _info) = self.ops.lookup(&cur_fh, component).await?;
+            let next_ino = self.intern(next_fh.clone(), cur_ino);
+            cur_fh = next_fh;
+            cur_ino = next_ino;
         }
+
+        // Final GETATTR to learn the type. If still a symlink, recurse.
+        let info = self.ops.getattr(&cur_fh).await?;
+
+        if info.file_type == ShellFileType::Symlink {
+            let parent_of_link = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).parents.get(&cur_ino).copied().unwrap_or(1);
+            return Box::pin(self.follow_symlink(cur_fh, parent_of_link, depth + 1)).await;
+        }
+
+        Ok((cur_fh, info, cur_ino))
+    }
+
+    /// Intern a new entry returned by create/mknod/mkdir/symlink,
+    /// falling back to LOOKUP when the server omitted the handle or attrs.
+    fn intern_with_lookup_fallback(&self, parent_ino: u64, parent_fh: &ShellHandle, name: &str) -> Option<(ShellHandle, u64, ShellFileInfo)> {
+        let (fh, file_info, child_ino) = self.block(self.try_lookup_with_ladder(parent_fh, name, parent_ino)).ok()?;
+        Some((fh, child_ino, file_info))
+    }
+
+    /// Page an entire directory via `list_dir`, returning owned entry tuples.
+    fn page_directory(&self, ino: u64, dir_fh: &ShellHandle) -> Result<Vec<ReaddirEntry>, Errno> {
+        let shell_entries: Vec<ShellEntry> = self
+            .block(self.try_with_ladder(ino, |ops: O| {
+                let dir_fh = dir_fh.clone();
+                async move { ops.list_dir(&dir_fh).await }
+            }))
+            .map_err(|e| {
+                let errno = shell_err_to_errno(&e);
+                if errno == libc::EACCES || errno == libc::EPERM {
+                    tracing::debug!(?ino, "readdir denied");
+                    Errno::EACCES
+                } else {
+                    tracing::debug!(?ino, "readdir failed");
+                    Errno::EIO
+                }
+            })?;
+
+        let entries: Vec<ReaddirEntry> = shell_entries.into_iter().take(Self::MAX_READDIR_ENTRIES).map(|e| (e.name.into_bytes(), e.info, e.handle)).collect();
         Ok(entries)
     }
 }
 
-impl Filesystem for NfsFuse {
+impl<O: ShellOps> Filesystem for NfsFuse<O> {
     /// Look up a directory entry by name and return its attributes.
-    ///
-    /// Server-side symlink follow is always on: if the LOOKUP result is a
-    /// symlink we READLINK and walk to the target before replying, so the
-    /// kernel never sees the underlying symlink.
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEntry) {
         let Some(parent_fh) = self.fh_for_ino(parent.0) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
-        let name_bytes = name.as_encoded_bytes().to_vec();
-        let result = self.block(self.try_lookup_with_ladder(&parent_fh, &name_bytes, parent.0));
+        let name_str = name.to_string_lossy();
+        let result = self.block(self.try_lookup_with_ladder(&parent_fh, &name_str, parent.0));
 
         match result {
-            Ok((child_fh, attrs, child_ino)) => {
+            Ok((_child_fh, info, child_ino)) => {
                 self.record_lookup(child_ino);
-                let attr = Self::make_attr(child_ino, &attrs);
+                let attr = Self::make_attr(child_ino, &info);
                 reply.entry(&ATTR_TTL, &attr, Generation(0));
-                drop(child_fh); // file handle already interned
             },
-            Err(nfsstat3::NFS3ERR_NOENT) => reply.error(Errno::ENOENT),
-            Err(nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM) => reply.error(Errno::EACCES),
-            Err(stat) => {
-                tracing::debug!(?parent, ?stat, "LOOKUP failed");
-                reply.error(Errno::EIO);
-            },
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
     /// Forget an inode (FUSE lifetime management).
-    ///
-    /// The kernel drops `nlookup` of the references it acquired via earlier
-    /// entry replies; once they reach zero we evict the inode from every map
-    /// (inode / handle / parent + the per-inode credential cache) so a
-    /// long-lived mount that walks large trees does not grow these maps
-    /// without bound. fuser's default `batch_forget` dispatches to this per
-    /// node, so multi-forget batches are covered too.
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
         let removed = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).forget(ino.0, nlookup);
         if removed {
@@ -757,31 +524,18 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
+        let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
-            async move {
-                let args = GETATTR3args { object: fh.to_nfs_fh3() };
-                c.getattr(&args).await
-            }
+            async move { ops.getattr(&fh).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                let a = FileAttrs::from_fattr3(&ok.obj_attributes);
-                let attr = Self::make_attr(ino.0, &a);
-                reply.attr(&ATTR_TTL, &attr);
-            },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Ok(file_info) => reply.attr(&ATTR_TTL, &Self::make_attr(ino.0, &file_info)),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
     /// SETATTR -- chmod / chown / utime / truncate.
-    ///
-    /// fuser packs all `setattr` requests into one callback regardless of
-    /// which fields the caller wanted to change; the unset ones come in as
-    /// `None` and we map those to `set_*::DONT_CHANGE` so the server-side
-    /// state is left alone.
     fn setattr(
         &self,
         _req: &Request,
@@ -809,109 +563,67 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        let new_attrs = sattr3 {
-            mode: mode.map_or(Nfs3Option::None, Nfs3Option::Some),
-            uid: uid.map_or(Nfs3Option::None, Nfs3Option::Some),
-            gid: gid.map_or(Nfs3Option::None, Nfs3Option::Some),
-            size: size.map_or(Nfs3Option::None, Nfs3Option::Some),
-            atime: time_or_now_to_set_atime(atime),
-            mtime: time_or_now_to_set_mtime(mtime),
-        };
+        let sa = ShellSetAttr { mode, uid, gid, size, atime: time_or_now_to_spec(atime), mtime: time_or_now_to_spec(mtime) };
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
+        let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
-            async move {
-                let args = SETATTR3args { object: fh.to_nfs_fh3(), new_attributes: new_attrs, guard: Nfs3Option::None };
-                c.setattr(&args).await
-            }
+            let sa = sa.clone();
+            async move { ops.setattr(&fh, sa).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => match ok.obj_wcc.after {
-                Nfs3Option::Some(a) => {
-                    let attrs = FileAttrs::from_fattr3(&a);
-                    reply.attr(&ATTR_TTL, &Self::make_attr(ino.0, &attrs));
-                },
-                Nfs3Option::None | _ => {
-                    // SETATTR succeeded but server didn't return post-op attrs;
-                    // re-issue GETATTR to keep the kernel in sync.
-                    if let Some(attrs) = self.block(self.try_getattr(ino.0)) {
-                        reply.attr(&ATTR_TTL, &Self::make_attr(ino.0, &attrs));
-                    } else {
-                        reply.error(Errno::EIO);
-                    }
-                },
-            },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_NOTSUPP, _))) => reply.error(Errno::ENOTSUP),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Ok(file_info) => reply.attr(&ATTR_TTL, &Self::make_attr(ino.0, &file_info)),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
-    /// ACCESS -- advisory permission check (RFC 1813 S3.3.4).
-    ///
-    /// We translate the FUSE access mask into the NFSv3 ACCESS bits and
-    /// honour what the server says; the spec is explicit that ACCESS is
-    /// advisory only, but the kernel's mask check usually wants this.
+    /// ACCESS -- advisory permission check.
     fn access(&self, _req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
         let Some(fh) = self.fh_for_ino(ino.0) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
+        // Translate POSIX mask to NFS ACCESS bits. Since DefaultPermissions is
+        // set, the kernel does its own check; we just forward to the server.
         let nfs_mask = access_flags_to_nfs(mask);
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
+        let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
-            async move {
-                let args = ACCESS3args { object: fh.to_nfs_fh3(), access: nfs_mask };
-                c.access(&args).await
-            }
+            async move { ops.access(&fh, nfs_mask).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                if (ok.access & nfs_mask) == nfs_mask {
+            Ok(granted) => {
+                if (granted & nfs_mask) == nfs_mask {
                     reply.ok();
                 } else {
                     reply.error(Errno::EACCES);
                 }
             },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
-    /// READLINK -- return the raw target bytes the kernel asked for.
-    ///
-    /// `lookup` already follows symlinks server-side so the kernel rarely
-    /// sees a NF3LNK on this FUSE mount, but we still implement readlink
-    /// for completeness and for the case where someone holds a handle to
-    /// a symlink directly.
+    /// READLINK -- return the raw symlink target.
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         let Some(fh) = self.fh_for_ino(ino.0) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
+        let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
-            async move {
-                let args = READLINK3args { symlink: fh.to_nfs_fh3() };
-                c.readlink(&args).await
-            }
+            async move { ops.readlink(&fh).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => reply.data(ok.data.0.as_ref()),
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Ok(target) => reply.data(target.as_bytes()),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
     /// MKNOD -- create a special file (FIFO, socket, char/block device).
-    ///
-    /// Regular files come through `create()` instead.
     fn mknod(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, mode: u32, _umask: u32, rdev: u32, reply: ReplyEntry) {
         if !self.allow_write {
             reply.error(Errno::EACCES);
@@ -924,60 +636,51 @@ impl Filesystem for NfsFuse {
 
         let kind = mode & 0o170_000;
         let perms = mode & 0o7777;
-        let name_bytes = name.as_encoded_bytes().to_vec();
+        let name_str = name.to_string_lossy().into_owned();
 
-        // Validate the file-type bits up front; mknoddata3 itself isn't
-        // Clone, so we rebuild it inside the closure on each ladder rung.
-        match kind {
-            0o010_000 | 0o014_000 | 0o020_000 | 0o060_000 => {},
+        // Validate the file-type bits up front.
+        let dev_type = match kind {
+            0o020_000 => Some(crate::shell::ops::ShellDeviceType::Char),
+            0o060_000 => Some(crate::shell::ops::ShellDeviceType::Block),
+            0o010_000 | 0o014_000 => None, // FIFO / socket -- handled differently
             _ => {
-                // 0o100_000 (regular file) goes through `create` in modern
-                // kernels; anything else (e.g. door files) is unsupported.
                 reply.error(Errno::ENOTSUP);
                 return;
             },
-        }
+        };
 
-        let result = self.block(self.try_with_ladder(parent.0, |c| {
-            let parent_fh = parent_fh.clone();
-            let name_bytes = name_bytes.clone();
-            let attrs = sattr3_for_perms(perms);
-            // FUSE delivers `rdev` in the kernel's new_encode_dev packing:
-            // minor low 8 bits, major in bits 8-19, minor high bits in bits
-            // 20-31. Both major and minor can exceed 8 bits, so decode the full
-            // values (the previous `& 0xff` masks truncated them) and place
-            // major in specdata1, minor in specdata2 -- RFC 1813 sec. 2.5: for
-            // NF3CHR / NF3BLK specdata1 and specdata2 are the major and minor
-            // device numbers respectively.
-            let major = (rdev >> 8) & 0xfff;
-            let minor = (rdev & 0xff) | ((rdev >> 12) & 0x000f_ff00);
-            let spec = specdata3 { specdata1: major, specdata2: minor };
-            let what = match kind {
-                0o010_000 => mknoddata3::NF3FIFO(attrs),
-                0o014_000 => mknoddata3::NF3SOCK(attrs),
-                0o020_000 => mknoddata3::NF3CHR(devicedata3 { dev_attributes: attrs, spec }),
-                _ => mknoddata3::NF3BLK(devicedata3 { dev_attributes: attrs, spec }),
-            };
-            async move {
-                let args = MKNOD3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, what };
-                c.mknod(&args).await
-            }
-        }));
+        // FUSE delivers `rdev` in the kernel's new_encode_dev packing.
+        let major = (rdev >> 8) & 0xfff;
+        let minor = (rdev & 0xff) | ((rdev >> 12) & 0x000f_ff00);
+
+        let result = if let Some(dt) = dev_type {
+            self.block(self.try_with_ladder(parent.0, |ops: O| {
+                let parent_fh = parent_fh.clone();
+                let name_str = name_str.clone();
+                async move { ops.mknod(&parent_fh, &name_str, dt, major, minor, perms).await }
+            }))
+        } else {
+            // FIFO / socket: create via mknod with a dummy device type.
+            // ShellOps::mknod should handle this, but if the version doesn't
+            // support it, fall back to creating as a char device with dev 0,0.
+            // For FIFO specifically, some backends may need special handling.
+            self.block(self.try_with_ladder(parent.0, |ops: O| {
+                let parent_fh = parent_fh.clone();
+                let name_str = name_str.clone();
+                async move { ops.mknod(&parent_fh, &name_str, crate::shell::ops::ShellDeviceType::Char, 0, 0, perms).await }
+            }))
+        };
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                let fh_opt = post_op_fh3_to_handle(ok.obj);
-                let attrs_opt = post_op_attr_to_attrs(ok.obj_attributes);
-                let Some((_child_fh, child_ino, attrs)) = self.intern_with_lookup_fallback(parent.0, &parent_fh, &name_bytes, fh_opt, attrs_opt) else {
+            Ok(_new_fh) => {
+                let Some((_child_fh, child_ino, info)) = self.intern_with_lookup_fallback(parent.0, &parent_fh, &name_str) else {
                     reply.error(Errno::EIO);
                     return;
                 };
                 self.record_lookup(child_ino);
-                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &attrs), Generation(0));
+                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &info), Generation(0));
             },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
@@ -992,32 +695,25 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        let name_bytes = name.as_encoded_bytes().to_vec();
-        let attrs = sattr3_for_perms(mode & 0o7777);
+        let name_str = name.to_string_lossy().into_owned();
+        let perms = mode & 0o7777;
 
-        let result = self.block(self.try_with_ladder(parent.0, |c| {
+        let result = self.block(self.try_with_ladder(parent.0, |ops: O| {
             let parent_fh = parent_fh.clone();
-            let name_bytes = name_bytes.clone();
-            async move {
-                let args = MKDIR3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, attributes: attrs };
-                c.mkdir(&args).await
-            }
+            let name_str = name_str.clone();
+            async move { ops.mkdir(&parent_fh, &name_str, perms).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                let fh_opt = post_op_fh3_to_handle(ok.obj);
-                let attrs_opt = post_op_attr_to_attrs(ok.obj_attributes);
-                let Some((_child_fh, child_ino, attrs)) = self.intern_with_lookup_fallback(parent.0, &parent_fh, &name_bytes, fh_opt, attrs_opt) else {
+            Ok(_new_fh) => {
+                let Some((_child_fh, child_ino, info)) = self.intern_with_lookup_fallback(parent.0, &parent_fh, &name_str) else {
                     reply.error(Errno::EIO);
                     return;
                 };
                 self.record_lookup(child_ino);
-                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &attrs), Generation(0));
+                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &info), Generation(0));
             },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
@@ -1032,33 +728,26 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        let name_bytes = link_name.as_encoded_bytes().to_vec();
-        let target_bytes: Vec<u8> = target.as_os_str().as_encoded_bytes().to_vec();
+        let name_str = link_name.to_string_lossy().into_owned();
+        let target_str = target.to_string_lossy().into_owned();
 
-        let result = self.block(self.try_with_ladder(parent.0, |c| {
+        let result = self.block(self.try_with_ladder(parent.0, |ops: O| {
             let parent_fh = parent_fh.clone();
-            let name_bytes = name_bytes.clone();
-            let target_bytes = target_bytes.clone();
-            async move {
-                let args = SYMLINK3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, symlink: symlinkdata3 { symlink_attributes: sattr3_for_perms(0o777), symlink_data: nfspath3(Opaque::owned(target_bytes)) } };
-                c.symlink(&args).await
-            }
+            let name_str = name_str.clone();
+            let target_str = target_str.clone();
+            async move { ops.symlink(&parent_fh, &name_str, &target_str).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                let fh_opt = post_op_fh3_to_handle(ok.obj);
-                let attrs_opt = post_op_attr_to_attrs(ok.obj_attributes);
-                let Some((_child_fh, child_ino, attrs)) = self.intern_with_lookup_fallback(parent.0, &parent_fh, &name_bytes, fh_opt, attrs_opt) else {
+            Ok(()) => {
+                let Some((_child_fh, child_ino, info)) = self.intern_with_lookup_fallback(parent.0, &parent_fh, &name_str) else {
                     reply.error(Errno::EIO);
                     return;
                 };
                 self.record_lookup(child_ino);
-                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &attrs), Generation(0));
+                reply.entry(&ATTR_TTL, &Self::make_attr(child_ino, &info), Generation(0));
             },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
@@ -1073,42 +762,28 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        let name_bytes = name.as_encoded_bytes().to_vec();
-        let attrs = sattr3_for_perms(mode & 0o7777);
+        let name_str = name.to_string_lossy().into_owned();
+        let perms = mode & 0o7777;
 
-        let result = self.block(self.try_with_ladder(parent.0, |c| {
+        let result = self.block(self.try_with_ladder(parent.0, |ops: O| {
             let parent_fh = parent_fh.clone();
-            let name_bytes = name_bytes.clone();
-            async move {
-                let args = CREATE3args { where_: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) }, how: createhow3::UNCHECKED(attrs) };
-                c.create(&args).await
-            }
+            let name_str = name_str.clone();
+            async move { ops.create_file(&parent_fh, &name_str, perms).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                let fh_opt = match ok.obj {
-                    Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
-                    Nfs3Option::None | _ => None,
-                };
-                let attrs_opt = match ok.obj_attributes {
-                    Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-                    Nfs3Option::None | _ => None,
-                };
-
-                let Some((child_fh, child_ino, attrs)) = self.intern_with_lookup_fallback(parent.0, &parent_fh, &name_bytes, fh_opt, attrs_opt) else {
-                    reply.error(Errno::EIO);
-                    return;
-                };
-
-                self.record_lookup(child_ino);
-                let attr = Self::make_attr(child_ino, &attrs);
-                reply.created(&ATTR_TTL, &attr, Generation(0), FuseFileHandle(0), FopenFlags::empty());
-                drop(child_fh);
+            Ok(child_fh) => {
+                let child_ino = self.intern(child_fh.clone(), parent.0);
+                match self.block(self.try_getattr(child_ino)) {
+                    Some(info) => {
+                        self.record_lookup(child_ino);
+                        let attr = Self::make_attr(child_ino, &info);
+                        reply.created(&ATTR_TTL, &attr, Generation(0), FuseFileHandle(0), FopenFlags::empty());
+                    },
+                    None => reply.error(Errno::EIO),
+                }
             },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
@@ -1122,17 +797,14 @@ impl Filesystem for NfsFuse {
             reply.error(Errno::ENOENT);
             return;
         };
-        let name_bytes = name.as_encoded_bytes().to_vec();
+        let name_str = name.to_string_lossy().into_owned();
 
-        let result = self.block(self.try_with_ladder(parent.0, |c| {
+        let result = self.block(self.try_with_ladder(parent.0, |ops: O| {
             let parent_fh = parent_fh.clone();
-            let name_bytes = name_bytes.clone();
-            async move {
-                let args = REMOVE3args { object: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) } };
-                c.remove(&args).await
-            }
+            let name_str = name_str.clone();
+            async move { ops.remove(&parent_fh, &name_str).await }
         }));
-        reply_empty(&result, reply);
+        reply_result(&result, reply);
     }
 
     /// RMDIR -- remove a directory.
@@ -1145,20 +817,17 @@ impl Filesystem for NfsFuse {
             reply.error(Errno::ENOENT);
             return;
         };
-        let name_bytes = name.as_encoded_bytes().to_vec();
+        let name_str = name.to_string_lossy().into_owned();
 
-        let result = self.block(self.try_with_ladder(parent.0, |c| {
+        let result = self.block(self.try_with_ladder(parent.0, |ops: O| {
             let parent_fh = parent_fh.clone();
-            let name_bytes = name_bytes.clone();
-            async move {
-                let args = RMDIR3args { object: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(name_bytes)) } };
-                c.rmdir(&args).await
-            }
+            let name_str = name_str.clone();
+            async move { ops.rmdir(&parent_fh, &name_str).await }
         }));
-        reply_empty(&result, reply);
+        reply_result(&result, reply);
     }
 
-    /// RENAME -- move a file from `(parent, name)` to `(newparent, newname)`.
+    /// RENAME -- move a file.
     fn rename(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, newparent: INodeNo, newname: &std::ffi::OsStr, _flags: RenameFlags, reply: ReplyEmpty) {
         if !self.allow_write {
             reply.error(Errno::EACCES);
@@ -1168,20 +837,17 @@ impl Filesystem for NfsFuse {
             reply.error(Errno::ENOENT);
             return;
         };
-        let from_name = name.as_encoded_bytes().to_vec();
-        let to_name = newname.as_encoded_bytes().to_vec();
+        let from_name = name.to_string_lossy().into_owned();
+        let to_name = newname.to_string_lossy().into_owned();
 
-        let result = self.block(self.try_with_ladder(parent.0, |c| {
+        let result = self.block(self.try_with_ladder(parent.0, |ops: O| {
             let from_dir = from_dir.clone();
             let to_dir = to_dir.clone();
             let from_name = from_name.clone();
             let to_name = to_name.clone();
-            async move {
-                let args = RENAME3args { from: diropargs3 { dir: from_dir.to_nfs_fh3(), name: filename3(Opaque::owned(from_name)) }, to: diropargs3 { dir: to_dir.to_nfs_fh3(), name: filename3(Opaque::owned(to_name)) } };
-                c.rename(&args).await
-            }
+            async move { ops.rename(&from_dir, &from_name, &to_dir, &to_name).await }
         }));
-        reply_empty(&result, reply);
+        reply_result(&result, reply);
     }
 
     /// LINK -- create a hard link.
@@ -1194,55 +860,34 @@ impl Filesystem for NfsFuse {
             reply.error(Errno::ENOENT);
             return;
         };
-        let newname_bytes = newname.as_encoded_bytes().to_vec();
+        let newname_str = newname.to_string_lossy().into_owned();
 
-        let result = self.block(self.try_with_ladder(newparent.0, |c| {
+        let result = self.block(self.try_with_ladder(newparent.0, |ops: O| {
             let target_fh = target_fh.clone();
             let parent_fh = parent_fh.clone();
-            let newname_bytes = newname_bytes.clone();
-            async move {
-                let args = LINK3args { file: target_fh.to_nfs_fh3(), link: diropargs3 { dir: parent_fh.to_nfs_fh3(), name: filename3(Opaque::owned(newname_bytes)) } };
-                c.link(&args).await
-            }
+            let newname_str = newname_str.clone();
+            async move { ops.hard_link(&target_fh, &parent_fh, &newname_str).await }
         }));
 
-        // LINK does not return a new handle (it's the same inode), so we
-        // re-use the existing one and fetch fresh attrs.
         match result {
-            Ok(Nfs3Result::Ok(_)) => {
-                if let Some(attrs) = self.block(self.try_getattr(ino.0)) {
+            Ok(()) => match self.block(self.try_getattr(ino.0)) {
+                Some(file_info) => {
                     self.record_lookup(ino.0);
-                    reply.entry(&ATTR_TTL, &Self::make_attr(ino.0, &attrs), Generation(0));
-                } else {
-                    reply.error(Errno::EIO);
-                }
+                    reply.entry(&ATTR_TTL, &Self::make_attr(ino.0, &file_info), Generation(0));
+                },
+                None => reply.error(Errno::EIO),
             },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
-    /// READDIRPLUS -- list directory entries with attributes / handles.
-    ///
-    /// Always fills in any `name_attributes = None` / `name_handle = None`
-    /// entries via individual LOOKUP calls (the NetApp / nested-export
-    /// fix-up). This makes `ls -l` correct on servers that omit inline
-    /// attrs by default.
+    /// READDIR -- list directory entries with fix-up for missing attrs.
     fn readdir(&self, _req: &Request, ino: INodeNo, _fh: FuseFileHandle, offset: u64, mut reply: ReplyDirectory) {
         let Some(dir_fh) = self.fh_for_ino(ino.0) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
-        // Offset-aware paging. The kernel resumes a large listing by re-calling
-        // readdir with an advancing `offset` each time the reply buffer fills;
-        // paging the whole directory from cookie 0 on every callback would turn
-        // one `ls` into O(callbacks x server-pages) READDIRPLUS RPCs. Instead we
-        // page the server exactly once -- on the `offset == 0` callback -- cache
-        // the fully-paged owned entry vector keyed by directory inode, and serve
-        // every later (`offset > 0`) callback from that cache. The cache entry
-        // is dropped in `forget` when the kernel releases the directory inode.
         if offset == 0 {
             match self.page_directory(ino.0, &dir_fh) {
                 Ok(entries) => {
@@ -1257,11 +902,6 @@ impl Filesystem for NfsFuse {
 
         let dotdot_ino = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).parents.get(&ino.0).copied().unwrap_or(1);
 
-        // FUSE readdir cookies are exclusive: when the kernel calls back with
-        // `offset = N`, it expects entries with cookie > N (the entry AT
-        // offset N has already been consumed). Using `<=` here re-emits
-        // "." / ".." every time the kernel resumes at offset 2, which is an
-        // infinite loop on any non-empty directory.
         let fixed: [(u64, u64, FuseFileType, &str); 2] = [(1, ino.0, FuseFileType::Directory, "."), (2, dotdot_ino, FuseFileType::Directory, "..")];
         for (pos, entry_ino, kind, name) in fixed {
             if offset < pos && reply.add(INodeNo(entry_ino), pos, kind, name) {
@@ -1270,9 +910,6 @@ impl Filesystem for NfsFuse {
             }
         }
 
-        // Serve entries from the per-inode cache populated on the offset == 0
-        // callback (cloned out so the lock is not held across the per-entry
-        // fix-up LOOKUPs below).
         let entries = self.readdir_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&ino.0).cloned().unwrap_or_default();
         for (idx, (name_bytes, attrs_opt, fh_opt)) in entries.into_iter().enumerate() {
             let entry_offset = (idx as u64) + 3;
@@ -1284,31 +921,17 @@ impl Filesystem for NfsFuse {
                 continue;
             }
 
-            // null-attr / null-handle fix-up: re-LOOKUP if missing. Use the
-            // non-interning variant so a merely-listed entry is not permanently
-            // pinned in the inode map (#35) -- the kernel's explicit LOOKUP later
-            // does the authoritative, lookup-counted intern.
+            // null-attr / null-handle fix-up via non-interning LOOKUP.
             let mut entry_attrs = attrs_opt;
             let mut entry_fh = fh_opt;
             if (entry_attrs.is_none() || entry_fh.is_none())
-                && let Ok((fh2, attrs2)) = self.block(self.lookup_no_intern(&dir_fh, &name_bytes, ino.0))
+                && let Ok((fh2, attrs2)) = self.block(self.lookup_no_intern(&dir_fh, &name_str, ino.0))
             {
                 entry_fh = Some(fh2);
                 entry_attrs = Some(attrs2);
             }
 
             let kind = entry_attrs.as_ref().map_or(FuseFileType::RegularFile, |a| to_fuse_type(a.file_type));
-            // Resolve an inode number WITHOUT pinning brand-new entries. Per
-            // the FUSE ABI a plain readdir entry takes no kernel lookup
-            // reference (only readdirplus does), so the kernel never sends a
-            // `forget` for entries it has merely listed -- permanently
-            // interning every listed handle would grow the inode map without
-            // bound (contradicting the `forget` reclamation bound). Reuse an
-            // inode only when its handle is already known (interned by a real
-            // lookup/create and reclaimed by the lookup/forget lifecycle);
-            // otherwise hand the kernel a transient number we do not store. The
-            // kernel issues an explicit LOOKUP -- the authoritative,
-            // lookup-counted intern -- before it uses the entry.
             let entry_ino = {
                 let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let known = entry_fh.as_ref().and_then(|fh| st.ino_for_handle(fh));
@@ -1329,14 +952,8 @@ impl Filesystem for NfsFuse {
             return;
         };
 
-        // NFSv3 READ may return fewer bytes than requested before true EOF
-        // (RFC 1813 sec. 3.3.6: a server caps a single READ at rtmax/rtpref).
-        // A non-direct-io FUSE mount zero-fills the unread remainder, so a single
-        // READ silently corrupts data from any server whose rtmax is below the
-        // kernel's request size. Loop until we have `size` bytes, the server
-        // signals eof, or returns an empty page. Each chunk still runs through
-        // the credential-escalation ladder (the winning cred is cached after the
-        // first chunk, so continuations stay single-RPC).
+        // Loop to handle servers that return fewer bytes than requested before
+        // true EOF (short reads). Each chunk runs through the credential ladder.
         let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
         loop {
             let want = size.saturating_sub(u32::try_from(buf.len()).unwrap_or(u32::MAX));
@@ -1344,43 +961,34 @@ impl Filesystem for NfsFuse {
                 break;
             }
             let pos = offset.saturating_add(buf.len() as u64);
-            let chunk = self.block(self.try_with_ladder(ino.0, |c| {
+            let chunk = self.block(self.try_with_ladder(ino.0, |ops: O| {
                 let fh = fh.clone();
-                async move {
-                    let args = READ3args { file: fh.to_nfs_fh3(), offset: pos, count: want };
-                    c.read(&args).await
-                }
+                async move { ops.read_chunk(&fh, pos, want).await }
             }));
             match chunk {
-                Ok(Nfs3Result::Ok(ok)) => {
-                    let data = ok.data.as_ref();
+                Ok(data) => {
                     if data.is_empty() {
                         break;
                     }
-                    buf.extend_from_slice(data);
-                    if ok.eof {
+                    buf.extend_from_slice(&data);
+                    // read_chunk returns up to `want` bytes; if less, the file
+                    // may have ended or the server capped the response. We keep
+                    // looping until we get `size` bytes or an empty page.
+                    if data.len() < want as usize {
                         break;
                     }
                 },
-                // A denial or error before any bytes were read is fatal; after a
-                // partial read, return what we have (the next read() resumes).
-                Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) if buf.is_empty() => {
-                    reply.error(Errno::EACCES);
+                Err(e) if buf.is_empty() => {
+                    reply.error(errno_from(&e));
                     return;
                 },
-                Ok(_) | Err(_) if buf.is_empty() => {
-                    reply.error(Errno::EIO);
-                    return;
-                },
-                _ => break,
+                Err(_) => break,
             }
         }
         reply.data(&buf);
     }
 
-    /// Write data to a file  --  only when `allow_write` is set.
-    ///
-    /// Per RFC 1813 S3.3.7 we always request `FILE_SYNC` for data integrity.
+    /// Write data to a file.
     fn write(&self, _req: &Request, ino: INodeNo, _fh: FuseFileHandle, offset: u64, data: &[u8], _write_flags: WriteFlags, _flags: OpenFlags, _lock_owner: Option<LockOwner>, reply: ReplyWrite) {
         if !self.allow_write {
             reply.error(Errno::EACCES);
@@ -1391,75 +999,52 @@ impl Filesystem for NfsFuse {
             return;
         };
         let data_owned = data.to_vec();
+        let sent = u32::try_from(data.len()).unwrap_or(u32::MAX);
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
+        let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
             let data_owned = data_owned.clone();
-            async move {
-                let count = u32::try_from(data_owned.len()).unwrap_or(u32::MAX);
-                let args = WRITE3args { file: fh.to_nfs_fh3(), offset, count, stable: stable_how::FILE_SYNC, data: Opaque::borrowed(&data_owned) };
-                c.write(&args).await
-            }
+            async move { ops.write_chunk(&fh, offset, &data_owned).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                // Clamp the server-reported write count to the bytes we
-                // actually sent. NFSv3 WRITE (RFC 1813 sec. 3.3.7) returns the
-                // committed count, but an untrusted server reporting a count
-                // larger than the request would otherwise mis-report progress
-                // to the kernel.
-                let sent = u32::try_from(data.len()).unwrap_or(u32::MAX);
-                reply.written(ok.count.min(sent));
-            },
-            Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-            Ok(_) | Err(_) => reply.error(Errno::EIO),
+            Ok(count) => reply.written(count.min(sent)),
+            Err(e) => reply.error(errno_from(&e)),
         }
     }
 
-    /// FSYNC -- forward NFSv3 COMMIT for the open file.
-    ///
-    /// We always commit the entire file (offset=0, count=0 means "from
-    /// here to end-of-file" per RFC 1813 S3.3.21).
+    /// FSYNC -- flush uncommitted writes.
     fn fsync(&self, _req: &Request, ino: INodeNo, _fh: FuseFileHandle, _datasync: bool, reply: ReplyEmpty) {
         let Some(fh) = self.fh_for_ino(ino.0) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
+        let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
-            async move {
-                let args = COMMIT3args { file: fh.to_nfs_fh3(), offset: 0, count: 0 };
-                c.commit(&args).await
-            }
+            async move { ops.commit(&fh).await }
         }));
-        reply_empty(&result, reply);
+        reply_result(&result, reply);
     }
 
-    /// STATFS -- forward NFSv3 FSSTAT.
+    /// STATFS -- filesystem statistics.
     fn statfs(&self, _req: &Request, ino: INodeNo, reply: ReplyStatfs) {
         let fh = self.fh_for_ino(ino.0).unwrap_or_else(|| self.root_fh.clone());
 
-        let result = self.block(self.try_with_ladder(ino.0, |c| {
+        let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
-            async move {
-                let args = FSSTAT3args { fsroot: fh.to_nfs_fh3() };
-                c.fsstat(&args).await
-            }
+            async move { ops.statfs(&fh).await }
         }));
 
         match result {
-            Ok(Nfs3Result::Ok(ok)) => {
-                // NFSv3 reports byte counts; statfs takes block counts, so
-                // we pick a 512-byte block size and divide.
-                let bsize: u32 = 512;
-                let blocks = ok.tbytes / u64::from(bsize);
-                let bfree = ok.fbytes / u64::from(bsize);
-                let bavail = ok.abytes / u64::from(bsize);
-                reply.statfs(blocks, bfree, bavail, ok.tfiles, ok.ffiles, bsize, 255, bsize);
+            Ok(fs) => {
+                let bsize = fs.block_size;
+                let blocks = fs.total_bytes / u64::from(bsize);
+                let bfree = fs.free_bytes / u64::from(bsize);
+                let bavail = fs.avail_bytes / u64::from(bsize);
+                reply.statfs(blocks, bfree, bavail, fs.total_files, fs.free_files, bsize, 255, bsize);
             },
-            Ok(_) | Err(_) => {
+            Err(_) => {
                 // Many servers reject FSSTAT for non-root callers; reply
                 // with zeros so `df` doesn't break the mount.
                 reply.statfs(0, 0, 0, 0, 0, 512, 255, 512);
@@ -1468,113 +1053,63 @@ impl Filesystem for NfsFuse {
     }
 }
 
-/// Convert our `FileType` to the fuser equivalent.
-const fn to_fuse_type(ft: FileType) -> FuseFileType {
+/// Convert `ShellFileType` to the fuser equivalent.
+const fn to_fuse_type(ft: ShellFileType) -> FuseFileType {
     match ft {
-        FileType::Directory => FuseFileType::Directory,
-        FileType::Symlink => FuseFileType::Symlink,
-        FileType::Block => FuseFileType::BlockDevice,
-        FileType::Character => FuseFileType::CharDevice,
-        FileType::Fifo => FuseFileType::NamedPipe,
-        FileType::Socket => FuseFileType::Socket,
-        FileType::Regular | _ => FuseFileType::RegularFile,
+        ShellFileType::Directory => FuseFileType::Directory,
+        ShellFileType::Symlink => FuseFileType::Symlink,
+        ShellFileType::Block => FuseFileType::BlockDevice,
+        ShellFileType::Character => FuseFileType::CharDevice,
+        ShellFileType::Fifo => FuseFileType::NamedPipe,
+        ShellFileType::Socket => FuseFileType::Socket,
+        _ => FuseFileType::RegularFile,
     }
 }
 
 /// Build a `SystemTime` from NFS time fields (seconds + nanoseconds since epoch).
-fn nfs_time_to_system(seconds: u32, nseconds: u32) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(u64::from(seconds)) + Duration::from_nanos(u64::from(nseconds))
+fn nfs_time_to_system(seconds: u64, nseconds: u32) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(seconds) + Duration::from_nanos(u64::from(nseconds))
 }
 
-/// Convert fuser's `Option<TimeOrNow>` to NFSv3 `set_atime`.
-///
-/// `None` -> DONT_CHANGE; `Some(Now)` -> SET_TO_SERVER_TIME;
-/// `Some(SpecificTime(t))` -> SET_TO_CLIENT_TIME with `t` packed as
-/// `nfstime3` (RFC 1813 §3.3.2).
-fn time_or_now_to_set_atime(t: Option<TimeOrNow>) -> set_atime {
+/// Convert fuser's `Option<TimeOrNow>` to `ShellTimeSpec`.
+fn time_or_now_to_spec(t: Option<TimeOrNow>) -> Option<ShellTimeSpec> {
     match t {
-        None => set_atime::DONT_CHANGE,
-        Some(TimeOrNow::Now) => set_atime::SET_TO_SERVER_TIME,
-        Some(TimeOrNow::SpecificTime(time)) => set_atime::SET_TO_CLIENT_TIME(nfstime3::try_from(time).unwrap_or_default()),
-    }
-}
-
-/// Convert fuser's `Option<TimeOrNow>` to NFSv3 `set_mtime`. Mirror of
-/// `time_or_now_to_set_atime`.
-fn time_or_now_to_set_mtime(t: Option<TimeOrNow>) -> set_mtime {
-    match t {
-        None => set_mtime::DONT_CHANGE,
-        Some(TimeOrNow::Now) => set_mtime::SET_TO_SERVER_TIME,
-        Some(TimeOrNow::SpecificTime(time)) => set_mtime::SET_TO_CLIENT_TIME(nfstime3::try_from(time).unwrap_or_default()),
+        None => None,
+        Some(TimeOrNow::Now) => Some(ShellTimeSpec::Now),
+        Some(TimeOrNow::SpecificTime(time)) => {
+            let d = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+            Some(ShellTimeSpec::At(d.as_secs(), d.subsec_nanos()))
+        },
     }
 }
 
 /// Translate fuser's `AccessFlags` (POSIX `R_OK`/`W_OK`/`X_OK` bitset) to
-/// the NFSv3 ACCESS bit mask (RFC 1813 §3.3.4).
-///
-/// `R_OK` maps to `ACCESS3_READ`; `W_OK` is the union of MODIFY / EXTEND /
-/// DELETE because the kernel sees a single "may write here" check whereas
-/// NFSv3 splits write operations apart; `X_OK` requests EXECUTE on regular
-/// files but LOOKUP semantics for directories, so we set both.
+/// NFS ACCESS bits. Uses the standard NFS constants:
+///   READ=0x01, LOOKUP=0x02, MODIFY=0x04, EXTEND=0x08, DELETE=0x10, EXECUTE=0x20
 const fn access_flags_to_nfs(mask: AccessFlags) -> u32 {
-    use crate::proto::nfs3::types::access;
     let mut bits: u32 = 0;
     if mask.contains(AccessFlags::R_OK) {
-        bits |= access::READ;
+        bits |= 0x01; // ACCESS_READ
     }
     if mask.contains(AccessFlags::W_OK) {
-        bits |= access::MODIFY | access::EXTEND | access::DELETE;
+        bits |= 0x04 | 0x08 | 0x10; // MODIFY | EXTEND | DELETE
     }
     if mask.contains(AccessFlags::X_OK) {
-        bits |= access::EXECUTE | access::LOOKUP;
+        bits |= 0x02 | 0x20; // LOOKUP | EXECUTE
     }
     bits
 }
 
-/// Build a `sattr3` that only sets the mode field (used by mknod / mkdir /
-/// symlink where the kernel asks for a specific mode but no other
-/// attributes).
-const fn sattr3_for_perms(perms: u32) -> sattr3 {
-    sattr3 { mode: Nfs3Option::Some(perms), uid: Nfs3Option::None, gid: Nfs3Option::None, size: Nfs3Option::None, atime: set_atime::DONT_CHANGE, mtime: set_mtime::DONT_CHANGE }
+/// Map an `anyhow::Error` to a FUSE `Errno`, extracting `ShellError` when
+/// present in the error chain.
+fn errno_from(e: &anyhow::Error) -> Errno {
+    Errno::from(std::io::Error::from_raw_os_error(shell_err_to_errno(e)))
 }
 
-/// Convert the optional post-op file handle returned by CREATE / MKNOD /
-/// MKDIR / SYMLINK responses (RFC 1813 §3.3.8 etc.) to our `FileHandle`.
-fn post_op_fh3_to_handle(opt: Nfs3Option<nfs_v3::wire::nfs_fh3>) -> Option<FileHandle> {
-    match opt {
-        Nfs3Option::Some(fh) => Some(FileHandle::from_nfs_fh3(&fh)),
-        Nfs3Option::None | _ => None,
-    }
-}
-
-/// Convert an optional post-op attribute reply into our `FileAttrs`.
-#[expect(clippy::missing_const_for_fn, reason = "FileAttrs::from_fattr3 is not const")]
-fn post_op_attr_to_attrs(opt: nfs_v3::wire::post_op_attr) -> Option<FileAttrs> {
-    match opt {
-        Nfs3Option::Some(a) => Some(FileAttrs::from_fattr3(&a)),
-        Nfs3Option::None | _ => None,
-    }
-}
-
-/// Reply to a no-data NFS3 callback (REMOVE / RMDIR / RENAME / COMMIT)
-/// based on the server's status code.
-///
-/// This table stays at the wire level on purpose. It maps NFS status codes
-/// onto POSIX errnos, and that is a translation between two specifications --
-/// `Nfs3Error` is the same set of codes under Rust names, so routing through
-/// it would rename the left-hand column without changing what the table says.
-fn reply_empty<T, U>(result: &Result<Nfs3Result<T, U>, onc_rpc_client::RpcError>, reply: ReplyEmpty) {
+/// Reply to a void-return NFS callback based on success/failure.
+fn reply_result(result: &anyhow::Result<()>, reply: ReplyEmpty) {
     match result {
-        Ok(Nfs3Result::Ok(_)) => reply.ok(),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ACCES | nfsstat3::NFS3ERR_PERM, _))) => reply.error(Errno::EACCES),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_NOENT, _))) => reply.error(Errno::ENOENT),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_NOTEMPTY, _))) => reply.error(Errno::ENOTEMPTY),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_EXIST, _))) => reply.error(Errno::EEXIST),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_NOTSUPP, _))) => reply.error(Errno::ENOTSUP),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_XDEV, _))) => reply.error(Errno::EXDEV),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_NOSPC, _))) => reply.error(Errno::ENOSPC),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_DQUOT, _))) => reply.error(Errno::EDQUOT),
-        Ok(Nfs3Result::Err((nfsstat3::NFS3ERR_ROFS, _))) => reply.error(Errno::EROFS),
-        Ok(_) | Err(_) => reply.error(Errno::EIO),
+        Ok(()) => reply.ok(),
+        Err(e) => reply.error(errno_from(e)),
     }
 }

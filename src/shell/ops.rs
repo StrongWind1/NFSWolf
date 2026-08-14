@@ -57,13 +57,13 @@ pub(crate) struct ShellFileInfo {
     pub size: u64,
     pub fileid: u64,
     pub atime_secs: u64,
-    #[expect(dead_code, reason = "FUSE adapter will read this; wiring lands in a follow-up")]
+    #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
     pub atime_nsecs: u32,
     pub mtime_secs: u64,
-    #[expect(dead_code, reason = "FUSE adapter will read this; wiring lands in a follow-up")]
+    #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
     pub mtime_nsecs: u32,
     pub ctime_secs: u64,
-    #[expect(dead_code, reason = "FUSE adapter will read this; wiring lands in a follow-up")]
+    #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
     pub ctime_nsecs: u32,
     pub used: u64,
     pub rdev: (u32, u32),
@@ -75,7 +75,7 @@ pub(crate) struct ShellFileInfo {
 /// Embedded in `anyhow::Error` chains by ShellOps implementations so the FUSE
 /// adapter can downcast to a specific errno instead of defaulting to EIO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code, reason = "FUSE adapter will construct these; wiring lands in a follow-up")]
+#[expect(dead_code, reason = "variants cover the full NFS error space; backends construct them as needed")]
 pub(crate) enum ShellError {
     Perm,
     NoEnt,
@@ -157,7 +157,6 @@ impl ShellError {
 
 /// Extract errno from an anyhow error chain containing a `ShellError`.
 #[cfg(feature = "fuse")]
-#[expect(dead_code, reason = "FUSE adapter will use this; wiring lands in a follow-up")]
 pub(crate) fn shell_err_to_errno(e: &anyhow::Error) -> libc::c_int {
     for cause in e.chain() {
         if let Some(se) = cause.downcast_ref::<ShellError>() {
@@ -169,6 +168,7 @@ pub(crate) fn shell_err_to_errno(e: &anyhow::Error) -> libc::c_int {
 
 /// Atomic setattr request. Each field is `None` = don't change.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
 pub(crate) struct ShellSetAttr {
     pub mode: Option<u32>,
     pub uid: Option<u32>,
@@ -180,7 +180,7 @@ pub(crate) struct ShellSetAttr {
 
 /// Timestamp value for `ShellSetAttr`.
 #[derive(Debug, Clone, Copy)]
-#[expect(dead_code, reason = "FUSE adapter will construct these; wiring lands in a follow-up")]
+#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
 pub(crate) enum ShellTimeSpec {
     Now,
     At(u64, u32),
@@ -188,7 +188,7 @@ pub(crate) enum ShellTimeSpec {
 
 /// Filesystem statistics for `df` / FUSE `statfs`.
 #[derive(Debug, Clone)]
-#[expect(dead_code, reason = "FUSE adapter will construct these; wiring lands in a follow-up")]
+#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
 pub(crate) struct ShellFsStat {
     pub total_bytes: u64,
     pub free_bytes: u64,
@@ -444,21 +444,21 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
     ///
     /// Returns the subset of `mask` bits the server grants. NFSv2 has no
     /// ACCESS procedure, so V2Ops returns `Ok(mask)` (all granted).
-    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "used by the FUSE adapter"))]
     fn access(&self, _fh: &ShellHandle, mask: u32) -> impl Future<Output = anyhow::Result<u32>> + Send {
         async move { Ok(mask) }
     }
 
     /// Atomic attribute update (mode, owner, size, timestamps).
-    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "used by the FUSE adapter"))]
     fn setattr(&self, fh: &ShellHandle, attrs: ShellSetAttr) -> impl Future<Output = anyhow::Result<ShellFileInfo>> + Send;
 
     /// Filesystem statistics for `df`.
-    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "used by the FUSE adapter"))]
     fn statfs(&self, fh: &ShellHandle) -> impl Future<Output = anyhow::Result<ShellFsStat>> + Send;
 
     /// Flush uncommitted writes to stable storage. No-op on NFSv2.
-    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "used by the FUSE adapter"))]
     fn commit(&self, _fh: &ShellHandle) -> impl Future<Output = anyhow::Result<()>> + Send {
         async { Ok(()) }
     }
@@ -467,7 +467,7 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
     ///
     /// The returned instance shares the underlying connection pool but
     /// carries its own credential. Used by the FUSE credential ladder.
-    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "used by the FUSE adapter"))]
     fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self
     where
         Self: Sized;
