@@ -56,12 +56,146 @@ pub(crate) struct ShellFileInfo {
     pub gid: u32,
     pub size: u64,
     pub fileid: u64,
-    pub atime_secs: u32,
-    pub mtime_secs: u32,
-    pub ctime_secs: u32,
+    pub atime_secs: u64,
+    #[expect(dead_code, reason = "FUSE adapter will read this; wiring lands in a follow-up")]
+    pub atime_nsecs: u32,
+    pub mtime_secs: u64,
+    #[expect(dead_code, reason = "FUSE adapter will read this; wiring lands in a follow-up")]
+    pub mtime_nsecs: u32,
+    pub ctime_secs: u64,
+    #[expect(dead_code, reason = "FUSE adapter will read this; wiring lands in a follow-up")]
+    pub ctime_nsecs: u32,
     pub used: u64,
     pub rdev: (u32, u32),
     pub fsid: u64,
+}
+
+/// Typed NFS error for FUSE errno mapping.
+///
+/// Embedded in `anyhow::Error` chains by ShellOps implementations so the FUSE
+/// adapter can downcast to a specific errno instead of defaulting to EIO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(dead_code, reason = "FUSE adapter will construct these; wiring lands in a follow-up")]
+pub(crate) enum ShellError {
+    Perm,
+    NoEnt,
+    Io,
+    Nxio,
+    Acces,
+    Exist,
+    Xdev,
+    NotDir,
+    IsDir,
+    Inval,
+    FBig,
+    NoSpc,
+    Rofs,
+    NameTooLong,
+    NotEmpty,
+    Dquot,
+    Stale,
+    NotSupp,
+    BadHandle,
+    ServerFault,
+}
+
+impl std::fmt::Display for ShellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Perm => "EPERM",
+            Self::NoEnt => "ENOENT",
+            Self::Io => "EIO",
+            Self::Nxio => "ENXIO",
+            Self::Acces => "EACCES",
+            Self::Exist => "EEXIST",
+            Self::Xdev => "EXDEV",
+            Self::NotDir => "ENOTDIR",
+            Self::IsDir => "EISDIR",
+            Self::Inval => "EINVAL",
+            Self::FBig => "EFBIG",
+            Self::NoSpc => "ENOSPC",
+            Self::Rofs => "EROFS",
+            Self::NameTooLong => "ENAMETOOLONG",
+            Self::NotEmpty => "ENOTEMPTY",
+            Self::Dquot => "EDQUOT",
+            Self::Stale => "ESTALE",
+            Self::NotSupp => "ENOTSUP",
+            Self::BadHandle => "EBADF",
+            Self::ServerFault => "EIO (server fault)",
+        })
+    }
+}
+
+impl std::error::Error for ShellError {}
+
+#[cfg(feature = "fuse")]
+impl ShellError {
+    pub(crate) fn to_errno(self) -> libc::c_int {
+        match self {
+            Self::Perm => libc::EPERM,
+            Self::NoEnt => libc::ENOENT,
+            Self::Io | Self::ServerFault => libc::EIO,
+            Self::Nxio => libc::ENXIO,
+            Self::Acces => libc::EACCES,
+            Self::Exist => libc::EEXIST,
+            Self::Xdev => libc::EXDEV,
+            Self::NotDir => libc::ENOTDIR,
+            Self::IsDir => libc::EISDIR,
+            Self::Inval => libc::EINVAL,
+            Self::FBig => libc::EFBIG,
+            Self::NoSpc => libc::ENOSPC,
+            Self::Rofs => libc::EROFS,
+            Self::NameTooLong => libc::ENAMETOOLONG,
+            Self::NotEmpty => libc::ENOTEMPTY,
+            Self::Dquot => libc::EDQUOT,
+            Self::Stale => libc::ESTALE,
+            Self::NotSupp => libc::ENOTSUP,
+            Self::BadHandle => libc::EBADF,
+        }
+    }
+}
+
+/// Extract errno from an anyhow error chain containing a `ShellError`.
+#[cfg(feature = "fuse")]
+#[expect(dead_code, reason = "FUSE adapter will use this; wiring lands in a follow-up")]
+pub(crate) fn shell_err_to_errno(e: &anyhow::Error) -> libc::c_int {
+    for cause in e.chain() {
+        if let Some(se) = cause.downcast_ref::<ShellError>() {
+            return se.to_errno();
+        }
+    }
+    libc::EIO
+}
+
+/// Atomic setattr request. Each field is `None` = don't change.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ShellSetAttr {
+    pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub size: Option<u64>,
+    pub atime: Option<ShellTimeSpec>,
+    pub mtime: Option<ShellTimeSpec>,
+}
+
+/// Timestamp value for `ShellSetAttr`.
+#[derive(Debug, Clone, Copy)]
+#[expect(dead_code, reason = "FUSE adapter will construct these; wiring lands in a follow-up")]
+pub(crate) enum ShellTimeSpec {
+    Now,
+    At(u64, u32),
+}
+
+/// Filesystem statistics for `df` / FUSE `statfs`.
+#[derive(Debug, Clone)]
+#[expect(dead_code, reason = "FUSE adapter will construct these; wiring lands in a follow-up")]
+pub(crate) struct ShellFsStat {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub avail_bytes: u64,
+    pub total_files: u64,
+    pub free_files: u64,
+    pub block_size: u32,
 }
 
 impl ShellFileInfo {
@@ -303,4 +437,38 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
     fn write_verifier(&self, _fh: &ShellHandle) -> impl Future<Output = anyhow::Result<Option<[u8; 8]>>> + Send {
         async { Ok(None) }
     }
+
+    // -- FUSE-required operations --
+
+    /// Advisory permission check (NFSv3 ACCESS / NFSv4 ACCESS).
+    ///
+    /// Returns the subset of `mask` bits the server grants. NFSv2 has no
+    /// ACCESS procedure, so V2Ops returns `Ok(mask)` (all granted).
+    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    fn access(&self, _fh: &ShellHandle, mask: u32) -> impl Future<Output = anyhow::Result<u32>> + Send {
+        async move { Ok(mask) }
+    }
+
+    /// Atomic attribute update (mode, owner, size, timestamps).
+    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    fn setattr(&self, fh: &ShellHandle, attrs: ShellSetAttr) -> impl Future<Output = anyhow::Result<ShellFileInfo>> + Send;
+
+    /// Filesystem statistics for `df`.
+    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    fn statfs(&self, fh: &ShellHandle) -> impl Future<Output = anyhow::Result<ShellFsStat>> + Send;
+
+    /// Flush uncommitted writes to stable storage. No-op on NFSv2.
+    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    fn commit(&self, _fh: &ShellHandle) -> impl Future<Output = anyhow::Result<()>> + Send {
+        async { Ok(()) }
+    }
+
+    /// Build an ephemeral ops instance with different AUTH_SYS credentials.
+    ///
+    /// The returned instance shares the underlying connection pool but
+    /// carries its own credential. Used by the FUSE credential ladder.
+    #[expect(dead_code, reason = "FUSE adapter will call this; wiring lands in a follow-up")]
+    fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self
+    where
+        Self: Sized;
 }

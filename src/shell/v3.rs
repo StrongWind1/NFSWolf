@@ -10,7 +10,7 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 
-use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, try_with_escalation};
+use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, try_with_escalation};
 
 /// NFSv3 backend wrapping a pooled `Nfs3Client` with credential escalation.
 pub(crate) struct V3Ops {
@@ -54,9 +54,12 @@ fn v3_info(a: &FileAttrs) -> ShellFileInfo {
         gid: a.gid,
         size: a.size,
         fileid: a.fileid,
-        atime_secs: a.atime.seconds,
-        mtime_secs: a.mtime.seconds,
-        ctime_secs: a.ctime.seconds,
+        atime_secs: u64::from(a.atime.seconds),
+        atime_nsecs: a.atime.nseconds,
+        mtime_secs: u64::from(a.mtime.seconds),
+        mtime_nsecs: a.mtime.nseconds,
+        ctime_secs: u64::from(a.ctime.seconds),
+        ctime_nsecs: a.ctime.nseconds,
         used: a.used,
         rdev: a.rdev,
         fsid: a.fsid,
@@ -277,6 +280,35 @@ impl ShellOps for V3Ops {
         let verf = self.nfs3.commit_verifier(&to_v3_fh(fh)).await.map_err(fault_to_anyhow)?;
         Ok(Some(verf))
     }
+
+    // -- FUSE-required operations --
+
+    async fn access(&self, fh: &ShellHandle, mask: u32) -> anyhow::Result<u32> {
+        let granted = self.nfs3.check_access(&to_v3_fh(fh), mask).await.map_err(fault_to_anyhow)?;
+        Ok(granted)
+    }
+
+    async fn setattr(&self, fh: &ShellHandle, attrs: ShellSetAttr) -> anyhow::Result<ShellFileInfo> {
+        let sa = shell_setattr_to_sattr3(&attrs);
+        self.nfs3.set_attrs(&to_v3_fh(fh), sa).await.map_err(fault_to_anyhow)?;
+        // SETATTR3res carries only wcc data, not full fattr3 -- fetch fresh attrs.
+        let a = self.nfs3.attrs(&to_v3_fh(fh)).await.map_err(fault_to_anyhow)?;
+        Ok(v3_info(&a))
+    }
+
+    async fn statfs(&self, fh: &ShellHandle) -> anyhow::Result<ShellFsStat> {
+        let fs = self.nfs3.stat_fs(&to_v3_fh(fh)).await.map_err(fault_to_anyhow)?;
+        Ok(ShellFsStat { total_bytes: fs.total_bytes, free_bytes: fs.free_bytes, avail_bytes: fs.avail_bytes, total_files: fs.total_files, free_files: fs.free_files, block_size: 4096 })
+    }
+
+    async fn commit(&self, fh: &ShellHandle) -> anyhow::Result<()> {
+        self.nfs3.commit_range(&to_v3_fh(fh), 0, 0).await.map_err(fault_to_anyhow)
+    }
+
+    fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self {
+        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
+        Self::new(Arc::new(self.nfs3.with_credential(cred, uid, gid)))
+    }
 }
 
 // --- Remote completion for tab-complete in the v3 shell ----------------------
@@ -356,6 +388,22 @@ async fn read_all_v3(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u
         }
     }
     Ok(buf)
+}
+
+/// Convert a `ShellSetAttr` to the NFSv3 `sattr3` wire type.
+fn shell_setattr_to_sattr3(attrs: &ShellSetAttr) -> sattr3 {
+    use nfs_v3::wire::nfstime3;
+    let atime = match attrs.atime {
+        Some(ShellTimeSpec::Now) => set_atime::SET_TO_SERVER_TIME,
+        Some(ShellTimeSpec::At(s, ns)) => set_atime::SET_TO_CLIENT_TIME(nfstime3 { seconds: u32::try_from(s).unwrap_or(0), nseconds: ns }),
+        None => set_atime::DONT_CHANGE,
+    };
+    let mtime = match attrs.mtime {
+        Some(ShellTimeSpec::Now) => set_mtime::SET_TO_SERVER_TIME,
+        Some(ShellTimeSpec::At(s, ns)) => set_mtime::SET_TO_CLIENT_TIME(nfstime3 { seconds: u32::try_from(s).unwrap_or(0), nseconds: ns }),
+        None => set_mtime::DONT_CHANGE,
+    };
+    sattr3 { mode: attrs.mode.map_or(Nfs3Option::None, Nfs3Option::Some), uid: attrs.uid.map_or(Nfs3Option::None, Nfs3Option::Some), gid: attrs.gid.map_or(Nfs3Option::None, Nfs3Option::Some), size: attrs.size.map_or(Nfs3Option::None, Nfs3Option::Some), atime, mtime }
 }
 
 async fn getattr_owner(nfs3: &Nfs3Client, fh: &FileHandle) -> Option<((u32, u32), u32)> {

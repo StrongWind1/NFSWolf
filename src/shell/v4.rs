@@ -16,7 +16,7 @@ use onc_xdr::Pack;
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs4::{Nfs4Client, PooledNfs4 as _};
 
-use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, try_with_escalation};
+use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, try_with_escalation};
 
 /// NFSv4 backend wrapping a pooled `Nfs4Client` with lazy session establishment.
 ///
@@ -70,9 +70,12 @@ fn v4_info(info: &Nfs4FileInfo) -> ShellFileInfo {
         gid: parse_v4_owner_id(info.owner_group.as_deref()),
         size: info.size.unwrap_or(0),
         fileid: info.fileid.unwrap_or(0),
-        atime_secs: info.time_access.map_or(0, |(s, _)| u32::try_from(s).unwrap_or(0)),
-        mtime_secs: info.time_modify.map_or(0, |(s, _)| u32::try_from(s).unwrap_or(0)),
-        ctime_secs: info.time_metadata.map_or(0, |(s, _)| u32::try_from(s).unwrap_or(0)),
+        atime_secs: info.time_access.map_or(0, |(s, _)| u64::try_from(s).unwrap_or(0)),
+        atime_nsecs: info.time_access.map_or(0, |(_, ns)| ns),
+        mtime_secs: info.time_modify.map_or(0, |(s, _)| u64::try_from(s).unwrap_or(0)),
+        mtime_nsecs: info.time_modify.map_or(0, |(_, ns)| ns),
+        ctime_secs: info.time_metadata.map_or(0, |(s, _)| u64::try_from(s).unwrap_or(0)),
+        ctime_nsecs: info.time_metadata.map_or(0, |(_, ns)| ns),
         used: info.size.unwrap_or(0),
         rdev: (0, 0),
         fsid: info.fsid.map_or(0, |(maj, _)| maj),
@@ -150,6 +153,41 @@ fn pack_fattr4(fattr: &Fattr4) -> Vec<u8> {
     let mut buf = Vec::with_capacity(fattr.packed_size());
     drop(fattr.pack(&mut buf));
     buf
+}
+
+/// Build an `Fattr4` from a `ShellSetAttr` for SETATTR.
+///
+/// Encodes mode (attr 33), owner (attr 36), owner_group (attr 37), and size
+/// (attr 4) in bitmap order. Timestamps are not supported by this helper --
+/// NFSv4 time_access_set and time_modify_set have a complex union encoding
+/// that the decoder doesn't handle yet.
+fn shell_setattr_to_fattr4(attrs: &ShellSetAttr) -> Fattr4 {
+    let mut w0: u32 = 0;
+    let mut w1: u32 = 0;
+    let mut attrvals = Vec::new();
+
+    // Attributes must be encoded in strict bitmap order (word 0 first, then word 1).
+    // Word 0: size (attr 4, bit 4).
+    if let Some(size) = attrs.size {
+        w0 |= 1 << 4;
+        drop(size.pack(&mut attrvals));
+    }
+
+    // Word 1: mode (attr 33, bit 1), owner (attr 36, bit 4), owner_group (attr 37, bit 5).
+    if let Some(mode) = attrs.mode {
+        w1 |= 1 << 1;
+        drop(mode.pack(&mut attrvals));
+    }
+    if let Some(uid) = attrs.uid {
+        w1 |= 1 << 4;
+        xdr_encode_string(&mut attrvals, &uid.to_string());
+    }
+    if let Some(gid) = attrs.gid {
+        w1 |= 1 << 5;
+        xdr_encode_string(&mut attrvals, &gid.to_string());
+    }
+
+    Fattr4 { bitmap: AttrRequest { words: vec![w0, w1] }, attrvals }
 }
 
 // --- ShellOps implementation ------------------------------------------------
@@ -445,6 +483,47 @@ impl ShellOps for V4Ops {
     async fn write_verifier(&self, fh: &ShellHandle) -> anyhow::Result<Option<[u8; 8]>> {
         let verf = self.client.commit(fh.as_bytes(), 0, 0).await.map_err(v4_err)?;
         Ok(Some(verf))
+    }
+
+    // -- FUSE-required operations --
+
+    async fn access(&self, fh: &ShellHandle, mask: u32) -> anyhow::Result<u32> {
+        let (_supported, granted) = self.client.access(fh.as_bytes(), mask).await.map_err(v4_err)?;
+        Ok(granted)
+    }
+
+    async fn setattr(&self, fh: &ShellHandle, attrs: ShellSetAttr) -> anyhow::Result<ShellFileInfo> {
+        let fattr = shell_setattr_to_fattr4(&attrs);
+        let _attrsset = self.client.setattr(fh.as_bytes(), Stateid4::ANONYMOUS, fattr).await.map_err(v4_err)?;
+        // Fetch fresh attrs after the change.
+        let info = self.client.getattr(fh.as_bytes()).await.map_err(v4_err)?;
+        Ok(v4_info(&info))
+    }
+
+    async fn statfs(&self, fh: &ShellHandle) -> anyhow::Result<ShellFsStat> {
+        // Request space attributes via GETATTR with bits 10-12 of word 1
+        // (space_avail=42, space_free=43, space_total=44).
+        let space_bitmap = AttrRequest { words: vec![0, (1 << 10) | (1 << 11) | (1 << 12)] };
+        let ops = vec![ArgOp::Putfh(fh.0.clone()), ArgOp::Getattr(space_bitmap)];
+        let res = self.client.compound(ops).await.map_err(rpc_err)?;
+        if res.status != 0 {
+            anyhow::bail!("GETATTR(space) failed: NFSv4 status={}", res.status);
+        }
+        let (avail, free, total) = match res.results.get(1).map(|op| &op.data) {
+            Some(ResOpData::Getattr(a)) => (a.space_avail.unwrap_or(0), a.space_free.unwrap_or(0), a.space_total.unwrap_or(0)),
+            _ => (0, 0, 0),
+        };
+        Ok(ShellFsStat { total_bytes: total, free_bytes: free, avail_bytes: avail, total_files: 0, free_files: 0, block_size: 4096 })
+    }
+
+    async fn commit(&self, fh: &ShellHandle) -> anyhow::Result<()> {
+        let _verf = self.client.commit(fh.as_bytes(), 0, 0).await.map_err(v4_err)?;
+        Ok(())
+    }
+
+    fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self {
+        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
+        Self::new(Arc::new(self.client.with_credential(cred, uid, gid)))
     }
 }
 

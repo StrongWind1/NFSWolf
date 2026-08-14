@@ -2291,6 +2291,12 @@ pub struct Fattr4Decoded {
     pub time_metadata: Option<(i64, u32)>,
     /// Last modify time (attr 53, word 1 bit 21, RFC 7530 S5.8.2.28).
     pub time_modify: Option<(i64, u32)>,
+    /// Available space in bytes (attr 42, word 1 bit 10, RFC 7530 S5.8.2.17).
+    pub space_avail: Option<u64>,
+    /// Free space in bytes (attr 43, word 1 bit 11, RFC 7530 S5.8.2.18).
+    pub space_free: Option<u64>,
+    /// Total space in bytes (attr 44, word 1 bit 12, RFC 7530 S5.8.2.19).
+    pub space_total: Option<u64>,
     /// MAC security label (attr 80, word 2 bit 16, RFC 7862 S12.2.4).
     pub sec_label: Option<SecLabel4>,
 }
@@ -2327,7 +2333,7 @@ impl Fattr4Decoded {
 ///
 /// This handles the common case (server returns exactly what we asked for
 /// via `AttrRequest::shell_attrs()`) and degrades gracefully otherwise.
-#[expect(clippy::indexing_slicing, clippy::match_same_arms, reason = "bounds checked before macro indexing; same-arm returns are intentional for readability")]
+#[expect(clippy::indexing_slicing, clippy::match_same_arms, clippy::cognitive_complexity, reason = "bounds checked before macro indexing; same-arm returns are intentional for readability; flat bitmap decoder is inherently a long match")]
 fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
     let mut out = Fattr4Decoded::default();
     let mut off: usize = 0;
@@ -2654,8 +2660,11 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
                     return out;
                 }
             },
-            10..=13 => {
-                // space_avail(42), space_free(43), space_total(44), space_used(45): u64
+            10 => out.space_avail = Some(read_u64!()),
+            11 => out.space_free = Some(read_u64!()),
+            12 => out.space_total = Some(read_u64!()),
+            13 => {
+                // space_used (attr 45): u64 -- not stored in Fattr4Decoded.
                 off += 8;
                 if off > attrvals.len() {
                     return out;

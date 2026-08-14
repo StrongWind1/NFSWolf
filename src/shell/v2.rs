@@ -7,7 +7,7 @@ use nfs_v2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs2::{Nfs2Client, PooledNfs2 as _};
 
-use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, try_with_escalation};
+use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, try_with_escalation};
 
 /// NFSv2 backend wrapping a `Nfs2Client` over `PooledTransport`.
 pub(crate) struct V2Ops {
@@ -66,9 +66,12 @@ fn v2_info(a: &Nfs2FileAttr) -> ShellFileInfo {
         gid: a.gid,
         size: u64::from(a.size),
         fileid: u64::from(a.fileid),
-        atime_secs: a.atime.seconds,
-        mtime_secs: a.mtime.seconds,
-        ctime_secs: a.ctime.seconds,
+        atime_secs: u64::from(a.atime.seconds),
+        atime_nsecs: a.atime.useconds.saturating_mul(1000),
+        mtime_secs: u64::from(a.mtime.seconds),
+        mtime_nsecs: a.mtime.useconds.saturating_mul(1000),
+        ctime_secs: u64::from(a.ctime.seconds),
+        ctime_nsecs: a.ctime.useconds.saturating_mul(1000),
         // NFSv2 reports disk usage in 512-byte blocks (RFC 1094 S2.3.5).
         used: u64::from(a.blocks) * 512,
         // Old Linux dev_t encoding: major = bits 15:8, minor = bits 7:0.
@@ -246,6 +249,27 @@ impl ShellOps for V2Ops {
     async fn probe_root(&self) -> anyhow::Result<Option<ShellHandle>> {
         self.probe_root().await
     }
+
+    // -- FUSE-required operations (v2 has no ACCESS or COMMIT) --
+
+    async fn setattr(&self, fh: &ShellHandle, attrs: ShellSetAttr) -> anyhow::Result<ShellFileInfo> {
+        let sa = shell_setattr_to_v2(&attrs);
+        let _ = self.client.setattr(&to_v2_fh(fh), &sa).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Fetch fresh attrs after the change.
+        let a = self.client.getattr(&to_v2_fh(fh)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(v2_info(&a))
+    }
+
+    async fn statfs(&self, fh: &ShellHandle) -> anyhow::Result<ShellFsStat> {
+        let fs = self.client.statfs(&to_v2_fh(fh)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let bsize = u64::from(fs.bsize);
+        Ok(ShellFsStat { total_bytes: u64::from(fs.blocks).saturating_mul(bsize), free_bytes: u64::from(fs.bfree).saturating_mul(bsize), avail_bytes: u64::from(fs.bavail).saturating_mul(bsize), total_files: 0, free_files: 0, block_size: fs.bsize })
+    }
+
+    fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self {
+        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
+        Self::new(Arc::new(self.client.with_credential(cred, uid, gid)))
+    }
 }
 
 fn v2_sattr_mode(mode: u32) -> Nfs2SetAttr {
@@ -258,6 +282,30 @@ fn v2_sattr_owner(uid: Option<u32>, gid: Option<u32>) -> Nfs2SetAttr {
     use nfs_v2::wire::{SATTR_UNCHANGED, Timeval};
     let unchanged_time = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
     Nfs2SetAttr { mode: SATTR_UNCHANGED, uid: uid.unwrap_or(SATTR_UNCHANGED), gid: gid.unwrap_or(SATTR_UNCHANGED), size: SATTR_UNCHANGED, atime: unchanged_time, mtime: unchanged_time }
+}
+
+/// Convert a `ShellSetAttr` to the NFSv2 `Nfs2SetAttr` wire type.
+///
+/// Fields set to `None` use the `SATTR_UNCHANGED` sentinel (RFC 1094 S2.3.6).
+/// NFSv2 has no "set to server time" -- `ShellTimeSpec::Now` sets the time to
+/// the epoch as an approximation; callers should avoid `Now` on v2.
+fn shell_setattr_to_v2(attrs: &ShellSetAttr) -> Nfs2SetAttr {
+    use nfs_v2::wire::{SATTR_UNCHANGED, Timeval};
+    let unchanged_time = Timeval { seconds: SATTR_UNCHANGED, useconds: SATTR_UNCHANGED };
+    let atime = match attrs.atime {
+        Some(ShellTimeSpec::At(s, ns)) => Timeval { seconds: u32::try_from(s).unwrap_or(0), useconds: ns / 1000 },
+        Some(ShellTimeSpec::Now) => {
+            // NFSv2 has no SET_TO_SERVER_TIME; use 0 as a best-effort marker.
+            Timeval { seconds: 0, useconds: 0 }
+        },
+        None => unchanged_time,
+    };
+    let mtime = match attrs.mtime {
+        Some(ShellTimeSpec::At(s, ns)) => Timeval { seconds: u32::try_from(s).unwrap_or(0), useconds: ns / 1000 },
+        Some(ShellTimeSpec::Now) => Timeval { seconds: 0, useconds: 0 },
+        None => unchanged_time,
+    };
+    Nfs2SetAttr { mode: attrs.mode.unwrap_or(SATTR_UNCHANGED), uid: attrs.uid.unwrap_or(SATTR_UNCHANGED), gid: attrs.gid.unwrap_or(SATTR_UNCHANGED), size: attrs.size.map_or(SATTR_UNCHANGED, |s| u32::try_from(s).unwrap_or(SATTR_UNCHANGED)), atime, mtime }
 }
 
 // --- Free helper functions for credential-escalated operations ---------------

@@ -2275,18 +2275,18 @@ fn ls_cmp_shell(a: &ShellEntry, b: &ShellEntry, sort: LsSort) -> std::cmp::Order
             ma.cmp(&mb).then(name_ord)
         },
         LsSort::Mtime => {
-            let ta = a.info.as_ref().map_or(0u32, |x| x.mtime_secs);
-            let tb = b.info.as_ref().map_or(0u32, |x| x.mtime_secs);
+            let ta = a.info.as_ref().map_or(0u64, |x| x.mtime_secs);
+            let tb = b.info.as_ref().map_or(0u64, |x| x.mtime_secs);
             ta.cmp(&tb).then(name_ord)
         },
         LsSort::Ctime => {
-            let ta = a.info.as_ref().map_or(0u32, |x| x.ctime_secs);
-            let tb = b.info.as_ref().map_or(0u32, |x| x.ctime_secs);
+            let ta = a.info.as_ref().map_or(0u64, |x| x.ctime_secs);
+            let tb = b.info.as_ref().map_or(0u64, |x| x.ctime_secs);
             ta.cmp(&tb).then(name_ord)
         },
         LsSort::Atime => {
-            let ta = a.info.as_ref().map_or(0u32, |x| x.atime_secs);
-            let tb = b.info.as_ref().map_or(0u32, |x| x.atime_secs);
+            let ta = a.info.as_ref().map_or(0u64, |x| x.atime_secs);
+            let tb = b.info.as_ref().map_or(0u64, |x| x.atime_secs);
             ta.cmp(&tb).then(name_ord)
         },
     }
@@ -2303,8 +2303,8 @@ const MONTH_DAYS_LEAP: [u64; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 
 ///
 /// Pure integer arithmetic -- no external crate required.
 /// Valid for any u32 timestamp (up to 2106-02-07).
-fn fmt_unix_time(secs: u32) -> String {
-    let s = u64::from(secs);
+fn fmt_unix_time(secs: u64) -> String {
+    let s = secs;
     let sec = s % 60;
     let min = (s / 60) % 60;
     let hour = (s / 3600) % 24;
@@ -2370,7 +2370,7 @@ fn sanitize_term(s: &str) -> String {
 /// `stat` and `ls` views. Negative timestamps are clamped to zero (1970-01-01)
 /// rather than crashing -- they only appear in corrupt records.
 fn fmt_ctime(tv_sec: i32) -> String {
-    let secs = u32::try_from(tv_sec).unwrap_or(0);
+    let secs = u64::from(u32::try_from(tv_sec).unwrap_or(0));
     fmt_unix_time(secs)
 }
 
