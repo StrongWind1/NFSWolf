@@ -245,7 +245,7 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
 /// Send an RPC NULL (procedure 0) to the NFS program at `host:port` with the
 /// given `version`. Returns `true` if the server accepts (no PROG_MISMATCH),
 /// `false` if the reply indicates a version mismatch or the connection fails.
-async fn verify_nfs_version_tcp(host: std::net::IpAddr, port: u16, version: u32, timeout_dur: Duration, proxy: Option<&str>) -> bool {
+pub(crate) async fn verify_nfs_version_tcp(host: std::net::IpAddr, port: u16, version: u32, timeout_dur: Duration, proxy: Option<&str>) -> bool {
     use onc_rpc_client::RpcClient;
     use onc_rpc_client::transport::tokio::TokioIo;
     use onc_xdr::Void;

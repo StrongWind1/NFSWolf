@@ -7,19 +7,16 @@
 
 use clap::Parser;
 
-use crate::cli::{H_PERMISSIONS, H_STEALTH, H_TARGET};
+use crate::cli::{H_BEHAVIOR, H_PERMISSIONS, H_STEALTH, H_TARGET};
 
 /// FUSE-mount an NFS export with transparent UID spoofing.
 ///
-/// The mount surface implements the full set of NFSv3 procedures (every
-/// `Nfs3Client` method is wired through a corresponding FUSE callback).
-/// The auto-UID credential ladder, owner-bit elevation, server-side symlink
-/// resolution, suid/dev passthrough, and shared-mount visibility are always
-/// on -- this is a security toolkit, the goal is unobstructed access.
-///
-/// Protocol scope: NFSv3 only. NFSv4-only servers are not supported by the
-/// FUSE mount; use `nfswolf shell --nfs-version 4` for interactive NFSv4
-/// browsing instead.
+/// The mount surface is version-neutral: it works over NFSv2, NFSv3, or
+/// NFSv4, auto-detecting the best available version when `--nfs-version`
+/// is omitted. The auto-UID credential ladder, owner-bit elevation,
+/// server-side symlink resolution, suid/dev passthrough, and shared-mount
+/// visibility are always on -- this is a security toolkit, the goal is
+/// unobstructed access.
 ///
 /// Cleanup: nfswolf detaches itself once the kernel mount is in place
 /// (just like mount(8)) and the FUSE handler runs in a daemon process,
@@ -35,6 +32,7 @@ use crate::cli::{H_PERMISSIONS, H_STEALTH, H_TARGET};
 ///   nfswolf mount 10.0.0.5:/srv /mnt/x
 ///   nfswolf mount 10.0.0.5 /mnt/x -e /srv
 ///   nfswolf mount 10.0.0.5 /mnt/x --handle 01000200...
+///   nfswolf mount 10.0.0.5:/srv /mnt/x --nfs-version 4
 #[derive(Parser)]
 pub(crate) struct MountArgs {
     /// Target host with optional :/export suffix (e.g. 10.0.0.5:/srv)
@@ -53,6 +51,10 @@ pub(crate) struct MountArgs {
     #[arg(long, group = "source", help_heading = H_TARGET)]
     pub handle: Option<String>,
 
+    /// NFS protocol version (2, 3, or 4). Auto-detected from the server if omitted.
+    #[arg(long, value_name = "VER", value_parser = clap::value_parser!(u32).range(2..=4), help_heading = H_BEHAVIOR)]
+    pub nfs_version: Option<u32>,
+
     /// Allow write operations (default: read-only)
     #[arg(long, help_heading = H_PERMISSIONS)]
     pub allow_write: bool,
@@ -64,13 +66,6 @@ pub(crate) struct MountArgs {
 }
 
 /// Synchronous pre-flight checks that must run BEFORE the binary detaches.
-///
-/// Validating these in the parent (rather than after `libc::daemon`) means
-/// argument errors land on the operator's terminal with a non-zero exit
-/// status, instead of disappearing into a daemon-child that nobody is
-/// watching. Network work happens later, in the daemon, so MOUNT/RPC
-/// failures still surface (stdio is kept attached) but they no longer
-/// block the parent from returning to the shell.
 #[cfg(feature = "fuse")]
 pub(crate) fn preflight(args: &MountArgs) -> anyhow::Result<()> {
     if args.hide && args.handle.is_some() {
@@ -83,27 +78,84 @@ pub(crate) fn preflight(args: &MountArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Run the `mount` subcommand.
-///
-/// The `#[cfg(feature = "fuse")]` variant does the real work; the stub
-/// variant prints a message and exits cleanly so the binary doesn't break
-/// when built without the `fuse` feature.
-///
-/// Pre-conditions:
-///   * `preflight(args)` has already succeeded (called from `main` before
-///     daemonization).
-///   * The current process is the daemon child  --  the user's shell has
-///     already returned. Status messages still reach the controlling
-///     terminal because `libc::daemon(1, 1)` was invoked with
-///     `noclose = 1`, but they appear "after the prompt" rather than
-///     blocking the prompt.
 #[cfg(feature = "fuse")]
 pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
-    use std::net::{IpAddr, SocketAddr};
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::net::IpAddr;
 
-    use fuser::MountOption;
+    tracing::info!(target = %args.target, mountpoint = %args.mountpoint, "mounting NFS export via FUSE");
+
+    let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), true)?;
+    let host: IpAddr = target.host;
+
+    let version = resolve_mount_version(&args, host, globals).await?;
+    match version {
+        2 => connect_v2_mount(&args, &target, host, globals).await,
+        3 => connect_v3_mount(&args, &target, host, globals).await,
+        4 => connect_v4_mount(&args, &target, host, globals).await,
+        _ => unreachable!("value_parser restricts to 2..=4"),
+    }
+}
+
+// =============================================================================
+// Version detection -- reuses the shell's probing logic
+// =============================================================================
+
+#[cfg(feature = "fuse")]
+async fn resolve_mount_version(args: &MountArgs, host: std::net::IpAddr, globals: &crate::cli::GlobalOpts) -> anyhow::Result<u32> {
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    if let Some(v) = args.nfs_version {
+        return Ok(v);
+    }
+
+    eprintln!("{}", crate::output::status_info("No --nfs-version specified, probing server..."));
+    let probe_timeout = Duration::from_secs(2);
+    let pmap_addr = SocketAddr::new(host, 111);
+    let portmap = match &globals.proxy {
+        Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
+        None => crate::proto::portmap::PortmapClient::default_port(),
+    };
+
+    if let Ok(Ok(port)) = tokio::time::timeout(probe_timeout, portmap.query_port(pmap_addr, 100_003, 3)).await
+        && port > 0
+        && crate::cli::shell::verify_nfs_version_tcp(host, port, 3, probe_timeout, globals.proxy.as_deref()).await
+    {
+        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv3 on port {port}")));
+        return Ok(3);
+    }
+
+    if let Ok(Ok(port)) = tokio::time::timeout(probe_timeout, portmap.query_port(pmap_addr, 100_003, 2)).await
+        && port > 0
+        && crate::cli::shell::verify_nfs_version_tcp(host, port, 2, probe_timeout, globals.proxy.as_deref()).await
+    {
+        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv2 on port {port}")));
+        return Ok(2);
+    }
+
+    let nfs_port = globals.nfs_port.unwrap_or(2049);
+    let v4_addr = SocketAddr::new(host, nfs_port);
+    if let Ok(Ok(_)) = tokio::time::timeout(probe_timeout, async {
+        let mut client = crate::proto::nfs4::compound::Nfs4DirectClient::connect_proxy(v4_addr, globals.proxy.as_deref()).await?;
+        client.get_root_fh().await
+    })
+    .await
+    {
+        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv4 on port {nfs_port}")));
+        return Ok(4);
+    }
+
+    anyhow::bail!("Could not detect NFS version on {host}. Specify --nfs-version explicitly (2, 3, or 4).")
+}
+
+// =============================================================================
+// Per-version connect + mount
+// =============================================================================
+
+#[cfg(feature = "fuse")]
+async fn connect_v3_mount(args: &MountArgs, target: &crate::cli::target::Target, host: std::net::IpAddr, globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
 
     use crate::cli::probe::make_mount_client;
     use crate::proto::auth::{AuthSys, Credential};
@@ -113,98 +165,160 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     use crate::proto::nfs3::types::FileHandle;
     use crate::proto::pool::{ConnectionPool, PoolKey};
     use crate::proto::transport::PooledTransport;
+    use crate::shell::ops::ShellHandle;
+    use crate::shell::v3::V3Ops;
     use crate::util::stealth::StealthConfig;
 
-    tracing::info!(target = %args.target, mountpoint = %args.mountpoint, "mounting NFS export via FUSE");
-
-    // Parse the unified `<TARGET>` -- accepts host, host:/export, or
-    // bare host with --export / --handle. Mount requires a source.
-    let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), true)?;
-    let host: IpAddr = target.host;
-    let (export, handle_hex) = match target.source {
-        crate::cli::target::Source::Export(p) => (p, None),
-        crate::cli::target::Source::Handle(h) => (String::from("/"), Some(h)),
-        crate::cli::target::Source::None => unreachable!("target::parse(.., true) rejected this"),
-    };
-    let export = export.as_str();
+    let (export, handle_hex) = parse_source(target);
     let addr = SocketAddr::new(host, 111);
 
-    // Decide whether the connection pool should bypass portmapper/MOUNT for
-    // future checkouts. We do this in two cases:
-    //   1. `--handle` is given (no MOUNT to begin with, so every reconnect
-    //      must go directly to the NFS port -- otherwise the pool would
-    //      re-mount on every checkout, defeating the whole point of
-    //      `--handle`).
-    //   2. `--nfs-port` is explicitly set (the operator wants every NFS
-    //      call to land on a specific port regardless of what portmapper
-    //      reports). The default fallback is 2049 only when `--handle`
-    //      forces a direct path; otherwise we honour exactly what was
-    //      provided.
     let direct_nfs_port = match (handle_hex.is_some(), globals.nfs_port) {
         (_, Some(p)) => Some(p),
         (true, None) => Some(2049),
         (false, None) => None,
     };
 
-    // Obtain the root file handle  --  either via MOUNT or from a raw hex handle.
     let root_fh = if let Some(hex) = &handle_hex {
         FileHandle::from_hex(hex)?
     } else {
         let mc = make_mount_client(globals);
-        eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
-        let mr = mc.mount(addr, export).await?;
-
-        // Stealth: unmount from server immediately after obtaining the handle.
-        // The local FUSE mount continues to use the captured handle (file
-        // handles are bearer tokens per RFC 1094 S2.3.3), so dropping the
-        // server-side MOUNT entry doesn't break us.
-        if args.hide {
-            match mc.unmount(addr, export).await {
-                Ok(()) => eprintln!("{}", crate::output::status_info("Stealth: unmounted from server")),
-                Err(e) => tracing::warn!(error = %e, "stealth UMNT failed; server may still show this client in its mount table"),
-            }
-        }
-
+        eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export} (NFSv3)")));
+        let mr = mc.mount(addr, &export).await?;
+        stealth_unmount(&mc, addr, &export, args.hide).await;
         mr.handle
     };
 
-    // Build pool-backed NFS3 client. When `--handle` is supplied, route the
-    // pool through `checkout_direct` so future RPC calls bypass MOUNT.
-    // `--proxy` is honoured: every TCP connection the pool opens (initial
-    // mount, raw-RPC handle, reconnects) tunnels through the SOCKS5 proxy.
     let pool = Arc::new(match &globals.proxy {
         Some(p) => ConnectionPool::with_proxy(p.clone()),
         None => ConnectionPool::default_config(),
     });
     let circuit = Arc::new(CircuitBreaker::default_config());
-    // Build the AUTH_SYS credential once; the FUSE adapter takes its own
-    // copy via `default_cred` so we clone rather than rebuild from scratch.
-    // `--aux-gids` from the global flag is folded in here so FUSE callbacks
-    // inherit the same group set (e.g. shadow GID 42 to read /etc/shadow).
     let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
     let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
-    let pool_key = PoolKey { host: addr, export: export.to_owned(), uid: globals.uid, gid: globals.gid };
+    let pool_key = PoolKey { host: addr, export: export.clone(), uid: globals.uid, gid: globals.gid };
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let nfs3 = Arc::new(if let Some(nfs_port) = direct_nfs_port {
-        Nfs3Client::new(PooledTransport::new_direct(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred.clone(), ReconnectStrategy::Persistent, nfs_port))
+        Nfs3Client::new(PooledTransport::new_direct(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, nfs_port))
     } else {
-        Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred.clone(), ReconnectStrategy::Persistent))
+        Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent))
     });
 
-    // Assemble FUSE mount options. This is a security toolkit, so the
-    // mount is configured for maximum local-side access:
-    //   - suid + dev are honoured (needed for SUID escalation testing)
-    //   - allow_other (`SessionACL::All`) makes the mount visible to every
-    //     local user, not just whoever ran nfswolf
-    //   - DefaultPermissions delegates kernel-level perm checks to the
-    //     POSIX semantics layer above us
-    // The FSName uses the resolved IP (and export path when available)
-    // rather than the raw `<TARGET>` -- otherwise the colon-form leaks
-    // colons into `mount | grep nfswolf` listings.
-    let fs_name = if handle_hex.is_some() { format!("nfswolf:{host}:handle") } else { format!("nfswolf:{host}:{export}") };
-    // In fuser v0.15+, `allow_other` is no longer a MountOption variant -- it
-    // moved to `Config::acl = SessionACL::All`. All other per-export flags
-    // remain as `MountOption` entries inside `Config::mount_options`.
+    let ops = V3Ops::new(nfs3);
+    let root = ShellHandle(root_fh.as_bytes().to_vec());
+    do_mount(ops, root, args, host, &export, handle_hex.is_some()).await
+}
+
+#[cfg(feature = "fuse")]
+async fn connect_v2_mount(args: &MountArgs, target: &crate::cli::target::Target, host: std::net::IpAddr, globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::cli::probe::{make_mount_client, make_v2_client_with_hostname, parse_addr_with_port};
+    use crate::proto::nfs3::types::FileHandle;
+    use crate::shell::ops::ShellHandle;
+    use crate::shell::v2::V2Ops;
+    use crate::util::stealth::StealthConfig;
+
+    let (export, handle_hex) = parse_source(target);
+
+    let root_fh = if let Some(hex) = &handle_hex {
+        let generic = FileHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?;
+        nfs_v2::wire::Nfs2FileHandle::from_bytes(generic.as_bytes())
+    } else {
+        let mc = make_mount_client(globals);
+        let addr = SocketAddr::new(host, 111);
+        eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export} (MOUNT v1 / NFSv2)")));
+        let mr = mc.mount_v1(addr, &export).await?;
+        stealth_unmount(&mc, addr, &export, args.hide).await;
+        nfs_v2::wire::Nfs2FileHandle::from_bytes(mr.handle.as_bytes())
+    };
+
+    let nfs_port = Some(globals.nfs_port.unwrap_or(2049));
+    let addr = parse_addr_with_port(&host.to_string(), nfs_port)?;
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, &export, globals.uid, globals.gid, &globals.aux_gids, stealth, globals.proxy.as_deref(), nfs_port, &globals.hostname);
+    let client = Arc::new(client);
+
+    let ops = V2Ops::new(client);
+    let root = ShellHandle(root_fh.0.to_vec());
+    do_mount(ops, root, args, host, &export, handle_hex.is_some()).await
+}
+
+#[cfg(feature = "fuse")]
+async fn connect_v4_mount(args: &MountArgs, target: &crate::cli::target::Target, host: std::net::IpAddr, globals: &crate::cli::GlobalOpts) -> anyhow::Result<()> {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::proto::auth::{AuthSys, Credential};
+    use crate::proto::circuit::CircuitBreaker;
+    use crate::proto::conn::ReconnectStrategy;
+    use crate::proto::nfs4::Nfs4Client as PooledNfs4Client;
+    use crate::proto::pool::{ConnectionPool, PoolKey};
+    use crate::proto::transport::PooledTransport;
+    use crate::shell::ops::ShellHandle;
+    use crate::shell::v4::V4Ops;
+    use crate::util::stealth::StealthConfig;
+
+    let (export, handle_hex) = parse_source(target);
+    let nfs_port = globals.nfs_port.unwrap_or(2049);
+    let addr = SocketAddr::new(host, nfs_port);
+
+    eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
+
+    let pool = Arc::new(match &globals.proxy {
+        Some(p) => ConnectionPool::with_proxy(p.clone()),
+        None => ConnectionPool::default_config(),
+    });
+    let circuit = Arc::new(CircuitBreaker::default_config());
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
+    let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
+    let pool_key = PoolKey { host: addr, export: format!("__nfs4__{nfs_port}"), uid: globals.uid, gid: globals.gid };
+    let transport = PooledTransport::new_direct(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent, nfs_port);
+    let client = Arc::new(PooledNfs4Client::new(transport));
+
+    let root_fh = if let Some(hex) = &handle_hex {
+        eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv4): {hex}")));
+        ShellHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?
+    } else {
+        let fh_bytes = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?;
+        ShellHandle(fh_bytes)
+    };
+
+    let ops = V4Ops::new(client);
+    do_mount(ops, root_fh, args, host, &export, handle_hex.is_some()).await
+}
+
+// =============================================================================
+// Shared helpers
+// =============================================================================
+
+#[cfg(feature = "fuse")]
+fn parse_source(target: &crate::cli::target::Target) -> (String, Option<String>) {
+    match &target.source {
+        crate::cli::target::Source::Export(p) => (p.clone(), None),
+        crate::cli::target::Source::Handle(h) => (String::from("/"), Some(h.clone())),
+        crate::cli::target::Source::None => (String::from("/"), None),
+    }
+}
+
+#[cfg(feature = "fuse")]
+async fn stealth_unmount(mc: &crate::proto::mount::NfsMountClient, addr: std::net::SocketAddr, export: &str, hide: bool) {
+    if hide {
+        match mc.unmount(addr, export).await {
+            Ok(()) => eprintln!("{}", crate::output::status_info("Stealth: unmounted from server")),
+            Err(e) => tracing::warn!(error = %e, "stealth UMNT failed; server may still show this client in its mount table"),
+        }
+    }
+}
+
+#[cfg(feature = "fuse")]
+async fn do_mount<O: crate::shell::ops::ShellOps>(ops: O, root_fh: crate::shell::ops::ShellHandle, args: &MountArgs, host: std::net::IpAddr, export: &str, is_handle: bool) -> anyhow::Result<()> {
+    use std::path::Path;
+
+    use fuser::MountOption;
+
+    let fs_name = if is_handle { format!("nfswolf:{host}:handle") } else { format!("nfswolf:{host}:{export}") };
     let mut mount_options = vec![MountOption::FSName(fs_name), MountOption::DefaultPermissions, MountOption::Suid, MountOption::Dev];
     if args.allow_write {
         mount_options.push(MountOption::RW);
@@ -213,24 +327,13 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
     }
     tracing::warn!("FUSE mount uses suid+dev passthrough for security testing (F-4.2, F-4.3) -- do not use on production systems");
 
-    // Config is #[non_exhaustive] so we can't use a struct literal; mutate after default().
     let mut config = fuser::Config::default();
     config.mount_options = mount_options;
     config.acl = fuser::SessionACL::All;
 
-    // Capture the runtime handle before handing the FUSE filesystem to a
-    // blocking thread. The fuser session spawns its own worker threads which
-    // are not Tokio tasks; passing this handle in lets those threads dispatch
-    // async NFS calls onto the runtime that owns the connection pool.
     let rt_handle = tokio::runtime::Handle::current();
-    let shell_root_fh = crate::shell::ops::ShellHandle(root_fh.as_bytes().to_vec());
-    let v3_ops = crate::shell::v3::V3Ops::new(nfs3);
-    let fs = crate::fuse::NfsFuse::new(crate::fuse::NfsFuseConfig { ops: v3_ops, root_fh: shell_root_fh, allow_write: args.allow_write, rt: rt_handle });
+    let fs = crate::fuse::NfsFuse::new(crate::fuse::NfsFuseConfig { ops, root_fh, allow_write: args.allow_write, rt: rt_handle });
 
-    // The status banner and `# rerun:` line have already been emitted from
-    // `main` before daemonization, so the operator sees them BEFORE their
-    // shell prompt returns. From here on out we are the daemon child;
-    // `fuser::mount` blocks for the lifetime of the kernel mount.
     let mountpoint = Path::new(&args.mountpoint).to_path_buf();
     tokio::task::spawn_blocking(move || fuser::mount(fs, &mountpoint, &config)).await??;
     Ok(())
