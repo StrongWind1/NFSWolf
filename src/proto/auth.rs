@@ -39,6 +39,9 @@ pub(crate) enum Credential {
     Sys(AuthSys),
     /// AUTH_SHORT: server-issued opaque session token (RFC 1057 S9.2).
     Short(Vec<u8>),
+    /// Pre-built opaque_auth for AUTH_DH or other raw credential injection.
+    #[cfg_attr(not(feature = "auth-dh"), expect(dead_code, reason = "constructed when auth-dh feature is enabled"))]
+    Raw(opaque_auth<'static>),
 }
 
 impl Credential {
@@ -48,6 +51,7 @@ impl Credential {
             Self::None => opaque_auth::default(),
             Self::Sys(auth) => auth.to_opaque_auth(next_stamp()),
             Self::Short(token) => onc_rpc_client::auth::short_credential(token),
+            Self::Raw(auth) => auth.clone(),
         }
     }
 }

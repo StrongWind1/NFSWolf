@@ -78,6 +78,17 @@ pub(crate) struct ShellArgs {
     /// NFS servers (Solaris, NetApp ONTAP).
     #[arg(long, value_name = "HEX", help_heading = H_IDENTITY)]
     pub short_token: Option<String>,
+
+    /// AUTH_DH network name (e.g. "unix.0@domain"). Enables AUTH_DH
+    /// authentication using 192-bit DH + 56-bit DES (RFC 1057 S9.3).
+    /// Requires --auth-dh-pubkey. Only useful against Solaris/Illumos servers.
+    #[arg(long, value_name = "NAME", requires = "auth_dh_pubkey", help_heading = H_IDENTITY)]
+    pub auth_dh_netname: Option<String>,
+
+    /// Server's DH public key (48 hex chars = 192 bits). Obtain from the
+    /// NIS publickey.byname map or from the server's documentation.
+    #[arg(long, value_name = "HEX", help_heading = H_IDENTITY)]
+    pub auth_dh_pubkey: Option<String>,
 }
 
 // =============================================================================
@@ -124,6 +135,34 @@ impl ShellSetup {
             let token = ShellHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --short-token hex: {e}"))?;
             eprintln!("{}", crate::output::status_info(&format!("Using AUTH_SHORT token ({} bytes)", token.0.len())));
             Credential::Short(token.0)
+        } else if let Some(ref netname) = args.auth_dh_netname {
+            #[cfg(feature = "auth-dh")]
+            {
+                let pubkey_hex = args.auth_dh_pubkey.as_deref().ok_or_else(|| anyhow::anyhow!("--auth-dh-pubkey required with --auth-dh-netname"))?;
+                let pubkey_bytes = ShellHandle::from_hex(pubkey_hex).map_err(|e| anyhow::anyhow!("invalid --auth-dh-pubkey hex: {e}"))?;
+                let pubkey: [u8; 24] = pubkey_bytes.0.try_into().map_err(|_| anyhow::anyhow!("--auth-dh-pubkey must be exactly 48 hex chars (24 bytes / 192 bits)"))?;
+                // DH secret key -- time-based nonce. The 192-bit DH is broken
+                // regardless, so cryptographic randomness is unnecessary.
+                let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                let nanos = nonce.as_nanos().to_le_bytes();
+                let secs = nonce.as_secs().to_le_bytes();
+                let sub = nonce.subsec_nanos().to_le_bytes();
+                let mut secret = [0u8; 24];
+                secret[..8].copy_from_slice(&nanos[..8]);
+                secret[8..16].copy_from_slice(&secs);
+                secret[16..20].copy_from_slice(&sub);
+                secret[20..24].copy_from_slice(&sub);
+                let mut session = onc_rpc_client::auth_dh::AuthDhSession::new(netname, &pubkey, &secret);
+                let (cred_auth, _verf_auth) = session.first_credential();
+                eprintln!("{}", crate::output::status_info(&format!("AUTH_DH session established for {netname} (192-bit DH + 56-bit DES)")));
+                eprintln!("{}", crate::output::status_warn("AUTH_DH crypto is broken: 192-bit DH is factorable in seconds, 56-bit DES brute-forced in hours"));
+                Credential::Raw(cred_auth)
+            }
+            #[cfg(not(feature = "auth-dh"))]
+            {
+                let _ = netname;
+                anyhow::bail!("AUTH_DH support requires the auth-dh feature: rebuild with --features auth-dh");
+            }
         } else {
             Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &hostname))
         };

@@ -62,7 +62,7 @@ impl PooledNfs3 for Nfs3Client {
             // empty string would put a blank machinename on the wire -- a
             // distinctive artifact in the server's logs, and inconsistent with
             // the default `fuse.rs` uses for the same purpose.
-            crate::proto::auth::Credential::None | crate::proto::auth::Credential::Short(_) => DEFAULT_MACHINENAME,
+            crate::proto::auth::Credential::None | crate::proto::auth::Credential::Short(_) | crate::proto::auth::Credential::Raw(_) => DEFAULT_MACHINENAME,
         }
     }
 
