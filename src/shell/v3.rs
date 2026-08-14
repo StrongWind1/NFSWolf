@@ -76,7 +76,14 @@ fn is_nfs_acces(e: &anyhow::Error) -> bool {
 
 #[expect(clippy::needless_pass_by_value, reason = "map_err requires FnOnce(E) -> F")]
 fn fault_to_anyhow<E: std::fmt::Display>(e: Nfs3Fault<E>) -> anyhow::Error {
-    anyhow::anyhow!("{e}")
+    use crate::shell::ops::ShellError;
+    match e.status() {
+        Some(nfs_err) => {
+            let se: ShellError = nfs_err.into();
+            anyhow::Error::new(se).context(format!("{e}"))
+        },
+        None => anyhow::anyhow!("{e}"),
+    }
 }
 
 impl ShellOps for V3Ops {

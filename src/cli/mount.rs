@@ -281,7 +281,16 @@ async fn connect_v4_mount(args: &MountArgs, target: &crate::cli::target::Target,
         eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv4): {hex}")));
         ShellHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?
     } else {
-        let fh_bytes = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?;
+        // Navigate from the pseudo-root into the export path via LOOKUP.
+        // PUTROOTFH gives the NFSv4 pseudo-root (/); we need the export
+        // directory itself, not the top-level pseudo-FS.
+        let components: Vec<&str> = export.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        let fh_bytes = if components.is_empty() {
+            client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?
+        } else {
+            eprintln!("{}", crate::output::status_info(&format!("Navigating to export {export}")));
+            client.lookup_fh(&components).await.map_err(|e| anyhow::anyhow!("LOOKUP into {export} failed: {e}"))?
+        };
         ShellHandle(fh_bytes)
     };
 

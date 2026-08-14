@@ -80,19 +80,31 @@ fn v2_info(a: &Nfs2FileAttr) -> ShellFileInfo {
     }
 }
 
+#[expect(clippy::needless_pass_by_value, reason = "map_err requires FnOnce(E) -> F")]
+fn v2err_to_anyhow<E: std::fmt::Display>(e: nfs_v2::Nfs2Error<E>) -> anyhow::Error {
+    use crate::shell::ops::ShellError;
+    match e.status() {
+        Some(stat) => {
+            let se: ShellError = stat.into();
+            anyhow::Error::new(se).context(format!("{e}"))
+        },
+        None => anyhow::anyhow!("{e}"),
+    }
+}
+
 impl ShellOps for V2Ops {
     async fn lookup(&self, dir: &ShellHandle, name: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
-        let (fh, attrs) = self.client.lookup(&to_v2_fh(dir), name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (fh, attrs) = self.client.lookup(&to_v2_fh(dir), name).await.map_err(v2err_to_anyhow)?;
         Ok((from_v2_fh(&fh), v2_info(&attrs)))
     }
 
     async fn lookup_path(&self, start: &ShellHandle, path: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
-        let (fh, attrs) = self.client.lookup_path(&to_v2_fh(start), path).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (fh, attrs) = self.client.lookup_path(&to_v2_fh(start), path).await.map_err(v2err_to_anyhow)?;
         Ok((from_v2_fh(&fh), v2_info(&attrs)))
     }
 
     async fn getattr(&self, fh: &ShellHandle) -> anyhow::Result<ShellFileInfo> {
-        let attrs = self.client.getattr(&to_v2_fh(fh)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let attrs = self.client.getattr(&to_v2_fh(fh)).await.map_err(v2err_to_anyhow)?;
         Ok(v2_info(&attrs))
     }
 
@@ -153,41 +165,41 @@ impl ShellOps for V2Ops {
     async fn write_chunk(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
         let off32 = u32::try_from(offset).unwrap_or(u32::MAX);
         // NFSv2 WRITE returns attrs we don't use; errors propagate via ?.
-        let _ = self.client.write(&to_v2_fh(fh), off32, data.to_vec()).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let _ = self.client.write(&to_v2_fh(fh), off32, data.to_vec()).await.map_err(v2err_to_anyhow)?;
         Ok(u32::try_from(data.len()).unwrap_or(u32::MAX))
     }
 
     async fn create_file(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<ShellHandle> {
         let attrs = v2_sattr_mode(mode);
-        let (fh, _) = self.client.create(&to_v2_fh(dir), name, &attrs).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (fh, _) = self.client.create(&to_v2_fh(dir), name, &attrs).await.map_err(v2err_to_anyhow)?;
         Ok(from_v2_fh(&fh))
     }
 
     async fn mkdir(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<ShellHandle> {
         let attrs = v2_sattr_mode(mode);
-        let (fh, _) = self.client.mkdir(&to_v2_fh(dir), name, &attrs).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (fh, _) = self.client.mkdir(&to_v2_fh(dir), name, &attrs).await.map_err(v2err_to_anyhow)?;
         Ok(from_v2_fh(&fh))
     }
 
     async fn remove(&self, dir: &ShellHandle, name: &str) -> anyhow::Result<()> {
-        self.client.remove(&to_v2_fh(dir), name).await.map_err(|e| anyhow::anyhow!("{e}"))
+        self.client.remove(&to_v2_fh(dir), name).await.map_err(v2err_to_anyhow)
     }
 
     async fn rmdir(&self, dir: &ShellHandle, name: &str) -> anyhow::Result<()> {
-        self.client.rmdir(&to_v2_fh(dir), name).await.map_err(|e| anyhow::anyhow!("{e}"))
+        self.client.rmdir(&to_v2_fh(dir), name).await.map_err(v2err_to_anyhow)
     }
 
     async fn rename(&self, from_dir: &ShellHandle, from: &str, to_dir: &ShellHandle, to: &str) -> anyhow::Result<()> {
-        self.client.rename(&to_v2_fh(from_dir), from, &to_v2_fh(to_dir), to).await.map_err(|e| anyhow::anyhow!("{e}"))
+        self.client.rename(&to_v2_fh(from_dir), from, &to_v2_fh(to_dir), to).await.map_err(v2err_to_anyhow)
     }
 
     async fn symlink(&self, dir: &ShellHandle, name: &str, target: &str) -> anyhow::Result<()> {
         let attrs = v2_sattr_mode(0o777);
-        self.client.symlink(&to_v2_fh(dir), name, target, &attrs).await.map_err(|e| anyhow::anyhow!("{e}"))
+        self.client.symlink(&to_v2_fh(dir), name, target, &attrs).await.map_err(v2err_to_anyhow)
     }
 
     async fn hard_link(&self, fh: &ShellHandle, dir: &ShellHandle, name: &str) -> anyhow::Result<()> {
-        self.client.link(&to_v2_fh(fh), &to_v2_fh(dir), name).await.map_err(|e| anyhow::anyhow!("{e}"))
+        self.client.link(&to_v2_fh(fh), &to_v2_fh(dir), name).await.map_err(v2err_to_anyhow)
     }
 
     async fn mknod(&self, _dir: &ShellHandle, _name: &str, _dev_type: ShellDeviceType, _major: u32, _minor: u32, _mode: u32) -> anyhow::Result<ShellHandle> {
@@ -195,18 +207,18 @@ impl ShellOps for V2Ops {
     }
 
     async fn readlink(&self, fh: &ShellHandle) -> anyhow::Result<String> {
-        self.client.readlink(&to_v2_fh(fh)).await.map_err(|e| anyhow::anyhow!("{e}"))
+        self.client.readlink(&to_v2_fh(fh)).await.map_err(v2err_to_anyhow)
     }
 
     async fn set_mode(&self, fh: &ShellHandle, mode: u32) -> anyhow::Result<()> {
         // NFSv2 SETATTR returns attrs we don't use; errors propagate via ?.
-        let _ = self.client.setattr(&to_v2_fh(fh), &v2_sattr_mode(mode)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let _ = self.client.setattr(&to_v2_fh(fh), &v2_sattr_mode(mode)).await.map_err(v2err_to_anyhow)?;
         Ok(())
     }
 
     async fn set_owner(&self, fh: &ShellHandle, uid: Option<u32>, gid: Option<u32>) -> anyhow::Result<()> {
         // NFSv2 SETATTR returns attrs we don't use; errors propagate via ?.
-        let _ = self.client.setattr(&to_v2_fh(fh), &v2_sattr_owner(uid, gid)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let _ = self.client.setattr(&to_v2_fh(fh), &v2_sattr_owner(uid, gid)).await.map_err(v2err_to_anyhow)?;
         Ok(())
     }
 
@@ -254,14 +266,14 @@ impl ShellOps for V2Ops {
 
     async fn setattr(&self, fh: &ShellHandle, attrs: ShellSetAttr) -> anyhow::Result<ShellFileInfo> {
         let sa = shell_setattr_to_v2(&attrs);
-        let _ = self.client.setattr(&to_v2_fh(fh), &sa).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let _ = self.client.setattr(&to_v2_fh(fh), &sa).await.map_err(v2err_to_anyhow)?;
         // Fetch fresh attrs after the change.
-        let a = self.client.getattr(&to_v2_fh(fh)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let a = self.client.getattr(&to_v2_fh(fh)).await.map_err(v2err_to_anyhow)?;
         Ok(v2_info(&a))
     }
 
     async fn statfs(&self, fh: &ShellHandle) -> anyhow::Result<ShellFsStat> {
-        let fs = self.client.statfs(&to_v2_fh(fh)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let fs = self.client.statfs(&to_v2_fh(fh)).await.map_err(v2err_to_anyhow)?;
         let bsize = u64::from(fs.bsize);
         Ok(ShellFsStat { total_bytes: u64::from(fs.blocks).saturating_mul(bsize), free_bytes: u64::from(fs.bfree).saturating_mul(bsize), avail_bytes: u64::from(fs.bavail).saturating_mul(bsize), total_files: 0, free_files: 0, block_size: fs.bsize })
     }
@@ -324,7 +336,7 @@ async fn list_dir_v2(client: &Nfs2Client, dir: &Nfs2FileHandle) -> anyhow::Resul
     let mut all_entries = Vec::new();
     let mut cookie = 0u32;
     loop {
-        let entries = client.readdir(dir, cookie, 4096).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let entries = client.readdir(dir, cookie, 4096).await.map_err(v2err_to_anyhow)?;
         if entries.is_empty() {
             break;
         }
@@ -346,12 +358,12 @@ async fn list_dir_v2(client: &Nfs2Client, dir: &Nfs2FileHandle) -> anyhow::Resul
 }
 
 async fn read_file_v2(client: &Nfs2Client, fh: &Nfs2FileHandle) -> anyhow::Result<Vec<u8>> {
-    client.read_file(fh).await.map_err(|e| anyhow::anyhow!("{e}"))
+    client.read_file(fh).await.map_err(v2err_to_anyhow)
 }
 
 async fn read_chunk_v2(client: &Nfs2Client, fh: &Nfs2FileHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
     let off32 = u32::try_from(offset).unwrap_or(u32::MAX);
-    let (_, data) = client.read(fh, off32, count.min(8192)).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (_, data) = client.read(fh, off32, count.min(8192)).await.map_err(v2err_to_anyhow)?;
     Ok(data)
 }
 

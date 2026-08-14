@@ -75,7 +75,6 @@ pub(crate) struct ShellFileInfo {
 /// Embedded in `anyhow::Error` chains by ShellOps implementations so the FUSE
 /// adapter can downcast to a specific errno instead of defaulting to EIO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code, reason = "variants cover the full NFS error space; backends construct them as needed")]
 pub(crate) enum ShellError {
     Perm,
     NoEnt,
@@ -127,6 +126,83 @@ impl std::fmt::Display for ShellError {
 }
 
 impl std::error::Error for ShellError {}
+
+impl From<nfs_v3::Nfs3Error> for ShellError {
+    fn from(e: nfs_v3::Nfs3Error) -> Self {
+        use nfs_v3::Nfs3Error as E;
+        match e {
+            E::Perm => Self::Perm,
+            E::NoEnt => Self::NoEnt,
+            E::Nxio | E::Nodev => Self::Nxio,
+            E::Acces => Self::Acces,
+            E::Exist => Self::Exist,
+            E::Xdev => Self::Xdev,
+            E::NotDir => Self::NotDir,
+            E::IsDir => Self::IsDir,
+            E::Inval => Self::Inval,
+            E::Fbig => Self::FBig,
+            E::Nospc => Self::NoSpc,
+            E::Rofs => Self::Rofs,
+            E::NameTooLong => Self::NameTooLong,
+            E::NotEmpty => Self::NotEmpty,
+            E::Dquot => Self::Dquot,
+            E::Stale => Self::Stale,
+            E::BadHandle => Self::BadHandle,
+            E::NotSupp => Self::NotSupp,
+            E::ServerFault => Self::ServerFault,
+            _ => Self::Io,
+        }
+    }
+}
+
+impl From<nfs_v4::wire::Nfs4Status> for ShellError {
+    fn from(s: nfs_v4::wire::Nfs4Status) -> Self {
+        use nfs_v4::wire::Nfs4Status as S;
+        match s {
+            S::Perm => Self::Perm,
+            S::NoEnt => Self::NoEnt,
+            S::Nxio => Self::Nxio,
+            S::Acces => Self::Acces,
+            S::Exist => Self::Exist,
+            S::NotDir => Self::NotDir,
+            S::IsDir => Self::IsDir,
+            S::Inval => Self::Inval,
+            S::Fbig => Self::FBig,
+            S::NoSpc => Self::NoSpc,
+            S::Rofs => Self::Rofs,
+            S::NameTooLong => Self::NameTooLong,
+            S::NotEmpty => Self::NotEmpty,
+            S::Stale => Self::Stale,
+            S::BadHandle => Self::BadHandle,
+            S::NotSupp => Self::NotSupp,
+            S::Dquot => Self::Dquot,
+            _ => Self::Io,
+        }
+    }
+}
+
+impl From<nfs_v2::wire::Nfs2Stat> for ShellError {
+    fn from(s: nfs_v2::wire::Nfs2Stat) -> Self {
+        use nfs_v2::wire::Nfs2Stat as S;
+        match s {
+            S::Perm => Self::Perm,
+            S::NoEnt => Self::NoEnt,
+            S::Nxio | S::NoDev => Self::Nxio,
+            S::Acces => Self::Acces,
+            S::Exist => Self::Exist,
+            S::NotDir => Self::NotDir,
+            S::IsDir => Self::IsDir,
+            S::Fbig => Self::FBig,
+            S::NoSpc => Self::NoSpc,
+            S::Rofs => Self::Rofs,
+            S::NameTooLong => Self::NameTooLong,
+            S::NotEmpty => Self::NotEmpty,
+            S::Dquot => Self::Dquot,
+            S::Stale => Self::Stale,
+            _ => Self::Io,
+        }
+    }
+}
 
 #[cfg(feature = "fuse")]
 impl ShellError {

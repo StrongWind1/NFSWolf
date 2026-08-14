@@ -91,10 +91,17 @@ fn parse_v4_owner_id(owner: Option<&str>) -> u32 {
     owner.and_then(|s| s.parse::<u32>().ok().or_else(|| s.split('@').next().and_then(|u| u.parse().ok()))).unwrap_or(65534)
 }
 
-/// Convert an `Nfs4Error` to `anyhow::Error`.
+/// Convert an `Nfs4Error` to `anyhow::Error`, attaching `ShellError` for FUSE errno mapping.
 #[expect(clippy::needless_pass_by_value, reason = "map_err requires FnOnce(E) -> F")]
 fn v4_err<E: std::fmt::Display>(e: Nfs4Error<E>) -> anyhow::Error {
-    anyhow::anyhow!("{e}")
+    use crate::shell::ops::ShellError;
+    match &e {
+        Nfs4Error::Status(status) => {
+            let se: ShellError = (*status).into();
+            anyhow::Error::new(se).context(format!("{e}"))
+        },
+        _ => anyhow::anyhow!("{e}"),
+    }
 }
 
 /// Convert a raw transport error to `anyhow::Error`.
