@@ -23,16 +23,22 @@ use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFil
 /// Read operations use the anonymous stateid (no OPEN required). Write
 /// operations lazily create an `Nfs4Session` on first use, then go through the
 /// OPEN + WRITE + CLOSE lifecycle mandated by RFC 7530.
+/// Global counter for unique NFSv4 client names (prevents SETCLIENTID collisions).
+static V4_INSTANCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub(crate) struct V4Ops {
     client: Arc<Nfs4Client>,
     /// Lazily initialized session for stateful operations (OPEN/WRITE/CLOSE).
     session: tokio::sync::Mutex<Option<Nfs4Session>>,
     cred_cache: CredCache,
+    /// Unique instance ID to prevent SETCLIENTID collisions between ephemeral
+    /// ops instances created by the FUSE credential ladder.
+    instance_id: u64,
 }
 
 impl V4Ops {
     pub(crate) fn new(client: Arc<Nfs4Client>) -> Self {
-        Self { client, session: tokio::sync::Mutex::new(None), cred_cache: CredCache::new() }
+        Self { client, session: tokio::sync::Mutex::new(None), cred_cache: CredCache::new(), instance_id: V4_INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
     }
 
     fn make_v4(&self, uid: u32, gid: u32) -> Nfs4Client {
@@ -43,7 +49,11 @@ impl V4Ops {
     async fn ensure_session(&self) -> anyhow::Result<()> {
         let mut guard = self.session.lock().await;
         if guard.is_none() {
-            let sess = self.client.establish("nfswolf", "0.0.0.0.0.0").await.map_err(v4_err)?;
+            // Each V4Ops instance uses a unique client name so ephemeral instances
+            // from with_credential() get distinct server-side clientids and
+            // don't stomp each other's seqid counters (NFS4ERR_BAD_SEQID).
+            let client_name = format!("nfswolf-{}", self.instance_id);
+            let sess = self.client.establish(&client_name, "0.0.0.0.0.0").await.map_err(v4_err)?;
             *guard = Some(sess);
         }
         Ok(())
