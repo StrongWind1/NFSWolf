@@ -38,7 +38,6 @@ pub(crate) enum Credential {
     /// AUTH_SYS: client-asserted UID and GID, which the server does not verify.
     Sys(AuthSys),
     /// AUTH_SHORT: server-issued opaque session token (RFC 1057 S9.2).
-    #[expect(dead_code, reason = "constructed by --short-token CLI flag and analyzer active probe")]
     Short(Vec<u8>),
 }
 

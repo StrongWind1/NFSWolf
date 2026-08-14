@@ -15,7 +15,7 @@ use rustyline::history::DefaultHistory;
 
 use crate::cli::probe::{build_gid_list, make_mount_client};
 use crate::cli::target::Source as TargetSource;
-use crate::cli::{GlobalOpts, H_BEHAVIOR, H_PERMISSIONS, H_TARGET};
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_IDENTITY, H_PERMISSIONS, H_TARGET};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
@@ -71,6 +71,13 @@ pub(crate) struct ShellArgs {
     /// NFS protocol version (2, 3, or 4). Auto-detected from the server if omitted.
     #[arg(long, value_name = "VER", value_parser = clap::value_parser!(u32).range(2..=4), help_heading = H_BEHAVIOR)]
     pub nfs_version: Option<u32>,
+
+    /// AUTH_SHORT session token (hex). Replays a server-issued opaque token
+    /// as the RPC credential instead of AUTH_SYS. Obtain from a packet
+    /// capture or from the analyzer's F-3.9 active probe against non-Linux
+    /// NFS servers (Solaris, NetApp ONTAP).
+    #[arg(long, value_name = "HEX", help_heading = H_IDENTITY)]
+    pub short_token: Option<String>,
 }
 
 // =============================================================================
@@ -113,7 +120,13 @@ impl ShellSetup {
         let circuit = Arc::new(CircuitBreaker::default_config());
         let stealth = StealthConfig::new(globals.delay, globals.jitter);
         let gids = build_gid_list(gid, &globals.aux_gids);
-        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &hostname));
+        let cred = if let Some(ref hex) = args.short_token {
+            let token = ShellHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --short-token hex: {e}"))?;
+            eprintln!("{}", crate::output::status_info(&format!("Using AUTH_SHORT token ({} bytes)", token.0.len())));
+            Credential::Short(token.0)
+        } else {
+            Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &hostname))
+        };
 
         Ok(Self { host, target, pool, circuit, stealth, cred, uid, gid, hostname, allow_write: args.allow_write, command: args.command.clone(), nfs_port: globals.nfs_port })
     }
