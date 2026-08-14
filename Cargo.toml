@@ -107,6 +107,7 @@ workspace = true
 [features]
 default = ["fuse"]
 fuse = ["dep:fuser"]
+auth-dh = ["onc-rpc-client/auth-dh"]
 
 [[bin]]
 name = "nfswolf"

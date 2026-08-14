@@ -35,6 +35,8 @@
 //! [RFC 5531]: https://www.rfc-editor.org/rfc/rfc5531
 
 pub mod auth;
+#[cfg(feature = "auth-dh")]
+pub mod auth_dh;
 pub mod rpc;
 pub mod transport;
 
