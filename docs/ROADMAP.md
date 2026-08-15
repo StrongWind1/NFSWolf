@@ -122,7 +122,7 @@ Deferred until a consumer exists. The recon value is already captured.
 
 ### ZFS escape handles
 
-ZFS file handles use a different structure than ext4/XFS/BTRFS. Requires lab testing with a ZFS NFS server to capture and analyze handle formats. The ext4/XFS/BTRFS escape paths are fully implemented; ZFS is the remaining gap.
+**Done.** ZFS root handle construction (`construct_zfs_root_handle`) is implemented using `zfid_short_t` layout with `gen=0` bypass. Lab-tested on ZFS NFS exports.
 
 ### DRC replay attacks
 
@@ -134,7 +134,7 @@ After detecting a server reboot (via write verifier oracle), replay captured des
 
 ### AUTH_SHORT token capture and replay
 
-AUTH_SHORT opaque tokens captured from wire traffic can be replayed to impersonate the original client. Requires network sniffing or PCAP parsing. Post-v1.0.
+**Done.** AUTH_SHORT credential replay is implemented: the shell captures opaque tokens from server reply verifiers and replays them via `--short-token`. PCAP-based offline capture remains out of scope (use tcpdump/wireshark externally).
 
 ---
 
@@ -193,9 +193,7 @@ Pre-publish checklist is complete. The binary (`nfswolf`) is distributed via Git
 
 Comparison against HVS Consulting's nfs-security-tooling (nfs_analyze + fuse_nfs, December 2024). Remaining gap:
 
-| Gap | Description | Effort |
-|-----|-------------|--------|
-| ZFS escape handles | ZFS handle format not implemented in `FileHandleAnalyzer` | Medium (needs lab) |
+No remaining gaps. ZFS escape handles were implemented and lab-tested.
 
 ---
 

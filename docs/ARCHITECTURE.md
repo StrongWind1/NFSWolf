@@ -298,7 +298,7 @@ This began as a dependency on [`nfs3-rs`](https://github.com/Vaiz/nfs3) (Unlicen
 |-------|----------|
 | `onc-xdr-derive` | `#[derive(XdrCodec)]` proc macro |
 | `onc-xdr` | `Pack`/`Unpack` traits, `Opaque`, `List`, `BoundedList`, `Void`, length-hardened readers (`PREALLOC_CAP`) |
-| `onc-rpc-client` | `RpcClient`, `RpcTransport` trait, `DirectTransport`, `AuthSys`, `AuthFlavor`, fragment headers, `AsyncRead`/`AsyncWrite` with tokio backend |
+| `onc-rpc-client` | `RpcClient`, `RpcTransport` trait, `DirectTransport`, `AuthSys`, `AuthFlavor`, `AuthDhSession` (RFC 2695, `auth-dh` feature), AUTH_SHORT credential replay, fragment headers, `AsyncRead`/`AsyncWrite` with tokio backend |
 | `onc-rpcbind` | Portmapper v2 (RFC 1057), rpcbind v3/v4 (RFC 1833), `PortmapperClient`, `RpcbindClient` |
 | `nfs-mount` | MOUNT v1/v3 (RFC 1094 Appendix A / RFC 1813 Appendix I), `MountV1Client`, `MountClient` |
 | `nfs-v2` | All 18 NFSv2 procedures (RFC 1094), fixed 32-byte handles, `Nfs2Client`, `Nfs2Error` with classification predicates, `Display` for `NfsStat` |
@@ -637,7 +637,7 @@ nfswolf/
 │   │   ├── v2.rs                  # V2Ops: ShellOps impl for NFSv2 with identity change via TCP reconnect
 │   │   ├── v3.rs                  # V3Ops: ShellOps impl for NFSv3 with credential escalation (read_file and read_chunk)
 │   │   └── v4.rs                  # V4Ops: ShellOps impl for NFSv4 with credential escalation via try_with_escalation()
-│   ├── fuse.rs                    # NfsFuse: full FUSE Filesystem trait, inode map, attr cache
+│   ├── fuse.rs                    # NfsFuse<O: ShellOps>: generic FUSE Filesystem over NFSv2/v3/v4, inode map, attr cache
 │   ├── cli/
 │   │   ├── mod.rs                 # Cli, Command enum, GlobalOpts, H_* help-section constants
 │   │   ├── target.rs              # Unified host[:/export] positional parser
@@ -646,7 +646,7 @@ nfswolf/
 │   │   ├── analyze.rs             # nfswolf analyze
 │   │   ├── mount.rs               # nfswolf mount (FUSE) -- daemonises
 │   │   ├── shell.rs               # nfswolf shell: ShellSetup + run_repl + connect_v2/v3/v4 + auto-detect
-│   │   ├── escape.rs              # nfswolf escape (delegates to engine/escape.rs via Nfs3EscapeProbe)
+│   │   ├── escape.rs              # nfswolf escape (delegates to engine/escape.rs via Nfs3EscapeProbe/Nfs2EscapeProbe/Nfs4EscapeProbe)
 │   │   ├── brute_handle.rs        # nfswolf brute-handle
 │   │   ├── uid_spray.rs           # nfswolf uid-spray (last-resort fallback)
 │   │   └── convert.rs             # nfswolf convert
@@ -754,7 +754,7 @@ Only `shell` exposes `--nfs-version` (2, 3, or 4). When omitted, `resolve_versio
 | Subcommand | NFS version used | Why no `--nfs-version` flag |
 |------------|-----------------|----------------------------|
 | `shell` | 2, 3, or 4 (auto-detected or user's choice) | **Has the flag.** Auto-detects when omitted. All three versions share the full 52-command shell via `NfsShell<V2Ops>` / `NfsShell<V3Ops>` / `NfsShell<V4Ops>`. |
-| `mount` | v3 only | The FUSE adapter (`fuse.rs`) is wired to `Nfs3Client` throughout. Use `shell --nfs-version 2` for interactive v2 access. |
+| `mount` | v2, v3, or v4 (auto-detected) | `NfsFuse<O: ShellOps>` is generic over NFS version; auto-detection probes v3 -> v2 -> v4 when `--nfs-version` is omitted. |
 | `escape` | Auto: v3 matrix, v2 fallback, v4 LOOKUPP | Tries all versions automatically. Forcing one would reduce coverage. |
 | `analyze` | v3 (with v1 handle acquisition fallback) | The 25+ checks use v3-only procedures (READDIRPLUS, COMMIT, PATHCONF, FSINFO). v2 lacks most of them. |
 | `brute-handle` | Auto: v3 first, v2 fallback | Auto-falls back. Forcing v2 would lose the STALE/BADHANDLE oracle (v2 has only STALE). |

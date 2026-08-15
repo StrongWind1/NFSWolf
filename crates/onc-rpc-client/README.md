@@ -83,7 +83,7 @@ let result: MyRes = transport.call_as(auth, 100_003, 3, 1, &args).await?;
 
 ## Protocol coverage
 
-Implements the ONC RPC v2 call/reply message format ([RFC 5531]). Supports `AUTH_NONE` and `AUTH_SYS` credentials. The `auth_flavor` wire enum also includes `RPCSEC_GSS` (6) for Kerberos detection and `AUTH_TLS` (7, [RFC 9289]) for STARTTLS probing -- useful for security reconnaissance even though this crate does not implement the GSS or TLS handshakes. The `RpcTransport` trait enables `call_as()` for identity switching on a live connection without re-handshaking. `PROG_MISMATCH` errors preserve the server's supported version range (`low`/`high`) rather than discarding it -- this is a version-enumeration oracle.
+Implements the ONC RPC v2 call/reply message format ([RFC 5531]). Supports `AUTH_NONE`, `AUTH_SYS`, `AUTH_DH` (RFC 2695, behind the `auth-dh` Cargo feature), and `AUTH_SHORT` credential replay. The `auth_flavor` wire enum also includes `RPCSEC_GSS` (6) for Kerberos detection and `AUTH_TLS` (7, [RFC 9289]) for STARTTLS probing -- useful for security reconnaissance even though this crate does not implement the GSS or TLS handshakes. The `RpcTransport` trait enables `call_as()` for identity switching on a live connection without re-handshaking. `PROG_MISMATCH` errors preserve the server's supported version range (`low`/`high`) rather than discarding it -- this is a version-enumeration oracle.
 
 The transport layer provides async I/O traits (`AsyncRead`/`AsyncWrite`), a tokio backend, TCP connection helpers, and UDP single-shot RPC calls.
 

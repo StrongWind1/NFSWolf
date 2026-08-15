@@ -276,7 +276,7 @@ File handles are bearer tokens -- possession is authorization.
 
 **Attack**: From `/srv/nfs/public` (open to everyone), issue `cd ..` to reach `/srv/nfs/`, then `cd data/etc` to enter a different export, then `cat passwd` to read credentials. Confirmed: starting from `public`, traversed to `data/etc/passwd` in 3 operations. The pseudo-root READDIR also reveals the names of ALL exports (F-5.5), including IP-restricted ones.
 
-**What nfswolf tests**: The `exports` shell command (planned) will enumerate reachable sibling exports via LOOKUPP. Standard `cd ..` + `cd <sibling>` demonstrates the lateral movement manually.
+**What nfswolf tests**: The `exports` shell command enumerates reachable sibling exports via LOOKUPP. Standard `cd ..` + `cd <sibling>` demonstrates the lateral movement manually.
 
 ---
 

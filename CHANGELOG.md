@@ -16,6 +16,11 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - **F-2.11: NFSv4 LOOKUPP export escape** -- critical severity. LOOKUPP from a subdirectory export reaches the filesystem root, bypassing export boundaries without MOUNT.
 - **F-2.12: NFSv4 LOOKUPP cross-export lateral access** -- high severity. LOOKUPP traversal through the pseudo-root reaches sibling exports.
 - **F-5.10: pNFS flex-file layout security downgrade** -- medium severity. pNFS data servers may bypass NFSv4 security enforcement.
+- **FUSE mount over NFSv2, v3, and v4** -- `NfsFuse` is now generic over `ShellOps` (`NfsFuse<O: ShellOps>`), supporting all three NFS versions with auto-detection when `--nfs-version` is omitted. Previously FUSE was hardwired to NFSv3 only. ShellOps gained FUSE-specific methods: `access`, `setattr`, `statfs`, `commit`, `with_credential`.
+- **AUTH_DH (AUTH_DES) cryptographic sessions** -- full RFC 2695 implementation behind the `auth-dh` Cargo feature: Diffie-Hellman key exchange, 56-bit DES encryption, timestamp verification, `AuthDhSession` in `crates/onc-rpc-client/src/auth_dh.rs`. CLI flags `--auth-dh-netname` and `--auth-dh-pubkey` on the shell subcommand.
+- **AUTH_SHORT credential replay** -- captures AUTH_SHORT opaque tokens from server reply verifiers and replays them as credentials. CLI flag `--short-token` on the shell subcommand.
+- **Nfs2EscapeProbe** -- escape engine now supports NFSv2-only servers via a dedicated `Nfs2EscapeProbe` implementation, completing the v2/v3/v4 escape coverage.
+- **NFS defense guide** -- `docs/NFS_DEFENSE_GUIDE.md`, a comprehensive hardening guide with live lab test results covering export configuration, auth enforcement, and network-level controls.
 - **Filesystem escape research matrix** -- `docs/research/FILESYSTEM_ESCAPE_MATRIX.md`, 335-line analysis of 23 Linux filesystem types with kernel source references, handle formats, root inodes, and generation check behavior.
 - **Linux kernel NFS breakdown** -- `ref/linux-kernel/BREAKDOWN.md`, 3200-line function-level walkthrough of Linux 7.1.8 knfsd mapping every security-relevant kernel code path to nfswolf findings.
 - **NFSv4 escape via LOOKUPP** -- pseudo-filesystem traversal to the real filesystem root, bypassing export boundaries without MOUNT.
@@ -48,6 +53,8 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - **NFSv4 LOOKUPP pseudo-FS vs real-FS root** -- correctly distinguishes pseudo-root from filesystem root in LOOKUPP output.
 - **clippy format_collect and needless_update** -- resolved CI-breaking clippy lints.
 - **Non-ASCII em-dashes in source** -- replaced with ASCII `--` to pass the hygiene gate.
+- **Unique NFSv4 client names** -- each `V4Ops` instance now generates a unique client name to avoid `NFS4ERR_BAD_SEQID` when multiple v4 sessions coexist.
+- **FUSE errno mapping** -- `ShellError` is now attached to anyhow chains so the FUSE layer can extract the correct errno (EACCES, ENOENT, etc.) instead of returning EIO for every failure.
 
 ## [1.0.0] - 2026-08-03
 

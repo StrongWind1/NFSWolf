@@ -44,10 +44,10 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 
 - **Documented security findings** across export, transport, file-handle, and credential attack categories - full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
 - **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2.
-- **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
+- **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, AUTH_DH cryptographic sessions (RFC 2695, optional `auth-dh` feature), AUTH_SHORT credential replay, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
 - **Offensive subcommands**: `escape` (export breakout across 18 filesystem types -- ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs -- cascading through v3 MOUNT, handle matrix, v2 MOUNT, v4 handle escape, and v4 LOOKUPP; `--all` reports every working root handle from all seed sources), `brute-handle` (inode/generation cross-product sweep with handle oracle), `uid-spray` (last-resort credential discovery).
 - **Interactive shell** across NFSv2, NFSv3, and NFSv4 with tab completion, `get -r` / `put -r`, `--verify <sha256>`, `--handle` MOUNT bypass, `-c` scripting mode, auto-version detection when `--nfs-version` is omitted, `exports` command for cross-export lateral discovery (F-2.12), `escape-root` for in-shell filesystem escape, and all standard POSIX-style verbs.
-- **FUSE**: mount any NFS export locally with spoofed credentials via `nfswolf mount`.
+- **FUSE**: mount any NFS export locally over NFSv2, v3, or v4 (auto-detected) with spoofed credentials via `nfswolf mount`.
 - **Six report formats**: HTML, JSON, CSV, Markdown, plain-text, ANSI console.
 
 ## Example
@@ -157,8 +157,8 @@ nfswolf convert -i results.json --format console
 | Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
 | Recon | `analyze` | Per-host security audit against the documented finding catalog |
 | Recon | `escape` | Construct escape handles across 18 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs); cascades through v3 MOUNT, handle matrix, v2 MOUNT, v4 handle escape, and v4 LOOKUPP; `--all` reports every working root handle from all seed sources |
-| Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4 (auto-detected when `--nfs-version` is omitted); 52 commands incl. `escape-root`, `exports` (F-2.12 sibling discovery), `suid-scan`, `secrets-scan`; `get -r` / `put -r` / `--verify` / `--handle` / `-c` |
-| Connect | `mount` | FUSE mount with spoofed AUTH_SYS credentials (`--features fuse`) |
+| Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4 (auto-detected when `--nfs-version` is omitted); 52 commands incl. `escape-root`, `exports` (F-2.12 sibling discovery), `suid-scan`, `secrets-scan`; `get -r` / `put -r` / `--verify` / `--handle` / `-c`; AUTH_DH sessions (`--auth-dh-netname`), AUTH_SHORT replay (`--short-token`) |
+| Connect | `mount` | FUSE mount over NFSv2, v3, or v4 (auto-detected) with spoofed AUTH_SYS credentials (`--features fuse`) |
 | Advanced | `brute-handle` | Brute-force file handles via inode/generation cross-product sweep with STALE / BADHANDLE oracle; reports all discovered handles; NFSv2 auto-fallback |
 | Advanced | `uid-spray` | Last-resort UID/GID brute force when auto-UID escalation fails |
 | Utilities | `convert` | Render a saved analysis result to HTML / JSON / CSV / Markdown / text / console (console prints to stdout without `-o`) |
@@ -210,21 +210,21 @@ The NFS protocol stack is split into eight standalone crates, published on [crat
 |---|---|
 | [`onc-xdr-derive`](https://crates.io/crates/onc-xdr-derive) | `#[derive(XdrCodec)]` proc macro for XDR (RFC 4506) |
 | [`onc-xdr`](https://crates.io/crates/onc-xdr) | XDR codec: `Pack`/`Unpack` traits, opaque data, length-hardened decoders |
-| [`onc-rpc-client`](https://crates.io/crates/onc-rpc-client) | ONC RPC v2 (RFC 5531) client with AUTH_SYS and async transport |
+| [`onc-rpc-client`](https://crates.io/crates/onc-rpc-client) | ONC RPC v2 (RFC 5531) client with AUTH_SYS, AUTH_DH (RFC 2695), AUTH_SHORT, and async transport |
 | [`onc-rpcbind`](https://crates.io/crates/onc-rpcbind) | Portmapper v2 (RFC 1057) and rpcbind v3/v4 (RFC 1833) |
 | [`nfs-mount`](https://crates.io/crates/nfs-mount) | MOUNT v1/v3 (RFC 1094 / RFC 1813) |
 | [`nfs-v2`](https://crates.io/crates/nfs-v2) | NFSv2 (RFC 1094): all 18 procedures |
 | [`nfs-v3`](https://crates.io/crates/nfs-v3) | NFSv3 (RFC 1813): all 22 procedures + domain types |
-| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): complete implementation -- all 37 ops, stateful client, 45 methods |
+| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): complete implementation -- all 37 ops, stateful client, 47 methods |
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 722 tests across 8 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 753 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (722 tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (753 tests), doc, hygiene, machete
 ```
 
 ## Credits

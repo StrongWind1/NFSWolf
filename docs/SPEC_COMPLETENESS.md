@@ -16,7 +16,7 @@ Verified by 10-agent parallel audit: 540 items checked, 505 correct on first pas
 | `onc-xdr-derive` | **Complete** | RFC 4506 | structs + enums + unions |
 | `onc-xdr` | **Complete** | RFC 4506 | all primitive types (i32, u32, i64, u64, f32, f64, bool, opaque, string, void) |
 | `onc-rpcbind` | **Complete** | RFC 1833 | portmapper 6/6 + rpcbind v3 8/8 + v4 12/12 |
-| `onc-rpc-client` | **Complete** (excluding RPCSEC_GSS) | RFC 5531 / RFC 2695 | TCP + UDP transport, AUTH_SYS, AUTH_DH wire types, multi-fragment, batched calls, broadcast |
+| `onc-rpc-client` | **Complete** (excluding RPCSEC_GSS) | RFC 5531 / RFC 2695 | TCP + UDP transport, AUTH_SYS, AUTH_DH full cryptographic sessions (`auth-dh` feature), AUTH_SHORT credential replay, multi-fragment, batched calls, broadcast |
 | `nfs-v4` | **Complete** — full RFC 7530 wire compliance + stateful infrastructure | RFC 7530 | 37/37 typed + decoded, 66 status codes, stateful OPEN/CLOSE/LOCK |
 
 ---
@@ -57,7 +57,8 @@ All RFC 5531 client-side features implemented except RPCSEC_GSS:
 | XID matching | sec 9 | Done |
 | All `accept_stat` / `reject_stat` / `auth_stat` values | sec 8.3, 13.2 | Done (including RFC 7861 extensions) |
 | AUTH_NONE / AUTH_SYS credentials | sec 14 | Done |
-| AUTH_DH wire types (credential + verifier) | RFC 2695 sec 2.4 | Done (separate cred/verf per spec) |
+| AUTH_DH full cryptographic session (DH key exchange, DES encryption, timestamp verification) | RFC 2695 | Done (`auth-dh` feature: `AuthDhSession`, `--auth-dh-netname`/`--auth-dh-pubkey` CLI flags) |
+| AUTH_SHORT credential replay (opaque token capture from reply verifiers) | RFC 5531 sec 14 / RFC 1057 sec 9.3 | Done (`--short-token` CLI flag) |
 | Batched calls | sec 8.4.1 | Done (`send_batch`) |
 | UDP RPC (no record marking) | sec 10 | Done |
 | UDP retransmission with XID reuse | sec 5 | Done (`call_rpc_udp_retry`) |
