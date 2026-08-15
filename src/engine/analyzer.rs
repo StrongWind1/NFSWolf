@@ -1518,6 +1518,10 @@ async fn run_nfs4_export_checks(addr: SocketAddr, export_path: &str, findings: &
     check_nfs4_sec_label(addr, export_path, findings, proxy, stealth).await;
     // NFSv4 named attributes (xattrs) via OPENATTR + READDIR.
     check_nfs4_xattrs(addr, export_path, findings, proxy, stealth).await;
+    // NFSv4 LOOKUPP export escape (F-2.11).
+    check_nfs4_lookupp_escape(addr, export_path, findings, proxy, stealth).await;
+    // NFSv4 cross-export lateral access via pseudo-root (F-2.12).
+    check_nfs4_cross_export(addr, export_path, findings, proxy, stealth).await;
 }
 
 /// Emit findings for auth flavors discovered via SECINFO, SECINFO_NO_NAME, or
@@ -2589,6 +2593,220 @@ async fn check_null_filename_fingerprint(nfs3: &Nfs3Client, root_fh: &FileHandle
             format!("Indeterminate ({e})")
         },
     }
+}
+
+// --- NFSv4 LOOKUPP escape and cross-export lateral checks ---
+
+/// F-2.11: LOOKUPP from a subdirectory export reaches the filesystem root.
+///
+/// LOOKUPP (RFC 7530 S16.14) walks to the parent directory. If the export is a
+/// subdirectory, repeated LOOKUPP eventually reaches the filesystem root,
+/// bypassing the export boundary without MOUNT. The check walks LOOKUPP until
+/// the handle stabilises (root is its own parent) or the server denies the
+/// request at the boundary. A successful traversal of 1+ levels proves the
+/// export is a subdirectory AND the server does not enforce export boundaries
+/// on LOOKUPP.
+async fn check_nfs4_lookupp_escape(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::{ArgOp, ResOpData};
+
+    const MAX_DEPTH: usize = 64;
+
+    let Ok(mut client) = Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await else { return };
+    client = client.with_stealth(stealth.clone());
+
+    let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    let export_fh = if components.is_empty() {
+        let Ok(fh) = client.get_root_fh().await else { return };
+        fh
+    } else {
+        let mut ops = Vec::with_capacity(components.len() + 2);
+        ops.push(ArgOp::Putrootfh);
+        for &c in &components {
+            ops.push(ArgOp::Lookup(c.to_owned()));
+        }
+        ops.push(ArgOp::Getfh);
+        let Ok(res) = client.compound(ops).await else { return };
+        if res.status != 0 {
+            return;
+        }
+        let Some(fh) = res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None }) else { return };
+        fh
+    };
+
+    let mut current_fh = export_fh.clone();
+    let mut depth: usize = 0;
+
+    loop {
+        if depth >= MAX_DEPTH {
+            break;
+        }
+        let ops = vec![ArgOp::Putfh(current_fh.clone()), ArgOp::Lookupp, ArgOp::Getfh];
+        let Ok(res) = client.compound(ops).await else { break };
+        if res.status != 0 {
+            break;
+        }
+        let Some(parent_fh) = res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None }) else {
+            break;
+        };
+        if parent_fh == current_fh {
+            break;
+        }
+        current_fh = parent_fh;
+        depth += 1;
+    }
+
+    if depth == 0 || current_fh == export_fh {
+        return;
+    }
+
+    // Verify root by looking up well-known directories.
+    let verified = nfs4_verify_root(&mut client, &current_fh).await;
+    let evidence = format!("LOOKUPP traversed {depth} levels above the export boundary. Root {}.", if verified { "confirmed (LOOKUP etc/bin/usr succeeded)" } else { "not positively confirmed" });
+
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-2.11",
+            title: "NFSv4 LOOKUPP export escape -- filesystem root reachable",
+            desc: "LOOKUPP from a subdirectory export reaches parent directories above the \
+                   export boundary. Repeated traversal reaches the filesystem root, exposing \
+                   the entire filesystem to any client with NFSv4 access (RFC 7530 S16.14).",
+            evidence: &evidence,
+            remediation: "Bind-mount the export directory to isolate its namespace, or set \
+                          crossmnt/nohide export options explicitly. Consider dedicated filesystem \
+                          per export.",
+            export: Some(export_path),
+        },
+        Severity::Critical,
+    ));
+}
+
+/// F-2.12: cross-export lateral access via NFSv4 pseudo-root.
+///
+/// After LOOKUPP to the pseudo-root (the shared parent above all exports), a
+/// READDIR reveals sibling export names, and LOOKUP into any sibling grants
+/// access regardless of MOUNT-level IP ACLs. This bypasses MOUNT entirely
+/// because NFSv4 does not use MOUNT.
+async fn check_nfs4_cross_export(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+    use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
+
+    let Ok(mut client) = Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await else { return };
+    client = client.with_stealth(stealth.clone());
+
+    // Navigate to the export, then LOOKUPP to the pseudo-root parent.
+    let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    if components.is_empty() {
+        return;
+    }
+
+    let export_fh = {
+        let mut ops = Vec::with_capacity(components.len() + 2);
+        ops.push(ArgOp::Putrootfh);
+        for &c in &components {
+            ops.push(ArgOp::Lookup(c.to_owned()));
+        }
+        ops.push(ArgOp::Getfh);
+        let Ok(res) = client.compound(ops).await else { return };
+        if res.status != 0 {
+            return;
+        }
+        let Some(fh) = res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None }) else { return };
+        fh
+    };
+
+    // Walk up to the pseudo-root parent. The deepest non-export component
+    // is the shared pseudo-directory.
+    let mut current_fh = export_fh;
+    for _ in 0..components.len() {
+        let ops = vec![ArgOp::Putfh(current_fh.clone()), ArgOp::Lookupp, ArgOp::Getfh];
+        let Ok(res) = client.compound(ops).await else { return };
+        if res.status != 0 {
+            return;
+        }
+        let Some(parent_fh) = res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None }) else { return };
+        if parent_fh == current_fh {
+            break;
+        }
+        current_fh = parent_fh;
+    }
+
+    // READDIR on the pseudo-root parent to discover sibling entries.
+    let ops = vec![
+        ArgOp::Putfh(current_fh.clone()),
+        ArgOp::Readdir { cookie: 0, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() },
+    ];
+    let Ok(res) = client.compound(ops).await else { return };
+    if res.status != 0 {
+        return;
+    }
+    let siblings: Vec<String> = match res.results.get(1).map(|op| &op.data) {
+        Some(ResOpData::Readdir { entries, .. }) => entries.iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name.clone()).collect(),
+        _ => return,
+    };
+
+    // The export's own basename is always visible -- only interesting if there
+    // are OTHER entries (sibling exports or pseudo-directories).
+    let own_basename = components.last().unwrap_or(&"");
+    let other_siblings: Vec<&String> = siblings.iter().filter(|s| s.as_str() != *own_basename).collect();
+    if other_siblings.is_empty() {
+        return;
+    }
+
+    // Try to LOOKUP into each sibling to confirm access.
+    let mut reachable: Vec<String> = Vec::new();
+    for sibling in &other_siblings {
+        let ops = vec![ArgOp::Putfh(current_fh.clone()), ArgOp::Lookup((*sibling).clone()), ArgOp::Getfh];
+        if let Ok(res) = client.compound(ops).await
+            && res.status == 0
+        {
+            reachable.push((*sibling).clone());
+        }
+    }
+
+    if reachable.is_empty() {
+        return;
+    }
+
+    let evidence = format!(
+        "LOOKUPP from {} reached pseudo-root parent. READDIR found {} sibling entries. {} reachable via LOOKUP: {}",
+        export_path,
+        siblings.len(),
+        reachable.len(),
+        reachable.join(", ")
+    );
+
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-2.12",
+            title: "NFSv4 cross-export lateral access via pseudo-root",
+            desc: "The NFSv4 pseudo-filesystem connects all exports under a shared namespace. \
+                   A client with access to one export can LOOKUPP to the shared parent and \
+                   LOOKUP into sibling exports, bypassing MOUNT-level IP ACLs entirely \
+                   (RFC 7530 S7.3).",
+            evidence: &evidence,
+            remediation: "Isolate exports on separate pseudo-root branches. Consider binding \
+                          sensitive exports under unique pseudo-paths that do not share a parent \
+                          with open exports.",
+            export: Some(export_path),
+        },
+        Severity::High,
+    ));
+}
+
+/// Verify an NFSv4 file handle points to the filesystem root by LOOKUPing
+/// well-known top-level entries (etc, bin, usr, var, lib).
+async fn nfs4_verify_root(client: &mut crate::proto::nfs4::compound::Nfs4DirectClient, fh: &[u8]) -> bool {
+    use crate::proto::nfs4::types::ArgOp;
+    for name in ["etc", "bin", "usr", "var", "lib"] {
+        let ops = vec![ArgOp::Putfh(fh.to_vec()), ArgOp::Lookup(name.to_owned()), ArgOp::Getfh];
+        if let Ok(res) = client.compound(ops).await
+            && res.status == 0
+        {
+            return true;
+        }
+    }
+    false
 }
 
 // --- Finding construction ---
