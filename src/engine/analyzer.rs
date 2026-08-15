@@ -2737,10 +2737,7 @@ async fn check_nfs4_cross_export(addr: SocketAddr, export_path: &str, findings: 
     }
 
     // READDIR on the pseudo-root parent to discover sibling entries.
-    let ops = vec![
-        ArgOp::Putfh(current_fh.clone()),
-        ArgOp::Readdir { cookie: 0, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() },
-    ];
+    let ops = vec![ArgOp::Putfh(current_fh.clone()), ArgOp::Readdir { cookie: 0, cookieverf: 0, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() }];
     let Ok(res) = client.compound(ops).await else { return };
     if res.status != 0 {
         return;
@@ -2773,13 +2770,7 @@ async fn check_nfs4_cross_export(addr: SocketAddr, export_path: &str, findings: 
         return;
     }
 
-    let evidence = format!(
-        "LOOKUPP from {} reached pseudo-root parent. READDIR found {} sibling entries. {} reachable via LOOKUP: {}",
-        export_path,
-        siblings.len(),
-        reachable.len(),
-        reachable.join(", ")
-    );
+    let evidence = format!("LOOKUPP from {} reached pseudo-root parent. READDIR found {} sibling entries. {} reachable via LOOKUP: {}", export_path, siblings.len(), reachable.len(), reachable.join(", "));
 
     findings.push(make_finding(
         &FindingSpec {
