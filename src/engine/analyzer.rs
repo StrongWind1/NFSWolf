@@ -160,6 +160,7 @@ use std::sync::Arc;
 use nfs_v3::wire::{LOOKUP3args, Nfs3Option, Nfs3Result, PATHCONF3args, READ3args, cookieverf3, diropargs3, filename3, nfsstat3, sattr3};
 use onc_xdr::Opaque;
 
+use crate::engine::escape::{EscapeConfig, EscapeProbe, EscapeRootOutcome, find_escape_root};
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus, WindowsHandleVersion};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
@@ -843,42 +844,46 @@ fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Ve
 /// escape.  Using READDIRPLUS rather than GETATTR catches servers that accept
 /// GETATTR on the root but refuse it on the export.
 async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) -> Option<FileHandle> {
-    // A confirmed escape needs a working baseline to compare against. When the
-    // export's OWN READDIRPLUS fails (transient timeout/reset, or denied to the
-    // configured uid/gid) export_count is None -- that is a failed probe, not a
-    // boundary crossing. Bail rather than let any crafted handle that merely lists
-    // successfully (Some(N) != None) fabricate a Critical F-2.1.
-    let export_count = count_readdirplus(nfs3, export_fh).await?;
+    let probe = AnalyzerEscapeProbe { client: nfs3 };
+    let config = EscapeConfig { btrfs_subvols: 8, max_root_scan: 100, announce: false };
 
-    // Build the full candidate list: fs-appropriate root first, then XFS/BTRFS.
-    let mut candidates = FileHandleAnalyzer::construct_root_candidates(export_fh);
-    // Also try BTRFS subvolumes (first 4 are cheap).
-    candidates.extend(FileHandleAnalyzer::construct_btrfs_subvol_handles(export_fh, 4));
-
-    for candidate in candidates {
-        // Confirm only when BOTH reads succeed and the crafted handle resolves to
-        // content that DIFFERS from the export root (a different entry count means a
-        // different directory, i.e. outside the export subtree).
-        let Some(root_count) = count_readdirplus(nfs3, &candidate.root_handle).await else { continue };
-        if root_count != export_count {
+    match find_escape_root(&probe, export_fh.as_bytes(), &config).await {
+        EscapeRootOutcome::Success(result) => {
             findings.push(make_finding(
                 &FindingSpec {
                     id: "F-2.1",
-                    title: "Export escape possible  --  filesystem root accessible via crafted handle",
+                    title: "Export escape possible -- filesystem root accessible via crafted handle",
                     desc: "subtree_check is disabled (Linux default). An attacker can craft a file \
                            handle targeting any inode on the filesystem, bypassing export boundaries.",
-                    evidence: &format!("export_entries={export_count}, root_entries={root_count}, inode={}, fs_type={:?}, confidence={:.0}%", candidate.inode_number, candidate.fs_type, candidate.confidence * 100.0),
-                    remediation: "Enable subtree_check in /etc/exports (caution  --  impacts rename correctness).",
+                    evidence: &format!("method={}, inode={}, fs_type={:?}, confidence={:.0}%", result.label, result.inode_number, result.fs_type, result.confidence * 100.0),
+                    remediation: "Enable subtree_check in /etc/exports (caution -- impacts rename correctness).",
                     export: Some(export_path),
                 },
                 Severity::Critical,
             ));
-            // Hand back the confirmed escape handle so --test-read can walk the path
-            // from the filesystem root (F-1.3 shadow is only reachable post-escape).
-            return Some(candidate.root_handle);
-        }
+            Some(result.root_handle)
+        },
+        EscapeRootOutcome::StaleNoRoot | EscapeRootOutcome::Unsupported => None,
     }
-    None
+}
+
+/// `EscapeProbe` wrapping the analyzer's pooled NFSv3 client.
+struct AnalyzerEscapeProbe<'a> {
+    client: &'a Nfs3Client,
+}
+
+impl EscapeProbe for AnalyzerEscapeProbe<'_> {
+    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
+        let fh = FileHandle::from_bytes(handle);
+        let attrs = self.client.attrs(&fh).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok((attrs.file_type == nfs_v3::FileType::Directory, attrs.fileid))
+    }
+
+    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+        let fh = FileHandle::from_bytes(dir);
+        let (child, _) = self.client.resolve(&fh, name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(child.as_bytes().to_vec())
+    }
 }
 
 /// Count READDIRPLUS entries for a file handle; returns None on any error.
