@@ -84,7 +84,7 @@ jobs:
             local crate="$1"
             local flags="${2:-}"
             echo "::group::Publishing ${crate}"
-            cargo publish -p "${crate}" --locked ${flags}
+            cargo publish -p "${crate}" ${flags}
             echo "::endgroup::"
             echo "Waiting for crates.io index propagation..."
             sleep 30
