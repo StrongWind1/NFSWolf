@@ -186,18 +186,9 @@ Multi-protocol sequences combining sideband RPC programs with NFS for compound e
 
 ## Crate publication
 
-Pre-publish checklist is complete. The binary (`nfswolf`) is distributed via GitHub releases and `cargo install --git`; the crates are internal-only until published.
+**Done.** All 8 protocol crates are published on [crates.io](https://crates.io) and usable independently of the `nfswolf` binary: `onc-xdr-derive`, `onc-xdr`, `onc-rpc-client`, `onc-rpcbind`, `nfs-mount`, `nfs-v2`, `nfs-v3`, `nfs-v4`. The binary is distributed via GitHub releases and `cargo install nfswolf`.
 
-### Publication phases
-
-| Phase | What | Status |
-|-------|------|--------|
-| Phase 0 | Binary fixes (v2 parity, proxy, errors) | Complete |
-| Phase 1 | Foundation (portmapper, absorb udp.rs, derive tests) | Complete except CALLIT |
-| Phase 2 | Extract (nfs-mount, onc-rpcbind, Nfs2Client) | Complete |
-| Phase 3 | Prepare (keywords, golden vectors, cargo-hack, MSRV CI) | Complete |
-| Phase 4 | Publish 8 crates to crates.io | Ready (all names available, all metadata present) |
-| Tier 3 | Sideband protocol crates (NLM, NSM, RQUOTA, NFS_ACL, NIS, RPCSEC_GSS) | Blocked on consumers |
+Future sideband protocol crates (NLM, NSM, RQUOTA, NFS_ACL, NIS) will be built as modules inside `nfswolf` first and promoted to standalone crates when an external consumer needs them.
 
 ---
 
