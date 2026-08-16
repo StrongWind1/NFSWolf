@@ -69,7 +69,6 @@ pub(crate) async fn connect_sideband(addr: SocketAddr, proxy: Option<&str>, stea
 ///
 /// `"/srv/nfs/data"` becomes `["srv", "nfs", "data"]`. Empty segments and
 /// leading/trailing slashes are stripped.
-#[expect(dead_code, reason = "used by analyzer.rs in Phase 4 refactor")]
 pub(crate) fn export_components(path: &str) -> Vec<&str> {
     path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect()
 }
@@ -78,7 +77,6 @@ pub(crate) fn export_components(path: &str) -> Vec<&str> {
 /// pseudo-root to an export path and retrieves the resulting file handle.
 ///
 /// Returns `[PUTROOTFH, LOOKUP("srv"), LOOKUP("nfs"), ..., GETFH]`.
-#[expect(dead_code, reason = "used by analyzer.rs in Phase 4 refactor")]
 pub(crate) fn build_export_lookup_ops(components: &[&str]) -> Vec<crate::proto::nfs4::types::ArgOp> {
     use crate::proto::nfs4::types::ArgOp;
     let mut ops = Vec::with_capacity(components.len() + 2);

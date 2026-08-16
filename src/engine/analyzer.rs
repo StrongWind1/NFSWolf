@@ -1771,17 +1771,13 @@ fn emit_secinfo_findings(entries: &[nfs_v4::SecInfoEntry], source: &str, export_
 async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{CompoundBuilder, ResOpData};
+    use crate::proto::sideband::export_components;
 
     let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
     let timeout = std::time::Duration::from_secs(5);
+    let Some(mut client) = connect_nfs4_anon(addr, proxy, stealth).await else { return };
 
-    let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
-    let Ok(Ok(client)) = connect else { return };
-    let mut client = client.with_stealth(stealth.clone());
-
-    // Parse export path into LOOKUP chain components and SECINFO target.
-    // "/srv/nfs" -> parent_components=["srv"], secinfo_name="nfs"
-    let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    let components = export_components(export_path);
     if components.is_empty() {
         return; // root export: SECINFO on "/" is not meaningful
     }
@@ -2858,25 +2854,18 @@ async fn check_nfs_acl(addr: SocketAddr, export_fh: &FileHandle, export_path: &s
 /// export is a subdirectory AND the server does not enforce export boundaries
 /// on LOOKUPP.
 async fn check_nfs4_lookupp_escape(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
-    use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{ArgOp, ResOpData};
 
     const MAX_DEPTH: usize = 64;
 
-    let Ok(mut client) = Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await else { return };
-    client = client.with_stealth(stealth.clone());
+    let Some(mut client) = connect_nfs4_root(addr, proxy, stealth).await else { return };
 
-    let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    let components = crate::proto::sideband::export_components(export_path);
     let export_fh = if components.is_empty() {
         let Ok(fh) = client.get_root_fh().await else { return };
         fh
     } else {
-        let mut ops = Vec::with_capacity(components.len() + 2);
-        ops.push(ArgOp::Putrootfh);
-        for &c in &components {
-            ops.push(ArgOp::Lookup(c.to_owned()));
-        }
-        ops.push(ArgOp::Getfh);
+        let ops = crate::proto::sideband::build_export_lookup_ops(&components);
         let Ok(res) = client.compound(ops).await else { return };
         if res.status != 0 {
             return;
@@ -2939,25 +2928,18 @@ async fn check_nfs4_lookupp_escape(addr: SocketAddr, export_path: &str, findings
 /// access regardless of MOUNT-level IP ACLs. This bypasses MOUNT entirely
 /// because NFSv4 does not use MOUNT.
 async fn check_nfs4_cross_export(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
-    use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
 
-    let Ok(mut client) = Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await else { return };
-    client = client.with_stealth(stealth.clone());
+    let Some(mut client) = connect_nfs4_root(addr, proxy, stealth).await else { return };
 
     // Navigate to the export, then LOOKUPP to the pseudo-root parent.
-    let components: Vec<&str> = export_path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    let components = crate::proto::sideband::export_components(export_path);
     if components.is_empty() {
         return;
     }
 
     let export_fh = {
-        let mut ops = Vec::with_capacity(components.len() + 2);
-        ops.push(ArgOp::Putrootfh);
-        for &c in &components {
-            ops.push(ArgOp::Lookup(c.to_owned()));
-        }
-        ops.push(ArgOp::Getfh);
+        let ops = crate::proto::sideband::build_export_lookup_ops(&components);
         let Ok(res) = client.compound(ops).await else { return };
         if res.status != 0 {
             return;
@@ -3114,4 +3096,20 @@ async fn connect_tcp(target: SocketAddr, proxy: Option<&str>) -> std::io::Result
     } else {
         tokio::net::TcpStream::connect(target).await
     }
+}
+
+/// Connect to port 2049 via NFSv4 with AUTH_NONE (5s timeout).
+///
+/// Returns `None` on timeout or connect failure (v3-only server).
+async fn connect_nfs4_anon(addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Option<crate::proto::nfs4::compound::Nfs4DirectClient> {
+    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let connect = tokio::time::timeout(std::time::Duration::from_secs(5), crate::proto::nfs4::compound::Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
+    connect.ok()?.ok().map(|c| c.with_stealth(stealth.clone()))
+}
+
+/// Connect to port 2049 via NFSv4 with AUTH_SYS uid=0 (5s timeout).
+async fn connect_nfs4_root(addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Option<crate::proto::nfs4::compound::Nfs4DirectClient> {
+    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let connect = tokio::time::timeout(std::time::Duration::from_secs(5), crate::proto::nfs4::compound::Nfs4DirectClient::connect_with_auth_proxy(nfs4_addr, 0, 0, "localhost", proxy)).await;
+    connect.ok()?.ok().map(|c| c.with_stealth(stealth.clone()))
 }
