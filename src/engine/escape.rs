@@ -325,6 +325,10 @@ async fn probe_candidate(probe: &(impl EscapeProbe + ?Sized), candidate: &Escape
 ///
 /// The filesystem root is its own parent (per POSIX), so `..` from the root
 /// resolves to the root itself. A subdirectory has a different parent.
+/// This also matches the NFSv4 pseudo-root, but that's acceptable -- the
+/// escape engine prefers reporting more handles (including pseudo-root
+/// matches) over missing real handles. Deduplication by handle bytes
+/// prevents redundant output.
 async fn is_root_dir(probe: &(impl EscapeProbe + ?Sized), handle: &[u8], self_fileid: u64) -> bool {
     let Ok(parent) = probe.probe_lookup(handle, "..").await else {
         return false;
@@ -408,7 +412,7 @@ mod tests {
         }
 
         async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
-            if name == ".." {
+            if name == ".." || name == "etc" || name == "bin" || name == "usr" {
                 return Ok(dir.to_vec());
             }
             anyhow::bail!("NFS3ERR_NOENT");
