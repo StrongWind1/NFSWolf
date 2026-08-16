@@ -200,50 +200,66 @@ struct AllEscapeResult {
 }
 
 /// Analyze a root handle's bytes and return a plain-English annotation.
+///
+/// Leads with a simple verdict ("likely reaches the real filesystem root"),
+/// then appends technical detail for operators who want to understand why.
 fn annotate_handle(fh: &FileHandle) -> String {
     let bytes = fh.as_bytes();
     if bytes.len() < 4 {
-        return "unknown format".to_owned();
+        return "unknown handle format".to_owned();
     }
 
     let fsid_type = bytes.get(2).copied().unwrap_or(0);
     let fileid_type = bytes.get(3).copied().unwrap_or(0);
 
-    let mut parts: Vec<String> = Vec::new();
-
-    match fsid_type {
-        6 => parts.push("UUID-only (no export context -- may resolve to pseudo-root)".to_owned()),
-        7 => parts.push("has export context (compound UUID)".to_owned()),
-        1 => parts.push("pseudo-FS synthetic handle".to_owned()),
-        _ => {},
-    }
-
-    match fileid_type {
-        0 => parts.push("mount-root reference".to_owned()),
-        1 => parts.push("real inode+generation".to_owned()),
-        2 => parts.push("real inode+generation+parent".to_owned()),
-        0x4d => parts.push("BTRFS subvolume handle".to_owned()),
-        0x61 => parts.push("NILFS2 handle".to_owned()),
-        0x81 => parts.push("XFS 64-bit inode handle".to_owned()),
-        _ => {},
-    }
-
-    // Extract filesystem UUID for grouping.
-    let uuid_slice = match fsid_type {
-        6 => bytes.get(4..20),
-        7 => bytes.get(12..28),
-        _ => None,
+    // Plain-English verdict based on the handle structure.
+    let verdict = match (fsid_type, fileid_type) {
+        (7, 1 | 2) => "likely the real filesystem root, best candidate to try first",
+        (7, 0) => "likely the real filesystem root via export root format",
+        (6, 0x4d) => "BTRFS volume root, reaches this BTRFS filesystem not the host root",
+        (6, 1 | 2) => "may only reach the NFSv4 virtual namespace not the real filesystem",
+        (1, _) => "NFSv4 pseudo-root, virtual directory not a real filesystem",
+        (6, _) => "may resolve to pseudo-root or a different filesystem",
+        _ => "unknown handle type",
     };
-    if let Some(uuid) = uuid_slice {
-        use std::fmt::Write;
-        let mut short = String::with_capacity(8);
-        for b in uuid.iter().take(4) {
-            let _ = write!(short, "{b:02x}");
-        }
-        parts.push(format!("filesystem {short}..."));
-    }
 
-    if parts.is_empty() { "unknown format".to_owned() } else { parts.join(", ") }
+    // Technical detail for the curious.
+    let fsid_detail = match fsid_type {
+        6 => "fsid=UUID-only",
+        7 => "fsid=compound-UUID",
+        1 => "fsid=pseudo",
+        _ => "fsid=other",
+    };
+    let fileid_detail = match fileid_type {
+        0 => "fileid=mount-root",
+        1 => "fileid=ino32+gen",
+        2 => "fileid=ino32+gen+parent",
+        0x4d => "fileid=btrfs-subvol",
+        0x61 => "fileid=nilfs2",
+        0x81 => "fileid=xfs-ino64",
+        _ => "fileid=other",
+    };
+
+    // Short filesystem UUID prefix for grouping handles from the same disk.
+    let fs_tag = match fsid_type {
+        6 => bytes.get(4..8),
+        7 => bytes.get(12..16),
+        _ => None,
+    }
+    .map(|b| {
+        use std::fmt::Write;
+        let mut s = String::with_capacity(10);
+        s.push_str("fs=");
+        for byte in b {
+            let _ = write!(s, "{byte:02x}");
+        }
+        s
+    });
+
+    match fs_tag {
+        Some(tag) => format!("{verdict} ({fsid_detail}, {fileid_detail}, {tag})"),
+        None => format!("{verdict} ({fsid_detail}, {fileid_detail})"),
+    }
 }
 
 /// Comprehensive multi-seed escape: acquire handles from ALL available sources
