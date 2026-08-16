@@ -36,23 +36,18 @@
     clippy::cast_sign_loss,
     reason = "integration test  --  all lints suppressed per project policy"
 )]
-use onc_rpc_client::transport::DirectTransport;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use assert_cmd::Command;
-use nfs_v3::MountClient;
-use nfs_v3::Nfs3Client;
 use nfs_v3::wire::mount::dirpath;
 use nfs_v3::wire::{GETATTR3args, LOOKUP3args, Nfs3Result, diropargs3, filename3};
-use nfs3_server::memfs::{MemFs, MemFsConfig};
-use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
+use nfs3_server::memfs::MemFsConfig;
 use onc_rpc_client::transport::tokio::TokioIo;
 use onc_rpcbind::PortmapperClient;
 use onc_xdr::Opaque;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
-use tokio::net::TcpStream;
 
 // --- CLI smoke tests (no server required) ---
 
@@ -133,7 +128,7 @@ fn uid_spray_help_succeeds() {
 #[tokio::test]
 async fn memfs_export_list_shows_root() {
     let config = MemFsConfig::default();
-    let (_server, port) = start_memfs_server(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
@@ -154,7 +149,7 @@ async fn memfs_portmapper_responds_to_getport() {
     // The scanner uses PMAPPROC_GETPORT to verify NFS versions are registered.
     // PMAPPROC_DUMP is not implemented in MemFs, but GETPORT is.
     let config = MemFsConfig::default();
-    let (_server, port) = start_memfs_server(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
@@ -172,43 +167,16 @@ async fn memfs_portmapper_responds_to_getport() {
 
 /// Start a MemFs-backed NFS server on an ephemeral port.
 /// Returns (server_task, port).
-///
-/// The `NFSTcpListener` serves MOUNT and NFS3 on the same port. We bind MOUNT
-/// and NFS3 clients to the same port as the nfs3_server does not separate them.
-async fn start_memfs_server(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16) {
-    let fs = MemFs::new(config).expect("MemFs creation must succeed");
-
-    // Bind on 127.0.0.1:0 to get an OS-assigned ephemeral port.
-    let listener = NFSTcpListener::bind("127.0.0.1:0", fs).await.expect("NFSTcpListener::bind must succeed");
-    let port = listener.get_listen_port();
-
-    let handle = tokio::spawn(async move {
-        listener.handle_forever().await.expect("server must not crash");
-    });
-
-    (handle, port)
-}
-
-/// Connect a `MountClient` to the given port on loopback.
-async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::v3(DirectTransport::new(TokioIo::new(stream)))
-}
-
-/// Connect an `Nfs3Client` to the given port on loopback.
-async fn nfs3_client(port: u16) -> Nfs3Client<DirectTransport<TokioIo<TcpStream>>> {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    Nfs3Client::new(DirectTransport::new(TokioIo::new(stream)))
-}
+#[path = "helpers.rs"]
+mod helpers;
+use helpers::{mount_client, nfs3_client, start_server};
 
 #[tokio::test]
 async fn memfs_mount_returns_root_handle() {
     let mut config = MemFsConfig::default();
     config.add_file("/hello.txt", b"hello world\n".as_slice());
 
-    let (_server, port) = start_memfs_server(config).await;
+    let (_server, port) = start_server(config).await;
     // Give the server a moment to start accepting.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -224,7 +192,7 @@ async fn memfs_mount_returns_root_handle() {
 #[tokio::test]
 async fn memfs_getattr_on_root() {
     let config = MemFsConfig::default();
-    let (_server, port) = start_memfs_server(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // MOUNT to get the root handle.
@@ -254,7 +222,7 @@ async fn memfs_lookup_file_in_root() {
     config.add_file("/secret.txt", b"top secret\n".as_slice());
     config.add_file("/other.txt", b"other\n".as_slice());
 
-    let (_server, port) = start_memfs_server(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
@@ -283,7 +251,7 @@ async fn memfs_lookup_missing_file_returns_noent() {
     use nfs_v3::wire::nfsstat3;
 
     let config = MemFsConfig::default();
-    let (_server, port) = start_memfs_server(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
@@ -311,7 +279,7 @@ async fn memfs_read_file_content() {
     let mut config = MemFsConfig::default();
     config.add_file("/data.bin", expected.as_slice());
 
-    let (_server, port) = start_memfs_server(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;

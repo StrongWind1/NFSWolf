@@ -34,35 +34,15 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use nfs_v3::MountClient;
-use nfs_v3::Nfs3Client;
 use nfs_v3::wire::mount::dirpath;
-use nfs3_server::memfs::{MemFs, MemFsConfig};
-use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
+use nfs3_server::memfs::MemFsConfig;
 use onc_rpc_client::transport::tokio::TokioIo;
 use onc_xdr::Opaque;
 use tokio::net::TcpStream;
 
-// --- Server helpers ---
-
-async fn start_server(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16) {
-    let fs = MemFs::new(config).expect("MemFs must construct");
-    let listener = NFSTcpListener::bind("127.0.0.1:0", fs).await.expect("bind must succeed");
-    let port = listener.get_listen_port();
-    let task = tokio::spawn(async move { listener.handle_forever().await.expect("server must not crash") });
-    (task, port)
-}
-
-async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::v3(DirectTransport::new(TokioIo::new(stream)))
-}
-
-async fn nfs3_client(port: u16) -> Nfs3Client<DirectTransport<TokioIo<TcpStream>>> {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    Nfs3Client::new(DirectTransport::new(TokioIo::new(stream)))
-}
+#[path = "helpers.rs"]
+mod helpers;
+use helpers::{mount_client, nfs3_client, start_server};
 
 // --- File handle byte-level helpers ---
 

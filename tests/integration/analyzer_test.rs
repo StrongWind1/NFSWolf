@@ -36,41 +36,17 @@
     reason = "integration test  --  all lints suppressed per project policy"
 )]
 use onc_rpc_client::transport::DirectTransport;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use nfs_v3::MountClient;
 use nfs_v3::wire::mount::dirpath;
-use nfs3_server::memfs::{MemFs, MemFsConfig};
-use nfs3_server::tcp::{NFSTcp, NFSTcpListener};
+use nfs3_server::memfs::MemFsConfig;
 use onc_rpc_client::transport::tokio::TokioIo;
-use onc_rpcbind::PortmapperClient;
 use onc_xdr::Opaque;
 use tokio::net::TcpStream;
 
-// --- Helpers ---
-
-async fn start_memfs(config: MemFsConfig) -> (tokio::task::JoinHandle<()>, u16) {
-    let fs = MemFs::new(config).expect("MemFs creation must succeed");
-    let listener = NFSTcpListener::bind("127.0.0.1:0", fs).await.expect("bind must succeed");
-    let port = listener.get_listen_port();
-    let handle = tokio::spawn(async move {
-        listener.handle_forever().await.expect("server must not crash");
-    });
-    (handle, port)
-}
-
-async fn mount_client(port: u16) -> MountClient<DirectTransport<TokioIo<TcpStream>>> {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    MountClient::v3(DirectTransport::new(TokioIo::new(stream)))
-}
-
-async fn portmap_client(port: u16) -> PortmapperClient<TokioIo<TcpStream>> {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let stream = TcpStream::connect(addr).await.expect("TCP connect must succeed");
-    PortmapperClient::new(TokioIo::new(stream))
-}
+#[path = "helpers.rs"]
+mod helpers;
+use helpers::{mount_client, portmap_client, start_server};
 
 // --- Wildcard ACL detection ---
 
@@ -79,7 +55,7 @@ async fn memfs_export_has_wildcard_acl() {
     // MemFs exports to "*" (all hosts) by default.
     // Analyzer::check_export_acls() should flag this as F-7.1.
     let config = MemFsConfig::default();
-    let (_server, port) = start_memfs(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
@@ -102,7 +78,7 @@ async fn memfs_advertises_auth_sys_no_kerberos() {
     let mut config = MemFsConfig::default();
     config.add_file("/test.txt", b"data".as_slice());
 
-    let (_server, port) = start_memfs(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
@@ -125,7 +101,7 @@ async fn memfs_root_handle_is_non_empty() {
     let mut config = MemFsConfig::default();
     config.add_file("/dummy.txt", b"x".as_slice());
 
-    let (_server, port) = start_memfs(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
@@ -148,7 +124,7 @@ async fn memfs_export_path_is_nonempty_string() {
     // The export path returned by MNTPROC_EXPORT must be a non-empty byte string.
     // The analyzer uses this path to identify which exports to check.
     let config = MemFsConfig::default();
-    let (_server, port) = start_memfs(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
@@ -170,7 +146,7 @@ async fn memfs_auth_flavors_are_valid() {
     // The auth_flavors from MNT must contain only well-known flavor values.
     // AUTH_NONE=0, AUTH_SYS=1, AUTH_SHORT=2, RPCSEC_GSS=6.
     let config = MemFsConfig::default();
-    let (_server, port) = start_memfs(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mc = mount_client(port).await;
@@ -196,7 +172,7 @@ async fn memfs_file_handle_usable_across_connections() {
     let mut config = MemFsConfig::default();
     config.add_file("/bearer.txt", b"test data");
 
-    let (_server, port) = start_memfs(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Connection 1: MOUNT + LOOKUP to get a file handle.
@@ -235,7 +211,7 @@ async fn memfs_portmapper_responds_to_nfs_getport() {
     // MemFs handles GETPORT on the same port it was bound to.
     // PMAPPROC_DUMP is not supported by MemFs (returns ProcUnavail).
     let config = MemFsConfig::default();
-    let (_server, port) = start_memfs(config).await;
+    let (_server, port) = start_server(config).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut pm = portmap_client(port).await;
