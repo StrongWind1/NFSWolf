@@ -801,6 +801,11 @@ subcommand exercises these findings.
 | F-5.8 | [Export Root Attributes Leaked via AUTH_NONE](findings/F-5.8-auth-none-attr-leak.md) | Low | `analyze` (GETATTR with AUTH_NONE on export root handle) |
 | F-5.9 | [Execute-Only File Content Disclosure](findings/F-5.9-read-if-exec-content-disclosure.md) | Low | Not implemented -- documented for awareness |
 | F-5.10 | [pNFS Layout Security Downgrade](findings/F-5.10-pnfs-layout-security-downgrade.md) | Medium | Not implemented -- documented for awareness |
+| F-5.11 | Filesystem Lacks Link/Symlink Support | Info | `analyze` (PATHCONF) |
+| F-5.12 | Near Inode Exhaustion | Medium | `analyze` (FSSTAT) |
+| F-5.13 | NFSv4 Named Attributes Exposed | Info | `analyze` (OPENATTR + READDIR) |
+| F-5.14 | POSIX ACL Entries Expose Access Beyond Mode Bits | Medium | `analyze` (NFS_ACL GETACL program 100227) |
+| F-5.15 | rquotad Exposes UID Activity via Quota Queries | Medium | `analyze` (RQUOTA GETQUOTA program 100011) |
 | F-6.1 | [NLM Lock Attacks](findings/F-6.1-nlm-lock-attacks.md) | Medium | Out of scope -- lock-DoS module removed |
 | F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | Out of scope -- never implemented |
 | F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | Out of scope -- never implemented |

@@ -134,6 +134,11 @@ Output split: `analyze` prints an ANSI-coloured human-readable summary on stdout
 | TLS detection | AUTH_TLS probe + DANE/TLSA record check | F-3.4 |
 | NIS detection | Portmapper check for programs 100004/100007 | F-5.3 |
 | Writable check | Test write access per export | F-4.1 |
+| NFS_ACL enumeration | POSIX ACL entries revealing UIDs/GIDs beyond mode bits (program 100227 GETACL) | F-5.14 |
+| RQUOTA UID oracle | Active UID detection + filesystem block size leak (program 100011 GETQUOTA) | F-5.15 |
+| NFSv4 LOOKUPP escape | LOOKUPP from subdirectory export reaches filesystem root | F-2.11 |
+| NFSv4 cross-export | LOOKUPP to pseudo-root + LOOKUP into sibling exports | F-2.12 |
+| NFSv4-only export discovery | Pseudo-FS fsid walk discovers exports when MOUNT is unavailable | -- |
 
 **Requirements**: [R2.1–R4.2](REQUIREMENTS.md#r2-authentication-testing)
 

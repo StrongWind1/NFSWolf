@@ -80,11 +80,28 @@ The attacker claims any UID in the AUTH_SYS credential. The server applies that 
 
 **Works on**: every AUTH_SYS export. `root_squash` only blocks uid=0. `all_squash` blocks all spoofing for restricted files but not world-readable ones.
 
+### NFSv4: The Definitive Statement
+
+On NFSv4, access to any single AUTH_SYS export grants access to every other AUTH_SYS export on the same server. The NFSv4 pseudo-filesystem connects all exports under a shared namespace. A client that can reach one export can LOOKUPP to the pseudo-root and LOOKUP into any sibling, regardless of export path, filesystem type, block device, `root_squash`, `all_squash`, or `ro`/`rw` flags. These settings control what you can do inside an export, not whether you can reach it.
+
+Tested with 15 exports across 3 filesystem types (ext4, XFS, BTRFS), 4 separate block devices, 5 different path trees, and every squash/permission combination. 13 of 15 reachable from a single entry point.
+
+Two defenses prevent cross-export access on NFSv4:
+
+1. **IP-restricted ACLs** (`10.99.99.0/24`) -- knfsd removes the export from the pseudo-FS entirely for unauthorized clients. Not visible, not traversable.
+2. **`sec=krb5` exclusively** (without `sys` in the list) -- the export appears in the pseudo-FS but the server rejects traversal with `NFS4ERR_WRONGSEC` unless the client presents valid Kerberos credentials.
+
+Everything else is cosmetic. `sec=krb5:sys` is defeated because the `sys` fallback is accepted. If a server has one open AUTH_SYS export and nine locked-down exports that also use AUTH_SYS, all ten are accessible to anyone who can reach the first.
+
+### Cross-Protocol Handles
+
+File handles are interpreted by the kernel's `exportfs` layer, not by the NFS protocol version. A handle obtained via NFSv3 MOUNT can be sent to the server via NFSv4 COMPOUND (PUTFH + GETATTR/READ), and vice versa. On servers that run both v3 and v4, escape handles from one protocol version work on the other. Tested: MOUNT v3 and MOUNT v1 handles both produced working root handles on NFSv3 and NFSv4 shell sessions against the same server.
+
 ---
 
 ## Defense Matrix
 
-Tested live on 6 servers (kernels 2.6.32, 3.13, 4.4, 4.15, 6.8, 6.12), every NFS version the server supports.
+Tested live on 7 servers (kernels 2.6.32, 3.13, 4.4, 4.15, 6.8, 6.12), every NFS version the server supports. NFSv4-only server tested separately (Debian 13, kernel 6.12, no rpcbind/mountd).
 
 ```
                      ┌─────────┬─────────────┬───────────┬───────────┐
@@ -115,6 +132,45 @@ Tested live on 6 servers (kernels 2.6.32, 3.13, 4.4, 4.15, 6.8, 6.12), every NFS
   * subtree_check on export B is defeated by escaping from export A
     on the same filesystem (the handle is evaluated against A's policy)
 ```
+
+### NFSv4-Only Defense Matrix
+
+Tested on Debian 13 (kernel 6.12), NFSv4-only server (no rpcbind, no mountd, ports 22+2049 only). Each config tested with `escape --all` then verified with `shell --handle`.
+
+```
+                        ┌─────────┬───────────────┬────────────────┐
+                        │ Export  │ Read          │ Read           │
+  Defense               │ escape  │ /etc/shadow   │ /etc/hostname  │
+  ══════════════════════╪═════════╪═══════════════╪════════════════╡
+  *(rw,sync) [default]  │ YES     │ YES           │ YES            │
+  ──────────────────────┼─────────┼───────────────┼────────────────┤
+  root_squash           │ YES     │ YES*          │ YES            │
+  ──────────────────────┼─────────┼───────────────┼────────────────┤
+  all_squash            │ YES     │ NO            │ YES (0644)     │
+  (anonuid=65534)       │         │ (gid=42 also  │                │
+                        │         │  blocked)     │                │
+  ──────────────────────┼─────────┼───────────────┼────────────────┤
+  subtree_check         │ PSEUDO  │ NO            │ NO             │
+                        │ ONLY    │ (NFS4ERR_STALE│                │
+                        │         │  on real root)│                │
+  ──────────────────────┼─────────┼───────────────┼────────────────┤
+  readonly (ro)         │ YES     │ YES           │ YES            │
+  ──────────────────────┼─────────┼───────────────┼────────────────┤
+  sec=krb5              │ NO      │ NO            │ NO             │
+  (without sys)         │(0 seeds)│ (WRONGSEC)    │                │
+  ──────────────────────┼─────────┼───────────────┼────────────────┤
+  sec=krb5:sys          │ YES     │ YES           │ YES            │
+  ──────────────────────┼─────────┼───────────────┼────────────────┤
+  all_squash +          │ PSEUDO  │ NO            │ NO             │
+  subtree_check         │ ONLY    │               │                │
+  ──────────────────────┴─────────┴───────────────┴────────────────┘
+
+  * root_squash on v4: the escape handle's export_ino determines which
+    export's squash settings apply. If ANY export on the same filesystem
+    has no_root_squash, the attacker uses a handle from that export.
+```
+
+**NFSv4-only vs NFSv3 difference for `sec=krb5`**: on NFSv3, MOUNT v3 still uses AUTH_SYS and leaks the file handle before krb5 kicks in (the escape handle is constructed but all subsequent operations are blocked by WRONGSEC). On NFSv4-only, there is no MOUNT protocol, so no handle is leaked at all -- `sec=krb5` is a complete block with zero seeds acquired.
 
 ---
 

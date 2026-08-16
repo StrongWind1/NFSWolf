@@ -66,7 +66,7 @@ nfswolf targets the following threat scenario:
 ## Document Hierarchy
 
 ```
-FINDINGS.md (47 findings with RFC-cited vulnerability analysis, F-1.1 through F-7.6)
+FINDINGS.md (60 findings with RFC-cited vulnerability analysis, F-1.1 through F-7.7)
     └── findings/ (detailed write-ups per finding)
         └── REQUIREMENTS.md (what the tool must detect, R1-R7)
             └── DESIGN.md (vision, goals, threat model)     <- you are here
@@ -229,7 +229,7 @@ See [ARCHITECTURE.md -- Comparison table](ARCHITECTURE.md#comparison-with-existi
 
 ## References
 
-- [FINDINGS.md](FINDINGS.md) -- All 47 findings grouped by attack type (RFC-cited)
+- [FINDINGS.md](FINDINGS.md) -- All 60 findings grouped by attack type (RFC-cited)
 - [findings/](findings/README.md) -- Detailed write-ups per finding
 - [REQUIREMENTS.md](REQUIREMENTS.md) -- Tool requirements with finding traceability
 - [ARCHITECTURE.md](ARCHITECTURE.md) -- Implementation architecture and module layout

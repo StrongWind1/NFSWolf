@@ -4,6 +4,21 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+### Added
+
+- **NFSv4-only server support** -- analyzer discovers exports via pseudo-FS fsid walking when MOUNT is unavailable. No portmapper or mountd required.
+- **`escape --all` NFSv4 pseudo-FS seed gathering** -- walks the pseudo-FS, enters every export, LOOKUPs a child to get real filesystem handles (fileid_type > 0), tries all as seeds. Cascade: v3 -> v2 -> v4 probe.
+- **Handle quality annotations** -- each escape result is annotated with plain-English analysis from the handle bytes (e.g., "likely the real filesystem root, best candidate to try first" vs "may only reach the NFSv4 virtual namespace"). Results sorted best-to-worst.
+- **`escape --all` v4 probe** -- when v3 and v2 probes find nothing, retries all seeds with NFSv4 GETATTR/LOOKUP probing. Critical for v4-only servers.
+- **NFSv4 defense verification** -- full defense matrix tested on NFSv4-only server: `subtree_check` blocks (NFS4ERR_STALE), `sec=krb5` blocks (no seeds), `sec=krb5:sys` defeated, `root_squash`/`all_squash` do not block escape.
+- **Cross-protocol handle verification** -- confirmed NFSv3 handles work on NFSv4 and vice versa on dual-version servers.
+
+### Changed
+
+- **Probe output suppressed** -- "Probing inode N gen=M ..." lines moved to debug level. Use `-v` to see them. Seed and result messages remain visible.
+- **`escape --all` results sorted** by handle quality score (compound UUID + real inode first, pseudo-root last).
+- **Codebase audit** -- 10 refactoring commits: shared sideband helpers, unified shell command lists, `require_write!`/`get_fh!` macros in FUSE, shared test helpers, extracted `run_handle_checks`, NFSv4 connect helpers. 798 tests (up from 753).
+
 ## [1.1.0] - 2026-08-16
 
 ### Added

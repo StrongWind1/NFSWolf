@@ -219,12 +219,12 @@ The NFS protocol stack is split into eight standalone crates, published on [crat
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 753 tests across 8 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 798 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (753 tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (798 tests), doc, hygiene, machete
 ```
 
 ## Credits

@@ -22,24 +22,6 @@ Source references: X/Open CAE C702 "XNFS, Version 3W" at `ref/xopen-c702.pdf` (3
 
 ## Ready to build
 
-### RQUOTA -- UID enumeration via quota oracle
-
-**Program 100011, v1/v2. 3 procedures each. Low effort.**
-
-`GETQUOTA` takes a path + UID and returns disk usage if the UID exists on the server. This is a UID existence oracle without NFS export access -- faster than `uid-spray` because it probes identity existence without attempting file operations. v2 adds GID quota enumeration.
-
-`rq_bsize` in the response leaks the filesystem block size (ext4=4096, XFS=512, ZFS=1024), narrowing the escape strategy before even running NFS. Active UIDs feed `credential_ladder_with()`.
-
-**Wire format:** full XDR for both versions documented below in the [protocol reference](#rquota-wire-format).
-
-### NFS_ACL -- permission bypass beyond mode bits
-
-**Program 100227, v2/v3. 3-5 procedures. Medium effort.**
-
-`GETACL` returns POSIX ACL entries revealing UIDs/GIDs with access beyond what mode bits show. ACL entries reference UIDs/GIDs that may own zero files (invisible to READDIRPLUS harvesting). Default ACL inheritance creates systemic false sense of security.
-
-No public spec exists. Wire format reverse-engineered from Linux kernel source (`fs/nfsd/nfs2acl.c`, `fs/nfsd/nfs3acl.c`) and Solaris `nfsacl_prot.x`. Fully documented below.
-
 ### PCNFSD -- password oracle and code execution
 
 **Program 150001, v1. 4 procedures. Medium effort.**
@@ -148,7 +130,7 @@ Multi-protocol sequences combining sideband RPC programs with NFS for compound e
 
 **Done.** All 8 protocol crates are published on [crates.io](https://crates.io) and usable independently of the `nfswolf` binary: `onc-xdr-derive`, `onc-xdr`, `onc-rpc-client`, `onc-rpcbind`, `nfs-mount`, `nfs-v2`, `nfs-v3`, `nfs-v4`. The binary is distributed via GitHub releases and `cargo install nfswolf`.
 
-Future sideband protocol crates (RQUOTA, NFS_ACL, NIS) will be built as modules inside `nfswolf` first and promoted to standalone crates when an external consumer needs them.
+RQUOTA and NFS_ACL are implemented as modules in `src/proto/`. Future sideband crates (NIS) will follow the same pattern.
 
 ---
 

@@ -70,7 +70,7 @@ All RFC 5531 client-side features implemented except RPCSEC_GSS:
 
 ## 8. `nfs-v4` — Complete (RFC 7530)
 
-**Status: Complete.** All 8 phases of the NFSv4 completion plan have been implemented. 244 nfs-v4 crate tests, 722 total project tests. Live-validated against 4 Linux knfsd servers.
+**Status: Complete.** All 8 phases of the NFSv4 completion plan have been implemented. 244 nfs-v4 crate tests, 798 total project tests. Live-validated against 4 Linux knfsd servers.
 
 ### What shipped
 
