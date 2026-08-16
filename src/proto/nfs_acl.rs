@@ -146,3 +146,84 @@ pub(crate) async fn getacl3(addr: SocketAddr, fh_bytes: &[u8], proxy: Option<&st
     let raw: RawReply = rpc.call(NFS_ACL_PROGRAM, NFS_ACL_V3, ACLPROC3_GETACL, &args).await.context("GETACL3 RPC")?;
     Getacl3Result::decode(&raw.data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_golden_reply() -> Vec<u8> {
+        let mut buf = Vec::new();
+        // status = NFS3_OK
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        // post_op_attr: follows = false
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        // mask = NFS_ACL | NFS_DFACL (0x0005)
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        // Solaris wire format: separate aclcnt before the XDR array
+        buf.extend_from_slice(&3u32.to_be_bytes()); // aclcnt
+        buf.extend_from_slice(&3u32.to_be_bytes()); // XDR array count
+        // access ACL: 3 entries
+        // USER_OBJ(0x01) uid=0 perm=rwx(7)
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.extend_from_slice(&7u32.to_be_bytes());
+        // USER(0x02) uid=1001 perm=rw-(6)
+        buf.extend_from_slice(&2u32.to_be_bytes());
+        buf.extend_from_slice(&1001u32.to_be_bytes());
+        buf.extend_from_slice(&6u32.to_be_bytes());
+        // GROUP(0x08) gid=42 perm=r-x(5)
+        buf.extend_from_slice(&8u32.to_be_bytes());
+        buf.extend_from_slice(&42u32.to_be_bytes());
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        // Solaris wire format: separate dfaclcnt + XDR array count
+        buf.extend_from_slice(&0u32.to_be_bytes()); // dfaclcnt
+        buf.extend_from_slice(&0u32.to_be_bytes()); // XDR array count
+        buf
+    }
+
+    #[test]
+    fn decode_golden_reply() {
+        let data = build_golden_reply();
+        let result = Getacl3Result::decode(&data).unwrap();
+        assert_eq!(result.status, 0);
+        assert_eq!(result.access_acl.len(), 3);
+        assert_eq!(result.default_acl.len(), 0);
+        assert_eq!(result.access_acl[0].tag, 0x01);
+        assert_eq!(result.access_acl[1].tag, ACL_USER);
+        assert_eq!(result.access_acl[1].id, 1001);
+        assert_eq!(result.access_acl[1].perm, 6);
+        assert_eq!(result.access_acl[2].tag, ACL_GROUP);
+        assert_eq!(result.access_acl[2].id, 42);
+    }
+
+    #[test]
+    fn decode_error_status() {
+        let data = 13u32.to_be_bytes().to_vec();
+        let result = Getacl3Result::decode(&data).unwrap();
+        assert_eq!(result.status, 13);
+        assert!(result.access_acl.is_empty());
+    }
+
+    #[test]
+    fn decode_truncated_rejects() {
+        assert!(Getacl3Result::decode(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn acl_entry_type_names() {
+        assert_eq!(AclEntry { tag: 0x01, id: 0, perm: 7 }.type_name(), "USER_OBJ");
+        assert_eq!(AclEntry { tag: ACL_USER, id: 0, perm: 0 }.type_name(), "USER");
+        assert_eq!(AclEntry { tag: ACL_GROUP, id: 0, perm: 0 }.type_name(), "GROUP");
+        assert_eq!(AclEntry { tag: 0x10, id: 0, perm: 0 }.type_name(), "MASK");
+        assert_eq!(AclEntry { tag: 0x20, id: 0, perm: 0 }.type_name(), "OTHER");
+        assert_eq!(AclEntry { tag: 0xFF, id: 0, perm: 0 }.type_name(), "UNKNOWN");
+    }
+
+    #[test]
+    fn perm_string_formatting() {
+        assert_eq!(AclEntry { tag: 0, id: 0, perm: 7 }.perm_string(), "rwx");
+        assert_eq!(AclEntry { tag: 0, id: 0, perm: 5 }.perm_string(), "r-x");
+        assert_eq!(AclEntry { tag: 0, id: 0, perm: 0 }.perm_string(), "---");
+        assert_eq!(AclEntry { tag: 0, id: 0, perm: 6 }.perm_string(), "rw-");
+    }
+}

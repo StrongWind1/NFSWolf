@@ -365,3 +365,83 @@ impl EscapeProbe for Nfs3EscapeProbe<'_> {
         Ok(child.as_bytes().to_vec())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mock probe: inode 2 with fileid_type=1 is a directory root,
+    /// everything else returns STALE.
+    struct MockProbe {
+        accept_inode: u32,
+    }
+
+    impl EscapeProbe for MockProbe {
+        async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
+            anyhow::ensure!(handle.len() >= 8, "BADHANDLE");
+            let fileid_type = handle.get(3).copied().unwrap_or(0);
+            if fileid_type != 1 {
+                anyhow::bail!("NFS3ERR_BADHANDLE");
+            }
+            // INO32_GEN: inode at bytes [fsid_len..fsid_len+4].
+            // For fsid_type=7 (24-byte fsid): inode starts at byte 28.
+            // For fsid_type=6 (16-byte fsid): inode starts at byte 20.
+            // Simplified: scan for the 4-byte LE inode anywhere after the fsid.
+            let fsid_type = handle.get(2).copied().unwrap_or(0);
+            let fsid_len = match fsid_type {
+                2 => 12,
+                6 => 20,
+                7 => 28,
+                _ => 8,
+            };
+            let inode_offset = 4 + fsid_len;
+            if handle.len() < inode_offset + 4 {
+                anyhow::bail!("NFS3ERR_STALE");
+            }
+            assert!(handle.len() >= inode_offset + 4, "handle too short for inode");
+            let inode = u32::from_le_bytes([handle[inode_offset], handle[inode_offset + 1], handle[inode_offset + 2], handle[inode_offset + 3]]);
+            if inode == self.accept_inode {
+                Ok((true, u64::from(inode)))
+            } else {
+                anyhow::bail!("NFS3ERR_STALE");
+            }
+        }
+
+        async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+            if name == ".." {
+                return Ok(dir.to_vec());
+            }
+            anyhow::bail!("NFS3ERR_NOENT");
+        }
+    }
+
+    #[tokio::test]
+    async fn find_escape_root_succeeds_on_inode_2() {
+        // Seed: fsid_type=7 (compound UUID, 28-byte fsid), fileid_type=0.
+        let mut seed = vec![0x01, 0x00, 0x07, 0x00];
+        seed.extend_from_slice(&[0; 24]); // 24-byte fsid
+
+        let config = EscapeConfig { btrfs_subvols: 0, max_root_scan: 5, announce: false };
+        // accept_inode=2: the INO32_GEN candidate with inode=2 should be tried
+        let result = find_escape_root(&MockProbe { accept_inode: 2 }, &seed, &config).await;
+
+        assert!(matches!(result, EscapeRootOutcome::Success(_)), "expected escape success");
+    }
+
+    #[tokio::test]
+    async fn find_escape_root_unsupported_on_short_handle() {
+        let seed = vec![0x01, 0x00]; // too short
+        let config = EscapeConfig { btrfs_subvols: 0, max_root_scan: 3, announce: false };
+        let result = find_escape_root(&MockProbe { accept_inode: 2 }, &seed, &config).await;
+        assert!(matches!(result, EscapeRootOutcome::Unsupported));
+    }
+
+    #[test]
+    fn is_acces_detects_permission_errors() {
+        assert!(is_acces("NFS3ERR_ACCES"));
+        assert!(is_acces("NFS3ERR_PERM"));
+        assert!(is_acces("operation denied: ACCES"));
+        assert!(!is_acces("NFS3ERR_STALE"));
+        assert!(!is_acces("timeout"));
+    }
+}

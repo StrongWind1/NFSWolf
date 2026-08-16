@@ -79,7 +79,7 @@ pub(crate) struct QuotaData {
 /// GETQUOTA result after XDR decoding.
 #[derive(Debug)]
 pub(crate) struct GetquotaResult {
-    #[expect(dead_code, reason = "status exposed for callers that need to distinguish NoQuota from PermDenied")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "read in tests and by future callers"))]
     pub status: QuotaStatus,
     pub quota: Option<QuotaData>,
 }
@@ -117,4 +117,67 @@ pub(crate) async fn getquota(addr: SocketAddr, export_path: &str, uid: u32, prox
     let args = GetquotaArgs { path: Opaque::owned(export_path.as_bytes().to_vec()), uid };
     let raw: RawReply = rpc.call(RQUOTA_PROGRAM, RQUOTA_V1, RQUOTAPROC_GETQUOTA, &args).await.context("GETQUOTA RPC")?;
     GetquotaResult::decode(&raw.data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_status_from_u32() {
+        assert_eq!(QuotaStatus::from_u32(1), QuotaStatus::Ok);
+        assert_eq!(QuotaStatus::from_u32(2), QuotaStatus::NoQuota);
+        assert_eq!(QuotaStatus::from_u32(3), QuotaStatus::PermDenied);
+        assert_eq!(QuotaStatus::from_u32(99), QuotaStatus::Unknown(99));
+    }
+
+    fn build_ok_reply() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1u32.to_be_bytes()); // Q_OK
+        buf.extend_from_slice(&4096u32.to_be_bytes()); // bsize
+        buf.extend_from_slice(&1u32.to_be_bytes()); // active
+        buf.extend_from_slice(&100_000u32.to_be_bytes()); // bhardlimit
+        buf.extend_from_slice(&50_000u32.to_be_bytes()); // bsoftlimit
+        buf.extend_from_slice(&25_000u32.to_be_bytes()); // curblocks
+        buf.extend_from_slice(&10_000u32.to_be_bytes()); // fhardlimit
+        buf.extend_from_slice(&5_000u32.to_be_bytes()); // fsoftlimit
+        buf.extend_from_slice(&1_234u32.to_be_bytes()); // curfiles
+        buf.extend_from_slice(&0u32.to_be_bytes()); // btimeleft
+        buf.extend_from_slice(&0u32.to_be_bytes()); // ftimeleft
+        buf
+    }
+
+    #[test]
+    fn decode_ok_reply() {
+        let data = build_ok_reply();
+        let result = GetquotaResult::decode(&data).unwrap();
+        assert_eq!(result.status, QuotaStatus::Ok);
+        let q = result.quota.unwrap();
+        assert_eq!(q.bsize, 4096);
+        assert!(q.active);
+        assert_eq!(q.bhardlimit, 100_000);
+        assert_eq!(q.curblocks, 25_000);
+        assert_eq!(q.curfiles, 1_234);
+    }
+
+    #[test]
+    fn decode_noquota() {
+        let data = 2u32.to_be_bytes().to_vec();
+        let result = GetquotaResult::decode(&data).unwrap();
+        assert_eq!(result.status, QuotaStatus::NoQuota);
+        assert!(result.quota.is_none());
+    }
+
+    #[test]
+    fn decode_truncated_rejects() {
+        assert!(GetquotaResult::decode(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn decode_ok_truncated_body_rejects() {
+        // Q_OK but only 4 bytes of rquota (need 40)
+        let mut data = 1u32.to_be_bytes().to_vec();
+        data.extend_from_slice(&4096u32.to_be_bytes());
+        assert!(GetquotaResult::decode(&data).is_err());
+    }
 }
