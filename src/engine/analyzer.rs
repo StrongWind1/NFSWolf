@@ -390,8 +390,7 @@ impl Analyzer {
         check_auth_methods(&entry.path, &probe.auth_flavors, findings);
         // NFSv4 probes: SECINFO, per-path SECINFO, SEC_LABEL, xattrs.
         run_nfs4_export_checks(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
-        check_windows_signing(&fh, &entry.path, findings);
-        check_handle_entropy(&fh, &entry.path, findings);
+        run_handle_checks(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // PATHCONF: case-insensitive detection (Windows/NTFS fingerprint) and
         // unrestricted chown detection (ownership hijacking).
@@ -419,9 +418,6 @@ impl Analyzer {
         // AUTH_TOOWEAK oracle: probe whether the server enforces stronger auth than
         // AUTH_SYS at the NFS operation level (even though MOUNT accepted AUTH_SYS).
         check_auth_tooweak(&export_nfs3, &fh, &entry.path, findings).await;
-
-        // NFS_ACL POSIX ACL enumeration (F-5.14).
-        check_nfs_acl(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // RQUOTA UID enumeration (F-5.15).
         check_rquota(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
@@ -602,9 +598,7 @@ impl Analyzer {
         tracing::info!(export = %entry.path, fh_len = v4_fh_bytes.len(), "NFSv4 fallback: acquired handle via LOOKUP");
 
         // Checks that work with raw handles (no v3 client needed).
-        check_windows_signing(&fh, &entry.path, findings);
-        check_handle_entropy(&fh, &entry.path, findings);
-        check_nfs_acl(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+        run_handle_checks(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // NFSv4-specific checks (SECINFO, LOOKUPP, cross-export).
         run_nfs4_export_checks(nfs_addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
@@ -1176,6 +1170,15 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
 ///
 /// All-zero HMAC bytes mean signing is disabled  --  arbitrary handle forgery is possible.
 ///
+/// Checks that work with any file handle (no v3 client or specific version needed).
+///
+/// Shared between the v3 main path and the v4 fallback path.
+async fn run_handle_checks(addr: SocketAddr, fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    check_windows_signing(fh, export_path, findings);
+    check_handle_entropy(fh, export_path, findings);
+    check_nfs_acl(addr, fh, export_path, findings, proxy, stealth).await;
+}
+
 /// Two detection paths: `fingerprint_os` recognises 32-byte v3 handles; the new
 /// `detect_windows_handle_version` also catches 28-byte v4.1 handles.
 fn check_windows_signing(fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
