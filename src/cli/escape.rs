@@ -501,13 +501,12 @@ async fn gather_v4_export_seeds(host: &str, globals: &GlobalOpts) -> Vec<(String
         }
         depth += 1;
 
-        // List children of this directory.
+        // List children of this directory (cap at 10 per directory to
+        // avoid spending too many RPCs on a single wide pseudo-dir).
         let Ok(entries) = client.list_dir(&dir_fh).await else { continue };
+        let children: Vec<&String> = entries.iter().filter(|n| *n != "." && *n != "..").take(10).collect();
 
-        for name in &entries {
-            if name == "." || name == ".." {
-                continue;
-            }
+        for name in children {
             // LOOKUP child + GETATTR(fsid) + GETFH.
             let Ok((child_fh, child_info)) = client.lookup(dir_fh.as_slice(), name).await else { continue };
             let child_fsid = child_info.fsid.unwrap_or(parent_fsid);
