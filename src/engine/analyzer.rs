@@ -289,6 +289,11 @@ impl Analyzer {
         if exports.is_empty() {
             exports = self.mount.list_exports_v1(addr).await.unwrap_or_default();
         }
+        // NFSv4-only servers have no MOUNT protocol. Discover exports by
+        // walking the pseudo-filesystem and detecting fsid boundaries.
+        if exports.is_empty() {
+            exports = discover_v4_exports(addr, self.proxy.as_deref(), &self.stealth).await;
+        }
         check_export_acls(&exports, &mut findings);
 
         let mut export_analyses: Vec<ExportAnalysis> = Vec::new();
@@ -3115,4 +3120,78 @@ async fn connect_nfs4_root(addr: SocketAddr, proxy: Option<&str>, stealth: &Stea
     let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
     let connect = tokio::time::timeout(std::time::Duration::from_secs(5), crate::proto::nfs4::compound::Nfs4DirectClient::connect_with_auth_proxy(nfs4_addr, 0, 0, "localhost", proxy)).await;
     connect.ok()?.ok().map(|c| c.with_stealth(stealth.clone()))
+}
+
+/// Discover NFS exports by walking the NFSv4 pseudo-filesystem.
+///
+/// The pseudo-FS connects all exports under a shared namespace. Each real
+/// export has a different fsid from its pseudo-directory parent. This walks
+/// the tree from PUTROOTFH, comparing fsid at each level, and records the
+/// path where the fsid changes as an export mount point.
+async fn discover_v4_exports(addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Vec<ExportEntry> {
+    use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
+
+    let Some(mut client) = connect_nfs4_root(addr, proxy, stealth).await else { return Vec::new() };
+
+    // Get the pseudo-root's fsid as the baseline.
+    let ops = vec![ArgOp::Putrootfh, ArgOp::Getattr(AttrRequest::fsid_only())];
+    let Ok(res) = client.compound(ops).await else { return Vec::new() };
+    if res.status != 0 {
+        return Vec::new();
+    }
+    let root_fsid = res.results.iter().find_map(|op| if let ResOpData::Getattr(attrs) = &op.data { attrs.fsid } else { None });
+    let Some(root_fsid) = root_fsid else { return Vec::new() };
+
+    // Get root FH for READDIR.
+    let Ok(root_fh) = client.get_root_fh().await else { return Vec::new() };
+
+    let mut exports = Vec::new();
+    // DFS stack: (parent_fh, parent_fsid, path_prefix)
+    let mut stack: Vec<(Vec<u8>, (u64, u64), String)> = vec![(root_fh, root_fsid, String::new())];
+    let mut depth = 0u32;
+
+    while let Some((dir_fh, parent_fsid, prefix)) = stack.pop() {
+        if depth > 10 {
+            break;
+        }
+        depth += 1;
+
+        let Ok(entries) = client.list_dir(&dir_fh).await else { continue };
+
+        for name in &entries {
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            // LOOKUP + GETATTR(fsid) + GETFH on each child.
+            let ops = vec![ArgOp::Putfh(dir_fh.clone()), ArgOp::Lookup(name.clone()), ArgOp::Getattr(AttrRequest::fsid_only()), ArgOp::Getfh];
+            let Ok(res) = client.compound(ops).await else { continue };
+            if res.status != 0 {
+                continue;
+            }
+
+            let child_fsid = res.results.iter().find_map(|op| if let ResOpData::Getattr(attrs) = &op.data { attrs.fsid } else { None });
+            let child_fh = res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None });
+
+            let child_path = if prefix.is_empty() { format!("/{name}") } else { format!("{prefix}/{name}") };
+
+            match (child_fsid, child_fh) {
+                (Some(fsid), Some(_)) if fsid != parent_fsid => {
+                    // fsid changed -- this is a real export mount point.
+                    tracing::info!(path = %child_path, "NFSv4 pseudo-FS: discovered export");
+                    exports.push(ExportEntry { path: child_path, allowed_hosts: vec!["*".to_owned()], auth_flavors: vec![1], handle_hex: String::new() });
+                },
+                (Some(_), Some(fh)) => {
+                    // Same fsid -- still in pseudo-FS, recurse deeper.
+                    stack.push((fh, parent_fsid, child_path));
+                },
+                _ => {},
+            }
+        }
+    }
+
+    if !exports.is_empty() {
+        tracing::info!(count = exports.len(), "NFSv4 pseudo-FS walk discovered exports");
+    }
+    exports
 }
