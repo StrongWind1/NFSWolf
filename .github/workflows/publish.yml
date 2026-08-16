@@ -84,7 +84,16 @@ jobs:
             local crate="$1"
             local flags="${2:-}"
             echo "::group::Publishing ${crate}"
-            cargo publish -p "${crate}" ${flags}
+            local output
+            if output="$(cargo publish -p "${crate}" ${flags} 2>&1)"; then
+              echo "${output}"
+            elif echo "${output}" | grep -q 'already exists'; then
+              echo "${output}"
+              echo "${crate} already published -- skipping."
+            else
+              echo "${output}" >&2
+              return 1
+            fi
             echo "::endgroup::"
             echo "Waiting for crates.io index propagation..."
             sleep 30
@@ -96,10 +105,8 @@ jobs:
           # with --no-verify. Strip the [dev-dependencies] section before
           # publish; --no-verify means tests won't run anyway.
           sed -i '/^\[dev-dependencies\]$/,/^$/d' crates/onc-xdr-derive/Cargo.toml
-          cargo publish -p onc-xdr-derive --no-verify --allow-dirty
+          publish_crate onc-xdr-derive "--no-verify --allow-dirty"
           git checkout -- crates/onc-xdr-derive/Cargo.toml
-          echo "Waiting for crates.io index propagation..."
-          sleep 30
 
           # Layer 2: XDR codec
           publish_crate onc-xdr
