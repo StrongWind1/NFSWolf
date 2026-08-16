@@ -262,6 +262,26 @@ fn annotate_handle(fh: &FileHandle) -> String {
     }
 }
 
+/// Score a handle for sorting: higher = more likely to be a usable real root.
+fn handle_quality_score(fh: &FileHandle) -> u32 {
+    let bytes = fh.as_bytes();
+    let fsid_type = bytes.get(2).copied().unwrap_or(0);
+    let fileid_type = bytes.get(3).copied().unwrap_or(0);
+
+    let fsid_score = match fsid_type {
+        7 => 100,
+        6 => 50,
+        _ => 0,
+    };
+    let fileid_score = match fileid_type {
+        2 => 20,
+        1 | 0x81 => 15,
+        0x4d => 10,
+        _ => 5,
+    };
+    fsid_score + fileid_score
+}
+
 /// Comprehensive multi-seed escape: acquire handles from ALL available sources
 /// (MOUNT v3, MOUNT v1, NFSv4 LOOKUP), run `find_escape_root_all` on each unique
 /// seed, and report every working root handle.
@@ -445,6 +465,9 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
     }
 
     if !all_results.is_empty() {
+        // Sort: best candidates first (highest score), worst last.
+        all_results.sort_by_key(|r| std::cmp::Reverse(handle_quality_score(&r.candidate.root_handle)));
+
         println!();
         println!("  {}", "Results:".bold());
         for r in &all_results {
