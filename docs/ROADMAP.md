@@ -62,34 +62,6 @@ Rare on modern systems but legacy SunOS/Solaris PC-NFS gateways persist in enter
 
 Build as modules inside `nfswolf` first. Promote to standalone crates only when an external consumer needs them.
 
-### nfs-nlm -- lock manipulation (program 100021)
-
-**24 procedures, v3 + v4 (64-bit widening). High effort.**
-
-Key procedures:
-- `NLM_TEST` (proc 1): leak lock holders (PID, byte range, owner handle)
-- `NLM_LOCK` / `NLM_UNLOCK`: targeted lock manipulation
-- `NLM_FREE_ALL` (proc 23): release ALL locks for an arbitrary hostname with a single UDP datagram -- unauthenticated bulk lock release
-- `NLM_SHARE` (proc 20): persistent DoS via share reservations
-- Async `_MSG` variants (procs 4-9): fire-and-forget with callback
-
-Combined with NFS WRITE, the `NLM_TEST -> NLM_UNLOCK -> WRITE` chain gives write access to files protected by advisory locks.
-
-Wire format: C702 ch. 10, 14. Full XDR for all 24 procedures documented in the protocol reference below.
-
-### nfs-nsm -- reboot spoofing and callback coercion (program 100024)
-
-**7 procedures, v1. Medium effort.**
-
-Key procedures:
-- `SM_MON` (proc 2): register attacker-controlled callbacks. The `my_id` structure specifies RPC program/version/procedure for the callback -- fully attacker-controlled.
-- `SM_NOTIFY` (proc 6): spoof reboot notifications to trigger lock release across the cluster
-- `SM_SIMU_CRASH` (proc 5): cascade lock recovery
-
-Outbound-connection coercion primitive (like NFSv4 SETCLIENTID but for v2/v3). Combined with NLM, provides two independent lock-release paths.
-
-Wire format: C702 ch. 11.
-
 ### nfs-nis -- credential store dump (programs 100004 + 100007)
 
 **15 total procedures (12 ypserv + 3 ypbind). High effort.**
@@ -132,14 +104,6 @@ Deferred until a consumer exists. The recon value is already captured.
 
 ### Remaining
 
-#### DRC replay attacks
-
-After detecting a server reboot (via write verifier oracle), replay captured destructive XIDs (REMOVE, RENAME, CREATE UNCHECKED). The duplicate request cache is RAM-only -- a reboot wipes it. Requires the write verifier oracle (done) and `--allow-write`. Medium effort.
-
-#### NFSv4 SETCLIENTID callback coercion
-
-`SETCLIENTID` (op 35) takes a `cb_client4` with an attacker-controlled callback address. The server connects outbound to the registered address for delegation recalls. Connection-coercion primitive for relay attacks and firewall traversal. Requires v4.0 stateful ops. Medium effort.
-
 #### Analyzer v4 OPEN write testing
 
 The `Nfs4Client` has `open_write()`/`write_via_open()` but the analyzer does not use them for honest write testing. Wiring v4 OPEN into the analyzer would give accurate write-access detection on v4-only servers. Low-medium effort.
@@ -174,13 +138,11 @@ Multi-protocol sequences combining sideband RPC programs with NFS for compound e
 | Chain | Sequence | Result |
 |-------|----------|--------|
 | 1. NIS -> NFS credential theft | ypbind DOMAIN -> ypserv ALL(passwd.byname) -> credential_ladder_with(harvested_uids) | Targeted UID spray from real credential store |
-| 2. NSM -> NLM -> NFS write access | SM_NOTIFY(spoofed reboot) -> NLM locks released -> NFS WRITE to previously locked file | Write to advisory-locked files |
-| 3. RQUOTA -> targeted uid-spray | GETQUOTA sweep -> active UID set -> uid-spray with only confirmed UIDs | Orders of magnitude fewer probes |
-| 4. NFS_ACL -> hidden permission discovery | GETACL -> ACL entries with UIDs not in mode bits -> credential_ladder_with(acl_uids) | Access paths invisible to mode-bit analysis |
-| 5. WebNFS -> MOUNT bypass -> full filesystem | Public handle + MCL "../../../etc/shadow" | Single-RPC file read without MOUNT |
-| 6. PCNFSD -> authenticated NFS access | PCNFSD_AUTH brute-force -> verified uid/gid -> AUTH_SYS with confirmed identity | Credential verification before NFS ops |
-| 7. Write verifier -> DRC replay window | COMMIT(count=0) poll -> verifier change = reboot -> replay captured destructive XIDs | Post-reboot destructive replay |
-| 8. Metadata leak -> targeted file discovery | post_op_attr from NFS3ERR_ACCES -> file owner/size/mode -> targeted credential selection | Reduces blind spray to targeted attempt |
+| 2. RQUOTA -> targeted uid-spray | GETQUOTA sweep -> active UID set -> uid-spray with only confirmed UIDs | Orders of magnitude fewer probes |
+| 3. NFS_ACL -> hidden permission discovery | GETACL -> ACL entries with UIDs not in mode bits -> credential_ladder_with(acl_uids) | Access paths invisible to mode-bit analysis |
+| 4. WebNFS -> MOUNT bypass -> full filesystem | Public handle + MCL "../../../etc/shadow" | Single-RPC file read without MOUNT |
+| 5. PCNFSD -> authenticated NFS access | PCNFSD_AUTH brute-force -> verified uid/gid -> AUTH_SYS with confirmed identity | Credential verification before NFS ops |
+| 6. Metadata leak -> targeted file discovery | post_op_attr from NFS3ERR_ACCES -> file owner/size/mode -> targeted credential selection | Reduces blind spray to targeted attempt |
 
 ---
 
@@ -188,7 +150,7 @@ Multi-protocol sequences combining sideband RPC programs with NFS for compound e
 
 **Done.** All 8 protocol crates are published on [crates.io](https://crates.io) and usable independently of the `nfswolf` binary: `onc-xdr-derive`, `onc-xdr`, `onc-rpc-client`, `onc-rpcbind`, `nfs-mount`, `nfs-v2`, `nfs-v3`, `nfs-v4`. The binary is distributed via GitHub releases and `cargo install nfswolf`.
 
-Future sideband protocol crates (NLM, NSM, RQUOTA, NFS_ACL, NIS) will be built as modules inside `nfswolf` first and promoted to standalone crates when an external consumer needs them.
+Future sideband protocol crates (RQUOTA, NFS_ACL, NIS) will be built as modules inside `nfswolf` first and promoted to standalone crates when an external consumer needs them.
 
 ---
 
@@ -241,50 +203,6 @@ struct rquota {
 ```
 
 **UID existence oracle:** if `GETQUOTA` returns `Q_OK` with `rq_curblocks > 0` or `rq_curfiles > 0`, the UID exists and has disk activity. `Q_NOQUOTA` means the UID has no quota record (may or may not exist). `Q_EPERM` means permission denied (UID exists but caller lacks access).
-
-### NLM wire format
-
-Program 100021. C702 ch. 10, 14. 24 procedures in v3; v4 widens offset/length to 64-bit.
-
-Key types:
-```
-struct nlm_lock {
-    string       caller_name<>;  /* spoofable identity */
-    netobj       fh;             /* NFS file handle (bearer token) */
-    netobj       oh;             /* lock owner handle */
-    unsigned int svid;           /* PID of lock holder */
-    unsigned int l_offset;       /* byte offset (v3: 32-bit, v4: 64-bit) */
-    unsigned int l_len;          /* byte count */
-};
-
-enum nlm_stats { LCK_GRANTED, LCK_DENIED, LCK_DENIED_NOLOCKS,
-                 LCK_BLOCKED, LCK_DENIED_GRACE_PERIOD };
-```
-
-`FREE_ALL` (proc 23): takes only `caller_name` (string). Releases ALL locks held by that hostname. A single UDP datagram with a spoofed hostname releases every lock the victim holds.
-
-### NSM wire format
-
-Program 100024. C702 ch. 11. 7 procedures.
-
-```
-struct mon {
-    mon_id   mon_id;
-    opaque   priv[16];  /* attacker-controlled private data */
-};
-struct mon_id {
-    string  mon_name<>;     /* hostname to monitor */
-    my_id   my_id;          /* callback specification */
-};
-struct my_id {
-    string       my_name<>;    /* callback target hostname */
-    unsigned int my_prog;      /* callback RPC program */
-    unsigned int my_vers;      /* callback RPC version */
-    unsigned int my_proc;      /* callback RPC procedure */
-};
-```
-
-`SM_MON` (proc 2): registers `my_id` as a callback target. The server will call `my_prog/my_vers/my_proc` at `my_name` when the monitored host reboots. All four fields are attacker-controlled -- outbound-connection coercion primitive.
 
 ### NFS_ACL wire format
 
