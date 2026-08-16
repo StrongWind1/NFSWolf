@@ -120,21 +120,33 @@ Deferred until a consumer exists. The recon value is already captured.
 
 ## Analyzer and scanner enhancements
 
-### ZFS escape handles
+### Completed
 
-**Done.** ZFS root handle construction (`construct_zfs_root_handle`) is implemented using `zfid_short_t` layout with `gen=0` bypass. Lab-tested on ZFS NFS exports.
+- **ZFS escape handles** -- `construct_zfs_root_handle` using `zfid_short_t` layout with `gen=0` bypass. Lab-tested.
+- **AUTH_SHORT token capture and replay** -- shell captures opaque tokens from server reply verifiers and replays them via `--short-token`. PCAP-based offline capture remains out of scope.
+- **AUTH_DH cryptographic sessions** -- full RFC 2695 implementation behind the `auth-dh` feature: DH key exchange, DES encryption, timestamp verification. `--auth-dh-netname`/`--auth-dh-pubkey` CLI flags.
+- **Unified escape engine** -- `find_escape_root()` covers 18/19 Linux filesystem types. Shared by the `escape` subcommand, `escape-root` shell command, and the analyzer's F-2.1 check.
+- **F-2.11/F-2.12 analyzer checks** -- LOOKUPP export escape and cross-export lateral access detection. Live-tested against 5 lab VMs.
+- **Multi-version FUSE mount** -- `NfsFuse<O: ShellOps>` supports NFSv2, v3, v4 with auto-detection.
+- **Nfs2EscapeProbe** -- escape engine works on v2-only servers.
 
-### DRC replay attacks
+### Remaining
+
+#### DRC replay attacks
 
 After detecting a server reboot (via write verifier oracle), replay captured destructive XIDs (REMOVE, RENAME, CREATE UNCHECKED). The duplicate request cache is RAM-only -- a reboot wipes it. Requires the write verifier oracle (done) and `--allow-write`. Medium effort.
 
-### NFSv4 SETCLIENTID callback coercion
+#### NFSv4 SETCLIENTID callback coercion
 
 `SETCLIENTID` (op 35) takes a `cb_client4` with an attacker-controlled callback address. The server connects outbound to the registered address for delegation recalls. Connection-coercion primitive for relay attacks and firewall traversal. Requires v4.0 stateful ops. Medium effort.
 
-### AUTH_SHORT token capture and replay
+#### Analyzer v4 OPEN write testing
 
-**Done.** AUTH_SHORT credential replay is implemented: the shell captures opaque tokens from server reply verifiers and replays them via `--short-token`. PCAP-based offline capture remains out of scope (use tcpdump/wireshark externally).
+The `Nfs4Client` has `open_write()`/`write_via_open()` but the analyzer does not use them for honest write testing. Wiring v4 OPEN into the analyzer would give accurate write-access detection on v4-only servers. Low-medium effort.
+
+#### Fstest MOUNT failures in analyzer
+
+The analyzer fails to MOUNT fstest exports on 10.252.0.10 (image-backed filesystems like ZFS, EROFS, bcachefs, UDF, ISO9660). The scan picks up their handles, but the per-export NFSv3 client cannot acquire them. Investigate whether using the scan's cached handles or a v4 LOOKUP path would let the analyzer run escape checks on these exports. Low effort.
 
 ---
 
@@ -151,7 +163,7 @@ After detecting a server reboot (via write verifier oracle), replay captured des
 
 ### OPEN for honest write testing (op 18, v4.0)
 
-Done in the crate. `Nfs4Client` has `open_read()`, `open_write()`, `close_file()`, `read_via_open()`, `write_via_open()`, `read_file()`, `write_file()` with full `Nfs4Session` (SETCLIENTID lifecycle, seqid sequencing, lease tracking). The V4Ops shell backend uses these for all file I/O. Remaining gap: analyzer integration for honest write testing (not yet wired into the `analyze` subcommand).
+**Done in the crate and shell.** `Nfs4Client` has `open_read()`, `open_write()`, `close_file()`, `read_via_open()`, `write_via_open()`, `read_file()`, `write_file()` with full `Nfs4Session` (SETCLIENTID lifecycle, seqid sequencing, lease tracking). The V4Ops shell backend uses these for all file I/O. Remaining gap: analyzer integration for honest write testing (not yet wired into the `analyze` subcommand -- see analyzer enhancements above).
 
 ---
 
@@ -191,9 +203,9 @@ Pre-publish checklist is complete. The binary (`nfswolf`) is distributed via Git
 
 ## HVS Consulting gap analysis
 
-Comparison against HVS Consulting's nfs-security-tooling (nfs_analyze + fuse_nfs, December 2024). Remaining gap:
+Comparison against HVS Consulting's nfs-security-tooling (nfs_analyze + fuse_nfs, December 2024).
 
-No remaining gaps. ZFS escape handles were implemented and lab-tested.
+No remaining gaps. ZFS escape handles, multi-version FUSE mount, and AUTH_DH sessions all implemented and lab-tested. nfswolf exceeds the HVS tooling in escape coverage (18 vs 3 filesystem types), protocol version support (v2/v3/v4 vs v3 only), and automation (credential ladder, auto-version detection).
 
 ---
 
