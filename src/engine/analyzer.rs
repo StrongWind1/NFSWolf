@@ -372,7 +372,12 @@ impl Analyzer {
         }
 
         let Some(best) = probe.best_v3() else {
-            tracing::warn!(export = %entry.path, "No handle variant accepted by NFSv3 GETATTR (tried {} variants)", probe.tested.len());
+            // NFSv3 MOUNT failed -- try NFSv4 LOOKUP to get a handle for
+            // read-only checks (escape, handle analysis, NFS_ACL, SECINFO).
+            // Write tests (squash probes) require v3 and are skipped.
+            tracing::debug!(export = %entry.path, "No v3 handle; trying NFSv4 LOOKUP fallback");
+            ea.auth_methods = probe.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
+            self.analyze_export_v4_fallback(config, addr, entry, findings, &mut ea).await;
             return ea;
         };
 
@@ -548,6 +553,130 @@ impl Analyzer {
         }
 
         ea
+    }
+
+    /// Fallback analysis path when NFSv3 MOUNT fails but NFSv4 may work.
+    ///
+    /// Navigates into the export via NFSv4 PUTROOTFH + LOOKUP chain, then
+    /// runs the checks that work with raw file handles (escape, handle
+    /// analysis, NFS_ACL, SECINFO). Write tests (squash probes) are skipped
+    /// because they require NFSv3 create/unlink.
+    async fn analyze_export_v4_fallback(&self, _config: &AnalyzeConfig, addr: SocketAddr, entry: &ExportEntry, findings: &mut Vec<Finding>, ea: &mut ExportAnalysis) {
+        use crate::proto::nfs4::compound::Nfs4DirectClient;
+        use crate::proto::nfs4::types::{ArgOp, ResOpData};
+
+        let nfs_addr = SocketAddr::new(addr.ip(), self.nfs_port.unwrap_or(2049));
+        let Ok(mut client) = Nfs4DirectClient::connect_with_auth_proxy(nfs_addr, 0, 0, "localhost", self.proxy.as_deref()).await else {
+            tracing::debug!(export = %entry.path, "NFSv4 fallback: connect failed");
+            return;
+        };
+        client = client.with_stealth(self.stealth.clone());
+
+        let components: Vec<&str> = entry.path.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+        let v4_fh = if components.is_empty() {
+            client.get_root_fh().await.ok()
+        } else {
+            let mut ops = Vec::with_capacity(components.len() + 2);
+            ops.push(ArgOp::Putrootfh);
+            for &c in &components {
+                ops.push(ArgOp::Lookup(c.to_owned()));
+            }
+            ops.push(ArgOp::Getfh);
+            match client.compound(ops).await {
+                Ok(res) if res.status == 0 => res.results.iter().find_map(|op| if let ResOpData::Fh(fh) = &op.data { Some(fh.clone()) } else { None }),
+                _ => None,
+            }
+        };
+
+        let Some(v4_fh_bytes) = v4_fh else {
+            tracing::debug!(export = %entry.path, "NFSv4 fallback: LOOKUP failed");
+            return;
+        };
+
+        let fh = FileHandle::from_bytes(&v4_fh_bytes);
+        ea.file_handle = fh.to_hex();
+        tracing::info!(export = %entry.path, fh_len = v4_fh_bytes.len(), "NFSv4 fallback: acquired handle via LOOKUP");
+
+        // Checks that work with raw handles (no v3 client needed).
+        check_windows_signing(&fh, &entry.path, findings);
+        check_handle_entropy(&fh, &entry.path, findings);
+        check_nfs_acl(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+
+        // NFSv4-specific checks (SECINFO, LOOKUPP, cross-export).
+        run_nfs4_export_checks(nfs_addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+
+        // Escape check via the unified engine (works with any handle format).
+        let escape_fh = check_escape_v4_handle(&fh, &entry.path, findings, nfs_addr, self.proxy.as_deref(), &self.stealth).await;
+        ea.escape_possible = escape_fh.is_some();
+    }
+}
+
+/// `EscapeProbe` wrapping an `Nfs4DirectClient` behind a tokio Mutex.
+struct AnalyzerV4EscapeProbe {
+    client: tokio::sync::Mutex<crate::proto::nfs4::compound::Nfs4DirectClient>,
+}
+
+impl EscapeProbe for AnalyzerV4EscapeProbe {
+    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
+        use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
+        let mut client = self.client.lock().await;
+        let ops = vec![ArgOp::Putfh(handle.to_vec()), ArgOp::Getattr(AttrRequest::shell_attrs())];
+        let res = client.compound(ops).await?;
+        anyhow::ensure!(res.status == 0, "GETATTR failed: NFSv4 status={}", res.status);
+        match res.results.get(1).map(|op| &op.data) {
+            Some(ResOpData::Getattr(attrs)) => {
+                let is_dir = attrs.ftype.as_ref().is_some_and(|ft| *ft == nfs_v4::wire::NfsFtype4::Dir);
+                let fileid = attrs.fileid.unwrap_or(0);
+                Ok((is_dir, fileid))
+            },
+            _ => anyhow::bail!("GETATTR result missing"),
+        }
+    }
+
+    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+        use crate::proto::nfs4::types::{ArgOp, ResOpData};
+        let mut client = self.client.lock().await;
+        let ops = vec![ArgOp::Putfh(dir.to_vec()), ArgOp::Lookup(name.to_owned()), ArgOp::Getfh];
+        let res = client.compound(ops).await?;
+        anyhow::ensure!(res.status == 0, "LOOKUP failed: NFSv4 status={}", res.status);
+        match res.results.last().map(|op| &op.data) {
+            Some(ResOpData::Fh(fh)) => Ok(fh.clone()),
+            _ => anyhow::bail!("GETFH result missing"),
+        }
+    }
+}
+
+/// Escape check using an NFSv4 handle as the seed.
+///
+/// Wraps the handle in an `AnalyzerV4EscapeProbe` and delegates to
+/// `find_escape_root`. Used when NFSv3 MOUNT fails but NFSv4 LOOKUP
+/// acquired a handle.
+async fn check_escape_v4_handle(fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Option<FileHandle> {
+    use crate::proto::nfs4::compound::Nfs4DirectClient;
+
+    let Ok(mut client) = Nfs4DirectClient::connect_with_auth_proxy(addr, 0, 0, "localhost", proxy).await else { return None };
+    client = client.with_stealth(stealth.clone());
+
+    let probe = AnalyzerV4EscapeProbe { client: tokio::sync::Mutex::new(client) };
+    let config = EscapeConfig { btrfs_subvols: 8, max_root_scan: 100, announce: false };
+
+    match find_escape_root(&probe, fh.as_bytes(), &config).await {
+        EscapeRootOutcome::Success(result) => {
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-2.1",
+                    title: "Export escape possible -- filesystem root accessible via crafted handle",
+                    desc: "subtree_check is disabled (Linux default). An attacker can craft a file \
+                           handle targeting any inode on the filesystem, bypassing export boundaries.",
+                    evidence: &format!("method={}, inode={}, fs_type={:?}, confidence={:.0}% (via NFSv4 fallback)", result.label, result.inode_number, result.fs_type, result.confidence * 100.0),
+                    remediation: "Enable subtree_check in /etc/exports (caution -- impacts rename correctness).",
+                    export: Some(export_path),
+                },
+                Severity::Critical,
+            ));
+            Some(result.root_handle)
+        },
+        EscapeRootOutcome::StaleNoRoot | EscapeRootOutcome::Unsupported => None,
     }
 }
 
