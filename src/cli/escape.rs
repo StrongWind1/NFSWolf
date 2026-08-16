@@ -391,7 +391,7 @@ async fn acquire_v4_lookup_handle(host: &str, export: &str, globals: &GlobalOpts
 
     // Navigate component-by-component. The pooled transport handles auth
     // context at each junction --same as the shell's `cd` command.
-    let components: Vec<&str> = export.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let components = crate::proto::sideband::export_components(export);
     let mut fh = client.get_root_fh().await.ok()?;
     let root_fh = fh.clone();
     for comp in &components {
@@ -634,7 +634,7 @@ async fn find_escape_v4(host: &str, export: &str, btrfs_subvols: u32, max_root_s
     let client = PooledNfs4Client::new(transport);
 
     // Navigate the pseudo-FS to the export path, component by component.
-    let components: Vec<&str> = export.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let components = crate::proto::sideband::export_components(export);
     let mut fh = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("NFSv4 PUTROOTFH: {e}"))?;
     let root_fh = fh.clone();
     for comp in &components {
@@ -868,7 +868,7 @@ async fn try_nfs4_escape(host: &str, export: &str, globals: &GlobalOpts) -> Opti
     // components under PUTROOTFH; once we cross into the real export the
     // server switches to real filesystem handles. LOOKUPP from there can
     // walk above the export boundary (RFC 7530 S16.14).
-    let components: Vec<&str> = export.trim_start_matches('/').split('/').filter(|c| !c.is_empty()).collect();
+    let components = crate::proto::sideband::export_components(export);
     let export_fh = if components.is_empty() {
         client.get_root_fh().await.ok()?
     } else {
