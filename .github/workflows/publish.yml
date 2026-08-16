@@ -90,9 +90,16 @@ jobs:
             sleep 30
           }
 
-          # Layer 1: proc macro (no workspace deps; --no-verify due to
-          # circular dev-dep with onc-xdr)
-          publish_crate onc-xdr-derive --no-verify
+          # Layer 1: proc macro -- has a circular dev-dep on onc-xdr (for
+          # testing the derive macro). Since onc-xdr hasn't been published at
+          # this version yet, cargo package fails resolving the dev-dep even
+          # with --no-verify. Strip the [dev-dependencies] section before
+          # publish; --no-verify means tests won't run anyway.
+          sed -i '/^\[dev-dependencies\]$/,/^$/d' crates/onc-xdr-derive/Cargo.toml
+          cargo publish -p onc-xdr-derive --no-verify
+          git checkout -- crates/onc-xdr-derive/Cargo.toml
+          echo "Waiting for crates.io index propagation..."
+          sleep 30
 
           # Layer 2: XDR codec
           publish_crate onc-xdr
