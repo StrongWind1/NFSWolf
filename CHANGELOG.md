@@ -4,6 +4,8 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-16
+
 ### Added
 
 - **Unified escape engine** -- `EscapeProbe` trait and `find_escape_root()` algorithm in `src/engine/escape.rs`, shared by both the `escape` subcommand and the `escape-root` shell command. Supports 18 of 19 Linux filesystem types (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660; only tmpfs resists). INO32_GEN candidate table with 9 labeled entries, plus filesystem-specific constructors for ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660.
@@ -23,6 +25,7 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - **F-2.11/F-2.12 analyzer checks** -- the analyzer now detects NFSv4 LOOKUPP export escape (F-2.11, Critical) and cross-export lateral access via pseudo-root (F-2.12, High) on every v4-capable export. Live-tested against 5 lab VMs.
 - **Analyzer escape upgrade** -- `check_escape()` now delegates to `find_escape_root()` via `AnalyzerEscapeProbe`, covering all 18 escapable filesystem types instead of the previous 3 (ext4/XFS/BTRFS). Evidence strings include descriptive labels.
 - **NFS_ACL client and F-5.14 analyzer check** -- POSIX ACL enumeration via program 100227 GETACL. Detects named USER/GROUP ACL entries that grant access beyond mode bits, revealing UIDs/GIDs invisible to standard analysis. Wire format verified against Linux `fs/nfsd/nfs3acl.c` and Solaris `nfsacl_prot.x`.
+- **RQUOTA client and F-5.15 analyzer check** -- UID existence oracle via rquotad (program 100011). GETQUOTA v1 reveals which UIDs have disk activity (block/file counts), confirming UID existence without NFS operations. The `bsize` field leaks filesystem block size (ext4=4096, XFS=512, ZFS=1024), narrowing escape strategy.
 - **Analyzer NFSv4 LOOKUP fallback** -- when NFSv3 MOUNT fails (image-backed filesystems, v4-only servers), the analyzer acquires handles via NFSv4 PUTROOTFH + LOOKUP and runs escape/handle/NFS_ACL checks through `AnalyzerV4EscapeProbe`. Previously these exports got zero analysis.
 - **NFS defense guide** -- `docs/NFS_DEFENSE_GUIDE.md`, a comprehensive hardening guide with live lab test results covering export configuration, auth enforcement, and network-level controls.
 - **Filesystem escape research matrix** -- `docs/research/FILESYSTEM_ESCAPE_MATRIX.md`, 335-line analysis of 23 Linux filesystem types with kernel source references, handle formats, root inodes, and generation check behavior.
@@ -413,7 +416,8 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.8.0...v1.0.0
 [0.8.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.5.0...v0.7.0

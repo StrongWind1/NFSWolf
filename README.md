@@ -43,7 +43,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 ## Features at a glance
 
 - **Documented security findings** across export, transport, file-handle, and credential attack categories - full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
-- **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2.
+- **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2, NFS_ACL (program 100227), RQUOTA (program 100011).
 - **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, AUTH_DH cryptographic sessions (RFC 2695, optional `auth-dh` feature), AUTH_SHORT credential replay, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
 - **Offensive subcommands**: `escape` (export breakout across 18 filesystem types -- ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs -- cascading through v3 MOUNT, handle matrix, v2 MOUNT, v4 handle escape, and v4 LOOKUPP; `--all` reports every working root handle from all seed sources), `brute-handle` (inode/generation cross-product sweep with handle oracle), `uid-spray` (last-resort credential discovery).
 - **Interactive shell** across NFSv2, NFSv3, and NFSv4 with tab completion, `get -r` / `put -r`, `--verify <sha256>`, `--handle` MOUNT bypass, `-c` scripting mode, auto-version detection when `--nfs-version` is omitted, `exports` command for cross-export lateral discovery (F-2.12), `escape-root` for in-shell filesystem escape, and all standard POSIX-style verbs.

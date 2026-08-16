@@ -594,6 +594,65 @@ File handles are bearer tokens -- possession is authorization.
 
 **Attack chain**: A client authenticated via krb5p on the MDS obtains a layout containing an NFSv3 file handle and DS address. The client (or attacker) then contacts the DS directly via NFSv3 AUTH_SYS with forged UID/GID credentials (F-1.1), bypassing all Kerberos enforcement. The layout and handle are irrevocable.
 
+### F-5.11: Filesystem Lacks Link/Symlink Support (Reduced Attack Surface)
+
+| Field | Value |
+|-------|-------|
+| Severity | Info |
+| RFC Basis | RFC 1813 §3.3.18 (FSINFO properties) |
+| Precondition | Server returns FSINFO with properties field |
+| Detection | Call FSINFO, check FSF3_LINK and FSF3_SYMLINK bits |
+
+**Why this matters**: When the filesystem does not support hard links or symbolic links (FSINFO `properties` field lacks `FSF3_LINK` or `FSF3_SYMLINK`), symlink escape (F-4.4) and hardlink attacks are inapplicable. This is informational -- it narrows the effective attack surface.
+
+### F-5.12: Near Inode Exhaustion (DoS Risk)
+
+| Field | Value |
+|-------|-------|
+| Severity | Medium |
+| RFC Basis | RFC 1813 §3.3.18 (FSSTAT) |
+| Precondition | Writable export with low available inodes |
+| Detection | Call FSSTAT, check avail_files < 1000 |
+
+**Why this matters**: FSSTAT reports total, free, and available file slots. When fewer than 1000 inodes remain, an attacker with write access can exhaust remaining capacity to deny file creation for all users.
+
+### F-5.13: NFSv4 Named Attributes (xattrs) Exposed on Export Root
+
+| Field | Value |
+|-------|-------|
+| Severity | Low |
+| RFC Basis | RFC 7530 §5.3 (named attributes) |
+| Precondition | Server supports OPENATTR operation |
+| Detection | OPENATTR + READDIR on export root enumerates named attributes |
+
+**Why this matters**: Named attributes (xattrs) may carry sensitive metadata: POSIX ACLs (`system.posix_acl_access`), SELinux labels (`security.selinux`), file capabilities (`security.capability`), or application-specific data. Enumerating them reveals the MAC/DAC enforcement posture.
+
+### F-5.14: POSIX ACL Entries Expose Access Beyond Mode Bits
+
+| Field | Value |
+|-------|-------|
+| Severity | Medium |
+| RFC Basis | NFS_ACL sideband protocol (program 100227, NFSACL_GETACL) |
+| Precondition | NFS_ACL program reachable on port 2049 |
+| Detection | GETACL on the export root returns named USER or GROUP ACL entries |
+
+**Why this matters**: The NFS_ACL sideband protocol returns POSIX ACL entries that grant access to specific UIDs/GIDs invisible to standard mode-bit analysis. Named USER and GROUP ACL entries may grant read/write access that does not appear in file ownership or READDIRPLUS results, revealing UIDs and GIDs with access paths invisible to mode-bit analysis and feeding the credential ladder for targeted escalation.
+
+**What nfswolf tests**: Calls NFSACL_GETACL (program 100227, procedure 2) on the export root file handle. Reports any named USER, GROUP, or DEFAULT ACL entries with their permission masks.
+
+### F-5.15: rquotad Exposes UID Activity via Quota Queries
+
+| Field | Value |
+|-------|-------|
+| Severity | Medium |
+| RFC Basis | Sun rquota.x (program 100011, no RFC; de facto standard) |
+| Precondition | rquotad reachable via portmapper |
+| Detection | GETQUOTA returns non-zero curblocks/curfiles for probed UIDs |
+
+**Why this matters**: rquotad (program 100011 v1) returns per-UID disk usage without authentication. GETQUOTA with a specific UID reveals whether that UID has disk activity (file and block counts), confirming UID existence on the server. The `bsize` field leaks the filesystem block size (ext4=4096, XFS=512, ZFS=1024), narrowing escape strategy before running NFS operations. Active UIDs feed the credential ladder for targeted spraying.
+
+**What nfswolf tests**: Resolves rquotad via portmapper GETPORT, then probes UIDs 0, 1000, and 65534 with GETQUOTA v1. Reports any UIDs with non-zero block or file counts, plus the filesystem block size.
+
 ---
 
 ## Category 6: Denial of Service (out of scope)
