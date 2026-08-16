@@ -255,6 +255,10 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
     let mut all = std::mem::take(&mut *collected.lock().await);
     all.sort_by(|a, b| a.idx.cmp(&b.idx).then_with(|| a.export.cmp(&b.export)));
 
+    let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
+    let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
+    let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
+
     let mut escaped = 0usize;
     for res in &all {
         match &res.outcome {
@@ -268,9 +272,6 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 // command reproduces the scan's transport (proxy / fixed NFS or
                 // mount port); without them the suggestion can't reach a proxied
                 // or non-2049 target -- exactly the auto-escape use case.
-                let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
-                let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
-                let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
                 let v2_flag = if note.contains("NFSv2") { " --nfs-version 2" } else { "" };
                 println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
@@ -284,9 +285,6 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 } else {
                     crate::output::print_handle("Public handle", &hex);
                 }
-                let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
-                let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
-                let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
                 let v2_flag = if *version == "v2" { " --nfs-version 2" } else { "" };
                 println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
@@ -298,9 +296,6 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 println!();
                 println!("{}", crate::output::status_ok(&format!("{}:{} {label}", res.host, res.export)));
                 crate::output::print_handle(if verified { "Root handle" } else { "Pseudo-root handle" }, &hex);
-                let proxy_flag = globals.proxy.as_ref().map(|p| format!(" --proxy {p}")).unwrap_or_default();
-                let nfs_port_flag = globals.nfs_port.map(|p| format!(" --nfs-port {p}")).unwrap_or_default();
-                let mount_port_flag = globals.mount_port.map(|p| format!(" --mount-port {p}")).unwrap_or_default();
                 if verified {
                     println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
                 } else {
