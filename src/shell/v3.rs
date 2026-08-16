@@ -276,7 +276,7 @@ impl ShellOps for V3Ops {
     }
 
     fn commands(&self) -> &'static [&'static str] {
-        crate::shell::V3_SHELL_COMMANDS
+        crate::shell::V3V4_SHELL_COMMANDS
     }
 
     fn make_completer(&self) -> Box<dyn crate::shell::complete::RemoteCompleter> {

@@ -34,181 +34,119 @@ const CAT_MAX_BYTES: u32 = 1_048_576; // 1 MiB
 use crate::shell::ops::{CHUNK_SIZE, READ_ALL_MAX};
 
 /// All commands available in the NFSv3 interactive shell (for Tab completion of the first token).
-pub(crate) const V3_SHELL_COMMANDS: &[&str] = &[
-    "ls",
-    "ll",
-    "dir",
-    "cd",
-    "pwd",
-    "tree",
-    "find",
+/// v3/v4 command list (sorted for binary search / tab completion).
+pub(crate) const V3V4_SHELL_COMMANDS: &[&str] = &[
     "cat",
-    "type",
-    "get",
-    "download",
-    "put",
-    "upload",
-    "rm",
-    "del",
-    "mkdir",
-    "rmdir",
-    "mv",
-    "rename",
-    "cp",
-    "copy",
+    "cd",
     "chmod",
     "chown",
-    "stat",
-    "readlink",
-    "symlink",
-    "link",
-    "uid",
+    "copy",
+    "cp",
+    "del",
+    "dir",
+    "download",
+    "escape-root",
+    "exit",
+    "exports",
+    "find",
+    "get",
     "gid",
+    "handle",
+    "help",
+    "history",
     "hostname",
-    "whoami",
     "id",
     "impersonate",
-    "su",
-    "mknod",
-    "suid-scan",
-    "world-writable",
-    "secrets-scan",
-    "exports",
     "last",
     "lastb",
     "lastlog",
-    "escape-root",
-    "mount-handle",
-    "handle",
-    "verifier",
     "lcd",
     "lls",
-    "lpwd",
     "lmkdir",
-    "history",
-    "help",
-    "exit",
-    "quit",
-];
-
-/// All commands available in the NFSv4 interactive shell (for Tab completion).
-///
-/// Identical to `V3_SHELL_COMMANDS` -- v4 supports mknod and verifier.
-pub(crate) const V4_SHELL_COMMANDS: &[&str] = &[
-    "ls",
-    "ll",
-    "dir",
-    "cd",
-    "pwd",
-    "tree",
-    "find",
-    "cat",
-    "type",
-    "get",
-    "download",
-    "put",
-    "upload",
-    "rm",
-    "del",
-    "mkdir",
-    "rmdir",
-    "mv",
-    "rename",
-    "cp",
-    "copy",
-    "chmod",
-    "chown",
-    "stat",
-    "readlink",
-    "symlink",
+    "lpwd",
     "link",
-    "uid",
-    "gid",
-    "hostname",
-    "whoami",
-    "id",
-    "impersonate",
-    "su",
+    "ll",
+    "ls",
+    "mkdir",
     "mknod",
-    "suid-scan",
-    "world-writable",
-    "secrets-scan",
-    "exports",
-    "last",
-    "lastb",
-    "lastlog",
-    "escape-root",
     "mount-handle",
-    "handle",
-    "verifier",
-    "lcd",
-    "lls",
-    "lpwd",
-    "lmkdir",
-    "history",
-    "help",
-    "exit",
+    "mv",
+    "put",
+    "pwd",
     "quit",
+    "readlink",
+    "rename",
+    "rm",
+    "rmdir",
+    "secrets-scan",
+    "suid-scan",
+    "stat",
+    "su",
+    "symlink",
+    "tree",
+    "type",
+    "uid",
+    "upload",
+    "verifier",
+    "whoami",
+    "world-writable",
 ];
 
-/// Commands available in the NFSv2 shell (Tab completion).
-///
-/// Excludes `mknod` (not in NFSv2).
-/// The unified dispatch still handles unsupported commands with a clear error.
+/// v2 command list: base + root (no mknod or verifier).
 pub(crate) const V2_SHELL_COMMANDS: &[&str] = &[
-    "ls",
-    "ll",
-    "dir",
-    "cd",
-    "pwd",
-    "tree",
-    "find",
     "cat",
-    "type",
-    "get",
-    "download",
-    "put",
-    "upload",
-    "rm",
-    "del",
-    "mkdir",
-    "rmdir",
-    "mv",
-    "rename",
-    "cp",
-    "copy",
+    "cd",
     "chmod",
     "chown",
-    "stat",
-    "readlink",
-    "symlink",
-    "link",
-    "uid",
+    "copy",
+    "cp",
+    "del",
+    "dir",
+    "download",
+    "escape-root",
+    "exit",
+    "exports",
+    "find",
+    "get",
     "gid",
+    "handle",
+    "help",
+    "history",
     "hostname",
-    "whoami",
     "id",
     "impersonate",
-    "su",
-    "suid-scan",
-    "world-writable",
-    "secrets-scan",
-    "exports",
     "last",
     "lastb",
     "lastlog",
-    "escape-root",
-    "mount-handle",
-    "handle",
-    "root",
     "lcd",
     "lls",
-    "lpwd",
     "lmkdir",
-    "history",
-    "help",
-    "exit",
+    "lpwd",
+    "link",
+    "ll",
+    "ls",
+    "mkdir",
+    "mount-handle",
+    "mv",
+    "put",
+    "pwd",
     "quit",
+    "readlink",
+    "rename",
+    "rm",
+    "rmdir",
+    "root",
+    "secrets-scan",
+    "suid-scan",
+    "stat",
+    "su",
+    "symlink",
+    "tree",
+    "type",
+    "uid",
+    "upload",
+    "whoami",
+    "world-writable",
 ];
 
 /// Interactive NFS shell  --  browse and extract files from an NFS export.
@@ -292,6 +230,15 @@ impl<O: ShellOps> NfsShell<O> {
             cache.cwd = self.cwd.as_bytes().to_vec();
             cache.entries = entries;
         }
+    }
+
+    /// Gate on `--allow-write`. Returns `true` if writes are permitted.
+    fn require_write(&self) -> bool {
+        if self.allow_write {
+            return true;
+        }
+        eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        false
     }
 
     /// Parse a command line and dispatch to the appropriate handler.
@@ -689,8 +636,7 @@ impl<O: ShellOps> NfsShell<O> {
     ///
     /// Add `-r` before the local path to upload an entire directory recursively.
     async fn cmd_put(&self, line: &str) {
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -783,8 +729,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: rm <file>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -807,8 +752,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: mkdir <dir>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -831,8 +775,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: rmdir <dir>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -856,8 +799,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: mv <src> <dst>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -882,8 +824,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: cp <src> <dst>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -936,8 +877,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: chmod <octal-mode> <path>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -967,8 +907,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: chown <uid>[:<gid>] <path>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -1033,8 +972,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: symlink <target> <linkname>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -1059,8 +997,7 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: link <existing> <linkname>".yellow());
             return;
         }
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
 
@@ -1185,8 +1122,7 @@ impl<O: ShellOps> NfsShell<O> {
     /// Exploits RFC 1813 sec. 3.3.11  --  MKNOD can create char/block device nodes
     /// with arbitrary major/minor numbers, potentially enabling raw disk access.
     async fn cmd_mknod(&self, line: &str) {
-        if !self.allow_write {
-            eprintln!("{}", "write disabled  --  rerun with --allow-write".red());
+        if !self.require_write() {
             return;
         }
         if !self.ops.supports_mknod() {
