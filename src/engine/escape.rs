@@ -79,7 +79,7 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
     let known = FileHandleAnalyzer::construct_root_candidates(&fh);
     for candidate in &known {
         if config.announce {
-            eprintln!("{}", crate::output::status_info(&format!("Probing {} ...", candidate.label)));
+            tracing::debug!("Probing {} ...", candidate.label);
         }
         if probe_candidate(probe, candidate, export_fileid, export_handle).await {
             return EscapeRootOutcome::Success(candidate.clone());
@@ -91,7 +91,7 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
     let mut announced: HashSet<u32> = HashSet::new();
     for candidate in &btrfs {
         if config.announce && announced.insert(candidate.inode_number) {
-            eprintln!("{}", crate::output::status_info(&format!("Probing BTRFS subvol {} ...", candidate.inode_number)));
+            tracing::debug!("Probing BTRFS subvol {} ...", candidate.inode_number);
         }
         if probe_candidate(probe, candidate, export_fileid, export_handle).await {
             return EscapeRootOutcome::Success(candidate.clone());
@@ -113,7 +113,7 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
 
     for candidate in &fs_specific {
         if config.announce {
-            eprintln!("{}", crate::output::status_info(&format!("Probing {} ...", candidate.label)));
+            tracing::debug!("Probing {} ...", candidate.label);
         }
         if probe_candidate(probe, candidate, export_fileid, export_handle).await {
             return EscapeRootOutcome::Success(candidate.clone());
@@ -125,7 +125,7 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
     // 2b: inodes 1..max_root_scan with gen=0 only (wider sweep, gen=0 covers most FSes)
     let mut found_stale = !known.is_empty() || !btrfs.is_empty();
     if found_stale && config.announce {
-        eprintln!("{}", crate::output::status_warn(&format!("Known candidates returned STALE -- brute-force scanning inodes 1..={}", config.max_root_scan)));
+        tracing::debug!("Known candidates returned STALE -- brute-force scanning inodes 1..={}", config.max_root_scan);
     }
 
     // 2a: small inode range with gen sweep (6 * 6 = 36 probes, doubled for compound UUID)
@@ -180,7 +180,7 @@ pub(crate) async fn find_escape_root_all(probe: &(impl EscapeProbe + ?Sized), ex
     let known = FileHandleAnalyzer::construct_root_candidates(&fh);
     for candidate in &known {
         if config.announce {
-            eprintln!("{}", crate::output::status_info(&format!("Probing {} ...", candidate.label)));
+            tracing::debug!("Probing {} ...", candidate.label);
         }
         let ok = probe_candidate(probe, candidate, export_fileid, export_handle).await;
         try_record(candidate, ok);
@@ -191,7 +191,7 @@ pub(crate) async fn find_escape_root_all(probe: &(impl EscapeProbe + ?Sized), ex
     let mut announced: HashSet<u32> = HashSet::new();
     for candidate in &btrfs {
         if config.announce && announced.insert(candidate.inode_number) {
-            eprintln!("{}", crate::output::status_info(&format!("Probing BTRFS subvol {} ...", candidate.inode_number)));
+            tracing::debug!("Probing BTRFS subvol {} ...", candidate.inode_number);
         }
         let ok = probe_candidate(probe, candidate, export_fileid, export_handle).await;
         try_record(candidate, ok);
@@ -212,7 +212,7 @@ pub(crate) async fn find_escape_root_all(probe: &(impl EscapeProbe + ?Sized), ex
 
     for candidate in &fs_specific {
         if config.announce {
-            eprintln!("{}", crate::output::status_info(&format!("Probing {} ...", candidate.label)));
+            tracing::debug!("Probing {} ...", candidate.label);
         }
         let ok = probe_candidate(probe, candidate, export_fileid, export_handle).await;
         try_record(candidate, ok);

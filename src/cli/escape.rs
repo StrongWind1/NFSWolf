@@ -199,6 +199,53 @@ struct AllEscapeResult {
     seed_source: String,
 }
 
+/// Analyze a root handle's bytes and return a plain-English annotation.
+fn annotate_handle(fh: &FileHandle) -> String {
+    let bytes = fh.as_bytes();
+    if bytes.len() < 4 {
+        return "unknown format".to_owned();
+    }
+
+    let fsid_type = bytes.get(2).copied().unwrap_or(0);
+    let fileid_type = bytes.get(3).copied().unwrap_or(0);
+
+    let mut parts: Vec<String> = Vec::new();
+
+    match fsid_type {
+        6 => parts.push("UUID-only (no export context -- may resolve to pseudo-root)".to_owned()),
+        7 => parts.push("has export context (compound UUID)".to_owned()),
+        1 => parts.push("pseudo-FS synthetic handle".to_owned()),
+        _ => {},
+    }
+
+    match fileid_type {
+        0 => parts.push("mount-root reference".to_owned()),
+        1 => parts.push("real inode+generation".to_owned()),
+        2 => parts.push("real inode+generation+parent".to_owned()),
+        0x4d => parts.push("BTRFS subvolume handle".to_owned()),
+        0x61 => parts.push("NILFS2 handle".to_owned()),
+        0x81 => parts.push("XFS 64-bit inode handle".to_owned()),
+        _ => {},
+    }
+
+    // Extract filesystem UUID for grouping.
+    let uuid_slice = match fsid_type {
+        6 => bytes.get(4..20),
+        7 => bytes.get(12..28),
+        _ => None,
+    };
+    if let Some(uuid) = uuid_slice {
+        use std::fmt::Write;
+        let mut short = String::with_capacity(8);
+        for b in uuid.iter().take(4) {
+            let _ = write!(short, "{b:02x}");
+        }
+        parts.push(format!("filesystem {short}..."));
+    }
+
+    if parts.is_empty() { "unknown format".to_owned() } else { parts.join(", ") }
+}
+
 /// Comprehensive multi-seed escape: acquire handles from ALL available sources
 /// (MOUNT v3, MOUNT v1, NFSv4 LOOKUP), run `find_escape_root_all` on each unique
 /// seed, and report every working root handle.
@@ -385,7 +432,10 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
         println!();
         println!("  {}", "Results:".bold());
         for r in &all_results {
-            println!("    {}  {:?} inode {}  via {}  handle: {}", "[+]".bold().green(), r.candidate.fs_type, r.candidate.inode_number, r.seed_source.dimmed(), r.candidate.root_handle.to_hex().cyan());
+            let annotation = annotate_handle(&r.candidate.root_handle);
+            println!("    {}  {:?} inode {}  via {}", "[+]".bold().green(), r.candidate.fs_type, r.candidate.inode_number, r.seed_source.dimmed());
+            println!("        handle: {}", r.candidate.root_handle.to_hex().cyan());
+            println!("        {}", annotation.dimmed());
         }
     }
 
@@ -952,9 +1002,11 @@ async fn retry_acces_as_nobody(client: &Nfs3Client, export_handle: &FileHandle, 
 /// Print the successful escape result and next-step hints.
 fn print_escape_success(candidate: &EscapeResult, note: &str, host: &str) {
     let hex = candidate.root_handle.to_hex();
+    let annotation = annotate_handle(&candidate.root_handle);
     println!();
     println!("  {}  {:?}  (inode {}  {})", "Filesystem:".dimmed(), candidate.fs_type, candidate.inode_number, note);
     crate::output::print_handle("Root handle", &hex);
+    println!("  {}", annotation.dimmed());
     crate::output::print_handle_next_steps(&hex, host);
     println!();
 }
