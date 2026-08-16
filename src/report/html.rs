@@ -190,3 +190,33 @@ tr:hover td { background: #f0f4ff; }
 .info     { background: #555;    color: #fff; }
 </style>
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_escape_special_chars() {
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+        assert_eq!(html_escape("<script>"), "&lt;script&gt;");
+        assert_eq!(html_escape("\"quoted\""), "&quot;quoted&quot;");
+        assert_eq!(html_escape("it's"), "it&#39;s");
+    }
+
+    #[test]
+    fn html_escape_strips_control_chars() {
+        assert_eq!(html_escape("a\x1bb"), "a\\x1bb");
+        assert_eq!(html_escape("\x00"), "\\x00");
+    }
+
+    #[test]
+    fn html_escape_passes_normal() {
+        assert_eq!(html_escape("hello world"), "hello world");
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn html_escape_combined() {
+        assert_eq!(html_escape("<\x1b&>"), "&lt;\\x1b&amp;&gt;");
+    }
+}

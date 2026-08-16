@@ -96,3 +96,52 @@ const fn severity_label(sev: Severity) -> &'static str {
         Severity::Info => "INFO",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_control_strips_c0() {
+        assert_eq!(sanitize_control("hello\x00world"), "hello\\x00world");
+        assert_eq!(sanitize_control("\x1b[31mred\x1b[0m"), "\\x1b[31mred\\x1b[0m");
+        assert_eq!(sanitize_control("a\nb\tc"), "a\\x0ab\\x09c");
+    }
+
+    #[test]
+    fn sanitize_control_strips_del_and_c1() {
+        assert_eq!(sanitize_control("\x7f"), "\\x7f");
+        assert_eq!(sanitize_control("\u{0080}"), "\\x80");
+        assert_eq!(sanitize_control("\u{009f}"), "\\x9f");
+        // U+00A0 (non-breaking space) is NOT a control byte -- should pass through.
+        assert_eq!(sanitize_control("\u{00a0}"), "\u{00a0}");
+    }
+
+    #[test]
+    fn sanitize_control_strips_bidi_and_zero_width() {
+        assert_eq!(sanitize_control("a\u{200b}b"), "a\\u{200b}b");
+        assert_eq!(sanitize_control("\u{202e}RLO"), "\\u{202e}RLO");
+        assert_eq!(sanitize_control("\u{feff}BOM"), "\\u{feff}BOM");
+    }
+
+    #[test]
+    fn sanitize_control_passes_normal_text() {
+        assert_eq!(sanitize_control("normal text"), "normal text");
+        assert_eq!(sanitize_control(""), "");
+        assert_eq!(sanitize_control("abc123!@#"), "abc123!@#");
+    }
+
+    #[test]
+    fn is_bidi_boundary_values() {
+        assert!(is_bidi_or_zero_width(0x200b));
+        assert!(is_bidi_or_zero_width(0x200f));
+        assert!(!is_bidi_or_zero_width(0x200a));
+        assert!(!is_bidi_or_zero_width(0x2010));
+        assert!(is_bidi_or_zero_width(0x202a));
+        assert!(is_bidi_or_zero_width(0x202e));
+        assert!(is_bidi_or_zero_width(0x2066));
+        assert!(is_bidi_or_zero_width(0x2069));
+        assert!(is_bidi_or_zero_width(0xfeff));
+        assert!(!is_bidi_or_zero_width(0x0041)); // 'A'
+    }
+}

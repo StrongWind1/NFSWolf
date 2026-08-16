@@ -208,3 +208,21 @@ pub(crate) fn print_findings_summary(findings: &[crate::engine::analyzer::Findin
         println!("  Findings: {}", parts.join(", "));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_terminal_replaces_control_chars() {
+        assert_eq!(sanitize_terminal("\x1b[31mred\x1b[0m"), ".[31mred.[0m");
+        assert_eq!(sanitize_terminal("\x00\x01\x02"), "...");
+        assert_eq!(sanitize_terminal("a\nb\tc"), "a.b.c");
+    }
+
+    #[test]
+    fn sanitize_terminal_passes_normal_text() {
+        assert_eq!(sanitize_terminal("hello world"), "hello world");
+        assert_eq!(sanitize_terminal(""), "");
+    }
+}

@@ -87,3 +87,60 @@ pub(crate) fn build_export_lookup_ops(components: &[&str]) -> Vec<crate::proto::
     ops.push(ArgOp::Getfh);
     ops
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_components_standard() {
+        assert_eq!(export_components("/srv/nfs/data"), vec!["srv", "nfs", "data"]);
+    }
+
+    #[test]
+    fn export_components_root() {
+        let result: Vec<&str> = export_components("/");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn export_components_empty() {
+        let result: Vec<&str> = export_components("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn export_components_double_slashes() {
+        assert_eq!(export_components("//srv//nfs//"), vec!["srv", "nfs"]);
+    }
+
+    #[test]
+    fn export_components_no_leading_slash() {
+        assert_eq!(export_components("srv/nfs"), vec!["srv", "nfs"]);
+    }
+
+    #[test]
+    fn build_export_lookup_ops_single_component() {
+        let ops = build_export_lookup_ops(&["data"]);
+        assert_eq!(ops.len(), 3); // PUTROOTFH + LOOKUP + GETFH
+    }
+
+    #[test]
+    fn build_export_lookup_ops_empty() {
+        let ops = build_export_lookup_ops(&[]);
+        assert_eq!(ops.len(), 2); // PUTROOTFH + GETFH
+    }
+
+    #[test]
+    fn read_u32_basic() {
+        let data = 42u32.to_be_bytes();
+        let mut pos = 0;
+        assert_eq!(read_u32(&data, &mut pos).unwrap(), 42);
+        assert_eq!(pos, 4);
+    }
+
+    #[test]
+    fn read_u32_truncated() {
+        assert!(read_u32(&[0, 0], &mut 0).is_err());
+    }
+}

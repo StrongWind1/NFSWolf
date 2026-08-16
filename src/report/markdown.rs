@@ -151,3 +151,47 @@ fn longest_backtick_run(s: &str) -> usize {
     }
     max
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn md_escape_special_punctuation() {
+        assert_eq!(md_escape_text("*bold*"), "\\*bold\\*");
+        assert_eq!(md_escape_text("[link](url)"), "\\[link\\]\\(url\\)");
+        assert_eq!(md_escape_text("a|b"), "a\\|b");
+        assert_eq!(md_escape_text("<html>"), "\\<html\\>");
+        assert_eq!(md_escape_text("a&b"), "a\\&b");
+    }
+
+    #[test]
+    fn md_escape_control_chars() {
+        assert_eq!(md_escape_text("a\x1bb"), "a\\x1bb");
+        assert_eq!(md_escape_text("a\nb"), "a\\x0ab");
+    }
+
+    #[test]
+    fn md_escape_normal_text() {
+        assert_eq!(md_escape_text("hello world"), "hello world");
+        assert_eq!(md_escape_text(""), "");
+    }
+
+    #[test]
+    fn sanitize_fence_preserves_newlines() {
+        assert_eq!(sanitize_fence_content("line1\nline2"), "line1\nline2");
+        assert_eq!(sanitize_fence_content("a\x1bb"), "a\\x1bb");
+        assert_eq!(sanitize_fence_content("a\tb"), "a\\x09b");
+        assert_eq!(sanitize_fence_content("clean"), "clean");
+    }
+
+    #[test]
+    fn longest_backtick_run_cases() {
+        assert_eq!(longest_backtick_run(""), 0);
+        assert_eq!(longest_backtick_run("no backticks"), 0);
+        assert_eq!(longest_backtick_run("`"), 1);
+        assert_eq!(longest_backtick_run("```"), 3);
+        assert_eq!(longest_backtick_run("a``b```c`d"), 3);
+        assert_eq!(longest_backtick_run("````"), 4);
+    }
+}

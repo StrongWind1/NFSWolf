@@ -548,3 +548,62 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
     where
         Self: Sized;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_rwx_common_modes() {
+        assert_eq!(format_rwx(0o777), "rwxrwxrwx");
+        assert_eq!(format_rwx(0o000), "---------");
+        assert_eq!(format_rwx(0o644), "rw-r--r--");
+        assert_eq!(format_rwx(0o755), "rwxr-xr-x");
+        assert_eq!(format_rwx(0o700), "rwx------");
+        assert_eq!(format_rwx(0o100), "--x------");
+    }
+
+    #[test]
+    fn shell_handle_hex_round_trip() {
+        let handle = ShellHandle(vec![0x00, 0x0a, 0xff, 0x42]);
+        let hex = handle.to_hex();
+        assert_eq!(hex, "000aff42");
+        let parsed = ShellHandle::from_hex(&hex).unwrap();
+        assert_eq!(parsed, handle);
+    }
+
+    #[test]
+    fn shell_handle_from_hex_whitespace() {
+        let h = ShellHandle::from_hex("  0a0b  ").unwrap();
+        assert_eq!(h.0, vec![0x0a, 0x0b]);
+    }
+
+    #[test]
+    fn shell_handle_from_hex_odd_length_rejected() {
+        assert!(ShellHandle::from_hex("abc").is_err());
+    }
+
+    #[test]
+    fn shell_handle_from_hex_invalid_chars_rejected() {
+        assert!(ShellHandle::from_hex("zzzz").is_err());
+    }
+
+    #[test]
+    fn shell_handle_empty() {
+        let h = ShellHandle(vec![]);
+        assert_eq!(h.to_hex(), "");
+        assert!(h.as_bytes().is_empty());
+    }
+
+    #[test]
+    fn shell_file_type_letters() {
+        assert_eq!(ShellFileType::Regular.letter(), '-');
+        assert_eq!(ShellFileType::Directory.letter(), 'd');
+        assert_eq!(ShellFileType::Symlink.letter(), 'l');
+        assert_eq!(ShellFileType::Block.letter(), 'b');
+        assert_eq!(ShellFileType::Character.letter(), 'c');
+        assert_eq!(ShellFileType::Socket.letter(), 's');
+        assert_eq!(ShellFileType::Fifo.letter(), 'p');
+        assert_eq!(ShellFileType::Unknown.letter(), '?');
+    }
+}
