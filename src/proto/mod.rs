@@ -16,5 +16,6 @@ pub(crate) mod nfs_acl;
 pub(crate) mod pool;
 pub(crate) mod portmap;
 pub(crate) mod rquota;
+pub(crate) mod sideband;
 pub(crate) mod transport;
 pub(crate) mod udp;

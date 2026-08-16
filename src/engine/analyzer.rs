@@ -160,7 +160,7 @@ use std::sync::Arc;
 use nfs_v3::wire::{LOOKUP3args, Nfs3Option, Nfs3Result, PATHCONF3args, READ3args, cookieverf3, diropargs3, filename3, nfsstat3, sattr3};
 use onc_xdr::Opaque;
 
-use crate::engine::escape::{EscapeConfig, EscapeProbe, EscapeRootOutcome, find_escape_root};
+use crate::engine::escape::{EscapeConfig, EscapeProbe, EscapeRootOutcome, Nfs3EscapeProbe, find_escape_root};
 use crate::engine::file_handle::{FileHandleAnalyzer, FsType, OsGuess, SigningStatus, WindowsHandleVersion};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
@@ -980,7 +980,7 @@ fn check_auth_methods(export_path: &str, auth_flavors: &[u32], findings: &mut Ve
 /// escape.  Using READDIRPLUS rather than GETATTR catches servers that accept
 /// GETATTR on the root but refuse it on the export.
 async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) -> Option<FileHandle> {
-    let probe = AnalyzerEscapeProbe { client: nfs3 };
+    let probe = Nfs3EscapeProbe { client: nfs3 };
     let config = EscapeConfig { btrfs_subvols: 8, max_root_scan: 100, announce: false };
 
     match find_escape_root(&probe, export_fh.as_bytes(), &config).await {
@@ -1003,24 +1003,7 @@ async fn check_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_path: &s
     }
 }
 
-/// `EscapeProbe` wrapping the analyzer's pooled NFSv3 client.
-struct AnalyzerEscapeProbe<'a> {
-    client: &'a Nfs3Client,
-}
-
-impl EscapeProbe for AnalyzerEscapeProbe<'_> {
-    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
-        let fh = FileHandle::from_bytes(handle);
-        let attrs = self.client.attrs(&fh).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok((attrs.file_type == nfs_v3::FileType::Directory, attrs.fileid))
-    }
-
-    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
-        let fh = FileHandle::from_bytes(dir);
-        let (child, _) = self.client.resolve(&fh, name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(child.as_bytes().to_vec())
-    }
-}
+// Nfs3EscapeProbe eliminated -- uses Nfs3EscapeProbe from engine/escape.rs
 
 /// Count READDIRPLUS entries for a file handle; returns None on any error.
 async fn count_readdirplus(nfs3: &Nfs3Client, fh: &FileHandle) -> Option<u32> {

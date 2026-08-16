@@ -11,11 +11,9 @@
 use std::net::SocketAddr;
 
 use anyhow::Context as _;
-use onc_rpc_client::rpc::RpcClient;
-use onc_rpc_client::transport::tokio::TokioIo;
-use onc_xdr::{Opaque, Pack, Unpack};
-use tokio::net::TcpStream;
+use onc_xdr::{Opaque, Pack};
 
+use crate::proto::sideband::{RawReply, read_u32};
 use crate::util::stealth::StealthConfig;
 
 const NFS_ACL_PROGRAM: u32 = 100_227;
@@ -91,27 +89,6 @@ pub(crate) struct Getacl3Result {
     pub default_acl: Vec<AclEntry>,
 }
 
-struct Getacl3RawReply {
-    data: Vec<u8>,
-}
-
-impl Unpack for Getacl3RawReply {
-    fn unpack(input: &mut impl std::io::Read) -> onc_xdr::Result<(Self, usize)> {
-        let mut data = Vec::new();
-        let n = input.read_to_end(&mut data)?;
-        Ok((Self { data }, n))
-    }
-}
-
-/// Read a big-endian u32 from `raw` at `pos`, advancing `pos` by 4.
-fn read_u32(raw: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
-    let end = *pos + 4;
-    let slice = raw.get(*pos..end).context("GETACL3 reply truncated")?;
-    let bytes: [u8; 4] = slice.try_into().context("GETACL3 reply truncated")?;
-    *pos = end;
-    Ok(u32::from_be_bytes(bytes))
-}
-
 impl Getacl3Result {
     fn decode(raw: &[u8]) -> anyhow::Result<Self> {
         let mut pos = 0;
@@ -164,21 +141,8 @@ impl Getacl3Result {
 
 /// Retrieve POSIX ACLs for a file handle via the NFS_ACL sideband protocol.
 pub(crate) async fn getacl3(addr: SocketAddr, fh_bytes: &[u8], proxy: Option<&str>, stealth: &StealthConfig) -> anyhow::Result<Getacl3Result> {
-    stealth.wait().await;
-
-    let stream = if let Some(p) = proxy {
-        let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-        crate::proto::conn::socks5_connect(proxy_addr, addr).await.context("NFS_ACL SOCKS5 connect")?
-    } else {
-        TcpStream::connect(addr).await.context("NFS_ACL TCP connect")?
-    };
-
-    let auth = crate::proto::auth::AuthSys::new(0, 0, "localhost").to_opaque_auth(crate::proto::auth::next_stamp());
-    let mut rpc = RpcClient::new_with_auth(TokioIo::new(stream), auth, onc_rpc_client::rpc::opaque_auth::default());
-
+    let mut rpc = crate::proto::sideband::connect_sideband(addr, proxy, stealth).await?;
     let args = Getacl3Args { fh: Opaque::owned(fh_bytes.to_vec()), mask: NFS_ACL_MASK | NFS_DFACL_MASK };
-
-    let raw: Getacl3RawReply = rpc.call(NFS_ACL_PROGRAM, NFS_ACL_V3, ACLPROC3_GETACL, &args).await.context("GETACL3 RPC")?;
-
+    let raw: RawReply = rpc.call(NFS_ACL_PROGRAM, NFS_ACL_V3, ACLPROC3_GETACL, &args).await.context("GETACL3 RPC")?;
     Getacl3Result::decode(&raw.data)
 }

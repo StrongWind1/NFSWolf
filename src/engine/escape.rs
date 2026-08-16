@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 
 use crate::engine::file_handle::{EscapeResult, FileHandleAnalyzer, FsType};
+use crate::proto::nfs3::Nfs3Client;
 use crate::proto::nfs3::types::FileHandle;
 
 /// Probe interface for testing escape candidate handles.
@@ -337,4 +338,30 @@ async fn is_root_dir(probe: &(impl EscapeProbe + ?Sized), handle: &[u8], self_fi
 /// Check if an error message indicates a permission denial.
 fn is_acces(msg: &str) -> bool {
     msg.contains("ACCES") || msg.contains("PERM")
+}
+
+// --- Concrete EscapeProbe implementations ---
+
+/// `EscapeProbe` wrapping a pooled NFSv3 client.
+///
+/// Used by the `escape` subcommand, the analyzer's `check_escape`, and
+/// any other caller that has an `Nfs3Client` and wants to run the escape
+/// algorithm. Defined here (next to the trait) so consumers don't each
+/// need their own copy.
+pub(crate) struct Nfs3EscapeProbe<'a> {
+    pub client: &'a Nfs3Client,
+}
+
+impl EscapeProbe for Nfs3EscapeProbe<'_> {
+    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
+        let fh = FileHandle::from_bytes(handle);
+        let attrs = self.client.attrs(&fh).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok((attrs.file_type == nfs_v3::FileType::Directory, attrs.fileid))
+    }
+
+    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+        let fh = FileHandle::from_bytes(dir);
+        let (child, _) = self.client.resolve(&fh, name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(child.as_bytes().to_vec())
+    }
 }

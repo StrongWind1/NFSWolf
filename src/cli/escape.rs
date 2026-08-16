@@ -564,23 +564,7 @@ fn print_webnfs_success(public_handle: &FileHandle, version: &str, host: &str) {
 
 /// Adapts `Nfs3Client` to the version-neutral `EscapeProbe` trait so the shared
 /// escape engine can probe handles through NFSv3.
-struct Nfs3EscapeProbe<'a> {
-    client: &'a Nfs3Client,
-}
-
-impl EscapeProbe for Nfs3EscapeProbe<'_> {
-    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
-        let fh = FileHandle::from_bytes(handle);
-        let attrs = self.client.attrs(&fh).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok((attrs.file_type == FileType::Directory, attrs.fileid))
-    }
-
-    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
-        let fh = FileHandle::from_bytes(dir);
-        let (child, _) = self.client.resolve(&fh, name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(child.as_bytes().to_vec())
-    }
-}
+use crate::engine::escape::Nfs3EscapeProbe;
 
 /// NFSv2 escape probe: wraps an `Nfs2Client` so the escape engine can
 /// probe candidate handles on v2-only servers (kernel 2.6.x, no v3/v4).
