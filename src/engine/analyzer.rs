@@ -342,6 +342,7 @@ impl Analyzer {
     }
 
     /// Analyze a single export: mount it, run per-export checks, return the result.
+    #[expect(clippy::cognitive_complexity, reason = "per-export check sequence is inherently sequential; splitting would scatter the analysis flow")]
     async fn analyze_export(&self, config: &AnalyzeConfig, addr: SocketAddr, entry: &ExportEntry, findings: &mut Vec<Finding>) -> ExportAnalysis {
         let mut ea = ExportAnalysis { path: entry.path.clone(), allowed_hosts: entry.allowed_hosts.clone(), auth_methods: Vec::new(), writable: false, no_root_squash: None, escape_possible: false, file_handle: String::new(), file_access_tests: Vec::new(), nfs4_acls: Vec::new() };
 
@@ -421,6 +422,9 @@ impl Analyzer {
 
         // NFS_ACL POSIX ACL enumeration (F-5.14).
         check_nfs_acl(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+
+        // RQUOTA UID enumeration (F-5.15).
+        check_rquota(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // Export escape check (F-2.x). Capture the confirmed escape handle so the
         // --test-read probes below can walk from the filesystem root.
@@ -2684,6 +2688,74 @@ async fn check_write_verifier(nfs3: &Nfs3Client, root_fh: &FileHandle, export_pa
             Severity::Medium,
         ));
     }
+}
+
+// --- RQUOTA UID enumeration ---
+
+/// F-5.15: rquotad reveals active UIDs via quota queries.
+///
+/// Probes rquotad (program 100011 v1) on the portmapper-resolved port.
+/// GETQUOTA with a UID returns disk usage if the UID has a quota record
+/// or has consumed any space. Active UIDs feed the credential ladder for
+/// targeted spraying. The `bsize` field leaks the filesystem block size.
+async fn check_rquota(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    let rquota_port = {
+        let pmap_addr = SocketAddr::new(addr.ip(), 111);
+        let Ok(stream) = tokio::net::TcpStream::connect(pmap_addr).await else { return };
+        let io = onc_rpc_client::transport::tokio::TokioIo::new(stream);
+        let mut pm = onc_rpcbind::PortmapperClient::new(io);
+        match pm.getport(100_011, 1, onc_rpcbind::IPPROTO_TCP).await {
+            Ok(port) if port > 0 => port,
+            _ => return,
+        }
+    };
+
+    let rquota_addr = SocketAddr::new(addr.ip(), rquota_port);
+    let probe_uids: &[u32] = &[0, 1000, 65534];
+    let mut active: Vec<String> = Vec::new();
+    let mut block_size: Option<u32> = None;
+
+    for &uid in probe_uids {
+        let Ok(result) = tokio::time::timeout(std::time::Duration::from_secs(3), crate::proto::rquota::getquota(rquota_addr, export_path, uid, proxy, stealth)).await else {
+            continue;
+        };
+        let Ok(result) = result else { continue };
+        if let Some(ref quota) = result.quota {
+            if block_size.is_none() && quota.bsize > 0 {
+                block_size = Some(quota.bsize);
+            }
+            if quota.curblocks > 0 || quota.curfiles > 0 {
+                active.push(format!("uid={uid} blocks={} files={}", quota.curblocks, quota.curfiles));
+            }
+        }
+    }
+
+    if active.is_empty() && block_size.is_none() {
+        return;
+    }
+
+    let mut evidence_parts: Vec<String> = Vec::new();
+    if let Some(bs) = block_size {
+        evidence_parts.push(format!("block_size={bs}"));
+    }
+    if !active.is_empty() {
+        evidence_parts.push(format!("active_uids: {}", active.join(", ")));
+    }
+
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-5.15",
+            title: "rquotad exposes UID activity via quota queries",
+            desc: "The rquotad service (program 100011) returned quota data for probed UIDs. \
+                   GETQUOTA reveals which UIDs have disk activity (file/block counts), enabling \
+                   targeted credential selection. The block size field fingerprints the filesystem.",
+            evidence: &evidence_parts.join("; "),
+            remediation: "Restrict rquotad access via host-based ACLs or firewall rules. \
+                          Consider disabling rquotad if remote quota queries are not needed.",
+            export: Some(export_path),
+        },
+        Severity::Medium,
+    ));
 }
 
 // --- Null-filename server fingerprint ---
