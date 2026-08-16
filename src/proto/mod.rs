@@ -12,6 +12,7 @@ pub(crate) mod mount;
 pub(crate) mod nfs2;
 pub(crate) mod nfs3;
 pub(crate) mod nfs4;
+pub(crate) mod nfs_acl;
 pub(crate) mod pool;
 pub(crate) mod portmap;
 pub(crate) mod transport;

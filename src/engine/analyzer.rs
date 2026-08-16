@@ -414,6 +414,9 @@ impl Analyzer {
         // AUTH_SYS at the NFS operation level (even though MOUNT accepted AUTH_SYS).
         check_auth_tooweak(&export_nfs3, &fh, &entry.path, findings).await;
 
+        // NFS_ACL POSIX ACL enumeration (F-5.14).
+        check_nfs_acl(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+
         // Export escape check (F-2.x). Capture the confirmed escape handle so the
         // --test-read probes below can walk from the filesystem root.
         let escape_fh = check_escape(&export_nfs3, &fh, &entry.path, findings).await;
@@ -2598,6 +2601,65 @@ async fn check_null_filename_fingerprint(nfs3: &Nfs3Client, root_fh: &FileHandle
             format!("Indeterminate ({e})")
         },
     }
+}
+
+// --- NFS_ACL POSIX ACL enumeration ---
+
+/// F-5.14: POSIX ACL entries reveal access grants beyond mode bits.
+///
+/// Probes the NFS_ACL sideband protocol (program 100227 v3, GETACL proc 1)
+/// on port 2049. If the server returns named USER or GROUP ACL entries,
+/// those UIDs/GIDs have access paths invisible to mode-bit analysis.
+async fn check_nfs_acl(addr: SocketAddr, export_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+    let Ok(result) = tokio::time::timeout(std::time::Duration::from_secs(5), crate::proto::nfs_acl::getacl3(nfs_addr, export_fh.as_bytes(), proxy, stealth)).await else {
+        tracing::debug!(export = export_path, "NFS_ACL GETACL timed out");
+        return;
+    };
+    let Ok(result) = result else {
+        tracing::debug!(export = export_path, "NFS_ACL GETACL RPC error");
+        return;
+    };
+    if result.status != 0 {
+        return;
+    }
+
+    let named_users: Vec<&crate::proto::nfs_acl::AclEntry> = result.access_acl.iter().filter(|e| e.tag == crate::proto::nfs_acl::ACL_USER).collect();
+    let named_groups: Vec<&crate::proto::nfs_acl::AclEntry> = result.access_acl.iter().filter(|e| e.tag == crate::proto::nfs_acl::ACL_GROUP).collect();
+    let default_named: Vec<&crate::proto::nfs_acl::AclEntry> = result.default_acl.iter().filter(|e| e.tag == crate::proto::nfs_acl::ACL_USER || e.tag == crate::proto::nfs_acl::ACL_GROUP).collect();
+
+    if named_users.is_empty() && named_groups.is_empty() && default_named.is_empty() {
+        return;
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    for e in &named_users {
+        parts.push(format!("uid={} {}", e.id, e.perm_string()));
+    }
+    for e in &named_groups {
+        parts.push(format!("gid={} {}", e.id, e.perm_string()));
+    }
+    for e in &default_named {
+        parts.push(format!("default:{}={} {}", e.type_name().to_lowercase(), e.id, e.perm_string()));
+    }
+
+    let evidence = format!("NFS_ACL GETACL returned {} named entries on export root: {}", named_users.len() + named_groups.len() + default_named.len(), parts.join(", "));
+
+    findings.push(make_finding(
+        &FindingSpec {
+            id: "F-5.14",
+            title: "POSIX ACL entries expose access beyond mode bits",
+            desc: "The NFS_ACL sideband protocol (program 100227) returned named USER or GROUP \
+                   ACL entries on the export root. These grant access to specific UIDs/GIDs \
+                   that are invisible to standard mode-bit analysis and may not appear in \
+                   READDIRPLUS file ownership.",
+            evidence: &evidence,
+            remediation: "Review POSIX ACLs on exported directories. Remove unnecessary named \
+                          ACL entries or restrict NFS_ACL program access.",
+            export: Some(export_path),
+        },
+        Severity::Medium,
+    ));
 }
 
 // --- NFSv4 LOOKUPP escape and cross-export lateral checks ---
