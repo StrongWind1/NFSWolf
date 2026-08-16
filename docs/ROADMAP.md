@@ -101,16 +101,14 @@ Deferred until a consumer exists. The recon value is already captured.
 - **F-2.11/F-2.12 analyzer checks** -- LOOKUPP export escape and cross-export lateral access detection. Live-tested against 5 lab VMs.
 - **Multi-version FUSE mount** -- `NfsFuse<O: ShellOps>` supports NFSv2, v3, v4 with auto-detection.
 - **Nfs2EscapeProbe** -- escape engine works on v2-only servers.
+- **NFS_ACL client (F-5.14)** -- program 100227 GETACL v3. Detects named USER/GROUP POSIX ACL entries beyond mode bits. Wire format verified against Linux kernel and Solaris.
+- **Analyzer NFSv4 LOOKUP fallback** -- when MOUNT fails, v4 LOOKUP acquires handles for escape/handle/NFS_ACL checks. Fixes zero-coverage on image-backed fstest exports and v4-only servers.
 
 ### Remaining
 
 #### Analyzer v4 OPEN write testing
 
-The `Nfs4Client` has `open_write()`/`write_via_open()` but the analyzer does not use them for honest write testing. Wiring v4 OPEN into the analyzer would give accurate write-access detection on v4-only servers. Low-medium effort.
-
-#### Fstest MOUNT failures in analyzer
-
-The analyzer fails to MOUNT fstest exports on 10.252.0.10 (image-backed filesystems like ZFS, EROFS, bcachefs, UDF, ISO9660). The scan picks up their handles, but the per-export NFSv3 client cannot acquire them. Investigate whether using the scan's cached handles or a v4 LOOKUP path would let the analyzer run escape checks on these exports. Low effort.
+The `Nfs4Client` has `open_write()`/`write_via_open()` but the analyzer does not use them for honest write testing (squash probes). The v4 fallback path handles read-only checks (escape, handle analysis, NFS_ACL, SECINFO). Stateful v4 write testing via `Nfs4Session` would give accurate write-access detection on v4-only servers. Medium effort.
 
 ---
 
