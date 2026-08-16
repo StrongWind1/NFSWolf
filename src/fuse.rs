@@ -38,6 +38,29 @@ use fuser::{
 use crate::engine::credential::credential_ladder_with;
 use crate::shell::ops::{ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, shell_err_to_errno};
 
+/// Guard: return EACCES if `--allow-write` is not set.
+macro_rules! require_write {
+    ($self:expr, $reply:expr) => {
+        if !$self.allow_write {
+            $reply.error(Errno::EACCES);
+            return;
+        }
+    };
+}
+
+/// Guard: look up the NFS handle for a FUSE inode, or return ENOENT.
+macro_rules! get_fh {
+    ($self:expr, $ino:expr, $reply:expr) => {
+        match $self.fh_for_ino($ino) {
+            Some(fh) => fh,
+            None => {
+                $reply.error(Errno::ENOENT);
+                return;
+            },
+        }
+    };
+}
+
 /// One directory entry paged from the server, owned so it outlives the
 /// per-page response buffer and can be cached across readdir callbacks:
 /// `(name bytes, optional attributes, optional file handle)`.
@@ -490,10 +513,7 @@ impl<O: ShellOps> NfsFuse<O> {
 impl<O: ShellOps> Filesystem for NfsFuse<O> {
     /// Look up a directory entry by name and return its attributes.
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEntry) {
-        let Some(parent_fh) = self.fh_for_ino(parent.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        let parent_fh = get_fh!(self, parent.0, reply);
 
         let name_str = name.to_string_lossy();
         let result = self.block(self.try_lookup_with_ladder(&parent_fh, &name_str, parent.0));
@@ -519,10 +539,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// Get file attributes for inode `ino`.
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FuseFileHandle>, reply: ReplyAttr) {
-        let Some(fh) = self.fh_for_ino(ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        let fh = get_fh!(self, ino.0, reply);
 
         let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
@@ -554,14 +571,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
-        let Some(fh) = self.fh_for_ino(ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        require_write!(self, reply);
+        let fh = get_fh!(self, ino.0, reply);
 
         let sa = ShellSetAttr { mode, uid, gid, size, atime: time_or_now_to_spec(atime), mtime: time_or_now_to_spec(mtime) };
 
@@ -579,10 +590,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// ACCESS -- advisory permission check.
     fn access(&self, _req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
-        let Some(fh) = self.fh_for_ino(ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        let fh = get_fh!(self, ino.0, reply);
 
         // Translate POSIX mask to NFS ACCESS bits. Since DefaultPermissions is
         // set, the kernel does its own check; we just forward to the server.
@@ -607,10 +615,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// READLINK -- return the raw symlink target.
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        let Some(fh) = self.fh_for_ino(ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        let fh = get_fh!(self, ino.0, reply);
 
         let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
@@ -625,14 +630,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// MKNOD -- create a special file (FIFO, socket, char/block device).
     fn mknod(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, mode: u32, _umask: u32, rdev: u32, reply: ReplyEntry) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
-        let Some(parent_fh) = self.fh_for_ino(parent.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        require_write!(self, reply);
+        let parent_fh = get_fh!(self, parent.0, reply);
 
         let kind = mode & 0o170_000;
         let perms = mode & 0o7777;
@@ -686,14 +685,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// MKDIR -- create a subdirectory.
     fn mkdir(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, mode: u32, _umask: u32, reply: ReplyEntry) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
-        let Some(parent_fh) = self.fh_for_ino(parent.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        require_write!(self, reply);
+        let parent_fh = get_fh!(self, parent.0, reply);
 
         let name_str = name.to_string_lossy().into_owned();
         let perms = mode & 0o7777;
@@ -719,14 +712,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// SYMLINK -- create a symbolic link.
     fn symlink(&self, _req: &Request, parent: INodeNo, link_name: &std::ffi::OsStr, target: &Path, reply: ReplyEntry) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
-        let Some(parent_fh) = self.fh_for_ino(parent.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        require_write!(self, reply);
+        let parent_fh = get_fh!(self, parent.0, reply);
 
         let name_str = link_name.to_string_lossy().into_owned();
         let target_str = target.to_string_lossy().into_owned();
@@ -753,14 +740,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// CREATE -- atomic create-and-open of a regular file.
     fn create(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, mode: u32, _umask: u32, _flags: i32, reply: ReplyCreate) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
-        let Some(parent_fh) = self.fh_for_ino(parent.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        require_write!(self, reply);
+        let parent_fh = get_fh!(self, parent.0, reply);
 
         let name_str = name.to_string_lossy().into_owned();
         let perms = mode & 0o7777;
@@ -789,14 +770,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// REMOVE -- delete a regular file (or a special file / symlink).
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
-        let Some(parent_fh) = self.fh_for_ino(parent.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        require_write!(self, reply);
+        let parent_fh = get_fh!(self, parent.0, reply);
         let name_str = name.to_string_lossy().into_owned();
 
         let result = self.block(self.try_with_ladder(parent.0, |ops: O| {
@@ -809,14 +784,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// RMDIR -- remove a directory.
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
-        let Some(parent_fh) = self.fh_for_ino(parent.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        require_write!(self, reply);
+        let parent_fh = get_fh!(self, parent.0, reply);
         let name_str = name.to_string_lossy().into_owned();
 
         let result = self.block(self.try_with_ladder(parent.0, |ops: O| {
@@ -829,10 +798,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// RENAME -- move a file.
     fn rename(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, newparent: INodeNo, newname: &std::ffi::OsStr, _flags: RenameFlags, reply: ReplyEmpty) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
+        require_write!(self, reply);
         let (Some(from_dir), Some(to_dir)) = (self.fh_for_ino(parent.0), self.fh_for_ino(newparent.0)) else {
             reply.error(Errno::ENOENT);
             return;
@@ -852,10 +818,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// LINK -- create a hard link.
     fn link(&self, _req: &Request, ino: INodeNo, newparent: INodeNo, newname: &std::ffi::OsStr, reply: ReplyEntry) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
+        require_write!(self, reply);
         let (Some(target_fh), Some(parent_fh)) = (self.fh_for_ino(ino.0), self.fh_for_ino(newparent.0)) else {
             reply.error(Errno::ENOENT);
             return;
@@ -883,10 +846,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// READDIR -- list directory entries with fix-up for missing attrs.
     fn readdir(&self, _req: &Request, ino: INodeNo, _fh: FuseFileHandle, offset: u64, mut reply: ReplyDirectory) {
-        let Some(dir_fh) = self.fh_for_ino(ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        let dir_fh = get_fh!(self, ino.0, reply);
 
         if offset == 0 {
             match self.page_directory(ino.0, &dir_fh) {
@@ -947,10 +907,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// Read file data for inode `ino`.
     fn read(&self, _req: &Request, ino: INodeNo, _fh: FuseFileHandle, offset: u64, size: u32, _flags: OpenFlags, _lock_owner: Option<LockOwner>, reply: ReplyData) {
-        let Some(fh) = self.fh_for_ino(ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        let fh = get_fh!(self, ino.0, reply);
 
         // Loop to handle servers that return fewer bytes than requested before
         // true EOF (short reads). Each chunk runs through the credential ladder.
@@ -990,14 +947,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// Write data to a file.
     fn write(&self, _req: &Request, ino: INodeNo, _fh: FuseFileHandle, offset: u64, data: &[u8], _write_flags: WriteFlags, _flags: OpenFlags, _lock_owner: Option<LockOwner>, reply: ReplyWrite) {
-        if !self.allow_write {
-            reply.error(Errno::EACCES);
-            return;
-        }
-        let Some(fh) = self.fh_for_ino(ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        require_write!(self, reply);
+        let fh = get_fh!(self, ino.0, reply);
         let data_owned = data.to_vec();
         let sent = u32::try_from(data.len()).unwrap_or(u32::MAX);
 
@@ -1015,10 +966,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
 
     /// FSYNC -- flush uncommitted writes.
     fn fsync(&self, _req: &Request, ino: INodeNo, _fh: FuseFileHandle, _datasync: bool, reply: ReplyEmpty) {
-        let Some(fh) = self.fh_for_ino(ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
+        let fh = get_fh!(self, ino.0, reply);
 
         let result = self.block(self.try_with_ladder(ino.0, |ops: O| {
             let fh = fh.clone();
