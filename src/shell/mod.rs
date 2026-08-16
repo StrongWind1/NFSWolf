@@ -232,6 +232,15 @@ impl<O: ShellOps> NfsShell<O> {
         }
     }
 
+    /// Gate on identity-change support. Returns `true` if the version supports it.
+    fn require_identity_change(&self, cmd: &str) -> bool {
+        if self.ops.supports_identity_change() {
+            return true;
+        }
+        eprintln!("{}", format!("{cmd}: identity changes not supported on {}", self.ops.version_name()).red());
+        false
+    }
+
     /// Gate on `--allow-write`. Returns `true` if writes are permitted.
     fn require_write(&self) -> bool {
         if self.allow_write {
@@ -1029,39 +1038,29 @@ impl<O: ShellOps> NfsShell<O> {
     /// Switch UID mid-session -- creates a new pool slot, no reconnect needed.
     /// AUTH_SYS credentials are client-asserted (RFC 5531 sec. 14).
     fn cmd_uid(&mut self, arg: &str) {
-        if !self.ops.supports_identity_change() {
-            eprintln!("{}", format!("uid: identity changes not supported on {}", self.ops.version_name()).red());
-            return;
-        }
-        match arg.parse::<u32>() {
-            Ok(uid) => {
-                let gid = self.ops.gid();
-                if let Err(e) = self.ops.change_identity(uid, gid, &self.hostname) {
-                    eprintln!("{}", format!("uid: {e}").red());
-                    return;
-                }
-                println!("{}", format!("uid={uid} gid={gid} hostname={}", self.hostname).green());
-            },
-            Err(_) => eprintln!("{}", format!("uid: invalid number: {arg}").red()),
-        }
+        self.set_identity_field("uid", arg, true);
     }
 
     /// Switch GID mid-session.
     fn cmd_gid(&mut self, arg: &str) {
-        if !self.ops.supports_identity_change() {
-            eprintln!("{}", format!("gid: identity changes not supported on {}", self.ops.version_name()).red());
+        self.set_identity_field("gid", arg, false);
+    }
+
+    /// Shared implementation for `cmd_uid` and `cmd_gid`.
+    fn set_identity_field(&mut self, field: &str, arg: &str, is_uid: bool) {
+        if !self.require_identity_change(field) {
             return;
         }
         match arg.parse::<u32>() {
-            Ok(gid) => {
-                let uid = self.ops.uid();
+            Ok(val) => {
+                let (uid, gid) = if is_uid { (val, self.ops.gid()) } else { (self.ops.uid(), val) };
                 if let Err(e) = self.ops.change_identity(uid, gid, &self.hostname) {
-                    eprintln!("{}", format!("gid: {e}").red());
+                    eprintln!("{}", format!("{field}: {e}").red());
                     return;
                 }
                 println!("{}", format!("uid={uid} gid={gid} hostname={}", self.hostname).green());
             },
-            Err(_) => eprintln!("{}", format!("gid: invalid number: {arg}").red()),
+            Err(_) => eprintln!("{}", format!("{field}: invalid number: {arg}").red()),
         }
     }
 
@@ -1075,8 +1074,7 @@ impl<O: ShellOps> NfsShell<O> {
             println!("{}", self.hostname);
             return;
         }
-        if !self.ops.supports_identity_change() {
-            eprintln!("{}", format!("hostname: identity changes not supported on {}", self.ops.version_name()).red());
+        if !self.require_identity_change("hostname") {
             return;
         }
         arg.clone_into(&mut self.hostname);
@@ -1096,8 +1094,7 @@ impl<O: ShellOps> NfsShell<O> {
 
     /// Switch both UID and GID at once (impersonate uid:gid).
     fn cmd_impersonate(&mut self, arg: &str) {
-        if !self.ops.supports_identity_change() {
-            eprintln!("{}", format!("impersonate: identity changes not supported on {}", self.ops.version_name()).red());
+        if !self.require_identity_change("impersonate") {
             return;
         }
         let (uid_opt, gid_opt) = parse_uid_gid(arg);
