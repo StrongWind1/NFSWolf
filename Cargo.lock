@@ -145,9 +145,9 @@ dependencies = [
 
 [[package]]
 name = "bstr"
-version = "1.13.0"
+version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
 dependencies = [
  "memchr",
  "regex-automata",
@@ -391,9 +391,9 @@ dependencies = [
 
 [[package]]
 name = "error-code"
-version = "3.3.2"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
+checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
 name = "fastrand"
@@ -438,21 +438,21 @@ dependencies = [
 
 [[package]]
 name = "futures-core"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
 name = "futures-task"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b231ed28831efb4a61a08580c4bc233ec56bc009f4cd8f52da2c3cb97df0c109"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
 
 [[package]]
 name = "futures-util"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
  "futures-task",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "nfs-mount"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "onc-rpc-client",
  "onc-xdr",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "nfs-v2"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "nfs-mount",
  "onc-rpc-client",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "nfs-v3"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "nfs-mount",
  "onc-rpc-client",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "nfs-v4"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "onc-rpc-client",
  "onc-xdr",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "nfswolf"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "onc-rpc-client"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cipher",
  "des",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "onc-rpcbind"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "onc-rpc-client",
  "onc-xdr",
@@ -864,14 +864,14 @@ dependencies = [
 
 [[package]]
 name = "onc-xdr"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "onc-xdr-derive",
 ]
 
 [[package]]
 name = "onc-xdr-derive"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "onc-xdr",
  "proc-macro2",
@@ -946,15 +946,15 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkg-config"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "portable-atomic"
-version = "1.14.0"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
 name = "ppv-lite86"
