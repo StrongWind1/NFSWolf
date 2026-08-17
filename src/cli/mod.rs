@@ -112,6 +112,21 @@ pub(crate) struct Cli {
     #[arg(long, global = true, value_name = "PORT", help_heading = H_NETWORK)]
     pub mount_port: Option<u16>,
 
+    /// Override the portmapper/rpcbind port (default 111). Applies to scanner
+    /// service discovery and analyzer portmapper queries.
+    #[arg(long, global = true, value_name = "PORT", help_heading = H_NETWORK)]
+    pub rpc_port: Option<u16>,
+
+    /// Skip all portmapper/rpcbind probes (DUMP, GETPORT, port 111). Use when
+    /// portmapper is firewalled and NFS port is known.
+    #[arg(long, global = true, help_heading = H_BEHAVIOR)]
+    pub skip_rpc: bool,
+
+    /// Skip all MOUNT daemon queries (EXPORT, MNT, DUMP). NFSv4 pseudo-FS
+    /// discovery still runs.
+    #[arg(long, global = true, help_heading = H_BEHAVIOR)]
+    pub skip_mountd: bool,
+
     /// Delay between RPC calls in milliseconds (stealth mode)
     #[arg(long, global = true, default_value = "0", value_name = "MS", help_heading = H_STEALTH)]
     pub delay: u64,
@@ -249,6 +264,12 @@ pub(crate) struct GlobalOpts {
     pub nfs_port: Option<u16>,
     /// Override mount-daemon port (skip portmapper) when set.
     pub mount_port: Option<u16>,
+    /// Override portmapper/rpcbind port when set.
+    pub rpc_port: Option<u16>,
+    /// Skip all portmapper/rpcbind probes.
+    pub skip_rpc: bool,
+    /// Skip all MOUNT daemon queries.
+    pub skip_mountd: bool,
     /// Delay between operations in milliseconds.
     pub delay: u64,
     /// Random jitter added to delay in milliseconds.
@@ -278,6 +299,9 @@ impl Cli {
             timeout: self.timeout,
             nfs_port: self.nfs_port,
             mount_port: self.mount_port,
+            rpc_port: self.rpc_port,
+            skip_rpc: self.skip_rpc,
+            skip_mountd: self.skip_mountd,
             delay: self.delay,
             jitter: self.jitter,
             no_color: self.no_color,

@@ -5,16 +5,25 @@
 //! before each task spawns, so live task count (and memory) is bounded by the
 //! concurrency cap rather than the target-list size. StealthConfig is honored
 //! before every outbound probe (critical rule 10), not once per host.
-//! Per-host probe sequence:
-//!   1. TCP (+ UDP) probe port 111
-//!   2. Portmapper DUMP (+ GETPORT fallback)
-//!   3. NFS + mountd port set assembly and dedup
-//!   4. TCP (+ UDP) reachability probes on all discovered ports
-//!   5. Version probes (NULL v2/v3, COMPOUND v4) with TCP connection reuse
-//!   6. Host skip logic (no version = omit)
-//!   7. MOUNT v1/v3 EXPORT + DUMP queries
-//!   8. NFSv4 READDIR on pseudo-root
-//!   9. Assemble HostResult
+//!
+//! Per-host probe pipeline (3 phases):
+//!
+//!   Phase 1 -- Port Discovery (parallel via tokio::join!):
+//!     RPC port (111 or --rpc-port) TCP [+UDP]   (skipped with --skip-rpc)
+//!     NFS port 2049 TCP [+UDP]                   (always)
+//!     Extra --nfs-port entries TCP [+UDP]
+//!
+//!   Phase 2 -- Service Discovery:
+//!     A. Portmapper DUMP + GETPORT              (if RPC reachable, !--skip-rpc)
+//!     B. NFS port set assembly                  (portmapper + 2049 + --nfs-port)
+//!     C. Version probes on reachable NFS ports  (NULL v2/v3, COMPOUND v4)
+//!     D. Mountd port discovery                  (portmapper / --mount-port / fallback)
+//!
+//!   Phase 3 -- Data Collection:
+//!     MOUNT v1/v3 EXPORT + MNT + DUMP           (gated on !--skip-mountd)
+//!     NFSv4 pseudo-FS READDIR                    (always when v4 confirmed)
+//!     RDMA detection                             (rpcbind GETADDR + port 20049)
+//!     Assembly -> HostResult
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
@@ -64,11 +73,17 @@ pub(crate) struct ScanConfig {
     pub nfs_ports: Vec<u16>,
     /// Override mountd port (`--mount-port`).
     pub mount_port: Option<u16>,
+    /// Override portmapper/rpcbind port (`--rpc-port`).
+    pub rpc_port: Option<u16>,
+    /// Skip all portmapper/rpcbind probes (`--skip-rpc`).
+    pub skip_rpc: bool,
+    /// Skip all MOUNT daemon queries (`--skip-mountd`).
+    pub skip_mountd: bool,
 }
 
 impl Default for ScanConfig {
     fn default() -> Self {
-        Self { concurrency: 256, timeout: Duration::from_secs(3), scan_udp: false, nfs_ports: vec![], mount_port: None }
+        Self { concurrency: 256, timeout: Duration::from_secs(3), scan_udp: false, nfs_ports: vec![], mount_port: None, rpc_port: None, skip_rpc: false, skip_mountd: false }
     }
 }
 
@@ -130,7 +145,17 @@ impl Scanner {
                 let nfs_found = Arc::clone(&nfs_found);
                 let results = Arc::clone(&results);
                 let pb = pb.clone();
-                let job = ScanJob { timeout: self.config.timeout, scan_udp: self.config.scan_udp, nfs_ports: self.config.nfs_ports.clone(), mount_port: self.config.mount_port, proxy: self.proxy.clone(), stealth: self.stealth.clone() };
+                let job = ScanJob {
+                    timeout: self.config.timeout,
+                    scan_udp: self.config.scan_udp,
+                    nfs_ports: self.config.nfs_ports.clone(),
+                    mount_port: self.config.mount_port,
+                    rpc_port: self.config.rpc_port,
+                    skip_rpc: self.config.skip_rpc,
+                    skip_mountd: self.config.skip_mountd,
+                    proxy: self.proxy.clone(),
+                    stealth: self.stealth.clone(),
+                };
 
                 drop(join_set.spawn(async move {
                     let _permit = permit;
@@ -214,42 +239,101 @@ struct ScanJob {
     scan_udp: bool,
     nfs_ports: Vec<u16>,
     mount_port: Option<u16>,
+    rpc_port: Option<u16>,
+    skip_rpc: bool,
+    skip_mountd: bool,
     proxy: Option<String>,
     stealth: StealthConfig,
 }
 
 /// Probe a single host. Returns `None` if no NFS version is confirmed.
+///
+/// Three-phase pipeline: (1) port discovery with parallel RPC + NFS probes,
+/// (2) service discovery via portmapper and version probes, (3) data collection
+/// via MOUNT queries and NFSv4 READDIR.  The `--skip-rpc` and `--skip-mountd`
+/// flags gate entire sections; `--rpc-port` overrides the portmapper port.
 #[expect(clippy::cognitive_complexity, reason = "scanner dispatch coordinates multiple protocol probes")]
 async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let start = Instant::now();
     let ip = target.ip;
     let probe_timeout = job.timeout;
+    let rpc_port_num = job.rpc_port.unwrap_or(111);
+    let portmap_addr = SocketAddr::new(ip, rpc_port_num);
 
-    // --- Stage 1: TCP/UDP probe port 111 ---
-    // Honor StealthConfig before every outbound probe (critical rule 10),
-    // mirroring Nfs3Client which waits before each of its 22 procedures so the
-    // scan emits paced traffic rather than one burst per host. `wait()` is a
-    // no-op when no delay/jitter is configured, so the non-stealth path is free.
-    let portmap_addr = SocketAddr::new(ip, 111);
-    job.stealth.wait().await;
-    let portmap_tcp = is_port_open(portmap_addr, probe_timeout, job.proxy.as_deref()).await;
-    let portmap_udp = if job.scan_udp {
+    // =======================================================================
+    // Phase 1: Port Discovery (parallel)
+    // =======================================================================
+    // Probe RPC and NFS ports concurrently via tokio::join! so a filtered
+    // port 111 no longer blocks NFS discovery.  Each TCP connect is bounded
+    // by --timeout independently.  StealthConfig is honored before every
+    // outbound probe (critical rule 10); wait() is a no-op when delay=0.
+
+    // RPC port probe -- skipped entirely with --skip-rpc.
+    let rpc_future = async {
+        if job.skip_rpc {
+            return (false, false);
+        }
         job.stealth.wait().await;
-        crate::proto::udp::probe_udp_rpc(portmap_addr, 100_000, 2, probe_timeout).await
-    } else {
-        false
+        let tcp = is_port_open(portmap_addr, probe_timeout, job.proxy.as_deref()).await;
+        let udp = if job.scan_udp {
+            job.stealth.wait().await;
+            crate::proto::udp::probe_udp_rpc(portmap_addr, 100_000, 2, probe_timeout).await
+        } else {
+            false
+        };
+        (tcp, udp)
     };
-    let portmap_reachability = PortReachability::from_probes(portmap_tcp, portmap_udp);
 
-    // --- Stage 2: Portmapper DUMP + GETPORT fallback ---
+    // NFS port 2049 (always probed) + extra --nfs-port entries.
+    let nfs_future = async {
+        let nfs_2049 = SocketAddr::new(ip, 2049);
+        job.stealth.wait().await;
+        let tcp_2049 = is_port_open(nfs_2049, probe_timeout, job.proxy.as_deref()).await;
+        let udp_2049 = if job.scan_udp {
+            job.stealth.wait().await;
+            crate::proto::udp::probe_udp_rpc(nfs_2049, 100_003, 3, probe_timeout).await
+        } else {
+            false
+        };
+
+        // Extra ports from --nfs-port (skip 2049 if already covered above).
+        let mut extras: Vec<(u16, bool, bool)> = Vec::new();
+        for &port in &job.nfs_ports {
+            if port == 2049 {
+                continue;
+            }
+            let addr = SocketAddr::new(ip, port);
+            job.stealth.wait().await;
+            let tcp = is_port_open(addr, probe_timeout, job.proxy.as_deref()).await;
+            let udp = if job.scan_udp {
+                job.stealth.wait().await;
+                crate::proto::udp::probe_udp_rpc(addr, 100_003, 3, probe_timeout).await
+            } else {
+                false
+            };
+            extras.push((port, tcp, udp));
+        }
+        (tcp_2049, udp_2049, extras)
+    };
+
+    let ((rpc_tcp, rpc_udp), (nfs_2049_tcp, nfs_2049_udp, extra_port_probes)) = tokio::join!(rpc_future, nfs_future);
+
+    let portmap_reachability = if job.skip_rpc { PortReachability::Unreachable } else { PortReachability::from_probes(rpc_tcp, rpc_udp) };
+    let portmap_reachable = portmap_reachability.is_reachable();
+
+    // =======================================================================
+    // Phase 2: Service Discovery
+    // =======================================================================
+
+    // --- Path A: Portmapper DUMP + GETPORT (if RPC reachable AND !skip_rpc) ---
     let portmap = PortmapClient::default_port();
     let portmap = if let Some(ref p) = job.proxy { portmap.with_proxy(p.clone()) } else { portmap };
 
     // Try TCP DUMP first; fall back to UDP DUMP if TCP is unreachable but UDP is.
-    let dump_entries = if portmap_reachability.has_tcp() {
+    let dump_entries = if !job.skip_rpc && portmap_reachability.has_tcp() {
         job.stealth.wait().await;
         timeout(probe_timeout, portmap.dump(portmap_addr)).await.ok().and_then(Result::ok).unwrap_or_default()
-    } else if portmap_udp {
+    } else if !job.skip_rpc && rpc_udp {
         job.stealth.wait().await;
         portmap.dump_udp(portmap_addr, probe_timeout).await.unwrap_or_default()
     } else {
@@ -261,8 +345,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let mount_from_dump: Vec<(u32, u32, u16)> = dump_entries.iter().filter(|e| e.program == 100_005 && e.port > 0).map(|e| (e.version, e.protocol, e.port)).collect();
 
     // If dump returned nothing and portmapper is reachable, try individual GETPORT queries.
-    let portmap_reachable = portmap_reachability.has_tcp() || portmap_udp;
-    let (nfs_from_getport, mount_from_getport) = if nfs_from_dump.is_empty() && portmap_reachable {
+    let (nfs_from_getport, mount_from_getport) = if !job.skip_rpc && nfs_from_dump.is_empty() && portmap_reachable {
         let mut nfs_gp = Vec::new();
         let mut mount_gp = Vec::new();
         for v in [2u32, 3, 4] {
@@ -288,67 +371,35 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         (vec![], vec![])
     };
 
-    // --- Stage 3: NFS + mountd port set assembly + dedup ---
+    // --- Path B: NFS port set assembly ---
+    // Port 2049 is ALWAYS in the set (not just when portmapper returns nothing).
+    // Merge portmapper results + --nfs-port entries + 2049.
     let mut nfs_port_set: HashSet<u16> = HashSet::new();
+    _ = nfs_port_set.insert(2049);
     for &(_, _, port) in nfs_from_dump.iter().chain(nfs_from_getport.iter()) {
         _ = nfs_port_set.insert(port);
     }
     for &port in &job.nfs_ports {
         _ = nfs_port_set.insert(port);
     }
-    // If no NFS port from portmapper, add 2049 as fallback.
-    if nfs_from_dump.is_empty() && nfs_from_getport.is_empty() {
-        _ = nfs_port_set.insert(2049);
+
+    // Build NfsPortInfo from Phase 1 probe results (2049 + extra ports).
+    let mut nfs_ports_info: Vec<NfsPortInfo> = Vec::new();
+    if nfs_2049_tcp || nfs_2049_udp {
+        nfs_ports_info.push(NfsPortInfo { port: 2049, tcp: nfs_2049_tcp, udp: nfs_2049_udp, v2: false, v3: false, v4: false });
     }
-
-    // Mountd port discovery.
-    let mut mountd_ports: HashSet<u16> = HashSet::new();
-    for &(_, _, port) in mount_from_dump.iter().chain(mount_from_getport.iter()) {
-        _ = mountd_ports.insert(port);
-    }
-
-    // Build the MOUNT client. When TCP/111 is down but we discovered the
-    // mountd port via UDP DUMP/GETPORT, pin the client to that port so
-    // EXPORT and DUMP calls connect directly instead of trying GETPORT
-    // through the unreachable TCP portmapper.
-    let explicit_mount_port = job.mount_port.or_else(|| if portmap_reachability.has_tcp() { None } else { mountd_ports.iter().next().copied() });
-    let mount_client = match explicit_mount_port {
-        Some(port) => {
-            let mc = NfsMountClient::with_port(port);
-            if let Some(ref p) = job.proxy { mc.with_proxy(p.clone()) } else { mc }
-        },
-        None => {
-            if let Some(ref p) = job.proxy {
-                NfsMountClient::new().with_proxy(p.clone())
-            } else {
-                NfsMountClient::new()
-            }
-        },
-    };
-
-    if mountd_ports.is_empty() {
-        if let Some(mp) = job.mount_port {
-            _ = mountd_ports.insert(mp);
-        } else {
-            // Probe fallback ports 2049, 20048 with MOUNT NULL.
-            for &port in &[2049u16, 20048] {
-                let probe_addr = SocketAddr::new(ip, port);
-                job.stealth.wait().await;
-                if is_port_open(probe_addr, probe_timeout, job.proxy.as_deref()).await {
-                    let mc = if let Some(ref p) = job.proxy { NfsMountClient::with_port(port).with_proxy(p.clone()) } else { NfsMountClient::with_port(port) };
-                    job.stealth.wait().await;
-                    if timeout(probe_timeout, mc.list_exports(SocketAddr::new(ip, 111))).await.is_ok_and(|r| r.is_ok()) {
-                        _ = mountd_ports.insert(port);
-                        break;
-                    }
-                }
-            }
+    for &(port, tcp, udp) in &extra_port_probes {
+        if (tcp || udp) && !nfs_ports_info.iter().any(|p| p.port == port) {
+            nfs_ports_info.push(NfsPortInfo { port, tcp, udp, v2: false, v3: false, v4: false });
         }
     }
 
-    // --- Stage 4: Reachability probes on NFS ports ---
-    let mut nfs_ports_info: Vec<NfsPortInfo> = Vec::new();
+    // Ports discovered by portmapper that were NOT already probed in Phase 1
+    // need fresh TCP/UDP reachability probes now.
     for &port in &nfs_port_set {
+        if port == 2049 || job.nfs_ports.contains(&port) {
+            continue; // Already probed in Phase 1
+        }
         let addr = SocketAddr::new(ip, port);
         job.stealth.wait().await;
         let tcp = is_port_open(addr, probe_timeout, job.proxy.as_deref()).await;
@@ -363,7 +414,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         }
     }
 
-    // --- Stage 5: Version probes ---
+    // --- Path C: Version probes on all reachable NFS ports ---
     let mut hint: Option<VersionRange> = None;
 
     for port_info in &mut nfs_ports_info {
@@ -407,23 +458,59 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         }
     }
 
-    // --- Stage 6: Host skip logic ---
+    // --- Skip logic ---
+    // Drop host only when: no NFS port is reachable OR all reachable ports
+    // fail version probes.  Do NOT drop when portmapper or mountd is unreachable.
     if !nfs_ports_info.iter().any(NfsPortInfo::any_version) {
         return None;
     }
 
-    // --- Stage 7: MOUNT queries ---
+    // --- Path D: Mountd port discovery ---
+    // Sources: portmapper DUMP/GETPORT, --mount-port, fallback probe 2049/20048.
+    // Skipped entirely when --skip-mountd.
+    let confirmed_v2 = nfs_ports_info.iter().any(|p| p.v2);
+    let confirmed_v3 = nfs_ports_info.iter().any(|p| p.v3);
+
+    let mut mountd_ports: HashSet<u16> = HashSet::new();
+    if !job.skip_mountd {
+        for &(_, _, port) in mount_from_dump.iter().chain(mount_from_getport.iter()) {
+            _ = mountd_ports.insert(port);
+        }
+        if mountd_ports.is_empty() {
+            if let Some(mp) = job.mount_port {
+                _ = mountd_ports.insert(mp);
+            } else {
+                // Fallback: probe 2049 and 20048 with MOUNT NULL.
+                // Port 2049 TCP status is cached from Phase 1 -- avoid re-probing.
+                for &port in &[2049u16, 20048] {
+                    let port_open = if port == 2049 {
+                        nfs_2049_tcp
+                    } else {
+                        job.stealth.wait().await;
+                        is_port_open(SocketAddr::new(ip, port), probe_timeout, job.proxy.as_deref()).await
+                    };
+                    if port_open {
+                        let mc = if let Some(ref p) = job.proxy { NfsMountClient::with_port(port).with_proxy(p.clone()) } else { NfsMountClient::with_port(port) };
+                        job.stealth.wait().await;
+                        if timeout(probe_timeout, mc.list_exports(portmap_addr)).await.is_ok_and(|r| r.is_ok()) {
+                            _ = mountd_ports.insert(port);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Build MountPortInfo for output -- only include versions relevant to
     // confirmed NFS versions (v1=NFSv2, v3=NFSv3). Filter out mountd v2
     // (legacy Linux artifact, not tied to any NFS version).
-    let confirmed_v2 = nfs_ports_info.iter().any(|p| p.v2);
-    let confirmed_v3 = nfs_ports_info.iter().any(|p| p.v3);
-    let mount_port_infos: Vec<MountPortInfo> = {
+    let mount_port_infos: Vec<MountPortInfo> = if job.skip_mountd {
+        Vec::new()
+    } else {
         let mut infos: Vec<MountPortInfo> = Vec::new();
         let all_mount = mount_from_dump.iter().chain(mount_from_getport.iter());
         for &(version, protocol, port) in all_mount {
-            // Only include mount versions tied to confirmed NFS versions.
-            // mountd v1 -> NFSv2, mountd v3 -> NFSv3. Skip mountd v2 (unused artifact).
             if version == 1 && !confirmed_v2 {
                 continue;
             }
@@ -448,19 +535,42 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         infos
     };
 
-    // v3 exports -- only query if NFSv3 version probe succeeded
-    let has_v3 = nfs_ports_info.iter().any(|p| p.v3);
+    // Build the MOUNT client. When TCP portmapper is down but we discovered the
+    // mountd port via UDP DUMP/GETPORT, pin the client to that port so
+    // EXPORT and DUMP calls connect directly instead of trying GETPORT
+    // through the unreachable TCP portmapper.
+    let explicit_mount_port = job.mount_port.or_else(|| if portmap_reachability.has_tcp() { None } else { mountd_ports.iter().next().copied() });
+    let mount_client = match explicit_mount_port {
+        Some(port) => {
+            let mc = NfsMountClient::with_port(port);
+            if let Some(ref p) = job.proxy { mc.with_proxy(p.clone()) } else { mc }
+        },
+        None => {
+            if let Some(ref p) = job.proxy {
+                NfsMountClient::new().with_proxy(p.clone())
+            } else {
+                NfsMountClient::new()
+            }
+        },
+    };
+
+    // =======================================================================
+    // Phase 3: Data Collection
+    // =======================================================================
+
+    // --- MOUNT queries (gated on !skip_mountd) ---
     let mut os_guess: Option<String> = None;
-    let exports_v3 = if has_v3 && (mount_port_infos.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
+
+    // v3 exports -- only query if NFSv3 version probe succeeded and mountd is known.
+    let exports_v3 = if !job.skip_mountd && confirmed_v3 && (mount_port_infos.iter().any(|m| m.versions.contains(&3) && m.tcp) || !mountd_ports.is_empty()) {
         job.stealth.wait().await;
-        match timeout(probe_timeout, mount_client.list_exports(SocketAddr::new(ip, 111))).await {
+        match timeout(probe_timeout, mount_client.list_exports(portmap_addr)).await {
             Ok(Ok(mut exports)) => {
                 // Probe MNT per export to discover auth flavors (RFC 1813 Appendix III).
-                let mount_addr = SocketAddr::new(ip, 111);
                 for entry in &mut exports {
                     job.stealth.wait().await;
                     // Try MOUNT v3 MNT first (returns auth flavors + variable-length handle).
-                    if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount(mount_addr, &entry.path)).await {
+                    if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount(portmap_addr, &entry.path)).await {
                         entry.auth_flavors = mr.auth_flavors;
                         entry.handle_hex = mr.handle.to_hex();
                         if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
@@ -468,12 +578,12 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                             let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
                             os_guess = Some(format!("{os:?}/{fs:?}"));
                         }
-                        drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                        drop(timeout(probe_timeout, mount_client.unmount(portmap_addr, &entry.path)).await);
                     } else {
                         // MOUNT v3 MNT failed -- try v1 MNT as fallback (F-1.6).
                         // v1 returns a 32-byte handle with a different fsid_type encoding.
                         job.stealth.wait().await;
-                        if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_v1(mount_addr, &entry.path)).await {
+                        if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_v1(portmap_addr, &entry.path)).await {
                             entry.auth_flavors = mr.auth_flavors;
                             entry.handle_hex = mr.handle.to_hex();
                             if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
@@ -481,7 +591,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                                 let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
                                 os_guess = Some(format!("{os:?}/{fs:?}"));
                             }
-                            drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                            drop(timeout(probe_timeout, mount_client.unmount(portmap_addr, &entry.path)).await);
                         }
                     }
                 }
@@ -493,16 +603,14 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         None
     };
 
-    // v2 exports (via MOUNT v1) -- only query if NFSv2 version probe succeeded
-    let has_v2 = nfs_ports_info.iter().any(|p| p.v2);
-    let exports_v2 = if has_v2 && mount_port_infos.iter().any(|m| m.versions.contains(&1)) {
+    // v2 exports (via MOUNT v1) -- only query if NFSv2 version probe succeeded.
+    let exports_v2 = if !job.skip_mountd && confirmed_v2 && mount_port_infos.iter().any(|m| m.versions.contains(&1)) {
         job.stealth.wait().await;
-        match timeout(probe_timeout, mount_client.list_exports_v1(SocketAddr::new(ip, 111))).await {
+        match timeout(probe_timeout, mount_client.list_exports_v1(portmap_addr)).await {
             Ok(Ok(mut exports)) => {
-                let mount_addr = SocketAddr::new(ip, 111);
                 for entry in &mut exports {
                     job.stealth.wait().await;
-                    if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_v1(mount_addr, &entry.path)).await {
+                    if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_v1(portmap_addr, &entry.path)).await {
                         entry.auth_flavors = mr.auth_flavors;
                         entry.handle_hex = mr.handle.to_hex();
                         if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
@@ -510,7 +618,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                             let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
                             os_guess = Some(format!("{os:?}/{fs:?}"));
                         }
-                        drop(timeout(probe_timeout, mount_client.unmount(mount_addr, &entry.path)).await);
+                        drop(timeout(probe_timeout, mount_client.unmount(portmap_addr, &entry.path)).await);
                     }
                 }
                 Some(exports)
@@ -521,10 +629,10 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         None
     };
 
-    // MOUNT DUMP
-    let mounts = if !mountd_ports.is_empty() || mount_port_infos.iter().any(|m| m.tcp) {
+    // MOUNT DUMP -- connected clients.
+    let mounts = if !job.skip_mountd && (!mountd_ports.is_empty() || mount_port_infos.iter().any(|m| m.tcp)) {
         job.stealth.wait().await;
-        match timeout(probe_timeout, mount_client.dump_clients(SocketAddr::new(ip, 111))).await {
+        match timeout(probe_timeout, mount_client.dump_clients(portmap_addr)).await {
             Ok(Ok(m)) => Some(m),
             _ => None,
         }
@@ -532,13 +640,10 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         None
     };
 
-    // --- Stage 7b: RDMA presence detection ---
-    // Query rpcbind v3 GETADDR for NFS (100003) on "rdma" and "rdma6" netids
-    // (RFC 1833 sec. 2.1). Also probe TCP port 20049 (conventional NFS/RDMA port).
-    // RDMA bypasses the kernel TCP/IP stack and may evade host firewalls.
+    // --- RDMA presence detection ---
     let rdma_detected = detect_rdma(ip, probe_timeout, portmap_reachable && portmap_reachability.has_tcp(), &job).await;
 
-    // --- Stage 8: NFSv4 READDIR ---
+    // --- NFSv4 pseudo-FS READDIR (always when v4 confirmed, not gated on MOUNT) ---
     let has_v4 = nfs_ports_info.iter().any(|p| p.v4);
     let exports_v4 = if has_v4 {
         let v4_port = nfs_ports_info.iter().find(|p| p.v4).map_or(2049, |p| p.port);
@@ -552,9 +657,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
         None
     };
 
-    // --- Stage 9: Assembly ---
-    // No trailing stealth delay here: pacing is applied before each outbound
-    // probe above, so the per-host burst is already spread across the scan.
+    // --- Assembly ---
     Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, rpc_services: dump_entries, exports_v2, exports_v3, exports_v4, mounts, hint, rdma_detected, os_guess, scan_duration: start.elapsed() })
 }
 
@@ -684,7 +787,7 @@ async fn readdir_v4_pseudo_root(addr: SocketAddr, proxy: Option<&str>) -> anyhow
 async fn detect_rdma(ip: IpAddr, probe_timeout: Duration, rpcbind_reachable: bool, job: &ScanJob) -> bool {
     // Signal 1: rpcbind GETADDR for RDMA netids.
     if rpcbind_reachable {
-        let rpcbind_addr = SocketAddr::new(ip, 111);
+        let rpcbind_addr = SocketAddr::new(ip, job.rpc_port.unwrap_or(111));
         for netid in ["rdma", "rdma6"] {
             job.stealth.wait().await;
             if let Ok(Ok(io)) = timeout(probe_timeout, connect_tcp_for_rpcbind(rpcbind_addr, job.proxy.as_deref())).await {
