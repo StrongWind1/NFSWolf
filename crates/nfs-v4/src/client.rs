@@ -315,7 +315,7 @@ impl<T: RpcTransport> Nfs4Client<T> {
             _ => return Err(Nfs4Error::MissingResult),
         };
         let info = match res.results.get(3).map(|op| &op.data) {
-            Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from(attrs.clone()),
+            Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from((**attrs).clone()),
             _ => Nfs4FileInfo::default(),
         };
         Ok((fh, info))
@@ -329,7 +329,7 @@ impl<T: RpcTransport> Nfs4Client<T> {
         let res = self.compound(ops).await?;
         check_status(res.status)?;
         match res.results.get(1).map(|op| &op.data) {
-            Some(ResOpData::Getattr(attrs)) => Ok(Nfs4FileInfo::from(attrs.clone())),
+            Some(ResOpData::Getattr(attrs)) => Ok(Nfs4FileInfo::from((**attrs).clone())),
             _ => Err(Nfs4Error::MissingResult),
         }
     }
@@ -367,12 +367,8 @@ impl<T: RpcTransport> Nfs4Client<T> {
     /// List directory entries with inline attributes.
     ///
     /// The NFSv4 equivalent of NFSv3 READDIRPLUS. Requests inline attrs
-    /// per entry via `shell_attrs_with_fh()`. Paginates internally until
-    /// EOF or the entry cap is hit.
-    ///
-    /// Note: file handles are requested via the FATTR4_FILEHANDLE bit, but
-    /// the current attribute decoder skips them, so `Nfs4DirEntry.fh` will
-    /// be `None`. A future decoder enhancement will populate them.
+    /// and file handles per entry via `shell_attrs_with_fh()`. Paginates
+    /// internally until EOF or the entry cap is hit.
     pub async fn readdir_plus(&self, dir_fh: &[u8]) -> Result<Vec<Nfs4DirEntry>, Nfs4Error<T::Error>> {
         const MAX_READDIR_ENTRIES: usize = 1_000_000;
         let mut entries = Vec::new();
@@ -394,8 +390,9 @@ impl<T: RpcTransport> Nfs4Client<T> {
             raw_seen = raw_seen.saturating_add(dir_entries.len());
             for e in dir_entries {
                 if e.name != "." && e.name != ".." {
+                    let fh = e.attrs.as_ref().and_then(|a| a.filehandle.clone());
                     let info = e.attrs.as_ref().map(|a| Nfs4FileInfo::from(a.clone()));
-                    entries.push(Nfs4DirEntry { name: e.name.clone(), cookie: e.cookie, fh: None, info });
+                    entries.push(Nfs4DirEntry { name: e.name.clone(), cookie: e.cookie, fh, info });
                 }
             }
             if eof {
@@ -651,7 +648,7 @@ impl<T: RpcTransport> Nfs4Client<T> {
 
         // Extract attributes (index 3: GETATTR). Fall back to default on mismatch.
         let info = match res.results.get(3).map(|op| &op.data) {
-            Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from(attrs.clone()),
+            Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from((**attrs).clone()),
             _ => Nfs4FileInfo::default(),
         };
 

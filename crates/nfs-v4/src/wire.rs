@@ -1162,17 +1162,18 @@ impl AttrRequest {
     /// Request the standard set of file attributes for shell display.
     ///
     /// Includes type, change, size, fsid, fileid (word 0) and mode,
-    /// numlinks, owner, owner_group, time_access, time_metadata,
-    /// time_modify (word 1).  This matches what `ls -la` needs.
+    /// numlinks, owner, owner_group, rawdev, space_used, time_access,
+    /// time_metadata, time_modify (word 1).  This matches what `ls -la` needs.
     #[must_use]
     pub fn shell_attrs() -> Self {
         // Word 0: type(1) | change(3) | size(4) | fsid(8) | fileid(20)
         let w0: u32 = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 8) | (1 << 20);
         // Word 1: mode(bit 1, attr 33) | numlinks(bit 3, attr 35) |
         //   owner(bit 4, attr 36) | owner_group(bit 5, attr 37) |
+        //   rawdev(bit 9, attr 41) | space_used(bit 13, attr 45) |
         //   time_access(bit 15, attr 47) | time_metadata(bit 19, attr 51) |
         //   time_modify(bit 20, attr 52)
-        let w1: u32 = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 15) | (1 << 19) | (1 << 20);
+        let w1: u32 = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 9) | (1 << 13) | (1 << 15) | (1 << 19) | (1 << 20);
         Self { words: vec![w0, w1] }
     }
 
@@ -2291,14 +2292,20 @@ pub struct Fattr4Decoded {
     pub time_metadata: Option<(i64, u32)>,
     /// Last modify time (attr 53, word 1 bit 21, RFC 7530 S5.8.2.28).
     pub time_modify: Option<(i64, u32)>,
+    /// Raw device specdata (attr 41, word 1 bit 9, RFC 7530 S5.8.2.16).
+    pub rawdev: Option<(u32, u32)>,
     /// Available space in bytes (attr 42, word 1 bit 10, RFC 7530 S5.8.2.17).
     pub space_avail: Option<u64>,
     /// Free space in bytes (attr 43, word 1 bit 11, RFC 7530 S5.8.2.18).
     pub space_free: Option<u64>,
     /// Total space in bytes (attr 44, word 1 bit 12, RFC 7530 S5.8.2.19).
     pub space_total: Option<u64>,
+    /// Disk space used in bytes (attr 45, word 1 bit 13, RFC 7530 S5.8.2.20).
+    pub space_used: Option<u64>,
     /// MAC security label (attr 80, word 2 bit 16, RFC 7862 S12.2.4).
     pub sec_label: Option<SecLabel4>,
+    /// File handle (attr 19, word 0 bit 19, RFC 7530 S5.8.1.20).
+    pub filehandle: Option<Vec<u8>>,
 }
 
 impl Fattr4Decoded {
@@ -2315,10 +2322,13 @@ impl Fattr4Decoded {
             && self.numlinks.is_none()
             && self.owner.is_none()
             && self.owner_group.is_none()
+            && self.rawdev.is_none()
             && self.time_access.is_none()
             && self.time_metadata.is_none()
             && self.time_modify.is_none()
+            && self.space_used.is_none()
             && self.sec_label.is_none()
+            && self.filehandle.is_none()
     }
 }
 
@@ -2507,9 +2517,8 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
                 }
             },
             19 => {
-                // filehandle: opaque<> -- variable length, skip past it.
-                // We only need the offset advancement; the data is discarded.
-                let _fh = read_opaque!();
+                // filehandle: opaque<> (RFC 7530 S5.8.1.20).
+                out.filehandle = Some(read_opaque!());
             },
             20 => out.fileid = Some(read_u64!()),
             21..=23 => {
@@ -2655,21 +2664,17 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
             },
             9 => {
                 // rawdev (attr 41): specdata4 = u32+u32
-                off += 8;
-                if off > attrvals.len() {
+                if off + 8 > attrvals.len() {
                     return out;
                 }
+                let major = read_u32!();
+                let minor = read_u32!();
+                out.rawdev = Some((major, minor));
             },
             10 => out.space_avail = Some(read_u64!()),
             11 => out.space_free = Some(read_u64!()),
             12 => out.space_total = Some(read_u64!()),
-            13 => {
-                // space_used (attr 45): u64 -- not stored in Fattr4Decoded.
-                off += 8;
-                if off > attrvals.len() {
-                    return out;
-                }
-            },
+            13 => out.space_used = Some(read_u64!()),
             14 => {
                 // system (attr 46): bool(u32)
                 off += 4;
@@ -2820,7 +2825,7 @@ pub enum ResOpData {
     /// Contains all decoded attributes from the response bitmap.
     /// Access individual fields (fsid, mode, owner, etc.) through
     /// the `Fattr4Decoded` struct.
-    Getattr(Fattr4Decoded),
+    Getattr(Box<Fattr4Decoded>),
     /// Directory entries from READDIR (RFC 7530 S16.24), plus EOF flag.
     Readdir {
         /// Server's cookie verifier (RFC 7530 S16.24).
@@ -3073,7 +3078,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             n += pad;
 
             let decoded = decode_fattr4(&bitmap_words, &attrvals);
-            Ok((ResOpData::Getattr(decoded), n))
+            Ok((ResOpData::Getattr(Box::new(decoded)), n))
         },
 
         // SECINFO / SECINFO_NO_NAME result: variable-length array of secinfo4.
@@ -3962,11 +3967,30 @@ pub struct Nfs4FileInfo {
     pub time_modify: Option<(i64, u32)>,
     /// Metadata change time as (seconds, nanoseconds).
     pub time_metadata: Option<(i64, u32)>,
+    /// Disk space used in bytes.
+    pub space_used: Option<u64>,
+    /// Raw device numbers as (major, minor).
+    pub rawdev: Option<(u32, u32)>,
 }
 
 impl From<Fattr4Decoded> for Nfs4FileInfo {
     fn from(d: Fattr4Decoded) -> Self {
-        Self { ftype: d.ftype.map(Nfs4FileType::from), size: d.size, mode: d.mode, owner: d.owner, owner_group: d.owner_group, numlinks: d.numlinks, fileid: d.fileid, fsid: d.fsid, change: d.change, time_access: d.time_access, time_modify: d.time_modify, time_metadata: d.time_metadata }
+        Self {
+            ftype: d.ftype.map(Nfs4FileType::from),
+            size: d.size,
+            mode: d.mode,
+            owner: d.owner,
+            owner_group: d.owner_group,
+            numlinks: d.numlinks,
+            fileid: d.fileid,
+            fsid: d.fsid,
+            change: d.change,
+            time_access: d.time_access,
+            time_modify: d.time_modify,
+            time_metadata: d.time_metadata,
+            space_used: d.space_used,
+            rawdev: d.rawdev,
+        }
     }
 }
 
@@ -6726,11 +6750,17 @@ mod tests {
         12345u64.pack(&mut attrvals).unwrap(); // fileid
 
         // Word 1 attributes in bit order: mode(1), numlinks(3), owner(4),
-        //   owner_group(5), time_access(15), time_metadata(19), time_modify(20).
+        //   owner_group(5), rawdev(9), space_used(13), time_access(15),
+        //   time_metadata(19), time_modify(20).
         0o755u32.pack(&mut attrvals).unwrap(); // mode
         2u32.pack(&mut attrvals).unwrap(); // numlinks
         onc_xdr::pack_string("root", &mut attrvals).unwrap(); // owner
         onc_xdr::pack_string("wheel", &mut attrvals).unwrap(); // owner_group
+        // rawdev: specdata4 = major(u32) + minor(u32)
+        8u32.pack(&mut attrvals).unwrap();
+        1u32.pack(&mut attrvals).unwrap();
+        // space_used
+        4096u64.pack(&mut attrvals).unwrap();
         // time_access: nfstime4 = i64 seconds + u32 nseconds
         1700000000i64.pack(&mut attrvals).unwrap();
         123456u32.pack(&mut attrvals).unwrap();
@@ -6751,6 +6781,8 @@ mod tests {
         assert_eq!(decoded.numlinks, Some(2));
         assert_eq!(decoded.owner.as_deref(), Some("root"));
         assert_eq!(decoded.owner_group.as_deref(), Some("wheel"));
+        assert_eq!(decoded.rawdev, Some((8, 1)));
+        assert_eq!(decoded.space_used, Some(4096));
         assert_eq!(decoded.time_access, Some((1_700_000_000, 123_456)));
         assert_eq!(decoded.time_metadata, Some((1_700_000_100, 654_321)));
         assert_eq!(decoded.time_modify, Some((1_700_000_200, 111_222)));
@@ -6787,12 +6819,14 @@ mod tests {
         assert_ne!(w0 & (1 << 4), 0, "size bit");
         assert_ne!(w0 & (1 << 8), 0, "fsid bit");
         assert_ne!(w0 & (1 << 20), 0, "fileid bit");
-        // Word 1: bits 1, 3, 4, 5, 15, 19, 20
+        // Word 1: bits 1, 3, 4, 5, 9, 13, 15, 19, 20
         let w1 = ar.words[1];
         assert_ne!(w1 & (1 << 1), 0, "mode bit");
         assert_ne!(w1 & (1 << 3), 0, "numlinks bit");
         assert_ne!(w1 & (1 << 4), 0, "owner bit");
         assert_ne!(w1 & (1 << 5), 0, "owner_group bit");
+        assert_ne!(w1 & (1 << 9), 0, "rawdev bit");
+        assert_ne!(w1 & (1 << 13), 0, "space_used bit");
         assert_ne!(w1 & (1 << 15), 0, "time_access bit");
         assert_ne!(w1 & (1 << 19), 0, "time_metadata bit");
         assert_ne!(w1 & (1 << 20), 0, "time_modify bit");
@@ -6833,6 +6867,11 @@ mod tests {
         onc_xdr::pack_string("nobody", &mut attrvals).unwrap();
         // owner_group
         onc_xdr::pack_string("nogroup", &mut attrvals).unwrap();
+        // rawdev: specdata4 = major(u32) + minor(u32)
+        0u32.pack(&mut attrvals).unwrap();
+        0u32.pack(&mut attrvals).unwrap();
+        // space_used
+        512u64.pack(&mut attrvals).unwrap();
         // time_access
         1000i64.pack(&mut attrvals).unwrap();
         0u32.pack(&mut attrvals).unwrap();
@@ -6871,6 +6910,8 @@ mod tests {
                 assert_eq!(attrs.numlinks, Some(1));
                 assert_eq!(attrs.owner.as_deref(), Some("nobody"));
                 assert_eq!(attrs.owner_group.as_deref(), Some("nogroup"));
+                assert_eq!(attrs.rawdev, Some((0, 0)));
+                assert_eq!(attrs.space_used, Some(512));
                 assert_eq!(attrs.time_access, Some((1000, 0)));
                 assert_eq!(attrs.time_metadata, Some((2000, 0)));
                 assert_eq!(attrs.time_modify, Some((3000, 0)));
@@ -6955,9 +6996,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_fattr4_with_filehandle_skip() {
-        // Verify that filehandle (opaque<>, word 0 bit 19) is properly
-        // skipped and fileid (bit 20) is decoded after it.
+    fn decode_fattr4_with_filehandle() {
+        // Verify that filehandle (opaque<>, word 0 bit 19) is decoded
+        // and fileid (bit 20) is decoded after it.
         let bitmap = [(1u32 << 19) | (1 << 20)]; // filehandle + fileid
         let mut attrvals = Vec::new();
         // filehandle: opaque<> with 6-byte handle (padded to 8)
@@ -6967,6 +7008,7 @@ mod tests {
         42u64.pack(&mut attrvals).unwrap();
 
         let decoded = decode_fattr4(&bitmap, &attrvals);
+        assert_eq!(decoded.filehandle.as_deref(), Some(fh.as_slice()));
         assert_eq!(decoded.fileid, Some(42));
         assert!(decoded.ftype.is_none());
     }
@@ -7347,6 +7389,8 @@ mod tests {
             time_access: Some((1000, 500)),
             time_modify: Some((2000, 600)),
             time_metadata: Some((3000, 700)),
+            rawdev: Some((8, 1)),
+            space_used: Some(2048),
             ..Fattr4Decoded::default()
         };
         let info = Nfs4FileInfo::from(decoded);
@@ -7362,6 +7406,8 @@ mod tests {
         assert_eq!(info.time_access, Some((1000, 500)));
         assert_eq!(info.time_modify, Some((2000, 600)));
         assert_eq!(info.time_metadata, Some((3000, 700)));
+        assert_eq!(info.space_used, Some(2048));
+        assert_eq!(info.rawdev, Some((8, 1)));
     }
 
     #[test]

@@ -1133,7 +1133,15 @@ impl<O: ShellOps> NfsShell<O> {
             return;
         }
         let (name, dev_type_str, major, minor) = if let (Some(&n), Some(&t), Some(&maj), Some(&min)) = (parts.first(), parts.get(1), parts.get(2), parts.get(3)) {
-            (n, t, maj.parse::<u32>().unwrap_or(0), min.parse::<u32>().unwrap_or(0))
+            let Ok(major) = maj.parse::<u32>() else {
+                eprintln!("{}", format!("mknod: invalid major number: {maj}").red());
+                return;
+            };
+            let Ok(minor) = min.parse::<u32>() else {
+                eprintln!("{}", format!("mknod: invalid minor number: {min}").red());
+                return;
+            };
+            (n, t, major, minor)
         } else {
             eprintln!("{}", "usage: mknod <name> c|b <major> <minor>".yellow());
             return;
@@ -1704,7 +1712,7 @@ impl<O: ShellOps> NfsShell<O> {
         if self.ops.version_name() == "NFSv2" {
             println!("  root                       probe NFSPROC_ROOT (obsolete MOUNT bypass)");
         }
-        if self.ops.version_name() == "NFSv3" {
+        if self.ops.version_name() == "NFSv3" || self.ops.version_name() == "NFSv4" {
             println!("  verifier                   probe write verifier (reboot oracle, RFC 1813 S3.3.21)");
         }
         println!();
