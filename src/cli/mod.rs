@@ -3,6 +3,7 @@
 pub(crate) mod analyze;
 pub(crate) mod brute_handle;
 pub(crate) mod convert;
+pub(crate) mod decode;
 pub(crate) mod escape;
 pub(crate) mod mount;
 pub(crate) mod probe;
@@ -165,6 +166,9 @@ pub(crate) enum Command {
     // --- Utilities: reporting and shell integration ---
     /// Convert an `analyze --json` dump into HTML/Markdown/CSV/TXT/console
     Convert(convert::ConvertArgs),
+
+    /// Decode an NFS file handle and print every field
+    Decode(decode::DecodeArgs),
 
     /// Generate shell completions
     Completions(CompletionsArgs),

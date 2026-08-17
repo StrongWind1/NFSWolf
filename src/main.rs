@@ -81,6 +81,7 @@ fn main() -> anyhow::Result<()> {
             cli::Command::BruteHandle(args) => cli::brute_handle::run(args, &globals).await,
             cli::Command::UidSpray(args) => cli::uid_spray::run(args, &globals).await,
             cli::Command::Convert(args) => cli::convert::run(&args, &globals),
+            cli::Command::Decode(args) => cli::decode::run(&args),
             cli::Command::Completions(args) => {
                 cli::completions(&args);
                 Ok(())
