@@ -86,8 +86,8 @@ fn v4_info(info: &Nfs4FileInfo) -> ShellFileInfo {
         mtime_nsecs: info.time_modify.map_or(0, |(_, ns)| ns),
         ctime_secs: info.time_metadata.map_or(0, |(s, _)| u64::try_from(s).unwrap_or(0)),
         ctime_nsecs: info.time_metadata.map_or(0, |(_, ns)| ns),
-        used: info.space_used.unwrap_or_else(|| info.size.unwrap_or(0)),
-        rdev: info.rawdev.unwrap_or((0, 0)),
+        used: info.size.unwrap_or(0),
+        rdev: (0, 0),
         fsid: info.fsid.map_or(0, |(maj, _)| maj),
     }
 }
@@ -244,7 +244,7 @@ impl ShellOps for V4Ops {
                     };
                     if i == last_idx {
                         let info = match res.results.get(3).map(|op| &op.data) {
-                            Some(ResOpData::Getattr(a)) => v4_info(&Nfs4FileInfo::from((**a).clone())),
+                            Some(ResOpData::Getattr(a)) => v4_info(&Nfs4FileInfo::from(a.clone())),
                             _ => v4_info(&Nfs4FileInfo::default()),
                         };
                         return Ok((ShellHandle(fh), info));
@@ -396,9 +396,7 @@ impl ShellOps for V4Ops {
     async fn mkdir(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<ShellHandle> {
         let (fh, _) = self.client.mkdir(dir.as_bytes(), name).await.map_err(v4_err)?;
         // Set the requested mode -- CREATE with empty attrs leaves the server's default.
-        if let Err(e) = self.client.setattr(&fh, Stateid4::ANONYMOUS, fattr4_with_mode(mode)).await {
-            tracing::warn!(dir = name, mode, "mkdir: SETATTR failed, directory has server default mode: {e}");
-        }
+        drop(self.client.setattr(&fh, Stateid4::ANONYMOUS, fattr4_with_mode(mode)).await);
         Ok(ShellHandle(fh))
     }
 
@@ -471,7 +469,7 @@ impl ShellOps for V4Ops {
     }
 
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
-        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
+        let cred = Credential::Sys(AuthSys::new(uid, gid, hostname));
         self.client = Arc::new(self.client.with_credential(cred, uid, gid));
         *self.session.get_mut() = None;
         self.cred_cache.flush();
@@ -595,7 +593,7 @@ async fn list_dir_v4(base_client: &Nfs4Client, rd_client: &Nfs4Client, dir: &She
             _ => None,
         });
         let info = res.results.get(3).and_then(|op| match &op.data {
-            ResOpData::Getattr(a) => Some(v4_info(&Nfs4FileInfo::from((**a).clone()))),
+            ResOpData::Getattr(a) => Some(v4_info(&Nfs4FileInfo::from(a.clone()))),
             _ => None,
         });
         result.push(ShellEntry { name: "..".to_owned(), info, handle: fh.map(ShellHandle) });

@@ -400,7 +400,7 @@ async fn connect_v3(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
 
     let ops = V3Ops::new(Arc::clone(&nfs3));
     let root_handle = ShellHandle(root_fh.as_bytes().to_vec());
-    let mut shell = NfsShell::new(ops, root_handle, setup.allow_write, setup.hostname.clone());
+    let mut shell = NfsShell::new(ops, root_handle, setup.allow_write, setup.hostname.clone(), host.to_string(), export.clone(), globals.clone());
     shell.refresh_tab_cache().await;
     eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid}{}   --   type 'help' for commands", if setup.allow_write { "  [write enabled]" } else { "" })));
     eprintln!("# rerun: nfswolf shell {host}:{export} --nfs-version 3 --uid {uid} --gid {gid}");
@@ -447,7 +447,7 @@ async fn connect_v4(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
     };
 
     let v4ops = V4Ops::new(client);
-    let mut shell = NfsShell::new(v4ops, root_fh, setup.allow_write, setup.hostname.clone());
+    let mut shell = NfsShell::new(v4ops, root_fh, setup.allow_write, setup.hostname.clone(), host.to_string(), "/".to_owned(), globals.clone());
     shell.refresh_tab_cache().await;
     eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid} (NFSv4 shell  --  type 'help' for commands)")));
     eprintln!("# rerun: nfswolf shell {host} --nfs-version 4 --uid {uid} --gid {gid}");
@@ -508,7 +508,7 @@ async fn connect_v2(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
 
     let v2ops = V2Ops::new(client);
     let root = ShellHandle(root_fh.0.to_vec());
-    let mut shell = NfsShell::new(v2ops, root, setup.allow_write, setup.hostname.clone());
+    let mut shell = NfsShell::new(v2ops, root, setup.allow_write, setup.hostname.clone(), host.to_string(), export.clone(), globals.clone());
     shell.refresh_tab_cache().await;
     eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid} (NFSv2 shell  --  type 'help' for commands)")));
     eprintln!("# rerun: nfswolf shell {host}:{export} --nfs-version 2 --uid {uid} --gid {gid}");

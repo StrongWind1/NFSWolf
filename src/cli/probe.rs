@@ -206,7 +206,9 @@ use crate::engine::file_handle::{HandleVariant, dedup_variants, derive_handle_va
 pub(crate) struct TestedHandle {
     pub variant: HandleVariant,
     pub v3_ok: bool,
+    #[expect(dead_code, reason = "set during handle probing, retained for future multi-version escape analysis")]
     pub v3_stale: bool,
+    #[expect(dead_code, reason = "set during handle probing, retained for future multi-version escape analysis")]
     pub v2_ok: bool,
 }
 
@@ -226,11 +228,6 @@ impl HandleProbeResult {
     /// First handle variant that works with NFSv3 GETATTR.
     pub(crate) fn best_v3(&self) -> Option<&TestedHandle> {
         self.tested.iter().find(|t| t.v3_ok)
-    }
-
-    /// All variants usable as escape seeds (v3_ok, v3_stale, or v2_ok).
-    pub(crate) fn escape_seeds(&self) -> Vec<&TestedHandle> {
-        self.tested.iter().filter(|t| t.v3_ok || t.v3_stale || t.v2_ok).collect()
     }
 }
 

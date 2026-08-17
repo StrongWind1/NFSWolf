@@ -24,7 +24,8 @@ use sha2::{Digest, Sha256};
 
 use colored::Colorize as _;
 
-use crate::engine::escape::{EscapeConfig, EscapeProbe, EscapeRootOutcome, find_escape_root};
+use crate::cli::GlobalOpts;
+use crate::cli::escape;
 use crate::util::utmp::{LastlogRecord, UTMP_RECORD_SIZE, UtType, UtmpRecord, parse_lastlog, parse_passwd, parse_utmp};
 
 /// Maximum bytes to read in a single `cat` command.
@@ -161,38 +162,24 @@ pub(crate) struct NfsShell<O: ShellOps> {
     cwd_path: String,
     allow_write: bool,
     hostname: String,
+    /// Target host IP/name, used by escape-root to call run_fast().
+    target_host: String,
+    /// Export path, used by escape-root to call run_fast().
+    target_export: String,
+    /// Cloned global options, passed through to escape pipeline.
+    globals: GlobalOpts,
     history: Vec<String>,
     tab_cache: Arc<Mutex<complete::TabCache>>,
     commands: &'static [&'static str],
 }
 
-/// Adapts `ShellOps` to the `EscapeProbe` trait so the shared escape engine
-/// can probe handles through the shell's NFS version backend.
-struct ShellEscapeProbe<'a, O: ShellOps> {
-    ops: &'a O,
-}
-
-impl<O: ShellOps> EscapeProbe for ShellEscapeProbe<'_, O> {
-    async fn probe_getattr(&self, handle: &[u8]) -> anyhow::Result<(bool, u64)> {
-        let fh = ShellHandle(handle.to_vec());
-        let info = self.ops.getattr(&fh).await?;
-        Ok((info.file_type == ShellFileType::Directory, info.fileid))
-    }
-
-    async fn probe_lookup(&self, dir: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
-        let fh = ShellHandle(dir.to_vec());
-        let (child, _) = self.ops.lookup(&fh, name).await?;
-        Ok(child.0)
-    }
-}
-
 impl<O: ShellOps> NfsShell<O> {
     /// Create a new shell rooted at `root` with the given ops backend.
     #[must_use]
-    pub(crate) fn new(ops: O, root: ShellHandle, allow_write: bool, hostname: String) -> Self {
+    pub(crate) fn new(ops: O, root: ShellHandle, allow_write: bool, hostname: String, target_host: String, target_export: String, globals: GlobalOpts) -> Self {
         let commands = ops.commands();
         let tab_cache = Arc::new(Mutex::new(complete::TabCache { cwd: root.as_bytes().to_vec(), entries: Vec::new() }));
-        Self { ops, export_root: root.clone(), cwd: root, cwd_path: "/".to_owned(), allow_write, hostname, history: Vec::new(), tab_cache, commands }
+        Self { ops, export_root: root.clone(), cwd: root, cwd_path: "/".to_owned(), allow_write, hostname, target_host, target_export, globals, history: Vec::new(), tab_cache, commands }
     }
 
     /// Return the current directory path for use in the prompt.
@@ -1133,15 +1120,7 @@ impl<O: ShellOps> NfsShell<O> {
             return;
         }
         let (name, dev_type_str, major, minor) = if let (Some(&n), Some(&t), Some(&maj), Some(&min)) = (parts.first(), parts.get(1), parts.get(2), parts.get(3)) {
-            let Ok(major) = maj.parse::<u32>() else {
-                eprintln!("{}", format!("mknod: invalid major number: {maj}").red());
-                return;
-            };
-            let Ok(minor) = min.parse::<u32>() else {
-                eprintln!("{}", format!("mknod: invalid minor number: {min}").red());
-                return;
-            };
-            (n, t, major, minor)
+            (n, t, maj.parse::<u32>().unwrap_or(0), min.parse::<u32>().unwrap_or(0))
         } else {
             eprintln!("{}", "usage: mknod <name> c|b <major> <minor>".yellow());
             return;
@@ -1457,18 +1436,15 @@ impl<O: ShellOps> NfsShell<O> {
         }
     }
 
-    /// Delegates to the shared escape engine (`engine::escape::find_escape_root`)
-    /// which covers ext4, XFS, BTRFS, ZFS, and a brute-force inode scan.
+    /// Run the escape pipeline in fast mode to break out of the export boundary.
     /// Implements F-2.1: when subtree_check is disabled (Linux default), the server
     /// only validates the fsid in the handle, not that the inode falls within the export.
     async fn cmd_escape_root(&mut self) {
-        let probe = ShellEscapeProbe { ops: &self.ops };
-        let config = EscapeConfig { announce: true, ..EscapeConfig::default() };
-
-        match find_escape_root(&probe, self.cwd.as_bytes(), &config).await {
-            EscapeRootOutcome::Success(result) => {
-                let handle = ShellHandle(result.root_handle.as_bytes().to_vec());
-                eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {})", result.fs_type, result.inode_number).green().bold());
+        match escape::run_fast(&self.target_host, &self.target_export, &self.globals).await {
+            Ok(Some(att)) => {
+                let handle = ShellHandle(att.tree_top.candidate.handle.as_bytes().to_vec());
+                let os_tag = if att.tree_top.os_escape { "  OS-ESCAPE" } else { "" };
+                eprintln!("{}", format!("[+] escaped to filesystem root ({:?}, inode {}){os_tag}", att.tree_top.candidate.fs_type, att.tree_top.candidate.inode_number).green().bold());
                 eprintln!("{}", format!("    handle: {}", handle.to_hex()).cyan());
                 // Probe attrs for display
                 if let Ok(info) = self.ops.getattr(&handle).await {
@@ -1479,11 +1455,11 @@ impl<O: ShellOps> NfsShell<O> {
                 self.cwd_path = String::from("/ [escaped]");
                 self.refresh_tab_cache().await;
             },
-            EscapeRootOutcome::StaleNoRoot => {
-                eprintln!("{}", "[!] handle format valid (STALE hits) but root not found in scan range -- try nfswolf escape with --max-root-scan".yellow());
+            Ok(None) => {
+                eprintln!("{}", "escape-root: no escape found -- server may use subtree_check or handle format is unsupported".yellow());
             },
-            EscapeRootOutcome::Unsupported => {
-                eprintln!("{}", "escape-root: server rejected handle format (non-Linux or unsupported filesystem)".red());
+            Err(e) => {
+                eprintln!("{}", format!("escape-root: {e}").red());
             },
         }
     }
@@ -1712,7 +1688,7 @@ impl<O: ShellOps> NfsShell<O> {
         if self.ops.version_name() == "NFSv2" {
             println!("  root                       probe NFSPROC_ROOT (obsolete MOUNT bypass)");
         }
-        if self.ops.version_name() == "NFSv3" || self.ops.version_name() == "NFSv4" {
+        if self.ops.version_name() == "NFSv3" {
             println!("  verifier                   probe write verifier (reboot oracle, RFC 1813 S3.3.21)");
         }
         println!();

@@ -801,6 +801,39 @@ impl FileHandleAnalyzer {
             .collect()
     }
 
+    /// Construct FAT/VFAT root handle candidates using FILEID_FAT_WITHOUT_PARENT (0x71).
+    ///
+    /// FAT root directory has i_logstart=0 (the root dir is at a fixed location,
+    /// not tracked by a cluster chain start) and generation=0.  The fileid layout
+    /// is: logstart(u32 LE) + generation(u32 LE).
+    ///
+    /// For compound UUID seeds (fsid_type=7), produces both fsid_type=7 and
+    /// fsid_type=6 (UUID-only) variants.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired into escape pipeline Phase 2 in a later step"))]
+    pub(crate) fn construct_fat_root_handle(export_fh: &FileHandle) -> Vec<EscapeResult> {
+        let variants = extract_fsid_variants(export_fh);
+        if variants.is_empty() {
+            return Vec::new();
+        }
+
+        variants
+            .iter()
+            .enumerate()
+            .map(|(i, (fsid_type, fsid))| {
+                let mut handle = Vec::with_capacity(4 + fsid.len() + 8);
+                handle.push(0x01);
+                handle.push(0x00);
+                handle.push(*fsid_type);
+                handle.push(0x71); // FILEID_FAT_WITHOUT_PARENT
+                handle.extend_from_slice(fsid);
+                handle.extend_from_slice(&0u32.to_le_bytes()); // logstart = 0 (FAT root)
+                handle.extend_from_slice(&0u32.to_le_bytes()); // gen = 0
+                let confidence = if i == 0 { 0.6 } else { 0.6 * 0.9 };
+                EscapeResult { root_handle: FileHandle::from_bytes(&handle), fs_type: FsType::Unknown, label: "FAT/VFAT root (logstart=0)".to_owned(), confidence, inode_number: 0 }
+            })
+            .collect()
+    }
+
     /// Estimate the entropy (randomness) of a file handle.
     pub(crate) fn estimate_entropy(fh: &FileHandle) -> EntropyAnalysis {
         let data = fh.as_bytes();
@@ -876,7 +909,7 @@ fn extract_fsid_variants(fh: &FileHandle) -> Vec<(u8, Vec<u8>)> {
     variants
 }
 
-fn fsid_len_for_type(fsid_type: usize) -> Option<usize> {
+pub(crate) fn fsid_len_for_type(fsid_type: usize) -> Option<usize> {
     match fsid_type {
         0 | 3..=5 => Some(8), // dev major:minor (32+32 bits)
         1 => Some(4),         // dev number only (32 bits)
@@ -1394,5 +1427,44 @@ mod tests {
         assert!(inodes.contains(&128), "must queue XFS v5 root inode 128");
         assert!(inodes.contains(&64), "must queue XFS root inode 64");
         assert!(inodes.contains(&32), "must queue XFS root inode 32");
+    }
+
+    #[test]
+    fn construct_fat_root_handle_returns_candidates_for_linux() {
+        // Standard Linux ext4 seed handle: FAT constructor must produce candidates.
+        let seed = linux_ext4_handle(100, 0);
+        let results = FileHandleAnalyzer::construct_fat_root_handle(&seed);
+        assert!(!results.is_empty(), "FAT constructor must return candidates for Linux handles");
+        for r in &results {
+            assert_eq!(r.fs_type, FsType::Unknown, "FAT uses FsType::Unknown");
+            assert_eq!(r.inode_number, 0, "FAT root logstart is 0");
+            assert!(r.label.contains("FAT"), "label must mention FAT");
+            // Verify fileid_type byte is 0x71
+            assert_eq!(r.root_handle.as_bytes()[3], 0x71, "fileid_type must be FILEID_FAT_WITHOUT_PARENT (0x71)");
+            // Verify logstart=0 and gen=0 at the end of the handle
+            let raw = r.root_handle.as_bytes();
+            let len = raw.len();
+            let logstart = u32::from_le_bytes([raw[len - 8], raw[len - 7], raw[len - 6], raw[len - 5]]);
+            let generation = u32::from_le_bytes([raw[len - 4], raw[len - 3], raw[len - 2], raw[len - 1]]);
+            assert_eq!(logstart, 0, "FAT root logstart must be 0");
+            assert_eq!(generation, 0, "FAT root gen must be 0");
+        }
+    }
+
+    #[test]
+    fn construct_fat_root_handle_empty_for_non_linux() {
+        let fh = windows_handle(false);
+        let results = FileHandleAnalyzer::construct_fat_root_handle(&fh);
+        assert!(results.is_empty(), "FAT constructor must return empty for non-Linux handles");
+    }
+
+    #[test]
+    fn construct_fat_root_handle_compound_uuid_produces_two_variants() {
+        // Compound UUID seed (fsid_type=7): must produce both fsid_type=7 and fsid_type=6 variants.
+        let seed = compound_uuid_handle(100);
+        let results = FileHandleAnalyzer::construct_fat_root_handle(&seed);
+        assert_eq!(results.len(), 2, "compound UUID seed must produce 2 FAT variants");
+        assert_eq!(results[0].root_handle.as_bytes()[2], 7, "first variant must use fsid_type=7");
+        assert_eq!(results[1].root_handle.as_bytes()[2], 6, "second variant must use fsid_type=6");
     }
 }

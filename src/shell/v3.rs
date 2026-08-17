@@ -258,7 +258,7 @@ impl ShellOps for V3Ops {
     }
 
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
-        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
+        let cred = Credential::Sys(AuthSys::new(uid, gid, hostname));
         self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
         self.cred_cache.flush();
         Ok(())

@@ -224,6 +224,42 @@ impl NfsMountClient {
         client.umnt(path).await.with_context(|| format!("UMNT {export}"))
     }
 
+    /// Unmount an export via MOUNT v1 UMNT (program 100005, version 1, proc 3).
+    ///
+    /// `unmount()` connects at MOUNT v3; this variant connects at version 1 so
+    /// the server's v1 rmtab entry is also cleaned up. Best-effort: callers
+    /// should drop the result.
+    pub(crate) async fn unmount_v1(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
+        use onc_rpc_client::rpc::RpcClient;
+
+        let portmap = match &self.proxy {
+            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
+            None => crate::proto::portmap::PortmapClient::default_port(),
+        };
+        let port = match self.mount_port {
+            Some(p) => p,
+            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1 UMNT")?,
+        };
+        let mount_addr = SocketAddr::new(addr.ip(), port);
+        let io = if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
+            onc_rpc_client::transport::tokio::TokioIo::new(stream)
+        } else if self.privileged_required {
+            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
+        } else {
+            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
+        };
+        let opaque = self.credential.to_opaque_auth();
+        let mut rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
+
+        // MOUNT v1 UMNT: program=100005, version=1, proc=3
+        // args = dirpath (XDR string), result = void
+        let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
+        let _: onc_xdr::Void = rpc.call(100_005, 1, 3, &path).await.with_context(|| format!("UMNT v1 {export}"))?;
+        Ok(())
+    }
+
     /// List all exports with their ACLs via MOUNT v3 EXPORT (MNTPROC_EXPORT).
     ///
     /// A wildcard or empty `allowed_hosts` list means the export is world-accessible (F-7.1).
@@ -282,6 +318,39 @@ impl NfsMountClient {
         let client = self.connect(addr).await?;
         let dump = client.dump().await.context("MNTPROC_DUMP")?;
         Ok(dump.into_inner().into_iter().map(|b| MountedClient { hostname: bytes_to_string(b.ml_hostname.0.as_ref()), directory: bytes_to_string(b.ml_directory.0.as_ref()) }).collect())
+    }
+
+    /// List connected clients via MOUNT v1 MNTPROC_DUMP (program 100005, version 1, proc 2).
+    ///
+    /// The wire format (mountlist) is identical between v1 and v3; only the RPC
+    /// version header differs.  Follows the same connection pattern as `list_exports_v1`.
+    pub(crate) async fn dump_clients_v1(&self, addr: SocketAddr) -> anyhow::Result<Vec<MountedClient>> {
+        use nfs_mount::wire::mountlist;
+        use onc_rpc_client::rpc::RpcClient;
+        use onc_xdr::Void;
+
+        let portmap = match &self.proxy {
+            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
+            None => crate::proto::portmap::PortmapClient::default_port(),
+        };
+        let port = match self.mount_port {
+            Some(p) => p,
+            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1")?,
+        };
+        let mount_addr = SocketAddr::new(addr.ip(), port);
+        let io = if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
+            onc_rpc_client::transport::tokio::TokioIo::new(stream)
+        } else if self.privileged_required {
+            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
+        } else {
+            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
+        };
+        // RPC call: program=100005, version=1, proc=2 (DUMP), args=Void
+        let mut rpc = RpcClient::new(io);
+        let result: mountlist<'_, '_> = rpc.call(100_005, 1, 2, &Void).await.context("MOUNT v1 DUMP")?;
+        Ok(result.into_inner().into_iter().map(|b| MountedClient { hostname: bytes_to_string(b.ml_hostname.0.as_ref()), directory: bytes_to_string(b.ml_directory.0.as_ref()) }).collect())
     }
 
     /// Open a TCP connection to the mount daemon.

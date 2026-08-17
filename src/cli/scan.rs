@@ -17,8 +17,9 @@ use tabled::builder::Builder;
 use tabled::settings::Style;
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::cli::escape::{self, EscapeOutcome};
+use crate::cli::escape;
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
+use crate::engine::escape::AnnotatedTreeTop;
 use crate::engine::scan_types::{HostResult, NfsPortInfo};
 use crate::engine::scanner::{ScanConfig, ScanOutput, Scanner};
 use crate::util::stealth::StealthConfig;
@@ -181,9 +182,9 @@ struct AutoEscapeResult {
     host: String,
     /// Export path the escape targeted.
     export: String,
-    /// `Ok(outcome)` from the escape primitive, or `Err(message)` when the
-    /// MOUNT/connection step failed before any handle could be probed.
-    outcome: Result<EscapeOutcome, String>,
+    /// `Ok(Some(att))` when escape succeeded, `Ok(None)` when the export is
+    /// not escapable, or `Err(message)` on connection/MOUNT failure.
+    outcome: Result<Option<AnnotatedTreeTop>, String>,
 }
 
 /// Attempt an export escape against every discovered export path and print a
@@ -237,8 +238,8 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
             // escape task -- and the join loop waits for every task, stalling the
             // whole scan. Bound the full escape per host (scales with --timeout).
             let per_host = Duration::from_millis(g.timeout.saturating_mul(10).max(15_000));
-            let outcome = match tokio::time::timeout(per_host, escape::find_escape_any(&host, &export, escape::DEFAULT_BTRFS_SUBVOLS, escape::DEFAULT_MAX_ROOT_SCAN, &g, false)).await {
-                Ok(Ok(outcome)) => Ok(outcome),
+            let outcome = match tokio::time::timeout(per_host, escape::run_fast(&host, &export, &g)).await {
+                Ok(Ok(att)) => Ok(att),
                 Ok(Err(e)) => Err(e.to_string()),
                 Err(_) => Err(format!("timed out after {}ms", per_host.as_millis())),
             };
@@ -262,51 +263,30 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
     let mut escaped = 0usize;
     for res in &all {
         match &res.outcome {
-            Ok(EscapeOutcome::Success { candidate, note }) => {
+            Ok(Some(att)) => {
                 escaped += 1;
-                let hex = candidate.root_handle.to_hex();
+                let hex = att.tree_top.candidate.handle.to_hex();
                 println!();
-                println!("{}", crate::output::status_ok(&format!("{}:{} escaped  --  {:?} inode {} ({note})", res.host, res.export, candidate.fs_type, candidate.inode_number)));
+                let os_tag = if att.tree_top.os_escape { "  OS-ESCAPE" } else { "" };
+                let version_info = if att.tree_top.v4_confirmed && !att.tree_top.v3_confirmed && !att.tree_top.v2_confirmed {
+                    " (NFSv4)"
+                } else if att.tree_top.v2_confirmed && !att.tree_top.v3_confirmed {
+                    " (NFSv2)"
+                } else {
+                    ""
+                };
+                println!("{}", crate::output::status_ok(&format!("{}:{} escaped  --  {:?} inode {}{version_info}{os_tag}", res.host, res.export, att.tree_top.candidate.fs_type, att.tree_top.candidate.inode_number)));
                 crate::output::print_handle("Root handle", &hex);
                 // Carry the network globals into the rerun hint so the printed
                 // command reproduces the scan's transport (proxy / fixed NFS or
                 // mount port); without them the suggestion can't reach a proxied
                 // or non-2049 target -- exactly the auto-escape use case.
-                let v2_flag = if note.contains("NFSv2") { " --nfs-version 2" } else { "" };
-                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
+                let v2_flag = if att.tree_top.v2_confirmed && !att.tree_top.v3_confirmed { " --nfs-version 2" } else { "" };
+                let v4_flag = if att.tree_top.v4_confirmed && !att.tree_top.v3_confirmed && !att.tree_top.v2_confirmed { " --nfs-version 4" } else { "" };
+                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag}{v4_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
             },
-            Ok(EscapeOutcome::WebNfs { public_handle, version }) => {
-                escaped += 1;
-                let hex = public_handle.to_hex();
-                println!();
-                println!("{}", crate::output::status_ok(&format!("{}:{} WebNFS escape (NFS{version}) -- public handle accepted, MOUNT bypass", res.host, res.export)));
-                if hex.is_empty() {
-                    crate::output::print_handle("Public handle", "(zero-length)");
-                } else {
-                    crate::output::print_handle("Public handle", &hex);
-                }
-                let v2_flag = if *version == "v2" { " --nfs-version 2" } else { "" };
-                println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag}{v2_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
-            },
-            Ok(EscapeOutcome::Nfs4Lookupp { root_handle, verified }) => {
-                escaped += 1;
-                let verified = *verified;
-                let hex = root_handle.to_hex();
-                let label = if verified { "escaped  --  NFSv4 LOOKUPP (filesystem root)" } else { "escaped  --  NFSv4 LOOKUPP (pseudo-root, cross-export)" };
-                println!();
-                println!("{}", crate::output::status_ok(&format!("{}:{} {label}", res.host, res.export)));
-                crate::output::print_handle(if verified { "Root handle" } else { "Pseudo-root handle" }, &hex);
-                if verified {
-                    println!("    {} shell {}{proxy_flag}{nfs_port_flag}{mount_port_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
-                } else {
-                    println!("    {} shell {} --nfs-version 4{proxy_flag}{nfs_port_flag}{mount_port_flag} --handle {}", "nfswolf".dimmed(), res.host, hex.cyan());
-                }
-            },
-            Ok(EscapeOutcome::StaleNoRoot) => {
-                println!("  {}", format!("{}:{}  handle valid but root not found (raise `escape --max-root-scan`)", res.host, res.export).dimmed());
-            },
-            Ok(EscapeOutcome::Unsupported) => {
-                println!("  {}", format!("{}:{}  not escapable (BADHANDLE / non-Linux handle)", res.host, res.export).dimmed());
+            Ok(None) => {
+                println!("  {}", format!("{}:{}  not escapable", res.host, res.export).dimmed());
             },
             Err(e) => {
                 println!("  {}", format!("{}:{}  escape failed: {e}", res.host, res.export).dimmed());
