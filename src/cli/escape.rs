@@ -1530,26 +1530,30 @@ async fn gather_v4_export_seeds(host: &str, globals: &GlobalOpts) -> Vec<(String
     let client = PooledNfs4Client::new(transport);
 
     // Get pseudo-root FH + fsid.
-    let Ok(root_fh) = client.get_root_fh().await else { return Vec::new() };
+    let Ok(root_fh) = client.get_root_fh().await else {
+        tracing::debug!("gather_v4: get_root_fh failed");
+        return Vec::new();
+    };
     let root_fsid = match client.getattr(&root_fh).await {
         Ok(info) => info.fsid.unwrap_or((0, 0)),
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            tracing::debug!("gather_v4: getattr(root) failed: {e}");
+            return Vec::new();
+        },
     };
+    tracing::debug!(root_fsid = ?root_fsid, root_fh_len = root_fh.len(), "gather_v4: pseudo-root acquired");
 
     let mut results: Vec<(String, FileHandle)> = Vec::new();
-    // Track depth per stack entry (not globally) so wide pseudo-FS trees don't
-    // silently drop siblings. A total-work cap prevents runaway on extremely
-    // wide trees.
     let mut stack: Vec<(Vec<u8>, (u64, u64), String, u32)> = vec![(root_fh, root_fsid, String::new(), 0)];
     let mut visited = 0u32;
 
     while let Some((dir_fh, parent_fsid, prefix, depth)) = stack.pop() {
         if depth > 10 {
-            continue; // skip deep entries but keep processing shallower ones
+            continue;
         }
         visited += 1;
         if visited > 200 {
-            break; // total work cap to prevent runaway
+            break;
         }
 
         let Ok(entries) = client.list_dir(&dir_fh).await else { continue };
@@ -1562,13 +1566,10 @@ async fn gather_v4_export_seeds(host: &str, globals: &GlobalOpts) -> Vec<(String
 
             if child_fsid != parent_fsid {
                 if let Ok(export_entries) = client.list_dir(&child_fh).await {
-                    for child_name in &export_entries {
-                        if child_name == "." || child_name == ".." {
-                            continue;
-                        }
+                    for child_name in export_entries.iter().filter(|n| *n != "." && *n != "..") {
                         if let Ok((inner_fh, _)) = client.lookup(child_fh.as_slice(), child_name).await {
                             results.push((child_path.clone(), FileHandle::from_bytes(&inner_fh)));
-                            break; // one child per export
+                            break;
                         }
                     }
                 }

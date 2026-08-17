@@ -318,23 +318,31 @@ pub(crate) fn parse_proxy_addr(proxy: &str) -> anyhow::Result<SocketAddr> {
 /// through to the single ephemeral attempt instead of retrying all ~724 ports against an
 /// unreachable host.
 async fn connect_privileged_nfs(addr: SocketAddr) -> std::io::Result<NfsIo> {
-    for port in 300_u16..1024 {
-        match TokioConnector.connect_with_port(addr, port).await {
-            Ok(io) => return Ok(io),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {},
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                tracing::debug!(%addr, "no privilege to bind <1024, falling back to ephemeral");
-                break;
-            },
-            Err(e) => {
-                // Destination-side failure (refused / timed out / unreachable): the
-                // same outcome awaits every other source port, so stop here rather
-                // than firing hundreds more SYNs at a dead host.
-                tracing::debug!(%addr, %e, "destination connect failed, not retrying other source ports");
-                break;
-            },
+    // Retry up to 3 times with a brief sleep between sweeps. Under heavy
+    // use all 724 privileged ports (300-1023) can land in TIME_WAIT; a
+    // short pause lets the kernel recycle them (tcp_tw_reuse / fin_timeout).
+    for attempt in 0..3u8 {
+        if attempt > 0 {
+            tracing::debug!(%addr, attempt, "privileged ports exhausted, waiting for TIME_WAIT recycle");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        for port in 300_u16..1024 {
+            match TokioConnector.connect_with_port(addr, port).await {
+                Ok(io) => return Ok(io),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {},
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    tracing::debug!(%addr, "no privilege to bind <1024, falling back to ephemeral");
+                    return TokioConnector.connect(addr).await;
+                },
+                Err(e) => {
+                    // Destination-side failure (refused / timed out / unreachable):
+                    // same outcome awaits every other source port, stop immediately.
+                    tracing::debug!(%addr, %e, "destination connect failed, not retrying other source ports");
+                    return TokioConnector.connect(addr).await;
+                },
+            }
         }
     }
-    tracing::warn!(%addr, "privileged NFS port binding failed, falling back to ephemeral port");
+    tracing::warn!(%addr, "privileged NFS port binding failed after retries, falling back to ephemeral port");
     TokioConnector.connect(addr).await
 }
