@@ -6,7 +6,7 @@ For vision and goals, see [DESIGN.md](DESIGN.md). For security rationale, see [F
 ## Document Traceability
 
 ```
-FINDINGS.md (60 findings with RFC-cited analysis, F-1.1 through F-7.7)
+FINDINGS.md (60 findings with RFC-cited analysis, F-1.1 through F-7.7 including F-1.8 through F-3.9)
     └── findings/ (detailed write-ups per finding)
         └── REQUIREMENTS.md (what the tool must detect, R1-R7)
             └── DESIGN.md (vision, goals, threat model)
@@ -56,10 +56,14 @@ nfswolf scan 192.168.0.0/24 --auto-escape       # break out of every export foun
 
 **Architecture** (src/engine/scanner.rs, src/engine/scan_types.rs):
 - tokio::spawn fan-out with Semaphore-based concurrency limit
-- Per-host 9-stage probe sequence with panic isolation
+- Per-host 3-phase probe pipeline with panic isolation
+- Phase 1 probes RPC + NFS + extra ports in parallel via `tokio::join!` (TCP and optionally UDP)
+- Phase 2 runs portmapper DUMP/GETPORT, assembles the NFS port set, and runs version probes (NULL v2/v3, COMPOUND v4)
+- Phase 3 collects MOUNT v1/v3 EXPORT/MNT/DUMP, NFSv4 pseudo-FS READDIR, and RDMA detection
 - SIGINT handling: partial results collected via Arc<Mutex<Vec>>, exit code 130
-- PROG_MISMATCH-aware probing (RFC 1831 §13) via raw record-marking framing
-- Single TCP connection reuse for sequential v2/v3/v4 version probes
+- PROG_MISMATCH-aware probing (RFC 1831 S13) via raw record-marking framing
+- `--rpc-port` overrides the portmapper port, `--skip-rpc` skips all portmapper queries, `--skip-mountd` skips all MOUNT daemon queries
+- `--probe-port` adds extra NFS ports to the parallel probe set
 - UDP portmapper fallback (DUMP + GETPORT) when TCP/111 is firewalled
 
 **Capabilities:**
@@ -221,11 +225,21 @@ subcommands.
 
 | Subcommand | Description | Findings |
 |------------|-------------|----------|
-| `escape` | Construct escape handles across 18/19 filesystem types to break out of an export; `--all` for comprehensive multi-seed probing | F-2.1, F-2.4, F-2.6, F-2.11 |
+| `escape` | Seven-phase pipeline to break out of NFS export boundaries; `--fast` for single-export quick mode, `--json` for machine-readable output, `--read-shadow` for post-escape read, `--all-handles` for every distinct handle | F-2.1, F-2.4, F-2.6, F-2.11 |
 | `brute-handle` | Brute-force file handles using the STALE / BADHANDLE oracle | F-2.2, F-2.5 |
 | `uid-spray` | Last-resort UID / GID + auxiliary-group brute force when the auto-UID ladder doesn't pin down a working credential | F-1.1, F-1.2, F-1.3 |
 
-`escape` is the single entry point for crossing the export boundary. It delegates to the unified escape engine (`src/engine/escape.rs`) which works through the `EscapeProbe` trait, making the algorithm version-neutral. The escape engine supports 18 of 19 Linux filesystem types: ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, and ISO9660 -- only tmpfs resists (random 32-bit generation per mount). The `find_escape_root()` function runs the full algorithm: INO32_GEN candidate table (9 entries) -> BTRFS subvol scan -> filesystem-specific constructors (ZFS zfid_short_t, EROFS INO64_GEN, NILFS2 0x61, bcachefs 0xb1, UDF 0x51, ISO9660 custom) -> brute-force inode scan (inodes 1-5 with gen 0-5, then 6-200 with gen=0). All constructors produce compound-UUID dual variants (fsid_type=7 and fsid_type=6) for maximum compatibility. The escape cascade in `find_escape_any` tries: WebNFS public handles -> v3 MOUNT + handle construction -> handle matrix (MOUNT v1/v3 cross-version) -> v2 MOUNT -> v4 handle escape (`find_escape_v4` via PooledTransport + Nfs4EscapeProbe) -> v4 LOOKUPP traversal (F-2.11). `--all` mode acquires seed handles from all sources (MOUNT v3, MOUNT v1, NFSv4 LOOKUP), runs `find_escape_root_all` on each, and reports every working root handle. The `escape-root` shell command uses the same `find_escape_root()` via a `ShellOps`-based `EscapeProbe` adapter, using `self.cwd` as the seed (enabling pure-NFSv4 escape when the shell navigates into an export). The `exports` shell command (F-2.12) uses LOOKUPP to discover sibling exports reachable from the current position.
+`escape` is the single entry point for crossing the export boundary. It runs a seven-phase pipeline (`src/cli/escape.rs`):
+
+1. **Phase 1 -- Gather seeds**: acquires every reachable file handle from every protocol version and source. Five discovery channels (MOUNT v3/v1 EXPORT, NFSv4 pseudo-FS walk, MOUNT v3/v1 DUMP) discover exports. For each export, boundary handles come from MOUNT v3, MOUNT v1, and NFSv4 LOOKUP. Child handles come from READDIRPLUS v3, READDIR+LOOKUP v2/v4. Protocol singles add PUTROOTFH, PUTPUBFH, WebNFS public v3/v2, and NFSPROC_ROOT v2. Four upward-traversal chains (v3 LOOKUP "..", v2 LOOKUP "..", v4 LOOKUPP, v4 LOOKUP "..") walk from every boundary handle toward the filesystem root.
+2. **Phase 2 -- Construct candidates**: pure computation producing all plausible filesystem-top handles from each seed -- INO32_GEN candidate table, BTRFS subvol scan, filesystem-specific constructors (ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660), brute-force inode scan. All constructors produce compound-UUID dual variants (fsid_type=7 and fsid_type=6).
+3. **Phase 3 -- Probe candidates**: tests every candidate via GETATTR across all protocol versions (or the active version only in `--fast` mode), confirms tree-tops via LOOKUP ".." == self, with credential escalation on ACCES.
+4. **Phase 4 -- Dedup and filter**: removes candidates that match known export boundary handles.
+4b. **Phase 4b -- Rootfs detection**: scores each tree-top by looking for OS-level directories (etc, bin, usr, var, lib, proc, sys, dev, home, root, tmp, boot, sbin, opt, run, srv).
+5. **Phase 5 -- Score and annotate**: ranks tree-tops by rootfs score, access level, and version availability. `--all-handles` reports every handle; default deduplicates by filesystem UUID + inode.
+6. **Phase 6 -- Report**: console output with colored severity or `--json` for machine-readable output. `--read-shadow` attempts to read /etc/shadow from the best OS-ESCAPE handle.
+
+Two modes: **Full** (default, `escape <HOST>`) discovers all exports and uses all handle sources. **Fast** (`--fast`, requires `HOST:/export`) scopes to one export, one version, no brute-force, ~10-80 RPCs. The `escape-root` shell command and `scan --auto-escape` both call `run_fast()`. The escape engine supports 18 of 19 Linux filesystem types: ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, and ISO9660 -- only tmpfs resists (random 32-bit generation per mount). The `exports` shell command (F-2.12) uses LOOKUPP to discover sibling exports reachable from the current position.
 
 ```bash
 # Step 1: construct the escape handle for the underlying filesystem (F-2.1)
@@ -267,7 +281,22 @@ nfswolf convert --format html --input results.json -o report.html
 - Affected export
 - Deduplication across exports
 
-**Requirements**: [R6.1–R6.2](REQUIREMENTS.md#r6-reporting)
+**Requirements**: [R6.1-R6.2](REQUIREMENTS.md#r6-reporting)
+
+### 7. `nfswolf decode` -- Offline Handle Decoder
+
+Decode an NFS file handle from hex and print every field in human-readable format. No network access, no server needed. Works with handles from any NFS version (v2/v3/v4) or any source (MOUNT, escape, GETFH, pcap).
+
+```
+nfswolf decode 010007020300240000000000...
+```
+
+**Output:**
+- Header: version, auth_type, fsid_type, fileid_type (with descriptive labels)
+- Filesystem ID: decoded per fsid_type (device major/minor, UUID, compound UUID, pseudo-FS number)
+- File ID: decoded per fileid_type (inode+gen, BTRFS objectid+root+gen, XFS 64-bit inode, NILFS2 checkpoint, bcachefs subvol, UDF block+partref)
+- Fingerprint: OS and filesystem type via `FileHandleAnalyzer`
+- Security assessment: escape viability, cross-protocol portability
 
 ## Core NFS Engine Design
 
@@ -651,10 +680,11 @@ nfswolf/
 │   │   ├── analyze.rs             # nfswolf analyze
 │   │   ├── mount.rs               # nfswolf mount (FUSE) -- daemonises
 │   │   ├── shell.rs               # nfswolf shell: ShellSetup + run_repl + connect_v2/v3/v4 + auto-detect
-│   │   ├── escape.rs              # nfswolf escape (delegates to engine/escape.rs via Nfs3EscapeProbe/Nfs2EscapeProbe/Nfs4EscapeProbe)
+│   │   ├── escape.rs              # nfswolf escape: seven-phase pipeline (gather seeds, construct, probe, dedup, rootfs-detect, score, report)
 │   │   ├── brute_handle.rs        # nfswolf brute-handle
 │   │   ├── uid_spray.rs           # nfswolf uid-spray (last-resort fallback)
-│   │   └── convert.rs             # nfswolf convert
+│   │   ├── convert.rs             # nfswolf convert
+│   │   └── decode.rs              # nfswolf decode: offline handle decoder (no network)
 │   ├── proto/
 │   │   ├── mod.rs
 │   │   ├── auth.rs                # AUTH_SYS stamp counter + Credential type
@@ -663,8 +693,9 @@ nfswolf/
 │   │   ├── circuit.rs             # CircuitBreaker: sliding window, exponential cooldown
 │   │   ├── transport.rs           # PooledTransport: the single RpcTransport impl in the binary
 │   │   ├── udp.rs                 # call_rpc_udp(): single-shot UDP RPC + NULL probe
-│   │   ├── mount.rs               # NfsMountClient: EXPORT, MNT, UMNT, auth-flavor extraction
+│   │   ├── mount.rs               # NfsMountClient: EXPORT, MNT, UMNT, auth-flavor extraction, dump_clients/dump_clients_v1, unmount_v1
 │   │   ├── portmap.rs             # PortmapClient: DUMP, GETPORT, NIS detection, amplification
+│   │   ├── sideband.rs            # Shared helpers for sideband RPC programs (NFS_ACL, RQUOTA)
 │   │   ├── nfs2.rs                # Nfs2Client type alias (library client + PooledTransport)
 │   │   ├── nfs3/mod.rs            # Nfs3Client type alias (library client + PooledTransport)
 │   │   └── nfs4/{mod,compound}.rs # Nfs4DirectClient (pool-free, direct port 2049); re-exports nfs_v4 types
@@ -697,12 +728,12 @@ nfswolf/
 │   ├── credential_test.rs
 │   └── xdr_fuzz_test.rs
 ├── docs/
-│   ├── FINDINGS.md                # Finding catalog (60 findings, F-1.1 through F-7.7)
+│   ├── FINDINGS.md                # Finding catalog (60 findings, F-1.1 through F-7.7 including F-1.8 through F-3.9)
 │   ├── REQUIREMENTS.md            # Tool requirements (R1 through R7)
 │   ├── DESIGN.md                  # Vision, goals, threat model
 │   ├── ARCHITECTURE.md            # This file
 │   ├── NFSv2.md, NFSv3.md, NFSv4.md  # Protocol reference notes
-│   ├── findings/                  # Detailed finding write-ups (56 files: 60 findings + README)
+│   ├── findings/                  # Detailed finding write-ups (56 .md files covering all 60 findings + README)
 │   └── research/
 │       └── FILESYSTEM_ESCAPE_MATRIX.md  # Escape coverage across 19 Linux filesystem types
 └── ref/
@@ -726,6 +757,9 @@ Options:
     --proxy <SOCKS5>         Route every TCP through a SOCKS5 (no-auth) proxy
     --nfs-port <PORT>        Override NFS port (skip portmapper)
     --mount-port <PORT>      Override mountd port (skip portmapper)
+    --rpc-port <PORT>        Override portmapper/rpcbind port [default: 111]
+    --skip-rpc               Skip all portmapper/rpcbind probes (DUMP, GETPORT, port 111)
+    --skip-mountd            Skip all MOUNT daemon queries (EXPORT, MNT, DUMP)
     --timeout <MS>           Connection timeout [default: 3000]
     --delay <MS>             Baseline inter-RPC delay [default: 0]
     --jitter <MS>            Random jitter added to each delay [default: 0]
@@ -746,6 +780,7 @@ Commands:
     uid-spray    Last-resort UID/GID brute force
   Utilities:
     convert      Render an `analyze --json` dump to HTML / JSON / CSV / MD / text / console
+    decode       Decode an NFS file handle and print every field (offline, no network)
     completions  Generate shell completions (bash / zsh / fish / PowerShell)
 ```
 

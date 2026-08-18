@@ -215,7 +215,7 @@ Failure mode: mountd unreachable. Logged as a warning.
 
 Call DUMP via MOUNT v1 (program 100005, version 1, proc 4). Same wire format as v3 DUMP but the RPC header carries version 1. On Linux knfsd v1 and v3 share rmtab so the results are identical, but on Solaris, NetApp, or embedded servers the v1 mountd may maintain separate client state and return different paths.
 
-*(Not yet implemented -- needs a `dump_clients_v1` method using raw RPC with version=1, proc=4, same pattern as the existing `list_exports_v1`.)*
+*Implemented via `dump_clients_v1` in `proto/mount.rs` (raw RPC with version=1, proc=4, same pattern as `list_exports_v1`).*
 
 **Cap: 10 novel paths** not already present in the merged export list (combined cap with Channel 4 -- the 10-path cap is shared across both DUMP channels).
 

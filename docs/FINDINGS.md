@@ -653,6 +653,32 @@ File handles are bearer tokens -- possession is authorization.
 
 **What nfswolf tests**: Resolves rquotad via portmapper GETPORT, then probes UIDs 0, 1000, and 65534 with GETQUOTA v1. Reports any UIDs with non-zero block or file counts, plus the filesystem block size.
 
+### F-5.16: Silly-Rename Files Detected (Open-Unlinked Indicator)
+
+| Field | Value |
+|-------|-------|
+| Severity | Info |
+| RFC Basis | Implementation-specific (no RFC defines silly-rename behavior) |
+| Precondition | Server has files held open after unlink (NFS silly-rename) |
+| Detection | READDIRPLUS directory listing, match `.nfs*` filename pattern |
+
+**Why this exists**: When an NFS client deletes a file that is still open by another process, the client performs a "silly rename" instead of a true unlink -- renaming the file to `.nfsXXXXXXXXXXXXXXXX` (hex-encoded cookie). The file remains accessible under the silly-rename name until all file descriptors close. The presence of `.nfs*` files in a directory listing indicates active open-unlinked state, which reveals: (1) the export is actively used by NFS clients (not a dormant share), (2) processes on the client have open file descriptors to deleted files, and (3) the silly-rename files themselves may contain sensitive data (logs, temp files, database journals) that the deleting application expected to be gone.
+
+**What nfswolf tests**: `analyze` scans READDIRPLUS results for filenames matching the `.nfs` prefix pattern and reports any matches as informational findings.
+
+### F-5.17: Write Verifier Changed Between Probes (Server Reboot Detected)
+
+| Field | Value |
+|-------|-------|
+| Severity | Medium |
+| RFC Basis | RFC 1813 sec 3.3.21 (COMMIT writeverf3) |
+| Precondition | Writable export (or COMMIT permitted without prior WRITE) |
+| Detection | Two COMMIT calls separated in time; compare writeverf3 values |
+
+**Why this exists**: The writeverf3 verifier returned by COMMIT "allows the client to detect one case where the server could have lost [unstable] data" (RFC 1813 sec 3.3.21). The server changes the verifier on reboot. A verifier change between two probes proves the server rebooted (or the NFS service restarted) during the interval. This is operationally significant: (1) any unstable writes from other clients during that window may have been lost, (2) the NLM lock state was reset (all locks dropped), (3) the NFSv4 grace period just started (new opens/locks temporarily blocked). For an attacker, a detected reboot means stale file handles may have been invalidated by the new instance and the credential cache should be re-validated.
+
+**What nfswolf tests**: `analyze` issues two COMMIT calls against the export root and compares the returned `writeverf3` values. A mismatch triggers this finding.
+
 ---
 
 ## Category 6: Denial of Service (out of scope)
@@ -782,7 +808,7 @@ subcommand exercises these findings.
 | F-3.4 | [STRIPTLS Downgrade](findings/F-3.4-striptls-downgrade.md) | High | `analyze` (AUTH_TLS probe); NFSv4 SECINFO |
 | F-3.5 | [Portmapper Tunnel Bypass](findings/F-3.5-portmapper-tunnel-bypass.md) | Medium | `scan` (direct port 2049 probe when 111 filtered) |
 | F-3.6 | [UDP MOUNT Handle Theft](findings/F-3.6-udp-mount-handle-theft.md) | Critical | `scan --scan-udp` (mountd UDP availability) |
-| F-3.7 | [AUTH_DH Advertised (Cryptographically Broken)](findings/F-3.7-auth-dh-broken.md) | Medium | `analyze` (MOUNT auth_flavors + NFSv4 SECINFO flavor 3 detection) |
+| F-3.7 | [AUTH_DH Advertised (Cryptographically Broken)](findings/F-3.7-auth-dh-obsolete.md) | Medium | `analyze` (MOUNT auth_flavors + NFSv4 SECINFO flavor 3 detection) |
 | F-3.8 | [RPC-with-TLS Supported (RFC 9289)](findings/F-3.8-rpc-with-tls.md) | Info | `analyze` (AUTH_TLS NULL probe on NFS program) |
 | F-3.9 | [AUTH_SHORT Session Credentials](findings/F-3.9-auth-short-session-credentials.md) | Info | `analyze` (MOUNT auth_flavors + NFSv4 SECINFO flavor 2 detection) |
 | F-4.1 | [no_root_squash](findings/F-4.1-no-root-squash.md) | Critical | `analyze`, `mount --uid 0 --allow-write`, `shell uid 0` |
@@ -796,16 +822,18 @@ subcommand exercises these findings.
 | F-5.3 | [NIS Credential Extraction](findings/F-5.3-nis-credential-extraction.md) | High | `scan` / `analyze` (portmapper 100004/100007 detect) |
 | F-5.4 | [RPC Service Enumeration](findings/F-5.4-rpc-service-enumeration.md) | Low | `scan` (PMAPPROC_DUMP full dump) |
 | F-5.5 | [NFSv4 Pseudo-FS Leakage](findings/F-5.5-nfsv4-pseudo-fs-leakage.md) | Low | `scan` (pseudo-root READDIR via `Nfs4DirectClient`) |
-| F-5.6 | Metadata Disclosed on Access Denial | Low | `analyze` (harvests `post_op_attr` from NFS3ERR_ACCES/PERM responses) |
+| F-5.6 | [Metadata Disclosed on Access Denial](findings/F-5.6-metadata-on-access-denial.md) | Low | `analyze` (harvests `post_op_attr` from NFS3ERR_ACCES/PERM responses) |
 | F-5.7 | [Case-Insensitive Filesystem](findings/F-5.7-case-insensitive-filesystem.md) | Low | `analyze` (PATHCONF `case_insensitive` check per export) |
-| F-5.8 | [Export Root Attributes Leaked via AUTH_NONE](findings/F-5.8-auth-none-attr-leak.md) | Low | `analyze` (GETATTR with AUTH_NONE on export root handle) |
-| F-5.9 | [Execute-Only File Content Disclosure](findings/F-5.9-read-if-exec-content-disclosure.md) | Low | Not implemented -- documented for awareness |
+| F-5.8 | [Export Root Attributes Leaked via AUTH_NONE](findings/F-5.8-auth-none-metadata-leak.md) | Low | `analyze` (GETATTR with AUTH_NONE on export root handle) |
+| F-5.9 | [Execute-Only File Content Disclosure](findings/F-5.9-read-if-exec-content-disclosure.md) | Low | `analyze` (`check_execute_implies_read`) |
 | F-5.10 | [pNFS Layout Security Downgrade](findings/F-5.10-pnfs-layout-security-downgrade.md) | Medium | Not implemented -- documented for awareness |
-| F-5.11 | Filesystem Lacks Link/Symlink Support | Info | `analyze` (PATHCONF) |
-| F-5.12 | Near Inode Exhaustion | Medium | `analyze` (FSSTAT) |
-| F-5.13 | NFSv4 Named Attributes Exposed | Info | `analyze` (OPENATTR + READDIR) |
-| F-5.14 | POSIX ACL Entries Expose Access Beyond Mode Bits | Medium | `analyze` (NFS_ACL GETACL program 100227) |
-| F-5.15 | rquotad Exposes UID Activity via Quota Queries | Medium | `analyze` (RQUOTA GETQUOTA program 100011) |
+| F-5.11 | Filesystem Lacks Link/Symlink Support (no detail write-up) | Info | `analyze` (PATHCONF) |
+| F-5.12 | Near Inode Exhaustion (no detail write-up) | Medium | `analyze` (FSSTAT) |
+| F-5.13 | NFSv4 Named Attributes Exposed (no detail write-up) | Info | `analyze` (OPENATTR + READDIR) |
+| F-5.14 | POSIX ACL Entries Expose Access Beyond Mode Bits (no detail write-up) | Medium | `analyze` (NFS_ACL GETACL program 100227) |
+| F-5.15 | rquotad Exposes UID Activity via Quota Queries (no detail write-up) | Medium | `analyze` (RQUOTA GETQUOTA program 100011) |
+| F-5.16 | Silly-Rename Files Detected (no detail write-up) | Info | `analyze` (READDIRPLUS `.nfs*` pattern match) |
+| F-5.17 | Write Verifier Changed Between Probes (no detail write-up) | Medium | `analyze` (two COMMIT calls comparing `writeverf3`) |
 | F-6.1 | [NLM Lock Attacks](findings/F-6.1-nlm-lock-attacks.md) | Medium | Out of scope -- lock-DoS module removed |
 | F-6.2 | [Grace Period DoS](findings/F-6.2-grace-period-dos.md) | Medium | Out of scope -- never implemented |
 | F-6.3 | [SETCLIENTID State Destruction](findings/F-6.3-setclientid-state-destruction.md) | Medium | Out of scope -- never implemented |

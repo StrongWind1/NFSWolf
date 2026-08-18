@@ -163,7 +163,7 @@ The deeper reason is that a security tool wants different defaults from a filesy
 
 The layer boundary is strict: the protocol crates hold no policy -- no pooling, no retries, no circuit breaking, no stealth delays, no credential escalation. `src/proto/` supplies all of it through a single seam, `onc_rpc_client::RpcTransport`, plus AUTH_SYS stamp injection, SOCKS5 transport, UDP probes, and privileged port binding.
 
-NFSv4 remains a read-only subset -- enough to walk the pseudo-filesystem, read attributes, list directories, and query SECINFO. The stateful half (OPEN, CLOSE, LOCK, delegations, v4.1 sessions) is not implemented and is not needed for the attack path.
+NFSv4 is fully implemented: all 37 operations are typed with response decoders, 66 named status codes, and the complete stateful infrastructure -- SETCLIENTID lifecycle, OPEN/CLOSE with stateid tracking, LOCK/LOCKU, and crash recovery (`Nfs4Session`, `OpenState`, `LockState`). The `Nfs4Client` exposes 47 public methods (244 crate tests). `V4Ops: ShellOps` integrates all 52 shell commands over NFSv4, and LOOKUPP enables export escape and cross-export lateral movement on v4-only servers. Only NFSv4.1 sessions remain unimplemented.
 
 libnfs was never a candidate: it would require 52+ unsafe blocks for FFI (as niffler demonstrates), break cross-compilation, and hide the error codes the handle oracle depends on.
 

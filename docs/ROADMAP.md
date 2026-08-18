@@ -14,7 +14,7 @@ Source references: X/Open CAE C702 "XNFS, Version 3W" at `ref/xopen-c702.pdf` (3
 - [OS fingerprinting](#os-fingerprinting) -- additional detection signals
 - [NFSv4 recon operations](#nfsv4-recon-operations) -- remaining v4 probes
 - [Cross-protocol attack chains](#cross-protocol-attack-chains) -- multi-protocol sequences
-- [Crate publication](#crate-publication) -- publish to crates.io
+- [Distribution](#distribution) -- GitHub releases and cargo install --git
 - [Protocol reference](#protocol-reference) -- wire formats, XDR definitions, security analysis
 - [Out of scope](#out-of-scope) -- explicitly deferred
 
@@ -126,9 +126,9 @@ Multi-protocol sequences combining sideband RPC programs with NFS for compound e
 
 ---
 
-## Crate publication
+## Distribution
 
-**Done.** All 8 protocol crates are published on [crates.io](https://crates.io) and usable independently of the `nfswolf` binary: `onc-xdr-derive`, `onc-xdr`, `onc-rpc-client`, `onc-rpcbind`, `nfs-mount`, `nfs-v2`, `nfs-v3`, `nfs-v4`. The binary is distributed via GitHub releases and `cargo install nfswolf`.
+The project is not published to crates.io. Distribution is via GitHub releases (pre-built binaries with SHA256SUMS and SLSA provenance) and `cargo install --git`. The 8 protocol crates (`onc-xdr-derive`, `onc-xdr`, `onc-rpc-client`, `onc-rpcbind`, `nfs-mount`, `nfs-v2`, `nfs-v3`, `nfs-v4`) are usable independently of the `nfswolf` binary but are consumed via the git repository, not from a registry.
 
 RQUOTA and NFS_ACL are implemented as modules in `src/proto/`. Future sideband crates (NIS) will follow the same pattern.
 
@@ -262,4 +262,4 @@ NFS attacks are invisible to standard defensive tooling. This is a research sect
 | Packet capture / sniffing | Use tcpdump/wireshark |
 | Exploit payload generation | Use msfvenom externally |
 | Post-exploitation (persistence, lateral movement) | Different tool category |
-| NFSv4.1/4.2 full session management (OPEN/CLOSE/LOCK/delegations) | Major scope -- build incrementally via recon ops |
+| NFSv4.1 sessions (CREATE_SESSION, SEQUENCE, BIND_CONN_TO_SESSION) | Different state model from v4.0; no consumer yet |
