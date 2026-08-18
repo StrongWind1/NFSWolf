@@ -14,7 +14,7 @@ Source references: X/Open CAE C702 "XNFS, Version 3W" at `ref/xopen-c702.pdf` (3
 - [OS fingerprinting](#os-fingerprinting) -- additional detection signals
 - [NFSv4 recon operations](#nfsv4-recon-operations) -- remaining v4 probes
 - [Cross-protocol attack chains](#cross-protocol-attack-chains) -- multi-protocol sequences
-- [Distribution](#distribution) -- GitHub releases and cargo install --git
+- [Distribution](#distribution) -- GitHub releases, crates.io, and cargo install
 - [Protocol reference](#protocol-reference) -- wire formats, XDR definitions, security analysis
 - [Out of scope](#out-of-scope) -- explicitly deferred
 
@@ -128,7 +128,7 @@ Multi-protocol sequences combining sideband RPC programs with NFS for compound e
 
 ## Distribution
 
-The project is not published to crates.io. Distribution is via GitHub releases (pre-built binaries with SHA256SUMS and SLSA provenance) and `cargo install --git`. The 8 protocol crates (`onc-xdr-derive`, `onc-xdr`, `onc-rpc-client`, `onc-rpcbind`, `nfs-mount`, `nfs-v2`, `nfs-v3`, `nfs-v4`) are usable independently of the `nfswolf` binary but are consumed via the git repository, not from a registry.
+**Done.** All 8 protocol crates and the `nfswolf` binary are published on [crates.io](https://crates.io/crates/nfswolf) and usable independently of the `nfswolf` binary. Distribution is via GitHub releases (pre-built binaries with SHA256SUMS and SLSA provenance), `cargo install nfswolf`, and `cargo install --git`.
 
 RQUOTA and NFS_ACL are implemented as modules in `src/proto/`. Future sideband crates (NIS) will follow the same pattern.
 

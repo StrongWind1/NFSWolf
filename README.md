@@ -6,9 +6,9 @@
 
 <p align="center">
   <a href="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://crates.io/crates/nfswolf"><img src="https://img.shields.io/crates/v/nfswolf.svg" alt="crates.io"></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/edition-2024-informational" alt="Edition 2024"></a>
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.95-informational" alt="MSRV 1.95"></a>
+  <a href="https://crates.io/crates/nfswolf"><img src="https://img.shields.io/crates/v/nfswolf.svg" alt="crates.io"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
 </p>
 
@@ -134,8 +134,17 @@ nfswolf shell 192.168.1.10 --handle DEADBEEF... --nfs-version 2
 # Mount an export locally via FUSE, spoofing UID 0:
 sudo nfswolf --uid 0 mount 192.168.1.10:/srv/nfs /mnt/target
 
-# Construct an escape handle to reach the underlying filesystem root:
-nfswolf escape 192.168.1.10:/srv/nfs
+# Full escape -- discover all exports, try every handle source:
+nfswolf escape 192.168.1.10
+
+# Fast single-export escape:
+nfswolf escape --fast 192.168.1.10:/srv/nfs
+
+# Machine-readable output with post-escape shadow read:
+nfswolf escape 192.168.1.10 --json --read-shadow > escape.json
+
+# Decode a file handle offline:
+nfswolf decode 0100070216002a00...
 
 # Brute-force handles across an inode/generation cross-product:
 nfswolf brute-handle 192.168.1.10:/srv/nfs --inode-start 2 --inode-end 500 --gen-start 0 --gen-end 10
@@ -156,12 +165,13 @@ nfswolf convert -i results.json --format console
 |---|---|---|
 | Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
 | Recon | `analyze` | Per-host security audit against the documented finding catalog |
-| Recon | `escape` | Construct escape handles across 18 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs); cascades through v3 MOUNT, handle matrix, v2 MOUNT, v4 handle escape, and v4 LOOKUPP; `--all` reports every working root handle from all seed sources |
+| Recon | `escape` | Seven-phase escape pipeline: seed gathering, candidate construction, multi-version probing, rootfs detection, scoring. Full mode discovers all exports; `--fast` for single-export. `--json`, `--read-shadow`, `--all-handles`. Covers 18 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs) |
 | Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4 (auto-detected when `--nfs-version` is omitted); 52 commands incl. `escape-root`, `exports` (F-2.12 sibling discovery), `suid-scan`, `secrets-scan`; `get -r` / `put -r` / `--verify` / `--handle` / `-c`; AUTH_DH sessions (`--auth-dh-netname`), AUTH_SHORT replay (`--short-token`) |
 | Connect | `mount` | FUSE mount over NFSv2, v3, or v4 (auto-detected) with spoofed AUTH_SYS credentials (`--features fuse`) |
 | Advanced | `brute-handle` | Brute-force file handles via inode/generation cross-product sweep with STALE / BADHANDLE oracle; reports all discovered handles; NFSv2 auto-fallback |
 | Advanced | `uid-spray` | Last-resort UID/GID brute force when auto-UID escalation fails |
 | Utilities | `convert` | Render a saved analysis result to HTML / JSON / CSV / Markdown / text / console (console prints to stdout without `-o`) |
+| Utilities | `decode` | Offline NFS file handle decoder -- prints header, fsid, fileid, OS/FS fingerprint, security assessment |
 | Utilities | `completions <shell>` | Generate shell completions for bash, zsh, fish, PowerShell |
 
 Global flags common to every subcommand:
@@ -169,12 +179,15 @@ Global flags common to every subcommand:
 ```
 --uid <UID>              AUTH_SYS UID (default 1000; use 0 for root spoof)
 --gid <GID>              AUTH_SYS primary GID (default 1000)
---aux-gids <G1,G2,...>   Auxiliary GIDs (max 16 per RFC 1057 §9.2)
+--aux-gids <G1,G2,...>   Auxiliary GIDs (max 16 per RFC 1057 sec. 9.2)
 --hostname <NAME>        AUTH_SYS machinename field
 --privileged-port        Bind source port <1024 (may require CAP_NET_BIND_SERVICE / root)
 --proxy <HOST:PORT>      Route all RPC through SOCKS5 (no-auth) proxy
 --nfs-port <PORT>        Override NFS service port (default: portmapper lookup)
 --mount-port <PORT>      Override mountd port (default: portmapper lookup)
+--rpc-port <PORT>        Override portmapper/rpcbind port (default: 111)
+--skip-rpc               Skip portmapper probes (use when port 111 is firewalled)
+--skip-mountd            Skip MOUNT daemon queries (NFSv4 pseudo-FS still runs)
 --timeout <MS>           Per-RPC timeout in milliseconds (default 3000)
 --delay <MS>             Baseline inter-RPC delay (stealth pacing)
 --jitter <MS>            Random jitter added to each delay
@@ -215,16 +228,16 @@ The NFS protocol stack is split into eight standalone crates, published on [crat
 | [`nfs-mount`](https://crates.io/crates/nfs-mount) | MOUNT v1/v3 (RFC 1094 / RFC 1813) |
 | [`nfs-v2`](https://crates.io/crates/nfs-v2) | NFSv2 (RFC 1094): all 18 procedures |
 | [`nfs-v3`](https://crates.io/crates/nfs-v3) | NFSv3 (RFC 1813): all 22 procedures + domain types |
-| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): complete implementation -- all 37 ops, stateful client, 47 methods |
+| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): all 37 ops typed, 66 status codes, stateful client (SETCLIENTID/OPEN/CLOSE/LOCK), 47 public methods, 244 tests |
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 798 tests across 8 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 790 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (798 tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (790 tests), doc, hygiene, machete
 ```
 
 ## Credits
