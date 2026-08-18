@@ -4,6 +4,8 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-17
+
 ### Added
 
 - **NFSv4-only server support** -- analyzer discovers exports via pseudo-FS fsid walking when MOUNT is unavailable. No portmapper or mountd required.
