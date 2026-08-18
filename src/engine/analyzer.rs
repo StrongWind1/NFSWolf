@@ -260,6 +260,7 @@ impl Analyzer {
     /// per-export and global checks. Returns findings even on partial failure.
     pub(crate) async fn analyze(&self, config: &AnalyzeConfig) -> anyhow::Result<AnalysisResult> {
         let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
+        let nfs_port = self.nfs_port.unwrap_or(2049);
         let timestamp = chrono_now();
         let mut findings: Vec<Finding> = Vec::new();
 
@@ -271,17 +272,17 @@ impl Analyzer {
         check_v2_downgrade(&nfs_versions, &mut findings);
         run_nis_check(&self.portmap, addr, &mut findings).await;
         run_amplification_check(&self.portmap, addr, &mut findings).await;
-        check_webnfs_public_handle(addr, &nfs_versions, &mut findings, self.proxy.as_deref(), &self.stealth).await;
-        check_auth_tls(addr, &mut findings, self.proxy.as_deref(), &self.stealth).await;
+        check_webnfs_public_handle(addr, nfs_port, &nfs_versions, &mut findings, self.proxy.as_deref(), &self.stealth).await;
+        check_auth_tls(addr, nfs_port, &mut findings, self.proxy.as_deref(), &self.stealth).await;
 
         // EXCHANGE_ID fingerprint: most authoritative source of server identity.
         // Runs before per-export checks because it needs no MOUNT and works even
         // when all exports deny access. Overrides the null-filename behavioral
         // probe when the server supports NFSv4.1.
-        let exchange_id_fp = probe_exchange_id(addr, self.proxy.as_deref(), &self.stealth).await;
+        let exchange_id_fp = probe_exchange_id(addr, nfs_port, self.proxy.as_deref(), &self.stealth).await;
 
         // NFSv4.1 pNFS topology probe: EXCHANGE_ID + conditional GETDEVICELIST.
-        probe_pnfs_topology(addr, &mut findings, self.proxy.as_deref(), &self.stealth).await;
+        probe_pnfs_topology(addr, nfs_port, &mut findings, self.proxy.as_deref(), &self.stealth).await;
 
         // Per-export checks. Try MOUNT v3 EXPORT first; fall back to MOUNT v1
         // EXPORT when v3 is unavailable (e.g., mountd -N 3).
@@ -292,7 +293,7 @@ impl Analyzer {
         // NFSv4-only servers have no MOUNT protocol. Discover exports by
         // walking the pseudo-filesystem and detecting fsid boundaries.
         if exports.is_empty() {
-            exports = discover_v4_exports(addr, self.proxy.as_deref(), &self.stealth).await;
+            exports = discover_v4_exports(addr, nfs_port, self.proxy.as_deref(), &self.stealth).await;
         }
         check_export_acls(&exports, &mut findings);
 
@@ -392,10 +393,11 @@ impl Analyzer {
         ea.file_handle = fh.to_hex();
         ea.auth_methods = probe.auth_flavors.iter().map(|&f| crate::proto::auth::flavor_name(f)).collect();
 
+        let nfs_port = self.nfs_port.unwrap_or(2049);
         check_auth_methods(&entry.path, &probe.auth_flavors, findings);
         // NFSv4 probes: SECINFO, per-path SECINFO, SEC_LABEL, xattrs.
-        run_nfs4_export_checks(addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
-        run_handle_checks(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+        run_nfs4_export_checks(addr, nfs_port, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+        run_handle_checks(addr, nfs_port, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // PATHCONF: case-insensitive detection (Windows/NTFS fingerprint) and
         // unrestricted chown detection (ownership hijacking).
@@ -418,7 +420,7 @@ impl Analyzer {
 
         // AUTH_NONE metadata leak: check if the server allows unauthenticated
         // GETATTR on the export root handle (RFC 2623 S2.3.2 automounter support).
-        check_auth_none_leak(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+        check_auth_none_leak(addr, nfs_port, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // AUTH_TOOWEAK oracle: probe whether the server enforces stronger auth than
         // AUTH_SYS at the NFS operation level (even though MOUNT accepted AUTH_SYS).
@@ -570,7 +572,8 @@ impl Analyzer {
         use crate::proto::nfs4::compound::Nfs4DirectClient;
         use crate::proto::nfs4::types::{ArgOp, ResOpData};
 
-        let nfs_addr = SocketAddr::new(addr.ip(), self.nfs_port.unwrap_or(2049));
+        let nfs_port = self.nfs_port.unwrap_or(2049);
+        let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
         let Ok(mut client) = Nfs4DirectClient::connect_with_auth_proxy(nfs_addr, 0, 0, "localhost", self.proxy.as_deref()).await else {
             tracing::debug!(export = %entry.path, "NFSv4 fallback: connect failed");
             return;
@@ -603,10 +606,10 @@ impl Analyzer {
         tracing::info!(export = %entry.path, fh_len = v4_fh_bytes.len(), "NFSv4 fallback: acquired handle via LOOKUP");
 
         // Checks that work with raw handles (no v3 client needed).
-        run_handle_checks(addr, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+        run_handle_checks(addr, nfs_port, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // NFSv4-specific checks (SECINFO, LOOKUPP, cross-export).
-        run_nfs4_export_checks(nfs_addr, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
+        run_nfs4_export_checks(addr, nfs_port, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
 
         // Escape check via the unified engine (works with any handle format).
         let escape_fh = check_escape_v4_handle(&fh, &entry.path, findings, nfs_addr, self.proxy.as_deref(), &self.stealth).await;
@@ -1093,14 +1096,14 @@ async fn run_amplification_check(portmap: &PortmapClient, addr: SocketAddr, find
 /// entirely -- no privileged port needed, no hostname check, no auth flavor
 /// negotiation. Typical on Solaris, some NetApp configurations, and embedded
 /// RTOS NFS servers (VxWorks).
-async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_webnfs_public_handle(addr: SocketAddr, nfs_port: u16, nfs_versions: &[u32], findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use onc_rpc_client::rpc::opaque_auth;
     use onc_rpc_client::transport::direct::DirectTransport;
     use onc_rpc_client::transport::tokio::TokioIo;
 
     stealth.wait().await;
 
-    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
 
     // NFSv3 public handle: zero-length (send a GETATTR with an empty fh).
     if nfs_versions.contains(&3)
@@ -1178,10 +1181,10 @@ async fn check_webnfs_public_handle(addr: SocketAddr, nfs_versions: &[u32], find
 /// Checks that work with any file handle (no v3 client or specific version needed).
 ///
 /// Shared between the v3 main path and the v4 fallback path.
-async fn run_handle_checks(addr: SocketAddr, fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn run_handle_checks(addr: SocketAddr, nfs_port: u16, fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     check_windows_signing(fh, export_path, findings);
     check_handle_entropy(fh, export_path, findings);
-    check_nfs_acl(addr, fh, export_path, findings, proxy, stealth).await;
+    check_nfs_acl(addr, nfs_port, fh, export_path, findings, proxy, stealth).await;
 }
 
 /// Two detection paths: `fingerprint_os` recognises 32-byte v3 handles; the new
@@ -1641,19 +1644,19 @@ pub(crate) fn infer_squash_mode(observed_uid: u32, probe_uid: u32) -> SquashProb
 /// Run all per-export NFSv4 checks: SECINFO, per-path SECINFO, SEC_LABEL, xattrs.
 ///
 /// Extracted from `analyze_export` to keep cognitive complexity below the threshold.
-async fn run_nfs4_export_checks(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn run_nfs4_export_checks(addr: SocketAddr, nfs_port: u16, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     // NFSv4 SECINFO check: verify auth methods from the NFSv4 perspective (F-3.4).
-    check_nfs4_secinfo(addr, export_path, findings, proxy, stealth).await;
+    check_nfs4_secinfo(addr, nfs_port, export_path, findings, proxy, stealth).await;
     // NFSv4 per-path SECINFO: walk subdirectories and compare auth flavors to the root.
-    check_nfs4_secinfo_per_path(addr, export_path, findings, proxy, stealth).await;
+    check_nfs4_secinfo_per_path(addr, nfs_port, export_path, findings, proxy, stealth).await;
     // NFSv4 FATTR4_SEC_LABEL: read SELinux labels via GETATTR.
-    check_nfs4_sec_label(addr, export_path, findings, proxy, stealth).await;
+    check_nfs4_sec_label(addr, nfs_port, export_path, findings, proxy, stealth).await;
     // NFSv4 named attributes (xattrs) via OPENATTR + READDIR.
-    check_nfs4_xattrs(addr, export_path, findings, proxy, stealth).await;
+    check_nfs4_xattrs(addr, nfs_port, export_path, findings, proxy, stealth).await;
     // NFSv4 LOOKUPP export escape (F-2.11).
-    check_nfs4_lookupp_escape(addr, export_path, findings, proxy, stealth).await;
+    check_nfs4_lookupp_escape(addr, nfs_port, export_path, findings, proxy, stealth).await;
     // NFSv4 cross-export lateral access via pseudo-root (F-2.12).
-    check_nfs4_cross_export(addr, export_path, findings, proxy, stealth).await;
+    check_nfs4_cross_export(addr, nfs_port, export_path, findings, proxy, stealth).await;
 }
 
 /// Emit findings for auth flavors discovered via SECINFO, SECINFO_NO_NAME, or
@@ -1776,14 +1779,14 @@ fn emit_secinfo_findings(entries: &[nfs_v4::SecInfoEntry], source: &str, export_
 /// 3. NFS4ERR_WRONGSEC oracle  --  last resort when both SECINFO ops fail
 ///
 /// Best-effort: silently returns on timeout or PROG_MISMATCH (NFSv3-only server).
-async fn check_nfs4_secinfo(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_nfs4_secinfo(addr: SocketAddr, nfs_port: u16, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{CompoundBuilder, ResOpData};
     use crate::proto::sideband::export_components;
 
-    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs4_addr = SocketAddr::new(addr.ip(), nfs_port);
     let timeout = std::time::Duration::from_secs(5);
-    let Some(mut client) = connect_nfs4_anon(addr, proxy, stealth).await else { return };
+    let Some(mut client) = connect_nfs4_anon(addr, nfs_port, proxy, stealth).await else { return };
 
     let components = export_components(export_path);
     if components.is_empty() {
@@ -1917,14 +1920,14 @@ async fn wrongsec_flavor_oracle(nfs4_addr: SocketAddr, export_path: &str, compon
 /// reveals the pNFS topology (data-server addresses the attacker may also reach).
 ///
 /// Best-effort: silently returns if the server does not support NFSv4.1 or pNFS.
-async fn probe_pnfs_topology(addr: SocketAddr, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn probe_pnfs_topology(addr: SocketAddr, nfs_port: u16, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{CompoundBuilder, ResOpData};
 
     /// EXCHGID4_FLAG_USE_PNFS_MDS (RFC 5661 S18.35.3, bit 17 = 0x0002_0000).
     const EXCHGID4_FLAG_USE_PNFS_MDS: u32 = 0x0002_0000;
 
-    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs4_addr = SocketAddr::new(addr.ip(), nfs_port);
     let timeout = std::time::Duration::from_secs(5);
 
     let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
@@ -2000,11 +2003,11 @@ async fn probe_pnfs_topology(addr: SocketAddr, findings: &mut Vec<Finding>, prox
 /// stronger entries).
 ///
 /// Best-effort: silently returns on any error.
-async fn check_nfs4_secinfo_per_path(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_nfs4_secinfo_per_path(addr: SocketAddr, nfs_port: u16, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{CompoundBuilder, ResOpData};
 
-    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs4_addr = SocketAddr::new(addr.ip(), nfs_port);
     let timeout = std::time::Duration::from_secs(5);
 
     let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
@@ -2103,11 +2106,11 @@ async fn check_nfs4_secinfo_per_path(addr: SocketAddr, export_path: &str, findin
 /// whether labeled NFS is active.
 ///
 /// Best-effort: silently returns if GETATTR for sec_label is not supported.
-async fn check_nfs4_sec_label(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_nfs4_sec_label(addr: SocketAddr, nfs_port: u16, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{AttrRequest, CompoundBuilder, ResOpData};
 
-    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs4_addr = SocketAddr::new(addr.ip(), nfs_port);
     let timeout = std::time::Duration::from_secs(5);
 
     let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
@@ -2164,11 +2167,11 @@ async fn check_nfs4_sec_label(addr: SocketAddr, export_path: &str, findings: &mu
 ///
 /// Best-effort: silently returns if the server does not support named attributes
 /// (NFS4ERR_NOTSUPP) or if no named attributes exist (NFS4ERR_NOENT).
-async fn check_nfs4_xattrs(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_nfs4_xattrs(addr: SocketAddr, nfs_port: u16, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::compound::Nfs4DirectClient;
     use crate::proto::nfs4::types::{AttrRequest, CompoundBuilder, ResOpData};
 
-    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs4_addr = SocketAddr::new(addr.ip(), nfs_port);
     let timeout = std::time::Duration::from_secs(5);
 
     let connect = tokio::time::timeout(timeout, Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
@@ -2271,13 +2274,13 @@ async fn check_auth_tooweak(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path
 /// automounters that lack Kerberos credentials (RFC 2623 S2.3.2). If GETATTR
 /// with AUTH_NONE returns file attributes, metadata (uid, gid, mode, size,
 /// timestamps) is leaked to any unauthenticated client.
-async fn check_auth_none_leak(addr: SocketAddr, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_auth_none_leak(addr: SocketAddr, nfs_port: u16, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use onc_rpc_client::transport::direct::DirectTransport;
     use onc_rpc_client::transport::tokio::TokioIo;
 
     stealth.wait().await;
 
-    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
     let timeout = std::time::Duration::from_secs(5);
 
     let Ok(Ok(stream)) = tokio::time::timeout(timeout, connect_tcp(nfs_addr, proxy)).await else { return };
@@ -2313,7 +2316,7 @@ async fn check_auth_none_leak(addr: SocketAddr, root_fh: &FileHandle, export_pat
 /// containing the ASCII string "STARTTLS". If the server responds with
 /// MSG_ACCEPTED and "STARTTLS" in the reply verifier, TLS is available.
 /// The probe result is stored on the analyzer for use by `check_plaintext_transport`.
-async fn check_auth_tls(addr: SocketAddr, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_auth_tls(addr: SocketAddr, nfs_port: u16, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use onc_rpc_client::RpcTransport as _;
     use onc_rpc_client::rpc::{auth_flavor, opaque_auth};
     use onc_rpc_client::transport::direct::DirectTransport;
@@ -2321,7 +2324,7 @@ async fn check_auth_tls(addr: SocketAddr, findings: &mut Vec<Finding>, proxy: Op
 
     stealth.wait().await;
 
-    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
     let timeout = std::time::Duration::from_secs(5);
 
     let Ok(Ok(stream)) = tokio::time::timeout(timeout, connect_tcp(nfs_addr, proxy)).await else { return };
@@ -2421,13 +2424,13 @@ async fn check_pathconf(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &s
 /// directly from the NFS server's self-reported identity rather than behavioral
 /// inference.
 ///
-/// Uses a raw `DirectTransport` to port 2049 with AUTH_NONE (same approach as
+/// Uses a raw `DirectTransport` to the NFS port with AUTH_NONE (same approach as
 /// `check_webnfs_public_handle`), building a minorversion=1 COMPOUND since the
 /// library `compound()` helpers hardcode minorversion=0.
 ///
 /// Returns `None` when the server does not support NFSv4.1 (NFS4ERR_MINOR_VERS_MISMATCH,
 /// NFS4ERR_OP_ILLEGAL, or connection failure).
-async fn probe_exchange_id(addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Option<String> {
+async fn probe_exchange_id(addr: SocketAddr, nfs_port: u16, proxy: Option<&str>, stealth: &StealthConfig) -> Option<String> {
     use onc_rpc_client::RpcTransport as _;
     use onc_rpc_client::transport::direct::DirectTransport;
     use onc_rpc_client::transport::tokio::TokioIo;
@@ -2436,7 +2439,7 @@ async fn probe_exchange_id(addr: SocketAddr, proxy: Option<&str>, stealth: &Stea
 
     stealth.wait().await;
 
-    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+    let nfs4_addr = SocketAddr::new(addr.ip(), nfs_port);
     let timeout = std::time::Duration::from_secs(5);
 
     let Ok(Ok(stream)) = tokio::time::timeout(timeout, connect_tcp(nfs4_addr, proxy)).await else { return None };
@@ -2796,10 +2799,10 @@ async fn check_null_filename_fingerprint(nfs3: &Nfs3Client, root_fh: &FileHandle
 /// F-5.14: POSIX ACL entries reveal access grants beyond mode bits.
 ///
 /// Probes the NFS_ACL sideband protocol (program 100227 v3, GETACL proc 1)
-/// on port 2049. If the server returns named USER or GROUP ACL entries,
+/// on the NFS port. If the server returns named USER or GROUP ACL entries,
 /// those UIDs/GIDs have access paths invisible to mode-bit analysis.
-async fn check_nfs_acl(addr: SocketAddr, export_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
-    let nfs_addr = SocketAddr::new(addr.ip(), 2049);
+async fn check_nfs_acl(addr: SocketAddr, nfs_port: u16, export_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+    let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
     let Ok(result) = tokio::time::timeout(std::time::Duration::from_secs(5), crate::proto::nfs_acl::getacl3(nfs_addr, export_fh.as_bytes(), proxy, stealth)).await else {
         tracing::debug!(export = export_path, "NFS_ACL GETACL timed out");
         return;
@@ -2861,12 +2864,12 @@ async fn check_nfs_acl(addr: SocketAddr, export_fh: &FileHandle, export_path: &s
 /// request at the boundary. A successful traversal of 1+ levels proves the
 /// export is a subdirectory AND the server does not enforce export boundaries
 /// on LOOKUPP.
-async fn check_nfs4_lookupp_escape(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_nfs4_lookupp_escape(addr: SocketAddr, nfs_port: u16, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::types::{ArgOp, ResOpData};
 
     const MAX_DEPTH: usize = 64;
 
-    let Some(mut client) = connect_nfs4_root(addr, proxy, stealth).await else { return };
+    let Some(mut client) = connect_nfs4_root(addr, nfs_port, proxy, stealth).await else { return };
 
     let components = crate::proto::sideband::export_components(export_path);
     let export_fh = if components.is_empty() {
@@ -2935,10 +2938,10 @@ async fn check_nfs4_lookupp_escape(addr: SocketAddr, export_path: &str, findings
 /// READDIR reveals sibling export names, and LOOKUP into any sibling grants
 /// access regardless of MOUNT-level IP ACLs. This bypasses MOUNT entirely
 /// because NFSv4 does not use MOUNT.
-async fn check_nfs4_cross_export(addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
+async fn check_nfs4_cross_export(addr: SocketAddr, nfs_port: u16, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>, stealth: &StealthConfig) {
     use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
 
-    let Some(mut client) = connect_nfs4_root(addr, proxy, stealth).await else { return };
+    let Some(mut client) = connect_nfs4_root(addr, nfs_port, proxy, stealth).await else { return };
 
     // Navigate to the export, then LOOKUPP to the pseudo-root parent.
     let components = crate::proto::sideband::export_components(export_path);
@@ -3106,18 +3109,18 @@ async fn connect_tcp(target: SocketAddr, proxy: Option<&str>) -> std::io::Result
     }
 }
 
-/// Connect to port 2049 via NFSv4 with AUTH_NONE (5s timeout).
+/// Connect to the NFS port via NFSv4 with AUTH_NONE (5s timeout).
 ///
 /// Returns `None` on timeout or connect failure (v3-only server).
-async fn connect_nfs4_anon(addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Option<crate::proto::nfs4::compound::Nfs4DirectClient> {
-    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+async fn connect_nfs4_anon(addr: SocketAddr, nfs_port: u16, proxy: Option<&str>, stealth: &StealthConfig) -> Option<crate::proto::nfs4::compound::Nfs4DirectClient> {
+    let nfs4_addr = SocketAddr::new(addr.ip(), nfs_port);
     let connect = tokio::time::timeout(std::time::Duration::from_secs(5), crate::proto::nfs4::compound::Nfs4DirectClient::connect_proxy(nfs4_addr, proxy)).await;
     connect.ok()?.ok().map(|c| c.with_stealth(stealth.clone()))
 }
 
-/// Connect to port 2049 via NFSv4 with AUTH_SYS uid=0 (5s timeout).
-async fn connect_nfs4_root(addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Option<crate::proto::nfs4::compound::Nfs4DirectClient> {
-    let nfs4_addr = SocketAddr::new(addr.ip(), 2049);
+/// Connect to the NFS port via NFSv4 with AUTH_SYS uid=0 (5s timeout).
+async fn connect_nfs4_root(addr: SocketAddr, nfs_port: u16, proxy: Option<&str>, stealth: &StealthConfig) -> Option<crate::proto::nfs4::compound::Nfs4DirectClient> {
+    let nfs4_addr = SocketAddr::new(addr.ip(), nfs_port);
     let connect = tokio::time::timeout(std::time::Duration::from_secs(5), crate::proto::nfs4::compound::Nfs4DirectClient::connect_with_auth_proxy(nfs4_addr, 0, 0, "localhost", proxy)).await;
     connect.ok()?.ok().map(|c| c.with_stealth(stealth.clone()))
 }
@@ -3128,10 +3131,10 @@ async fn connect_nfs4_root(addr: SocketAddr, proxy: Option<&str>, stealth: &Stea
 /// export has a different fsid from its pseudo-directory parent. This walks
 /// the tree from PUTROOTFH, comparing fsid at each level, and records the
 /// path where the fsid changes as an export mount point.
-async fn discover_v4_exports(addr: SocketAddr, proxy: Option<&str>, stealth: &StealthConfig) -> Vec<ExportEntry> {
+async fn discover_v4_exports(addr: SocketAddr, nfs_port: u16, proxy: Option<&str>, stealth: &StealthConfig) -> Vec<ExportEntry> {
     use crate::proto::nfs4::types::{ArgOp, AttrRequest, ResOpData};
 
-    let Some(mut client) = connect_nfs4_root(addr, proxy, stealth).await else { return Vec::new() };
+    let Some(mut client) = connect_nfs4_root(addr, nfs_port, proxy, stealth).await else { return Vec::new() };
 
     // Get the pseudo-root's fsid as the baseline.
     let ops = vec![ArgOp::Putrootfh, ArgOp::Getattr(AttrRequest::fsid_only())];
