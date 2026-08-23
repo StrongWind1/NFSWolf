@@ -1,0 +1,59 @@
+/* NFSWolf -- site theme.
+ *
+ * The only place this site's colour is defined. mkdocs.yml sets `primary: custom`
+ * and `accent: custom`, which make Material emit the palette attributes but ship
+ * no rules for them, so every variable below has to be supplied here. Anything
+ * omitted silently falls back to Material's indigo defaults in main.css.
+ *
+ * `:root > *` rather than `:root`: the palette attributes live on <body>, so this
+ * matches the same element and keeps winning even if the config ever moves back
+ * to a named colour. Plain `:root` targets <html> and would be overridden.
+ *
+ * Material already paints .md-header and .md-tabs from --md-primary-fg-color.
+ * Do not add direct background-color rules for them -- that is what let the
+ * header drift away from the variable that claims to define it.
+ *
+ * Backgrounds are identical and neutral across all eleven sites; only the header
+ * and accent carry the site identity.
+ */
+
+:root > * {
+  /* Header and tabs. Deep crimson -- offensive-tool identity, wolf branding. */
+  --md-primary-fg-color: #792d33;
+  --md-primary-fg-color--light: #8f3540;
+  --md-primary-fg-color--dark: #632428;
+
+  /* Text drawn on top of the header bar */
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffb3;
+
+  /* Text drawn on top of accent-filled elements */
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: #ffffffb3;
+}
+
+/* Accent ships one shade per scheme. Material's 16 named accents are tuned to stay
+ * legible on both backgrounds; a hand-picked one is not, and every value here was
+ * solved to clear WCAG AA (4.5:1) against the scheme it renders on.
+ *
+ * --md-typeset-a-color is set explicitly because Material defaults it to
+ * var(--md-primary-fg-color), which renders body links in the header colour. */
+
+[data-md-color-scheme="slate"] {
+  /* Material's own default. Deliberately NOT the site hue: --md-hue drives all 19
+   * hsl-derived slate surfaces -- page, code blocks, footer, tables -- so tinting
+   * it per site colours the entire page and hurts readability. Backgrounds are
+   * identical and neutral across all eleven sites; only the header and accent
+   * carry the site identity. */
+  --md-hue: 225deg;
+
+  --md-accent-fg-color: #ff6e6e;
+  --md-accent-fg-color--transparent: #ff6e6e1a;
+  --md-typeset-a-color: #ff6e6e;
+}
+
+[data-md-color-scheme="default"] {
+  --md-accent-fg-color: #a62626;
+  --md-accent-fg-color--transparent: #a626261a;
+  --md-typeset-a-color: #a62626;
+}

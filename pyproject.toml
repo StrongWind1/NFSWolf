@@ -1,0 +1,7 @@
+[project]
+name = "nfswolf-docs"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[dependency-groups]
+docs = ["mkdocs-material>=9.0"]

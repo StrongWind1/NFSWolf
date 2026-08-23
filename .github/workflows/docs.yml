@@ -1,13 +1,14 @@
 name: Docs
 
-# Build the documentation strictly on every push to main and every PR.
-# This is a TEST ONLY workflow: cargo doc with rustdoc warnings treated as
-# errors (broken intra-doc links / missing docs fail here). It does NOT deploy.
+# Build the documentation on every push to main and every PR (the test), and
+# deploy it to GitHub Pages on a v* tag (the publish). No deploy on PRs.
 
 "on":
   push:
     branches: [main]
+    tags: [v*]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -64,6 +65,72 @@ jobs:
 
       - name: cargo doc
         env:
-          # Turns rustdoc warnings into errors so broken links fail CI.
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --all-features --no-deps
+
+  build:
+    name: Build docs (strict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+
+      - name: Build docs (strict)
+        run: |
+          set -euo pipefail
+          uv run --group docs mkdocs build --strict
+
+  deploy:
+    name: Deploy docs to Pages
+    runs-on: ubuntu-latest
+    needs: [cargo-doc, build]
+    timeout-minutes: 10
+    # Tag pushes publish a release; workflow_dispatch publishes the current
+    # main on demand. Without the second clause a manual run builds and then
+    # silently skips this job.
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+
+      - name: Build docs (strict)
+        run: |
+          set -euo pipefail
+          uv run --group docs mkdocs build --strict
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5.0.0

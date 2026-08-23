@@ -1,0 +1,225 @@
+site_name: NFSWolf
+site_description: NFS security toolkit — recon, analysis, escape, shell, and exploitation in one native binary
+site_url: https://strongwind.dev/NFSWolf/
+repo_url: https://github.com/StrongWind1/NFSWolf
+repo_name: StrongWind1/NFSWolf
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2025 - 2026 StrongWind1
+
+theme:
+  name: material
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    # Dark mode (default) — respects system preference
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+    # Light mode — respects system preference
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+  features:
+    # Navigation
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.sections
+    - navigation.path
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    # Deviation from the shared baseline: this is a reference site with a
+    # seven-tab nav over 70+ pages, so the top-level sections become tabs
+    # rather than one very long sidebar.
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.prune
+    # Table of contents
+    - toc.follow
+    # Search
+    - search.highlight
+    - search.suggest
+    - search.share
+    # Header
+    - header.autohide
+    - announce.dismiss
+    # Content
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - content.action.view
+
+plugins:
+  - search
+  # Downloads the Google Fonts requested by theme.font at build time so the
+  # published site makes no third-party requests.
+  - privacy
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.mark
+  - pymdownx.keys
+  - tables
+  - attr_list
+  - md_in_html
+  - def_list
+  - footnotes
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - abbr
+  - pymdownx.snippets:
+      auto_append:
+        - docs/includes/abbreviations.md
+  - toc:
+      permalink: true
+
+exclude_docs: |
+  includes/
+
+nav:
+  - Home:
+      - index.md
+      - Installation: getting-started/installation.md
+      - Quick start: getting-started/quick-start.md
+  - NFS:
+      - nfs/index.md
+      - History of NFS: nfs/history.md
+      - Why NFS Is Insecure: nfs/insecurity.md
+      - The NFS Protocol Stack: nfs/protocol-stack.md
+      - Authentication Model: nfs/authentication.md
+      - File Handles: nfs/file-handles.md
+      - Previous Research: nfs/research.md
+      - Related Tools: nfs/tools.md
+  - Protocols:
+      - protocols/index.md
+      - ONC XDR: protocols/xdr.md
+      - ONC RPC: protocols/rpc.md
+      - Portmapper and rpcbind: protocols/portmapper.md
+      - MOUNT: protocols/mount.md
+      - NFSv2: protocols/nfsv2.md
+      - NFSv3: protocols/nfsv3.md
+      - NFSv4:
+          - protocols/nfsv4/index.md
+          - What Changed: protocols/nfsv4/changes.md
+          - COMPOUND Operations: protocols/nfsv4/compound.md
+          - Stateful Model: protocols/nfsv4/stateful.md
+          - Pseudo-Filesystem: protocols/nfsv4/pseudo-fs.md
+          - Security Negotiation: protocols/nfsv4/security.md
+      - NFS_ACL: protocols/nfs-acl.md
+      - RQUOTA: protocols/rquota.md
+  - Findings:
+      - findings/index.md
+      - Attack Chain: findings/attack-chain.md
+      - By Category:
+          - Identity Attacks (F-1.x): findings/identity/index.md
+          - Access Control Bypass (F-2.x): findings/access-control/index.md
+          - Network Attacks (F-3.x): findings/network/index.md
+          - Privilege Escalation (F-4.x): findings/privesc/index.md
+          - Information Disclosure (F-5.x): findings/info-disclosure/index.md
+          - Denial of Service (F-6.x): findings/dos/index.md
+          - Configuration Weaknesses (F-7.x): findings/config/index.md
+      - By Protocol:
+          - NFSv2 Findings: findings/by-protocol/nfsv2.md
+          - NFSv3 Findings: findings/by-protocol/nfsv3.md
+          - NFSv4 Findings: findings/by-protocol/nfsv4.md
+          - RPC/Portmapper Findings: findings/by-protocol/rpc.md
+          - MOUNT Findings: findings/by-protocol/mount.md
+      - By Stage:
+          - Reconnaissance: findings/by-stage/recon.md
+          - Initial Access: findings/by-stage/access.md
+          - Lateral Movement: findings/by-stage/lateral.md
+          - Privilege Escalation: findings/by-stage/privesc.md
+          - Data Exfiltration: findings/by-stage/exfil.md
+  - Defense:
+      - defense/index.md
+      - NFS Security Guide: defense/security-guide.md
+      - Installing NFS:
+          - defense/install/index.md
+          - Server Setup: defense/install/server.md
+          - Client Setup: defense/install/client.md
+      - Configuring NFS:
+          - defense/configure/index.md
+          - /etc/exports Syntax: defense/configure/exports-syntax.md
+          - Export Options Reference: defense/configure/export-options.md
+          - Kernel Parameters: defense/configure/kernel-params.md
+          - Firewall Rules: defense/configure/firewall.md
+      - Hardening:
+          - defense/hardening/index.md
+          - Hardening Checklist: defense/hardening/checklist.md
+          - Kerberos Authentication: defense/hardening/kerberos.md
+          - NFS over TLS: defense/hardening/tls.md
+          - Example Configurations: defense/hardening/examples.md
+      - What Does Not Work: defense/what-does-not-work.md
+  - Usage:
+      - usage/index.md
+      - Subcommands:
+          - Scan: usage/scan.md
+          - Analyze: usage/analyze.md
+          - Shell: usage/shell.md
+          - Mount: usage/mount.md
+          - Escape: usage/escape.md
+          - Brute-handle: usage/brute-handle.md
+          - UID Spray: usage/uid-spray.md
+          - Decode: usage/decode.md
+          - Convert: usage/convert.md
+      - Shell Commands: usage/shell-commands.md
+      - CLI Reference: usage/cli-reference.md
+      - Global Options: usage/global-options.md
+      - Examples: usage/examples.md
+  - Reference:
+      - reference/index.md
+      - RFC Index: reference/rfcs.md
+      - Kernel Source Map: reference/kernel.md
+      - Filesystem Escape Matrix: reference/escape-matrix.md
+      - Spec Completeness: reference/spec-completeness.md
+      - Comparison: reference/comparison.md
+      - Glossary: reference/glossary.md
+      - Changelog: reference/changelog.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/StrongWind1/NFSWolf
+      name: NFSWolf on GitHub
+  generator: false
+
+extra_css:
+  # theme.css is the site palette; primary and accent are both `custom`,
+  # so every Material colour variable is defined there.
+  - stylesheets/theme.css
+  - stylesheets/extra.css
+
+strict: true
+
+validation:
+  omitted_files: info
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn

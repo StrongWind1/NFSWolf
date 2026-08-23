@@ -1,5 +1,8 @@
 dist/
 ref/
+site/
+.venv/
+uv.lock
 CLAUDE.md
 tasklist.md
 .vscode/

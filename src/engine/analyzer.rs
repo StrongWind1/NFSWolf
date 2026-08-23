@@ -808,7 +808,7 @@ fn check_execute_implies_read(impl_fingerprint: Option<&str>, findings: &mut Vec
     }
     findings.push(make_finding(
         &FindingSpec {
-            id: "F-1.1",
+            id: "F-5.9",
             title: "Execute-implies-read: execute-only files are readable via NFS on Linux knfsd",
             desc: "Linux knfsd's nfsd_permission() unconditionally adds NFSD_MAY_OWNER_OVERRIDE \
                    to every file-open check. When READ is denied on a regular file, it falls back \
@@ -2618,7 +2618,7 @@ async fn check_silly_renames(nfs3: &Nfs3Client, root_fh: &FileHandle, export_pat
     let truncated = if silly.len() > 10 { format!(" (+{} more)", silly.len() - 10) } else { String::new() };
     findings.push(make_finding(
         &FindingSpec {
-            id: "F-5.9",
+            id: "F-5.16",
             title: "Silly-rename files detected (open-unlinked indicator)",
             desc: "The export root contains .nfs* files created by Linux NFS clients \
                    when an open file is deleted. These indicate actively-used files \
@@ -2663,7 +2663,7 @@ async fn check_write_verifier(nfs3: &Nfs3Client, root_fh: &FileHandle, export_pa
     } else {
         findings.push(make_finding(
             &FindingSpec {
-                id: "F-5.8",
+                id: "F-5.17",
                 title: "Write verifier changed between probes (server reboot detected)",
                 desc: "Two consecutive zero-count COMMIT calls returned different writeverf3 \
                        values. Per RFC 1813 S3.3.21 the server regenerates this verifier on \
