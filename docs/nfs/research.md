@@ -18,7 +18,7 @@ These observations directly map to nfswolf findings [F-1.1](../security/identity
 
 ## RFC 2623 as the foundational security audit
 
-RFC 2623 deserves special attention because it is, in effect, the first systematic security audit of the NFS protocol, written by Mike Eisler at Sun Microsystems -- one of the organizations that designed NFS in the first place. Published in June 1999, twenty-seven years before nfswolf, it lays out every fundamental weakness that NFS security tools still exploit today. The RFC is not merely a protocol specification; its Section 2 ("Overview of NFS Security") reads like a penetration tester's notes.
+RFC 2623 was written by Mike Eisler at Sun -- one of the organizations that designed NFS. Published in June 1999, it lays out every fundamental weakness that NFS security tools still exploit today. Section 2 ("Overview of NFS Security") reads like a pentester's notes, not a specification.
 
 The RFC identifies five distinct attack surfaces, each of which nfswolf automates:
 
@@ -32,7 +32,7 @@ The RFC identifies five distinct attack surfaces, each of which nfswolf automate
 
 5. **Anonymous mapping is inconsistent** (Section 2.5): Root squashing maps only UID/GID 0 to `nobody`. The RFC acknowledges this but does not address the consequence: every non-root identity is trusted without verification, enabling the shadow-group read trick and setgid escalation techniques discovered 25 years later by HVS Consulting.
 
-The remarkable aspect of RFC 2623 is that every issue it identified in 1999 remains exploitable in default Linux NFS configurations today. The fixes it proposed (RPCSEC_GSS with Kerberos V5) exist but are rarely deployed in practice, exactly as the RFC's authors feared. nfswolf implements automated tests for every issue RFC 2623 cataloged, making it possible to verify in seconds what the RFC described in pages of careful prose.
+Every issue RFC 2623 identified in 1999 is still exploitable on default Linux NFS configs today. The fixes it proposed (RPCSEC_GSS with Kerberos V5) exist but are rarely deployed in practice, exactly as the RFC's authors feared. nfswolf implements automated tests for every issue RFC 2623 cataloged, making it possible to verify in seconds what the RFC described in pages of careful prose.
 
 ## Key publications and research
 
@@ -74,9 +74,9 @@ The Stony Brook report focused on ext4 and XFS, which were the dominant Linux fi
 
 ## HVS Consulting research (2024)
 
-HVS Consulting published the most thorough modern treatment of NFS security, combining a detailed [blog post](https://www.hvs-consulting.de/en/nfs-security-identifying-and-exploiting-misconfigurations/) with open-source tooling and a comprehensive [wiki](https://github.com/hvs-consulting/nfs-security-tooling/wiki). Their work stands out because it bridges the gap between the protocol-level analysis in the RFCs and practical exploitation on modern Linux distributions, providing both the theory and the tools to validate it.
+HVS Consulting published a detailed [blog post](https://www.hvs-consulting.de/en/nfs-security-identifying-and-exploiting-misconfigurations/), three open-source tools, and a [wiki](https://github.com/hvs-consulting/nfs-security-tooling/wiki) covering NFS security from protocol theory through exploitation on modern Linux distributions.
 
-Their wiki covers NFS from protocol fundamentals through Linux-specific implementation details to attack execution, organized as a progression from defense to offense. The wiki's structure mirrors an actual security assessment: it starts with how NFS works (protocol overview, Linux/Windows/other implementations), moves through the security features that are supposed to protect exports (authentication methods, secure ports, squashing, subtree_check, allowed hosts, RPC-with-TLS), and then documents the attacks that succeed when those features are misconfigured or insufficient.
+Their wiki starts with how NFS works (protocol overview, Linux/Windows/other implementations), moves through the security features that are supposed to protect exports (authentication methods, secure ports, squashing, subtree_check, allowed hosts, RPC-with-TLS), and then documents the attacks that succeed when those features are misconfigured or insufficient.
 
 Key original contributions:
 
@@ -200,17 +200,15 @@ Beyond the protocol-level analysis in the RFCs, several implementation-specific 
 
 **Cloud NFS implementations**: AWS EFS, Azure Files NFS, and GCP Filestore all expose NFS as a managed service, typically NFSv4.1 with AUTH_SYS over VPC-internal networks. These implementations inherit the AUTH_SYS trust model documented in RFC 2623 -- any VM in the same VPC can claim any UID and access any file. Cloud providers rely on VPC security groups and network ACLs rather than NFS-level authentication, which means a compromised VM or container in the same network segment can access all NFS-mounted data. None of the major cloud providers deploy RPCSEC_GSS by default on their managed NFS services.
 
-## The research gap: from documentation to automation
+## The gap between documentation and tooling
 
-A pattern emerges across the research surveyed above: every NFS security weakness has been thoroughly documented, but until recently, testing for these weaknesses required manual protocol manipulation or single-purpose scripts. The gap is not in knowledge but in tooling.
+Every NFS security weakness on this page has been documented for years, some for decades. Testing for them required manual protocol manipulation or single-purpose scripts until recently.
 
-RFC 2623 identified AUTH_SYS credential spoofing in 1999. The Stony Brook technical report demonstrated export escape via handle construction in 2006. The HVS Consulting wiki documented BTRFS subvolume traversal and shadow-group reads in 2024. The linux-nfs mailing list documented cross-filesystem escape via symlink replacement in 2021. Each of these publications described a specific attack technique in isolation, but no single tool implemented all of them, and no tool connected them into a coherent attack workflow.
+AUTH_SYS credential spoofing was documented in 1999 (RFC 2623). Export escape via handle construction was demonstrated in 2006 (Stony Brook). BTRFS subvolume traversal and shadow-group reads were documented in 2024 (HVS Consulting). Each publication described a specific technique, but no tool implemented all of them, and no tool connected them into a single workflow. A researcher needed Python, C, Go, and Rust tools to cover the path from recon to exploitation.
 
-The fragmentation was not just across tools but across languages and platforms. A researcher needed Python (nfs_analyze, fuse_nfs, NFSwalker), C (nfsshell, nfscli), Go (EvilNFSClient), and Rust (niffler) to cover the full attack surface. Each tool had its own installation requirements, CLI conventions, and output formats. A complete NFS security assessment required switching between 10+ tools just to cover the path from reconnaissance through exploitation.
+nfswolf's [finding catalog](../security/index.md) references the specific RFC section, paper, or kernel code path behind each weakness. It does not discover new vulnerabilities -- it automates tests for what the NFS community has documented over four decades.
 
-nfswolf's design traces directly to the publications documented on this page. Every finding in its [catalog](../security/index.md) references the specific RFC section, research paper, or kernel code path that documents the underlying weakness. The tool does not discover new vulnerabilities -- it automates tests for the vulnerabilities that the NFS community has documented over four decades but never consolidated into a single assessment framework.
-
-The timeline illustrates the slow pace of NFS security tooling development compared to the rapid evolution of tools for other protocols (HTTP, SMB, LDAP, Kerberos). Between the Stony Brook report in 2006 and the HVS Consulting research in 2024, nearly two decades passed with no significant new NFS security research. During the same period, NFS deployment grew substantially -- cloud storage providers adopted NFS (AWS EFS, Azure Files, GCP Filestore), containerized workloads used NFS for persistent volumes, and NAS appliances shipped NFS as a default protocol. The attack surface expanded while the tooling stagnated, creating a gap that nfswolf and the HVS tools now address.
+Between the Stony Brook report in 2006 and the HVS Consulting research in 2024, nearly two decades passed with no significant new NFS security research. During the same period, cloud providers adopted NFS (AWS EFS, Azure Files, GCP Filestore), containers used NFS for persistent volumes, and NAS appliances shipped NFS as a default. The deployment grew while the tooling did not.
 
 ## Protocol RFCs
 

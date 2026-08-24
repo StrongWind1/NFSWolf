@@ -119,6 +119,6 @@ When an attacker has both escaped the export (Section 3) and claimed `uid=0` on 
 
 ## The Root Cause
 
-These are not seven independent bugs. They are consequences of a single design decision: NFS trusts the client. The server does not verify identity, does not bind tokens to sessions, does not enforce export boundaries by default, does not encrypt the wire, and does not authenticate its sideband services. Every mitigation is an afterthought bolted onto a trust-the-client architecture. The RFCs know this: RFC 2623 (1999) documented the issues, RFC 9289 (2022) was written because they still were not solved, and each protocol revision has fixed one flaw while introducing others. There is no version of NFS that is secure by default.
+These all trace to one design choice: NFS trusts the client. Identity is unverified, handles have no binding or expiry, export boundaries are unenforced by default, the wire is plaintext, and sideband services accept anonymous calls. The mitigations came decades later and cover only parts of the surface. The RFCs know this: RFC 2623 (1999) documented the issues, RFC 9289 (2022) was written because they still were not solved, and each protocol revision has fixed one flaw while introducing others. There is no version of NFS that is secure by default.
 
 For a concrete walkthrough showing how these flaws chain together in a real attack, see the [attack chain](attack-chain.md) page. For defensive guidance, see the [defense](defense/index.md) section.

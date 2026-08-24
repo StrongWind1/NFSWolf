@@ -167,7 +167,7 @@ Capabilities unique to nfswolf that no prior tool implemented:
 
 ## Maintenance and project health
 
-The NFS security tool landscape has a significant abandonment problem. Several tools that were important contributions when released are now unmaintained, leaving users with security tools that depend on deprecated runtimes or libraries.
+Many NFS security tools have been abandoned. Several tools that were important contributions when released are now unmaintained, leaving users with security tools that depend on deprecated runtimes or libraries.
 
 | Status | Tools | Implications |
 |--------|-------|-------------|
@@ -175,9 +175,9 @@ The NFS security tool landscape has a significant abandonment problem. Several t
 | **Maintenance mode** (functional but infrequent updates) | libnfs, go-nfs, go-nfs-client, pynfs, ms-nfs41-client | Stable for existing use cases but unlikely to add new capabilities |
 | **Abandoned** (no updates in 3+ years) | NfSpy (2014, Python 2), RPCScan (2018), davecheney/nfs (2017) | Should not be used in new assessments; NfSpy requires Python 2 which reached end-of-life in 2020 |
 
-The trend in active development is toward compiled languages that produce self-contained binaries. The three most actively developed security tools (nfswolf, niffler, nfscli) are all compiled to single binaries with no runtime dependencies, reflecting the operational reality that security tools must be deployable on minimal target systems where installing Python, Go, or Java runtimes is not feasible.
+The three most actively developed security tools (nfswolf, niffler, nfscli) all compile to single binaries with no runtime dependencies. Security tools need to run on minimal jump boxes where installing a Python or Go runtime is not an option.
 
-## Tool landscape by language
+## Tools by language
 
 The NFS security tool ecosystem spans five languages, each with trade-offs:
 
@@ -190,7 +190,7 @@ The NFS security tool ecosystem spans five languages, each with trade-offs:
 | **Java** | nfs-client-java | Enterprise ecosystem, Maven distribution, mature concurrency | JVM overhead (100+ MB baseline), startup latency, not suited for security tooling deployment |
 | **Swift** | NFSKit | Native Apple platform integration, thread-safe concurrency | Apple-only, wraps libnfs (C dependency), no Linux/Windows support |
 
-The trend is clear: newer tools (nfswolf, niffler, EvilNFSClient) favor compiled languages that produce single static binaries with no runtime dependencies. This matters for offensive security work where tools must be deployed on minimal target systems (jump boxes, containers, embedded NAS appliances) without installing language runtimes.
+Newer tools (nfswolf, niffler, EvilNFSClient) all ship as single static binaries -- you drop one file on a target, no runtime to install.
 
 The language choice also affects protocol implementation depth. Python tools tend to use existing libraries (libnfs via FFI, anfs, pynfs) and focus on application logic, while Rust and C tools implement the protocol stack directly. nfswolf owns its entire protocol stack across eight workspace crates, which means protocol-level attacks (handle construction, COMPOUND batching, stateid manipulation) can be implemented without library constraints. This architectural difference explains why nfswolf supports 18 filesystem types for escape while nfs_analyze supports 4 -- nfswolf can construct arbitrary handle formats because it controls the XDR encoding layer.
 
@@ -219,7 +219,7 @@ timeline
         nfswolf (Rust) : Unified toolkit, 62 findings, 18 FS escape
 ```
 
-The early era (1990s-2000s) produced only one significant NFS security tool -- nfsshell. For nearly twenty years, it was the only option for interactive NFS security testing. The mid era (2010-2018) saw Python-based tools emerge, driven by the ease of prototyping network clients in Python. Both NfSpy and RPCScan made meaningful contributions but were abandoned before reaching maturity. The modern era (2024-2026) produced a burst of activity, with six new tools appearing in roughly two years, driven by the HVS Consulting research and the availability of mature NFS client libraries in multiple languages. The modern tools show a clear trend toward compiled single-binary distribution -- three of the six (nfswolf, niffler, EvilNFSClient) ship as standalone executables.
+The early era (1990s-2000s) produced only one significant NFS security tool -- nfsshell. For nearly twenty years, it was the only option for interactive NFS security testing. The mid era (2010-2018) saw Python-based tools emerge, driven by the ease of prototyping network clients in Python. Both NfSpy and RPCScan made meaningful contributions but were abandoned before reaching maturity. The modern era (2024-2026) saw six new tools appear in roughly two years, driven by the HVS Consulting research and mature NFS client libraries becoming available in multiple languages. Three of the six (nfswolf, niffler, EvilNFSClient) ship as standalone executables.
 
 ## Tool dependency graph
 

@@ -1,6 +1,6 @@
 # Attack chain
 
-No single NFS finding is catastrophic in isolation. UID spoofing is useless without a reachable export. Export escape is useless without a credential that can read the target file. Handle construction is useless without a seed handle to extract the fsid from. What makes NFS dangerous is the chain: information leaked by one protocol stage feeds the next, and each stage widens the attacker's access until the entire server filesystem is compromised.
+Individual NFS findings don't do much alone -- you need a reachable export before UID spoofing matters, a credential before an escape handle is useful, and a seed handle before you can construct anything. The damage comes from chaining them: information leaked by one protocol stage feeds the next, and each stage widens access until the entire server filesystem is compromised.
 
 This page maps how the [62 findings](index.md) connect across the attack path, from initial network access to full filesystem control.
 

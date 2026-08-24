@@ -2,7 +2,7 @@
 
 **NFS security toolkit — recon, analysis, escape, shell, and exploitation in one native binary.**
 
-NFSWolf consolidates 10+ fragmented NFS security tools into a single fast Rust binary. It covers the full attack path from network reconnaissance through export escape to interactive shell access and file exfiltration, all without mounting anything or requiring root on the attacker's machine.
+NFSWolf replaces 10+ fragmented NFS security tools with one fast Rust binary. It covers recon, analysis, export escape, interactive shell access, and file exfiltration -- all without mounting anything or requiring root on the attacker's machine.
 
 ## What NFSWolf does
 
@@ -49,7 +49,7 @@ nfswolf escape 10.0.0.1:/export
 
 ## About this site
 
-This site is both a comprehensive NFS security reference and the documentation for the nfswolf tool. Use the tabs above to navigate:
+This site is an NFS security reference and the documentation for the nfswolf tool. Use the tabs above to navigate:
 
 - **NFSWolf** — Installation, every subcommand, shell commands, CLI reference, and examples
 - **NFS** — Protocol background, wire-level deep dives (XDR through NFSv4), research, and related tools

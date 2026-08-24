@@ -1,6 +1,6 @@
 # Analyze
 
-The `analyze` subcommand performs a deep security audit of one or more NFS servers, running 30+ checks across 62 documented findings. It enumerates exports, tests authentication weaknesses, probes for export escape vulnerabilities, checks squash configuration, and reports every finding with a severity rating, evidence, and remediation guidance.
+The `analyze` subcommand performs a security audit of one or more NFS servers, running 30+ checks across 62 documented findings. It enumerates exports, tests authentication weaknesses, probes for export escape vulnerabilities, checks squash configuration, and reports every finding with a severity rating, evidence, and remediation guidance.
 
 ```
 nfswolf analyze <TARGET> [OPTIONS]

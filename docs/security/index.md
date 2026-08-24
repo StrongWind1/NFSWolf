@@ -1,6 +1,6 @@
 # Security findings catalog
 
-nfswolf documents **62 NFS security findings** across 7 attack categories. Every finding traces to a specific RFC section (or kernel code path) that explains why the vulnerability exists at the protocol level. Together they cover the full NFS attack surface, from unauthenticated recon through credential forging, export escape, privilege escalation, and lateral movement.
+nfswolf documents **62 NFS security findings** across 7 attack categories. Every finding traces to a specific RFC section (or kernel code path) that explains why the vulnerability exists at the protocol level. Together they cover recon, credential forging, export escape, privilege escalation, and lateral movement.
 
 The catalog is the authoritative reference for what nfswolf detects and why each attack works. Findings are numbered `F-{category}.{sequence}` and carry a severity rating, RFC basis, preconditions, and a mapping to the nfswolf subcommand that exercises them.
 

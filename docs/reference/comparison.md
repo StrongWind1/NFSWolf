@@ -1,6 +1,6 @@
 # Comparison
 
-nfswolf consolidates the capabilities of 10+ fragmented NFS security tools into a single static binary. This page compares nfswolf against every actively maintained offensive NFS tool across 39 capability dimensions.
+nfswolf replaces 10+ fragmented NFS security tools with one static binary. This page compares nfswolf against every actively maintained offensive NFS tool across 39 capability dimensions.
 
 !!! tip "See also"
     For detailed descriptions of each tool, client libraries, and the historical timeline, see [Related Tools](../nfs/tools.md).

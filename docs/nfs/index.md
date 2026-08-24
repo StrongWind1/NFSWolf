@@ -1,6 +1,6 @@
 # NFS
 
-**The Network File System is one of the oldest and most widely deployed remote file access protocols in existence, and one of the most fundamentally insecure.**
+**The Network File System is one of the oldest remote file access protocols, and one of the most insecure.**
 
 NFS was designed at Sun Microsystems in 1984 for a world where every machine on the network was trusted. Three decades and four major protocol versions later, the core security model has not changed: the client tells the server who it is, and the server believes it. There is no password, no challenge, no verification. The 32-bit UID (user ID) in every RPC call is the entire authentication story for the vast majority of NFS deployments.
 
