@@ -240,7 +240,7 @@ pub fn des_cbc_encrypt(key: &[u8; 8], iv: &[u8; 8], data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut prev = *iv;
 
-    for chunk in data.chunks_exact(8) {
+    for chunk in data.as_chunks::<8>().0 {
         // XOR plaintext with previous ciphertext (or IV).
         let mut block = [0u8; 8];
         for (b, (c, p)) in block.iter_mut().zip(chunk.iter().zip(prev.iter())) {
@@ -273,10 +273,9 @@ pub fn des_cbc_decrypt(key: &[u8; 8], iv: &[u8; 8], data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut prev = *iv;
 
-    for chunk in data.chunks_exact(8) {
+    for chunk in data.as_chunks::<8>().0 {
         // ECB decrypt the block.
-        let mut ciphertext = [0u8; 8];
-        ciphertext.copy_from_slice(chunk);
+        let ciphertext = *chunk;
         let mut buf = ciphertext.into();
         cipher.decrypt_block(&mut buf);
         let decrypted: [u8; 8] = buf.into();
