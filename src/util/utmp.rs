@@ -180,11 +180,10 @@ impl UtmpRecord {
         }
         // Render as a hex IPv6 group string. Faithful but not RFC-5952-compressed.
         let mut s = String::with_capacity(39);
-        for (i, pair) in self.addr_v6.chunks_exact(2).enumerate() {
+        for (i, pair) in self.addr_v6.as_chunks::<2>().0.iter().enumerate() {
             if i > 0 {
                 s.push(':');
             }
-            // chunks_exact(2) guarantees pair.len() == 2 -- safe to use a fold here.
             let group: u16 = pair.iter().fold(0u16, |acc, b| (acc << 8) | u16::from(*b));
             // Infallible: fmt::Write for String never fails.
             let _ = write!(s, "{group:x}");
@@ -193,13 +192,9 @@ impl UtmpRecord {
     }
 
     fn addr_u32_le(&self) -> [u32; 4] {
-        // chunks_exact(4) on a fixed [u8;16] yields exactly 4 chunks, each
-        // exactly 4 bytes -- never panics, and avoids slice indexing.
         let mut out = [0u32; 4];
-        for (slot, chunk) in out.iter_mut().zip(self.addr_v6.chunks_exact(4)) {
-            if let Ok(arr) = <[u8; 4]>::try_from(chunk) {
-                *slot = u32::from_ne_bytes(arr);
-            }
+        for (slot, chunk) in out.iter_mut().zip(self.addr_v6.as_chunks::<4>().0) {
+            *slot = u32::from_ne_bytes(*chunk);
         }
         out
     }
@@ -208,7 +203,7 @@ impl UtmpRecord {
 /// Parse a wtmp/btmp blob into records. Trailing partial records are silently dropped.
 #[must_use]
 pub(crate) fn parse_utmp(bytes: &[u8]) -> Vec<UtmpRecord> {
-    bytes.chunks_exact(UTMP_RECORD_SIZE).filter_map(UtmpRecord::from_bytes).collect()
+    bytes.as_chunks::<UTMP_RECORD_SIZE>().0.iter().filter_map(|c| UtmpRecord::from_bytes(c)).collect()
 }
 
 /// One decoded lastlog slot. The slot's `uid` is the array index in the file.
@@ -232,7 +227,9 @@ pub(crate) struct LastlogRecord {
 #[must_use]
 pub(crate) fn parse_lastlog(bytes: &[u8]) -> Vec<LastlogRecord> {
     bytes
-        .chunks_exact(LASTLOG_RECORD_SIZE)
+        .as_chunks::<LASTLOG_RECORD_SIZE>()
+        .0
+        .iter()
         .enumerate()
         .filter_map(|(uid, chunk)| {
             let ll_time = i32::from_ne_bytes(read_arr::<4>(chunk, 0)?);

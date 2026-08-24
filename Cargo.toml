@@ -383,6 +383,9 @@ use_self = "warn"
 # Transitive dependency version conflicts are not actionable.
 multiple_crate_versions = "allow"
 # --- Pedantic group: overrides to allow --------------------------------------
+# Trait impls must match the trait's async fn signature even when no .await
+# is needed (e.g. V2Ops::mknod, test mocks). Lint added in Rust 1.98.
+unused_async_trait_impl = "allow"
 # Protocol identifiers (AUTH_SYS, NFSv2, CRC32) trigger false positives.
 doc_markdown = "allow"
 # Too noisy for internal tools -- every pub fn returning Result would need # Errors.
