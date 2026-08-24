@@ -4,13 +4,9 @@ site/
 .venv/
 uv.lock
 CLAUDE.md
-tasklist.md
 .vscode/
 *.pcapng
-
-# Shell test artifacts (downloaded from NFS targets)
-passwd
-readme.txt
+old-docs/
 
 # =============================================================================
 # .gitignore -- Rust/Cargo + VS Code + Linux + macOS + Windows
