@@ -332,4 +332,4 @@ nfswolf shell 10.0.0.1:/srv/nfs --nfs-version 2
 - [Shell](../usage/shell.md) — Complete shell command reference, credential escalation, MOUNT bypass
 - [Escape](../usage/escape.md) — Escape algorithm, filesystem support matrix, fast vs full mode
 - [Global Options](../usage/global-options.md) — Every flag that applies across subcommands
-- [Why NFS Is Insecure](../nfs/insecurity.md) — Background on the protocol-level weaknesses NFSWolf exploits
+- [Why NFS Is Insecure](../security/insecurity.md) — Background on the protocol-level weaknesses NFSWolf exploits

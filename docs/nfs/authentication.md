@@ -53,7 +53,7 @@ AUTH_NONE is used for two purposes:
 2. **RPCSEC_GSS control messages** -- the GSS context establishment and destruction calls use AUTH_NONE as the credential flavor, with the GSS token in the credential body interpreted by the RPCSEC_GSS layer.
 
 !!! warning "AUTH_NONE still leaks data"
-    Some servers respond to GETATTR with AUTH_NONE credentials on valid file handles, leaking ownership, permissions, size, and timestamps to completely unauthenticated callers. See [F-5.8](../findings/info-disclosure/F-5.8-auth-none-metadata-leak.md) for details.
+    Some servers respond to GETATTR with AUTH_NONE credentials on valid file handles, leaking ownership, permissions, size, and timestamps to completely unauthenticated callers. See [F-5.8](../security/info-disclosure/F-5.8-auth-none-metadata-leak.md) for details.
 
 ---
 
@@ -86,7 +86,7 @@ The verifier on the call is AUTH_NONE (zero-length). The server reply verifier m
 :   A client-supplied hostname string, limited to 255 bytes. The server does not use this for access control decisions. Linux knfsd ignores it entirely; export ACLs are enforced against the TCP source IP address, not the `machinename` field. An attacker can set this to any value.
 
 `uid` / `gid`
-:   The claimed effective user and group IDs. The server maps these directly to local permission checks. Since there is no verification, any client can claim any UID/GID. This is the basis of [F-1.1](../findings/identity/index.md) (UID/GID spoofing).
+:   The claimed effective user and group IDs. The server maps these directly to local permission checks. Since there is no verification, any client can claim any UID/GID. This is the basis of [F-1.1](../security/identity/index.md) (UID/GID spoofing).
 
 `gids<16>`
 :   An array of up to 16 supplemental group IDs. The 16-group limit is a hard constraint in the XDR encoding. Linux systems commonly have users in more than 16 groups; when accessed over NFS with AUTH_SYS, only the first 16 are transmitted. The server may silently deny access to files whose permissions depend on group 17+.
@@ -124,7 +124,7 @@ Verifier:   flavor=AUTH_NONE, body=<empty>
 The server maintains a cache mapping the opaque token back to the original `authsys_parms`. If the server evicts the token, it rejects the call with `AUTH_REJECTEDCRED`, and the client falls back to full AUTH_SYS.
 
 !!! danger "AUTH_SHORT enables credential replay"
-    If an attacker captures the opaque token (by sniffing the network or reading process memory), they can replay it to impersonate the original caller without knowing the UID/GID. The token is not bound to a source IP or timestamp. Linux knfsd does not implement AUTH_SHORT (the `authtab[2]` slot is NULL), but other NFS server implementations (Solaris, legacy commercial servers) may issue and accept AUTH_SHORT tokens. See [F-3.9](../findings/network/F-3.9-auth-short-session-credentials.md).
+    If an attacker captures the opaque token (by sniffing the network or reading process memory), they can replay it to impersonate the original caller without knowing the UID/GID. The token is not bound to a source IP or timestamp. Linux knfsd does not implement AUTH_SHORT (the `authtab[2]` slot is NULL), but other NFS server implementations (Solaris, legacy commercial servers) may issue and accept AUTH_SHORT tokens. See [F-3.9](../security/network/F-3.9-auth-short-session-credentials.md).
 
 ---
 
@@ -146,7 +146,7 @@ The problems are fundamental:
 - **No integrity protection**: the call body is not authenticated, only the timestamp
 
 !!! warning "AUTH_DH advertised = finding"
-    If MOUNT auth_flavors or NFSv4 SECINFO includes flavor 3, nfswolf reports [F-3.7](../findings/network/F-3.7-auth-dh-obsolete.md). Any server still advertising AUTH_DH is running cryptography that was obsolete before it was formally deprecated.
+    If MOUNT auth_flavors or NFSv4 SECINFO includes flavor 3, nfswolf reports [F-3.7](../security/network/F-3.7-auth-dh-obsolete.md). Any server still advertising AUTH_DH is running cryptography that was obsolete before it was formally deprecated.
 
 ---
 
@@ -237,7 +237,7 @@ sequenceDiagram
 ### Limitations
 
 !!! warning "AUTH_TLS is opportunistic and optional"
-    RFC 9289 Section 6.1.1 acknowledges the STRIPTLS attack: "The initial AUTH_TLS probe occurs in cleartext. An on-path attacker can alter a cleartext handshake to make it appear as though TLS support is not available." If the probe fails, the client falls back to unencrypted RPC. There is no mechanism to require TLS; it is always opt-in. See [F-3.4](../findings/network/F-3.4-striptls-downgrade.md).
+    RFC 9289 Section 6.1.1 acknowledges the STRIPTLS attack: "The initial AUTH_TLS probe occurs in cleartext. An on-path attacker can alter a cleartext handshake to make it appear as though TLS support is not available." If the probe fails, the client falls back to unencrypted RPC. There is no mechanism to require TLS; it is always opt-in. See [F-3.4](../security/network/F-3.4-striptls-downgrade.md).
 
 AUTH_TLS provides **host authentication** (via certificates) and **transport encryption**, but it does not replace user authentication. After the TLS session is established, the client still sends AUTH_SYS or RPCSEC_GSS credentials inside the encrypted tunnel. AUTH_TLS with AUTH_SYS is better than AUTH_SYS alone (it prevents network sniffing and spoofing), but the server still trusts client-asserted UIDs.
 
@@ -267,7 +267,7 @@ The mapping from `sec=` names to flavor values:
 The pseudo-flavor numbers (390003-390005) appear in the MOUNT v3 MNT response `auth_flavors` list and in NFSv4 SECINFO responses. They distinguish the three Kerberos service levels within the single RPCSEC_GSS flavor.
 
 !!! danger "Mixed sec= lists are a downgrade vulnerability"
-    An export with `sec=krb5:sys` accepts both Kerberos and AUTH_SYS. An attacker who cannot obtain Kerberos credentials simply uses AUTH_SYS and forges any UID. The first flavor in the list is the preferred one, but the server does not enforce it; any listed flavor is accepted. This is [F-1.7](../findings/identity/index.md).
+    An export with `sec=krb5:sys` accepts both Kerberos and AUTH_SYS. An attacker who cannot obtain Kerberos credentials simply uses AUTH_SYS and forges any UID. The first flavor in the list is the preferred one, but the server does not enforce it; any listed flavor is accepted. This is [F-1.7](../security/identity/index.md).
 
 ### What happens with the wrong flavor: AUTH_TOOWEAK
 
@@ -282,7 +282,7 @@ When a client sends a request with a flavor that the export does not accept, the
     The server returns `NFS4ERR_WRONGSEC` (status 10016). The client should then issue a SECINFO operation to discover the accepted flavors.
 
 !!! tip "AUTH_TOOWEAK as an oracle"
-    An AUTH_TOOWEAK rejection is an information leak: it tells the attacker that the export exists and requires stronger authentication than what was offered. Combined with the MOUNT bypass (MOUNT succeeds with AUTH_SYS even on `sec=krb5` exports, leaking the root handle), AUTH_TOOWEAK lets an attacker enumerate Kerberos-protected exports without Kerberos credentials. This is [F-1.8](../findings/identity/index.md).
+    An AUTH_TOOWEAK rejection is an information leak: it tells the attacker that the export exists and requires stronger authentication than what was offered. Combined with the MOUNT bypass (MOUNT succeeds with AUTH_SYS even on `sec=krb5` exports, leaking the root handle), AUTH_TOOWEAK lets an attacker enumerate Kerberos-protected exports without Kerberos credentials. This is [F-1.8](../security/identity/index.md).
 
 ---
 
@@ -292,7 +292,7 @@ When a client sends a request with a flavor that the export does not accept, the
 
     **AUTH_NONE** -- Useful for reconnaissance. NULL probes reveal service availability. Some servers leak file attributes via GETATTR with AUTH_NONE.
 
-    **AUTH_SYS** -- The primary attack surface. UID/GID spoofing ([F-1.1](../findings/identity/index.md)), credential ladder escalation, and root_squash bypass are all AUTH_SYS attacks. The credential is trivially forged.
+    **AUTH_SYS** -- The primary attack surface. UID/GID spoofing ([F-1.1](../security/identity/index.md)), credential ladder escalation, and root_squash bypass are all AUTH_SYS attacks. The credential is trivially forged.
 
     **AUTH_SHORT** -- If the server issues AUTH_SHORT tokens, capturing one via network sniffing gives the attacker a replayable session credential that does not expire until the server flushes its cache.
 

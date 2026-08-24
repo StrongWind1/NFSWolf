@@ -181,4 +181,4 @@ nfswolf mount 10.0.0.1 --handle <HANDLE_HEX> /mnt/escaped
 - [Brute Handle](brute-handle.md) -- targeted inode/generation sweep when the escape pipeline does not find the root
 - [Decode](decode.md) -- offline handle analysis to understand the format before attempting escape
 - [Shell](shell.md) -- interactive filesystem access using an escape handle
-- [F-2.1 Export Escape](../findings/access-control/F-2.1-export-escape.md) -- the finding that documents this attack class
+- [F-2.1 Export Escape](../security/access-control/F-2.1-export-escape.md) -- the finding that documents this attack class

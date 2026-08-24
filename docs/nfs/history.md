@@ -97,11 +97,11 @@ NFSv2 defined 18 procedures built on ONC RPC (RFC 1057) and XDR (RFC 1014):
 - **UDP only.** The protocol was designed for UDP transport. TCP support was not specified.
 - **32-bit file sizes and offsets.** The `unsigned int` fields in `readargs` limited files to 4 GB and individual reads to the transfer size, typically 8192 bytes.
 - **Synchronous writes.** Every WRITE had to be committed to stable storage before the server could respond, creating a severe performance bottleneck.
-- **No real security.** AUTH_UNIX was the only widely implemented authentication, with no security negotiation mechanism (see [Why NFS Is Insecure](insecurity.md)).
+- **No real security.** AUTH_UNIX was the only widely implemented authentication, with no security negotiation mechanism (see [Why NFS Is Insecure](../security/insecurity.md)).
 
 ### The MOUNT protocol
 
-The MOUNT protocol (RFC 1094 Appendix A) was a separate RPC service that provided the initial file handle. A client would call MOUNT's MNT procedure with a pathname like `/export/home`, and the server would return the root file handle for that export. Once a client obtained a handle, the NFS protocol had no concept of export boundaries, creating a structural security gap that RFC 2623 Section 2.6 documents explicitly. See [MOUNT Protocol](../protocols/mount.md) for the full analysis.
+The MOUNT protocol (RFC 1094 Appendix A) was a separate RPC service that provided the initial file handle. A client would call MOUNT's MNT procedure with a pathname like `/export/home`, and the server would return the root file handle for that export. Once a client obtained a handle, the NFS protocol had no concept of export boundaries, creating a structural security gap that RFC 2623 Section 2.6 documents explicitly. See [MOUNT Protocol](protocols/mount.md) for the full analysis.
 
 ## 1995: NFSv3 -- performance without security
 
@@ -123,7 +123,7 @@ The security model was identical to NFSv2. RFC 1813 Section 1.5 describes the sa
 
 > "The NFS server checks permissions by taking the credentials from the RPC authentication information in each remote request."
 
-ACCESS checks are advisory only (see [NFSv3 protocol](../protocols/nfsv3.md)).
+ACCESS checks are advisory only (see [NFSv3 protocol](protocols/nfsv3.md)).
 
 The MOUNT v3 protocol added one genuine improvement: the MNT response now included a list of supported authentication flavors (RFC 1813 Appendix I, Section 5.2.1). This was the first form of security negotiation in the NFS ecosystem, but it was informational. The client received the list and could choose to ignore it.
 
@@ -195,7 +195,7 @@ The design is explicitly opportunistic (RFC 9289 Section 6.1). If the server doe
 
 > "The mechanism described in the current document interoperates fully with RPC implementations that do not support RPC-with-TLS."
 
-TLS encrypts the transport but does not fix AUTH_SYS; an attacker with a TLS certificate can still assert any UID (see [RPC-over-TLS hardening](../defense/hardening/tls.md)).
+TLS encrypts the transport but does not fix AUTH_SYS; an attacker with a TLS certificate can still assert any UID (see [RPC-over-TLS hardening](../security/defense/hardening/tls.md)).
 
 ## The thread through 40 years
 
@@ -219,11 +219,11 @@ The problem is not technical: the IETF knows how to build authenticated, encrypt
 
 nfswolf exists because the protocol's security model has been broken since 1984 and four decades of RFCs have not fixed it. The only real protection is knowing what your NFS servers expose, then either hardening the configuration or replacing the protocol.
 
-For the technical details of how each version's security model fails in practice, see [Why NFS Is Insecure](insecurity.md). For the specific vulnerabilities that nfswolf detects across all NFS versions, see the [Findings](../findings/index.md) tab.
+For the technical details of how each version's security model fails in practice, see [Why NFS Is Insecure](../security/insecurity.md). For the specific vulnerabilities that nfswolf detects across all NFS versions, see the [Security](../security/index.md) tab.
 
 ## Further reading
 
-- [Why NFS Is Insecure](insecurity.md) -- the fundamental design decisions that make NFS insecure by default
+- [Why NFS Is Insecure](../security/insecurity.md) -- the fundamental design decisions that make NFS insecure by default
 - [Authentication Model](authentication.md) -- AUTH_SYS, AUTH_NONE, RPCSEC_GSS, and AUTH_DH in detail
 - [File Handles](file-handles.md) -- bearer-token semantics, format analysis, and escape construction
 - [The NFS Protocol Stack](protocol-stack.md) -- how XDR, ONC RPC, portmapper, MOUNT, and NFS layer together

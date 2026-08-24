@@ -23,7 +23,7 @@ The reference pages are lookup tables, not tutorials. They exist so you can quic
 - "Does nfswolf implement NFSv4 SECINFO?" -- check [Spec Completeness](spec-completeness.md)
 - "How does nfswolf compare to NFSpy for UID spoofing?" -- check the [Comparison](comparison.md)
 
-For guided explanations of protocols and attacks, see the [NFS](../nfs/index.md), [Protocols](../protocols/index.md), and [Findings](../findings/index.md) tabs instead. For practical usage instructions, see the [Usage](../usage/index.md) tab.
+For guided explanations of protocols and attacks, see the [NFS](../nfs/index.md) and [Security](../security/index.md) tabs instead. For practical usage instructions, see the [NFSWolf](../index.md) tab.
 
 ## Local copies
 

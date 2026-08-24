@@ -67,7 +67,7 @@ These are set on the `nfswolf` command itself, before the `analyze` subcommand. 
 
 ## What it checks
 
-The analyzer runs every check unconditionally. There are no opt-in flags for individual checks. Findings are organized by attack category, each referencing an ID from the [findings catalog](../findings/index.md).
+The analyzer runs every check unconditionally. There are no opt-in flags for individual checks. Findings are organized by attack category, each referencing an ID from the [findings catalog](../security/index.md).
 
 ### Finding categories
 

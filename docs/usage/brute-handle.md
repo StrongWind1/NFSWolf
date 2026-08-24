@@ -1,4 +1,4 @@
-# Brute Handle
+# Brute-handle
 
 The `brute-handle` subcommand performs file handle brute-force using the NFS STALE/BADHANDLE error oracle. It systematically generates candidate handles by sweeping the inode and generation number space, probing each against the server to discover valid file handles pointing to directories or files outside the export boundary.
 
@@ -115,4 +115,4 @@ Every valid handle is printed with its filesystem type, inode number, generation
 - [Escape](escape.md) -- the primary export escape tool (fingerprint-driven, use first)
 - [Decode](decode.md) -- analyze a handle's structure before brute-forcing
 - [UID Spray](uid-spray.md) -- credential brute-force (identity space, not handle space)
-- [F-2.2 File Handle Guessing](../findings/access-control/F-2.2-file-handle-guessing.md) -- the finding that documents handle brute-force attacks
+- [F-2.2 File Handle Guessing](../security/access-control/F-2.2-file-handle-guessing.md) -- the finding that documents handle brute-force attacks

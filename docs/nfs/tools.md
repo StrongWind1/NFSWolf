@@ -81,7 +81,7 @@ These are NFS protocol implementations used as building blocks by other tools or
 | [NFSKit](https://github.com/alexiscn/NFSKit) | Swift | v3 | Swift wrapper around libnfs for Apple platforms. Thread-safe NFS client API modeled after AMSMB2, installed via Swift Package Manager. |
 | [nfusr](https://github.com/savushkin-r-d/nfusr) | C | v3 | Userspace FUSE client for NFSv3 based on libnfs. Supports direct `nfs://` URI mounting and automount integration. NFSv4 explicitly not supported. |
 | [davecheney/nfs](https://github.com/davecheney/nfs) | Go | v3 | Abandoned Go NFS client library (2017). Author explicitly requests no patches or issues. |
-| [ms-nfs41-client](https://github.com/kofemann/ms-nfs41-client) | C | v4.1, v4.2 | Windows NFSv4.2 filesystem client driver providing native NFS mount support on Windows via Cygwin, including WSL integration, user/group mapping, and Windows Service mode. Reference for [F-2.3 handle signing](../findings/access-control/F-2.3-windows-handle-signing.md). |
+| [ms-nfs41-client](https://github.com/kofemann/ms-nfs41-client) | C | v4.1, v4.2 | Windows NFSv4.2 filesystem client driver providing native NFS mount support on Windows via Cygwin, including WSL integration, user/group mapping, and Windows Service mode. Reference for [F-2.3 handle signing](../security/access-control/F-2.3-windows-handle-signing.md). |
 
 ## Standard utilities
 
@@ -89,9 +89,9 @@ These ship with most Linux/Unix systems and are the baseline for NFS enumeration
 
 | Tool | What It Does | Security Value |
 |------|-------------|----------------|
-| `showmount -e` | Lists exports via MOUNT EXPORT | Export discovery ([F-5.1](../findings/info-disclosure/F-5.1-export-list-enumeration.md)), but no auth flavor info |
+| `showmount -e` | Lists exports via MOUNT EXPORT | Export discovery ([F-5.1](../security/info-disclosure/F-5.1-export-list-enumeration.md)), but no auth flavor info |
 | `showmount -a` | Lists connected clients via MOUNT DUMP | Client enumeration, but list is unreliable (not cleaned on crash/v4) |
-| `rpcinfo -p` | Dumps portmapper service registrations | Service discovery ([F-5.4](../findings/info-disclosure/F-5.4-rpc-service-enumeration.md)) -- reveals NIS, NLM, all NFS versions |
+| `rpcinfo -p` | Dumps portmapper service registrations | Service discovery ([F-5.4](../security/info-disclosure/F-5.4-rpc-service-enumeration.md)) -- reveals NIS, NLM, all NFS versions |
 | `rpcdump` (impacket) | Same as rpcinfo but over MS-RPC | Useful for Windows NFS servers |
 | `mount -t nfs` | Kernel NFS mount | Requires root, uses real kernel client, no credential spoofing |
 
@@ -269,4 +269,4 @@ For practitioners deciding which tool to use for a specific task:
 
 - [Previous Research](research.md) -- the publications and RFCs that document NFS security weaknesses
 - [Capability Comparison (full table)](../reference/comparison.md) -- the exhaustive feature-by-feature comparison matrix
-- [NFS Insecurity Model](insecurity.md) -- how the protocol design creates the attack surface these tools exploit
+- [Why NFS Is Insecure](../security/insecurity.md) -- how the protocol design creates the attack surface these tools exploit

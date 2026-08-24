@@ -1,6 +1,6 @@
 # CLI Reference
 
-Complete reference for every nfswolf command and flag. For narrative walkthroughs, see the individual command pages linked from [Tool Usage](index.md).
+Complete reference for every nfswolf command and flag. For narrative walkthroughs, see the individual subcommand pages in the NFSWolf tab.
 
 Target syntax is consistent across all subcommands: `host:/export`, `host --export /p`, or `host --handle HEX`. IPv6 must be bracketed: `[2001:db8::1]:/export`.
 

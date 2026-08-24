@@ -3,7 +3,7 @@
 Systematic testing of NFS export escape (constructing the filesystem root file handle from an export handle) across 22 Linux filesystem types. All results from live testing on kernel 6.8.0 (Ubuntu 24.04, knfsd) using nfswolf.
 
 !!! info "What is export escape?"
-    When an NFS server exports a subdirectory (e.g., `/srv/nfs/shared`), the client receives a file handle scoped to that directory. Export escape constructs a new file handle pointing to the filesystem root (`/`), breaking out of the export boundary. This works because NFS file handles are bearer tokens: any valid handle works regardless of how it was obtained. See [F-2.1](../findings/access-control/F-2.1-export-escape.md) for the full finding.
+    When an NFS server exports a subdirectory (e.g., `/srv/nfs/shared`), the client receives a file handle scoped to that directory. Export escape constructs a new file handle pointing to the filesystem root (`/`), breaking out of the export boundary. This works because NFS file handles are bearer tokens: any valid handle works regardless of how it was obtained. See [F-2.1](../security/access-control/F-2.1-export-escape.md) for the full finding.
 
 ## Summary table
 

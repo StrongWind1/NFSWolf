@@ -51,9 +51,7 @@ nfswolf escape 10.0.0.1:/export
 
 This site is both a comprehensive NFS security reference and the documentation for the nfswolf tool. Use the tabs above to navigate:
 
-- **NFS** — Background, history, and the fundamental security problems with NFS
-- **Protocols** — Technical deep dives into every protocol in the NFS stack
-- **Findings** — 62 security findings organized by category, protocol, and exploitation stage
-- **Defense** — How to install, configure, and harden NFS on Linux
-- **Usage** — How to use nfswolf, with examples for every subcommand
-- **Reference** — RFC index, kernel source map, tool comparison, and changelog
+- **NFSWolf** — Installation, every subcommand, shell commands, CLI reference, and examples
+- **NFS** — Protocol background, wire-level deep dives (XDR through NFSv4), research, and related tools
+- **Security** — 62 findings organized by category/protocol/stage, the attack chain, and defense/hardening guidance
+- **Reference** — RFC index, kernel source map, escape matrix, tool comparison, glossary, and changelog

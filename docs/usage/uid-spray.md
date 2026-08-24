@@ -108,4 +108,4 @@ UID spray requires NFSv3 because the permission oracle is the NFSv3 ACCESS proce
 - [Escape](escape.md) -- bypass export-level access checks entirely (use before UID spray)
 - [Shell](shell.md) -- interactive session with auto-credential escalation
 - [Brute Handle](brute-handle.md) -- handle-space brute-force (complements UID spray)
-- [F-1.1 UID/GID Spoofing](../findings/identity/F-1.1-uid-gid-spoofing.md) -- the finding that documents AUTH_SYS identity spoofing
+- [F-1.1 UID/GID Spoofing](../security/identity/F-1.1-uid-gid-spoofing.md) -- the finding that documents AUTH_SYS identity spoofing

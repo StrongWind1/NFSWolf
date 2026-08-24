@@ -60,7 +60,7 @@ XDR (RFC 4506) is the serialization format used by every protocol in the stack. 
 XDR is a pure encoding layer: it has no concept of security, authentication, or integrity. It faithfully serializes whatever the caller provides, including forged credentials, crafted file handles, and malformed data. The serialization layer is not where attacks happen, but it is worth understanding because every field in every protocol above is XDR-encoded.
 
 !!! info "nfswolf implementation"
-    The `onc-xdr` crate implements XDR encoding and decoding with the `Pack` and `Unpack` traits. The `onc-xdr-derive` crate provides `#[derive(XdrCodec)]` for automatic code generation from Rust structs. See [ONC XDR](../protocols/xdr.md) for the full protocol reference.
+    The `onc-xdr` crate implements XDR encoding and decoding with the `Pack` and `Unpack` traits. The `onc-xdr-derive` crate provides `#[derive(XdrCodec)]` for automatic code generation from Rust structs. See [ONC XDR](protocols/xdr.md) for the full protocol reference.
 
 **Security properties:** None. XDR is a data format, not a security mechanism.
 
@@ -79,10 +79,10 @@ The RPC layer carries authentication but does not enforce it. The credential and
 !!! warning "AUTH_SYS: the default authentication flavor"
     The dominant credential type is AUTH_SYS (flavor 1), which carries plaintext UID/GID integers with no cryptographic verification. The server trusts whatever the client sends. See [Authentication Model](authentication.md) for the full AUTH_SYS and RPCSEC_GSS breakdown, XDR structures, and attack implications.
 
-**Security properties:** ONC RPC defines authentication slots but provides no built-in security. AUTH_SYS is plaintext and trivially forged; RPCSEC_GSS (RFC 2203) adds Kerberos but is optional and can be downgraded ([F-1.7](../findings/identity/index.md)).
+**Security properties:** ONC RPC defines authentication slots but provides no built-in security. AUTH_SYS is plaintext and trivially forged; RPCSEC_GSS (RFC 2203) adds Kerberos but is optional and can be downgraded ([F-1.7](../security/identity/index.md)).
 
 !!! info "nfswolf implementation"
-    The `onc-rpc-client` crate implements the RPC call/reply framing, `AuthSys` credential construction, and the `RpcTransport` trait that separates wire I/O from protocol logic. See [ONC RPC](../protocols/rpc.md) for the full protocol reference.
+    The `onc-rpc-client` crate implements the RPC call/reply framing, `AuthSys` credential construction, and the `RpcTransport` trait that separates wire I/O from protocol logic. See [ONC RPC](protocols/rpc.md) for the full protocol reference.
 
 ### Layer 3: Portmapper / rpcbind -- service discovery
 
@@ -105,15 +105,15 @@ sequenceDiagram
     N-->>C: file attributes
 ```
 
-Portmapper is itself an RPC service (program 100000) with no authentication. Any host that can reach port 111 can query the full list of registered services, including their program numbers, versions, protocols, and ports. This is finding [F-5.4](../findings/info-disclosure/F-5.4-rpc-service-enumeration.md): the portmapper acts as a free reconnaissance oracle.
+Portmapper is itself an RPC service (program 100000) with no authentication. Any host that can reach port 111 can query the full list of registered services, including their program numbers, versions, protocols, and ports. This is finding [F-5.4](../security/info-disclosure/F-5.4-rpc-service-enumeration.md): the portmapper acts as a free reconnaissance oracle.
 
 !!! danger "Portmapper has no authentication"
-    Any host that can reach port 111 can enumerate all registered RPC services, including over UDP where source IPs can be spoofed. See [Portmapper](../protocols/portmapper.md) for details.
+    Any host that can reach port 111 can enumerate all registered RPC services, including over UDP where source IPs can be spoofed. See [Portmapper](protocols/portmapper.md) for details.
 
 **Security properties:** None. Portmapper is unauthenticated, unencrypted, and reveals the full RPC service map to any querier.
 
 !!! info "nfswolf implementation"
-    The `onc-rpcbind` crate implements both portmapper v2 (`GETPORT`, `DUMP`) and rpcbind v3/v4 (`GETTIME`, `GETSTAT`). The scanner uses portmapper as the first phase of service discovery. See [Portmapper and rpcbind](../protocols/portmapper.md) for the full protocol reference.
+    The `onc-rpcbind` crate implements both portmapper v2 (`GETPORT`, `DUMP`) and rpcbind v3/v4 (`GETTIME`, `GETSTAT`). The scanner uses portmapper as the first phase of service discovery. See [Portmapper and rpcbind](protocols/portmapper.md) for the full protocol reference.
 
 ### Layer 4: MOUNT -- export access
 
@@ -127,14 +127,14 @@ MOUNT runs as a separate daemon (`rpc.mountd`) on a dynamic port, registered wit
 - **UMNT / UMNTALL** -- Bookkeeping for unmounting (advisory only, not enforced)
 
 !!! warning "MOUNT grants bearer tokens"
-    The file handle returned by MNT is a bearer token -- it works for any client, with any credentials, indefinitely ([F-2.1](../findings/access-control/index.md)). See [File Handles](file-handles.md#handles-are-bearer-tokens) for the full bearer-token analysis and [MOUNT protocol](../protocols/mount.md) for the wire-level reference.
+    The file handle returned by MNT is a bearer token -- it works for any client, with any credentials, indefinitely ([F-2.1](../security/access-control/index.md)). See [File Handles](file-handles.md#handles-are-bearer-tokens) for the full bearer-token analysis and [MOUNT protocol](protocols/mount.md) for the wire-level reference.
 
 MOUNT v3 returns an additional piece of information that v1 does not: the list of authentication flavors the export accepts. This is how nfswolf's analyzer determines whether an export requires Kerberos or accepts AUTH_SYS without attempting any file operations.
 
 **Security properties:** MOUNT can enforce IP-based access control on MNT requests, but the resulting handles have no access control of their own. The EXPORT procedure reveals all export paths and ACLs to any querier. MOUNT v1 has no auth-flavor negotiation.
 
 !!! info "nfswolf implementation"
-    The `nfs-mount` crate implements MOUNT v1 and v3. The escape pipeline gathers seed handles from both MOUNT versions. See [MOUNT](../protocols/mount.md) for the full protocol reference.
+    The `nfs-mount` crate implements MOUNT v1 and v3. The escape pipeline gathers seed handles from both MOUNT versions. See [MOUNT](protocols/mount.md) for the full protocol reference.
 
 ### Layer 5: NFS -- file operations
 
@@ -154,7 +154,7 @@ The NFS layer enforces access control based on the AUTH_SYS credentials in the R
 **Security properties:** Access control is enforced here, but depends on [AUTH_SYS credentials](authentication.md) that are trivially forged. [File handles](file-handles.md) are bearer tokens that bypass path-based export boundaries.
 
 !!! info "nfswolf implementation"
-    The `nfs-v2`, `nfs-v3`, and `nfs-v4` crates implement the full wire protocol for each version. See [NFSv2](../protocols/nfsv2.md), [NFSv3](../protocols/nfsv3.md), and [NFSv4](../protocols/nfsv4/index.md) for the full protocol references.
+    The `nfs-v2`, `nfs-v3`, and `nfs-v4` crates implement the full wire protocol for each version. See [NFSv2](protocols/nfsv2.md), [NFSv3](protocols/nfsv3.md), and [NFSv4](protocols/nfsv4/index.md) for the full protocol references.
 
 ## Sideband RPC services
 
@@ -169,7 +169,7 @@ Beyond the core NFS/MOUNT/portmapper stack, several auxiliary RPC services exten
 | NFSSTAT | 100249 | Server statistics | Information disclosure (operation counts, error rates) |
 
 !!! info "nfswolf implementation"
-    nfswolf implements NFS_ACL and RQUOTA clients for POSIX ACL enumeration and UID oracle attacks. NLM and NSM were removed in v0.2.0. See [NFS_ACL](../protocols/nfs-acl.md) and [RQUOTA](../protocols/rquota.md) for details.
+    nfswolf implements NFS_ACL and RQUOTA clients for POSIX ACL enumeration and UID oracle attacks. NLM and NSM were removed in v0.2.0. See [NFS_ACL](protocols/nfs-acl.md) and [RQUOTA](protocols/rquota.md) for details.
 
 ## Protocol-to-RFC mapping
 
@@ -222,7 +222,7 @@ graph LR
 
 NFSv4 replaces MOUNT with `PUTROOTFH` (get the root handle directly), replaces portmapper with a fixed port, replaces EXPORT listing with pseudo-filesystem traversal, and adds in-band security negotiation via `SECINFO`. This reduces the attack surface in some ways (fewer services to probe, no unauthenticated portmapper) but retains the fundamental AUTH_SYS weakness.
 
-For the full NFSv4 protocol reference, see [NFSv4](../protocols/nfsv4/index.md).
+For the full NFSv4 protocol reference, see [NFSv4](protocols/nfsv4/index.md).
 
 ## nfswolf's relationship to the stack
 
@@ -230,4 +230,4 @@ nfswolf implements every layer of the NFS protocol stack in pure Rust, with no C
 
 The implementation is split into 8 workspace crates, one per protocol layer, plus the `nfswolf` binary that wires them together with connection pooling, circuit breaking, stealth pacing, and credential escalation. The crate boundary enforces a strict separation: protocol crates encode and decode wire formats; the binary adds security-testing policy.
 
-For details on how nfswolf uses each protocol layer offensively, see the [Usage](../usage/index.md) tab and the [Findings](../findings/index.md) tab.
+For details on how nfswolf uses each protocol layer offensively, see the [NFSWolf](../index.md) tab and the [Security](../security/index.md) tab.
