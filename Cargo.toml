@@ -287,16 +287,16 @@ variant_size_differences = "warn"
 [workspace.lints.clippy]
 # --- Lint groups (explicit levels) -------------------------------------------
 # Priority -1 so per-lint overrides (default priority 0) take precedence.
-all                = { level = "deny", priority = -2 }
-correctness        = { level = "deny", priority = -1 }
-suspicious         = { level = "deny", priority = -1 }
-complexity         = { level = "deny", priority = -1 }
-perf               = { level = "deny", priority = -1 }
-style              = { level = "deny", priority = -1 }
-pedantic           = { level = "deny", priority = -1 }
-cargo              = { level = "deny", priority = -1 }
-restriction        = { level = "allow", priority = -1 }
-nursery            = { level = "allow", priority = -1 }
+all = { level = "deny", priority = -2 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+restriction = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
 # --- Restriction lints promoted to deny --------------------------------------
 # No dbg!() in committed code.
 dbg_macro = "deny"

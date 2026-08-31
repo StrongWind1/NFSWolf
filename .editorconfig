@@ -12,16 +12,54 @@ indent_size = 4
 indent_style = space
 indent_size = 4
 
+# rustfmt owns indentation for Rust files. editorconfig-checker enforces
+# charset, LF, final newline, and trailing whitespace only.
 [*.rs]
-indent_style = space
-indent_size = 4
+indent_style = unset
+indent_size = unset
 
 [*.{yml,yaml,toml,json}]
 indent_style = space
 indent_size = 2
 
+# Markdown embeds code samples and tables with varying indentation.
+# Trailing whitespace is sometimes meaningful (line breaks).
 [*.md]
 trim_trailing_whitespace = false
+indent_style = unset
+indent_size = unset
 
+[*.css]
+indent_style = space
+indent_size = 2
+
+# Make uses tabs for recipes but spaces for continuation and variable lines.
+# Generic indent checkers can't distinguish the two, so indent is unset.
 [Makefile]
-indent_style = tab
+indent_style = unset
+indent_size = unset
+
+# Vendored license text: never reformatted.
+[LICENSE]
+indent_style = unset
+indent_size = unset
+
+# Pre-commit hook is a shell script with 2-space indent.
+[.githooks/*]
+indent_style = space
+indent_size = 2
+
+# NOTICE files are upstream legal text, not reformatted.
+[NOTICE]
+indent_style = unset
+indent_size = unset
+
+# Compiler diagnostic test fixtures: exact whitespace matters.
+[*.stderr]
+indent_style = unset
+indent_size = unset
+
+# JSONC config files use 2-space indent.
+[*.jsonc]
+indent_style = space
+indent_size = 2

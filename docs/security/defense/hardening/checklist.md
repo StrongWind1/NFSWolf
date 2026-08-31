@@ -153,4 +153,3 @@ nfswolf analyze target --json > audit-$(date +%Y%m%d).json
 ```
 
 A fully hardened deployment (all Critical and High items) should produce zero Critical and zero High findings from `nfswolf analyze`. Medium-tier items reduce the remaining surface further.
-
