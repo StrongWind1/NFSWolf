@@ -50,10 +50,10 @@ Every issue RFC 2623 identified in 1999 is still exploitable on default Linux NF
 | 2018 | hegusung (RPCScan) | Network-wide RPC scanner with NFS export enumeration and recursive directory listing -- first tool to combine network scanning with NFS file access |
 | 2021 | J. Bruce Fields | linux-nfs mailing list thread documenting cross-filesystem escape via symlink replacement of export directory |
 | 2022 | RFC 9289 | RPC-with-TLS specification -- STARTTLS-style upgrade for NFS, addressing plaintext wire protocol (F-3.1) |
-| 2024 | HVS Consulting | "NFS Security: Identifying and Exploiting Misconfigurations": comprehensive blog post, wiki, and tooling (nfs_analyze, fuse_nfs, nfscli) with original research on BTRFS/ZFS escape, shadow group read, and setgid privilege escalation |
+| 2024 | HVS Consulting | "NFS Security: Identifying and Exploiting Misconfigurations": comprehensive blog post, wiki, and tooling (nfs_analyze, fuse_nfs) with original research on BTRFS/ZFS escape, shadow group read, and setgid privilege escalation |
 | 2024 | CVE-2024-46695 | Linux kernel nfsd SELinux label bypass -- server fails to enforce inode security labels on NFS-created files |
 | 2024 | dejisec (niffler) | First NFS-specific credential and secret scanner with rule engine, UID cycling, and web dashboard -- designed as a post-access companion to nfswolf |
-| 2024 | 44Con London | nfscli presented by HVS Consulting at 44Con, the first conference talk focused entirely on NFS export escape techniques and tooling |
+| 2024 | 44Con London | nfscli presented by Claes M Nyberg and John Cartwright (Signedness.org) at 44Con ([video](https://www.youtube.com/watch?v=NuxCUMIH5M8)), covering NFS export escape techniques, source IP spoofing for ACL bypass, and file handle brute-force. Released nfscli and brutefh. Discovered OpenBSD NFS server READDIRPLUS remote kernel crash. |
 
 ## The Stony Brook file handle research
 
@@ -86,7 +86,7 @@ Key original contributions:
 - **Client-side privilege escalation without `no_root_squash`**: documented a progression of attacks using `setgid` binaries: the `disk` group (GID 6) grants raw block device access via `debugfs`, the `docker` group grants container escape to host root, and the `sudo`/`wheel` group grants `sudo` access. Their wiki also documents the `nodev` defense gap -- many administrators set `nosuid` on client mounts but forget `nodev`, leaving the block-device attack path open.
 - **Cross-filesystem escape via symlink replacement**: documented the attack (originally described by J. Bruce Fields on the linux-nfs mailing list) where an attacker with write access to the parent of an exported directory can replace it with a symlink to an arbitrary path. After an NFS service restart, the server follows the symlink, effectively re-exporting any directory the attacker chose. The wiki notes this requires `no_root_squash` or specific parent directory permissions, and that the NFS service restart is the main practical barrier.
 - **RPC-with-TLS setup guide**: provided the first practical deployment guide for RFC 9289 on Linux, including TLS and MTLS configuration with `tlshd`. Critically, their wiki documents that RPC-with-TLS operates below the NFS authentication layer -- NFS requests over TLS still typically use AUTH_SYS, so clients can still spoof UIDs unless certificate-to-user mapping is implemented.
-- **nfs_analyze, fuse_nfs, and nfscli**: three tools covering analysis, mounting, and interactive access respectively. nfs_analyze automates export escape detection and OS fingerprinting. fuse_nfs provides FUSE mount with automatic UID cycling. nfscli provides a full interactive shell with auto-UID, LOOKUP-based `..` traversal for export escape, and file handle harvesting. nfscli was presented at 44Con London in 2024. See [Related Tools](tools.md).
+- **nfs_analyze and fuse_nfs**: two tools covering analysis and mounting respectively. nfs_analyze automates export escape detection and OS fingerprinting. fuse_nfs provides FUSE mount with automatic UID cycling. See [Related Tools](tools.md). Note: nfscli is a separate project by Claes M Nyberg / Signedness.org (not HVS Consulting) -- see the 44Con entry above.
 
 ## Linux kernel documentation
 
