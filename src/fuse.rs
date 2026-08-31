@@ -184,11 +184,14 @@ pub(crate) struct NfsFuseConfig<O: ShellOps> {
     pub allow_write: bool,
     /// Tokio runtime handle (fuser threads are not Tokio tasks).
     pub rt: tokio::runtime::Handle,
+    /// Local FUSE mountpoint path, used to rewrite absolute symlink targets so
+    /// they resolve through the mount rather than the local filesystem.
+    pub mountpoint: String,
 }
 
 impl<O: ShellOps> std::fmt::Debug for NfsFuseConfig<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NfsFuseConfig").field("root_fh", &self.root_fh.to_hex()).field("allow_write", &self.allow_write).finish_non_exhaustive()
+        f.debug_struct("NfsFuseConfig").field("root_fh", &self.root_fh.to_hex()).field("allow_write", &self.allow_write).field("mountpoint", &self.mountpoint).finish_non_exhaustive()
     }
 }
 
@@ -213,6 +216,8 @@ pub(crate) struct NfsFuse<O: ShellOps> {
     readdir_cache: Mutex<HashMap<u64, Vec<ReaddirEntry>>>,
     /// Tokio runtime handle captured at construction.
     rt: tokio::runtime::Handle,
+    /// Local mountpoint path for rewriting absolute symlink targets.
+    mountpoint: String,
 }
 
 impl<O: ShellOps> std::fmt::Debug for NfsFuse<O> {
@@ -237,7 +242,7 @@ impl<O: ShellOps> NfsFuse<O> {
     #[must_use]
     pub(crate) fn new(cfg: NfsFuseConfig<O>) -> Self {
         let state = Mutex::new(InodeMapState::new(&cfg.root_fh));
-        Self { ops: cfg.ops, state, root_fh: cfg.root_fh, allow_write: cfg.allow_write, cred_cache: Mutex::new(HashMap::new()), readdir_cache: Mutex::new(HashMap::new()), rt: cfg.rt }
+        Self { ops: cfg.ops, state, root_fh: cfg.root_fh, allow_write: cfg.allow_write, cred_cache: Mutex::new(HashMap::new()), readdir_cache: Mutex::new(HashMap::new()), rt: cfg.rt, mountpoint: cfg.mountpoint }
     }
 
     /// Convert `ShellFileInfo` to a fuser `FileAttr`.
@@ -613,7 +618,8 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
         }
     }
 
-    /// READLINK -- return the raw symlink target.
+    /// READLINK -- return the symlink target, rewriting absolute paths so they
+    /// resolve through the FUSE mountpoint rather than the local filesystem.
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         let fh = get_fh!(self, ino.0, reply);
 
@@ -623,7 +629,14 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
         }));
 
         match result {
-            Ok(target) => reply.data(target.as_bytes()),
+            Ok(target) => {
+                if target.starts_with('/') {
+                    let rewritten = format!("{}{target}", self.mountpoint.trim_end_matches('/'));
+                    reply.data(rewritten.as_bytes());
+                } else {
+                    reply.data(target.as_bytes());
+                }
+            },
             Err(e) => reply.error(errno_from(&e)),
         }
     }

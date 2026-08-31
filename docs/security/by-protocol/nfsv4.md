@@ -12,10 +12,9 @@ These findings are reduced in severity or eliminated when a server is configured
 |---------|------|----------|-----------------|
 | [F-1.6](../identity/F-1.6-nfsv2-downgrade.md) | NFSv2 Downgrade | High | Eliminated if v2/v3 are disabled. NFSv4 has SECINFO for flavor negotiation, so the "no way to signal krb5 requirement" problem disappears. Only relevant if the server also exposes v2. |
 | [F-3.2](../network/F-3.2-portmapper-amplification.md) | Portmapper Amplification | Medium | NFSv4 does not use the portmapper. It runs on a fixed port (2049). If portmapper is disabled entirely, this finding is eliminated. |
-| [F-3.5](../network/F-3.5-portmapper-tunnel-bypass.md) | Filtered Portmapper Bypass | Medium | No portmapper dependency means no portmapper to bypass. NFSv4 connects directly to 2049. |
+| [F-3.5](../network/F-3.5-pnfs-metadata-server-detected.md) | pNFS Metadata Server Detected | Info | NFSv4.1 EXCHANGE_ID flags reveal pNFS MDS capability. GETDEVICELIST exposes the data-server topology, leaking internal hostnames and IP addresses of backend storage nodes. |
 | [F-5.1](../info-disclosure/F-5.1-export-list-enumeration.md) | Export List Enumeration | Medium | MNTPROC_EXPORT is a MOUNT protocol operation. NFSv4 replaces it with pseudo-FS browsing (F-5.5), which is slightly harder to enumerate but still leaks export names. |
 | [F-5.2](../info-disclosure/F-5.2-readdirplus-handle-harvesting.md) | READDIRPLUS Harvesting | High | NFSv4 READDIR can return file handles via GETFH in a COMPOUND, but this requires an explicit attribute request. The implicit handle return of NFSv3 READDIRPLUS does not exist. Practical impact is minimal, since an attacker simply includes GETFH in the COMPOUND. |
-| [F-3.6](../network/F-3.6-udp-mount-handle-theft.md) | UDP MOUNT Handle Theft | Critical | NFSv4 does not use the MOUNT protocol at all. No mountd listener means no UDP handle theft. Eliminated if v3 is disabled. |
 
 ## Findings that persist in NFSv4
 
@@ -48,6 +47,7 @@ These findings are specific to NFSv4 or are new attack surfaces introduced by th
 | [F-2.12](../access-control/F-2.12-nfsv4-lookupp-cross-export-lateral.md) | LOOKUPP Cross-Export Lateral | High | From any export, LOOKUPP to the pseudo-FS parent and LOOKUP into sibling exports. Bypasses MOUNT-level IP ACLs entirely because NFSv4 does not use MOUNT. The `exports` shell command enumerates reachable siblings. |
 | [F-5.5](../info-disclosure/F-5.5-nfsv4-pseudo-fs-leakage.md) | Pseudo-FS Structure Leakage | Low | The pseudo-filesystem connects all exports under a shared namespace. READDIR from PUTROOTFH reveals the names and structure of all exports, including IP-restricted ones. Replaces F-5.1 (MOUNT EXPORT) with a harder-to-firewall equivalent. |
 | F-5.13 | Named Attributes Exposed | Low | OPENATTR + READDIR on the export root enumerates xattrs: POSIX ACLs, SELinux labels, file capabilities. Reveals the MAC/DAC enforcement posture. |
+| [F-3.6](../network/F-3.6-mixed-secinfo-zones.md) | Mixed Security Zones (Per-Path SECINFO) | Medium | SECINFO on subdirectories may return different auth flavors than the export root. When the root requires krb5 but a subdirectory accepts AUTH_SYS, the attacker bypasses the stronger requirement by directly accessing the subdirectory with weaker credentials. Detected by `analyze`. |
 | [F-3.7](../network/F-3.7-auth-dh-obsolete.md) | AUTH_DH in SECINFO | Medium | NFSv4 SECINFO can advertise AUTH_DH (flavor 3). The 192-bit DH + 56-bit DES is trivially breakable. |
 
 ## Protocol-specific exploitation notes
@@ -62,7 +62,7 @@ SECINFO (RFC 7530 Section 16.29) returns the list of security flavors a director
 
 ### No MOUNT protocol means no MOUNT ACLs
 
-NFSv4 does not use the MOUNT protocol. This eliminates one layer of access control (the MOUNT server's host-based ACL) but also eliminates the MOUNT-specific findings (F-5.1 export enumeration via MNTPROC_EXPORT, F-3.6 UDP handle theft). The trade-off is that NFSv4's pseudo-FS discovery (F-5.5) and LOOKUPP lateral movement (F-2.12) replace these attack surfaces with protocol-native equivalents that cannot be mitigated by firewalling a separate mountd port.
+NFSv4 does not use the MOUNT protocol. This eliminates one layer of access control (the MOUNT server's host-based ACL) but also eliminates the MOUNT-specific findings (F-5.1 export enumeration via MNTPROC_EXPORT, UDP handle theft via mountd). The trade-off is that NFSv4's pseudo-FS discovery (F-5.5) and LOOKUPP lateral movement (F-2.12) replace these attack surfaces with protocol-native equivalents that cannot be mitigated by firewalling a separate mountd port. Meanwhile, NFSv4 introduces its own SECINFO-based weakness: F-3.6 (mixed security zones) exposes per-path auth flavor mismatches within the v4 namespace.
 
 ### Stateful operations and session infrastructure
 

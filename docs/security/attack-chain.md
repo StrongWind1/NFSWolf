@@ -15,7 +15,7 @@ flowchart TD
         F51["F-5.1<br>Export List Enumeration"]
         F55["F-5.5<br>NFSv4 Pseudo-FS Leakage"]
         F32["F-3.2<br>Portmapper Amplification"]
-        F35["F-3.5<br>Portmapper Bypass"]
+        F35["F-3.5<br>pNFS MDS Detected"]
         F515["F-5.15<br>rquotad UID Oracle"]
         F514["F-5.14<br>POSIX ACL Leak"]
     end
@@ -119,7 +119,7 @@ The attacker starts with nothing but network access to the target. Every piece o
 
 **What feeds into the next stage:** Export paths, trusted host IPs, active UIDs, service ports, filesystem block sizes, and the NFS versions the server supports.
 
-**What blocks this stage:** Firewall rules that restrict port 111 and mountd to authorized clients only. But even with port 111 filtered, the attacker can probe port 2049 directly ([F-3.5](network/F-3.5-portmapper-tunnel-bypass.md)).
+**What blocks this stage:** Firewall rules that restrict port 111 and mountd to authorized clients only. But even with port 111 filtered, the attacker can probe port 2049 directly.
 
 ### Stage 2: Identity attacks
 

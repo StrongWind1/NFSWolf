@@ -17,7 +17,7 @@ These findings range from low-severity reconnaissance aids to high-severity harv
 | F-5.7 | Case-Insensitive Filesystem Detection | :material-information-outline:{ .low } Low | RFC 1813 sec 3.3.20 | `analyze` | [Detail](F-5.7-case-insensitive-fs.md) |
 | F-5.8 | Export Root Attributes via AUTH_NONE | :material-information-outline:{ .low } Low | RFC 2623 sec 2.3.2 | `analyze` | [Detail](F-5.8-auth-none-metadata-leak.md) |
 | F-5.9 | Execute-Only File Content Disclosure | :material-information-outline:{ .low } Low | Implementation-specific | `analyze` | [Detail](F-5.9-read-if-exec-content-disclosure.md) |
-| F-5.10 | Solaris NFS Server Detected (time_delta fingerprint) | :material-information-outline:{ .info } Info | RFC 1813 sec 3.3.20 | `analyze` | [Detail](F-5.10-pnfs-layout-security-downgrade.md) |
+| F-5.10 | Solaris NFS Server Detected (time_delta fingerprint) | :material-information-outline:{ .info } Info | RFC 1813 sec 3.3.20 | `analyze` | [Detail](F-5.10-solaris-time-delta-fingerprint.md) |
 | F-5.11 | Filesystem Lacks Link/Symlink Support | :material-information-outline:{ .info } Info | RFC 1813 sec 3.3.20 | `analyze` | [Detail](F-5.11-filesystem-lacks-link-symlink.md) |
 | F-5.12 | Near Inode Exhaustion (DoS Risk) | :material-information:{ .medium } Medium | RFC 1813 sec 3.3.18 | `analyze` | [Detail](F-5.12-near-inode-exhaustion.md) |
 | F-5.13 | NFSv4 Named Attributes Exposed | :material-information-outline:{ .info } Info | RFC 7530 sec 5.3 | `analyze` | [Detail](F-5.13-nfsv4-named-attributes-exposed.md) |

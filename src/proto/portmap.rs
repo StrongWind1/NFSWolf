@@ -5,6 +5,7 @@
 //! (F-3.2) and detects NIS (F-5.3) and NetApp services.
 
 // Toolkit API  --  not all items are used in currently-implemented phases.
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -12,6 +13,10 @@ use anyhow::Context as _;
 use onc_rpc_client::transport::net::Connector as _;
 use onc_rpc_client::transport::tokio::{TokioConnector, TokioIo};
 use onc_rpcbind::{self as portmap, IPPROTO_TCP, PortmapperClient};
+use onc_xdr::{Opaque, Pack, Unpack};
+
+use crate::proto::mount::MountResult;
+use crate::proto::nfs3::types::FileHandle;
 
 /// RPC program numbers relevant to NFS infrastructure.
 /// NFSv2/v3/v4 server (program 100003, RFC 1057 S9).
@@ -157,6 +162,39 @@ impl PortmapClient {
         Ok(list.0.into_iter().filter_map(|m| u16::try_from(m.port).ok().map(|port| PortmapEntry { program: m.prog, version: m.vers, protocol: m.prot, port })).collect())
     }
 
+    /// Relay a MOUNT v3 MNT request through PMAPPROC_CALLIT (RFC 1057 Appendix A, proc 5).
+    ///
+    /// The portmapper forwards the RPC to mountd on localhost, so mountd sees
+    /// the request from 127.0.0.1. On systems where localhost passes the export
+    /// ACL this bypasses IP-based restrictions. Modern rpcbind may restrict
+    /// CALLIT forwarding.
+    pub(crate) async fn callit_mount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        let pmap_addr = SocketAddr::new(addr.ip(), self.port);
+        let io = self.connect_tcp(pmap_addr).await.context("connect to portmapper for CALLIT")?;
+        let mut pm = PortmapperClient::new(io);
+
+        let mut mnt_args = Vec::new();
+        let _ = Opaque::borrowed(export.as_bytes()).pack(&mut mnt_args).context("pack MNT dirpath")?;
+
+        let result = pm.callit(100_005, 3, 1, &mnt_args).await.context("PMAPPROC_CALLIT MOUNT v3 MNT")?;
+        decode_mnt3_response(result.res.as_ref()).with_context(|| format!("decode CALLIT MNT v3 response for {export}"))
+    }
+
+    /// Relay a MOUNT v1 MNT request through PMAPPROC_CALLIT.
+    ///
+    /// Returns a fixed 32-byte NFSv2 handle (RFC 1094 Appendix A).
+    pub(crate) async fn callit_mount_v1(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        let pmap_addr = SocketAddr::new(addr.ip(), self.port);
+        let io = self.connect_tcp(pmap_addr).await.context("connect to portmapper for CALLIT v1")?;
+        let mut pm = PortmapperClient::new(io);
+
+        let mut mnt_args = Vec::new();
+        let _ = Opaque::borrowed(export.as_bytes()).pack(&mut mnt_args).context("pack MNT v1 dirpath")?;
+
+        let result = pm.callit(100_005, 1, 1, &mnt_args).await.context("PMAPPROC_CALLIT MOUNT v1 MNT")?;
+        decode_mnt1_response(result.res.as_ref()).with_context(|| format!("decode CALLIT MNT v1 response for {export}"))
+    }
+
     /// Resolve the port for `program`/`version` via PMAPPROC_GETPORT over UDP.
     pub(crate) async fn query_port_udp(&self, addr: SocketAddr, program: u32, version: u32, probe_timeout: Duration) -> anyhow::Result<u16> {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
@@ -164,4 +202,39 @@ impl PortmapClient {
         let port: u32 = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 3, &query, probe_timeout).await.context("PMAPPROC_GETPORT over UDP")?;
         u16::try_from(port).with_context(|| format!("port {port} out of u16 range"))
     }
+}
+
+// --- CALLIT response decoders ---
+
+/// Decode a MOUNT v3 MNT response from raw XDR bytes (RFC 1813 Appendix I).
+///
+/// Wire layout: u32 status, then if status == 0: opaque<> fhandle + u32 count + count x u32 flavors.
+fn decode_mnt3_response(data: &[u8]) -> anyhow::Result<MountResult> {
+    let mut cur = Cursor::new(data);
+    let (status, _) = u32::unpack(&mut cur).context("read MNT3 status")?;
+    anyhow::ensure!(status == 0, "MNT3 returned status {status}");
+
+    let (fh_opaque, _) = Opaque::<'_>::unpack(&mut cur).context("read MNT3 fhandle")?;
+    let handle = FileHandle::from_bytes(fh_opaque.as_ref());
+
+    let (count, _) = u32::unpack(&mut cur).context("read auth flavor count")?;
+    let mut auth_flavors = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let (f, _) = u32::unpack(&mut cur).context("read auth flavor")?;
+        auth_flavors.push(f);
+    }
+    let parsed = auth_flavors.iter().map(|&f| crate::proto::auth::AuthFlavor::from_u32(f)).collect();
+    Ok(MountResult { handle, auth_flavors, _parsed_flavors: parsed })
+}
+
+/// Decode a MOUNT v1 MNT response from raw XDR bytes (RFC 1094 Appendix A).
+///
+/// Wire layout: u32 status, then if status == 0: 32 bytes of file handle (fixed size).
+fn decode_mnt1_response(data: &[u8]) -> anyhow::Result<MountResult> {
+    let mut cur = Cursor::new(data);
+    let (status, _) = u32::unpack(&mut cur).context("read MNT1 status")?;
+    anyhow::ensure!(status == 0, "MNT1 returned status {status}");
+    let fh_bytes = data.get(4..36).context("MNT1 response too short for 32-byte handle")?;
+    let handle = FileHandle::from_bytes(fh_bytes);
+    Ok(MountResult { handle, auth_flavors: vec![1], _parsed_flavors: vec![crate::proto::auth::AuthFlavor::Sys] })
 }

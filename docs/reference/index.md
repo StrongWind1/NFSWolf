@@ -10,7 +10,6 @@ Technical reference material for nfswolf: protocol specifications, kernel intern
 | [Kernel Source Map](kernel.md) | Function-level walkthrough of the Linux 7.1.8 knfsd server, with every security-relevant code path mapped to nfswolf findings |
 | [Filesystem Escape Matrix](escape-matrix.md) | Per-filesystem escape support across 19 Linux filesystem types: which file handle layouts nfswolf can construct and which resist escape |
 | [Spec Completeness](spec-completeness.md) | Protocol coverage tracking -- which RFC procedures and fields are implemented in each of the 8 workspace crates |
-| [Comparison](comparison.md) | Feature comparison against other NFS security tools (showmount, nfs-ls, NFSpy, etc.) |
 | [Changelog](changelog.md) | Release history and migration notes from v0.1.0 through the current release |
 
 ## How to use this section
@@ -21,8 +20,6 @@ The reference pages are lookup tables, not tutorials. They exist so you can quic
 - "Does the ext4 escape work on 64-bit inodes?" -- check the [Escape Matrix](escape-matrix.md)
 - "What kernel function enforces `sec=krb5`?" -- check the [Kernel Source Map](kernel.md)
 - "Does nfswolf implement NFSv4 SECINFO?" -- check [Spec Completeness](spec-completeness.md)
-- "How does nfswolf compare to NFSpy for UID spoofing?" -- check the [Comparison](comparison.md)
-
 For guided explanations of protocols and attacks, see the [NFS](../nfs/index.md) and [Security](../security/index.md) tabs instead. For practical usage instructions, see the [NFSWolf](../index.md) tab.
 
 ## Local copies

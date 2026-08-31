@@ -58,7 +58,7 @@ port = 2049
 ```
 
 !!! tip "Disable UDP for NFSv3"
-    UDP NFS is susceptible to source-address spoofing and request amplification ([F-3.6](../../network/F-3.6-udp-mount-handle-theft.md)). If your clients support TCP, disable UDP by setting `udp = n` under `[nfsd]` in `/etc/nfs.conf`.
+    UDP NFS is susceptible to source-address spoofing and request amplification. If your clients support TCP, disable UDP by setting `udp = n` under `[nfsd]` in `/etc/nfs.conf`.
 
 ### Maximum block size
 

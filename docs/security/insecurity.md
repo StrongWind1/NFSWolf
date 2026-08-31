@@ -90,7 +90,7 @@ All NFS traffic (credentials, file handles, file contents, directory listings) t
 !!! warning "RFC 1813 Section 8"
     "As with the previous protocol revision (version 2), NFS version 3 defers to the authentication provisions of the supporting RPC protocol [RFC1057], and assumes that data privacy and integrity are provided by underlying transport layers as available in each implementation of the protocol."
 
-NFS-over-TLS (RFC 9289) exists but is opt-in and STRIPTLS-vulnerable ([F-3.4](network/F-3.4-striptls-downgrade.md)). Even with TLS, AUTH_SYS still allows UID/GID forging ([F-3.8](network/F-3.8-rpc-with-tls.md)). The plaintext default enables credential theft, handle theft, data exfiltration, and UDP MOUNT handle spoofing; see [F-3.1](network/F-3.1-plaintext-wire-protocol.md) and [F-3.6](network/F-3.6-udp-mount-handle-theft.md).
+NFS-over-TLS (RFC 9289) exists but is opt-in and STRIPTLS-vulnerable ([F-3.4](network/F-3.4-striptls-downgrade.md)). Even with TLS, AUTH_SYS still allows UID/GID forging ([F-3.8](network/F-3.8-rpc-with-tls.md)). The plaintext default enables credential theft, handle theft, data exfiltration, and UDP MOUNT handle spoofing; see [F-3.1](network/F-3.1-plaintext-wire-protocol.md).
 
 ## 6. Cross-Protocol Information Leaks
 

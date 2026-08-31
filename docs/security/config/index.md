@@ -12,7 +12,7 @@ Server misconfiguration findings. These are not protocol vulnerabilities; the NF
 | F-7.4 | Missing `nosuid`/`nodev` on Client Mount | :material-alert:{ .high } High | RFC 1094 sec 2.3.5 | Not detectable | [Detail](F-7.4-missing-nosuid-nodev.md) |
 | F-7.5 | `all_squash` with `anonuid=0` | :material-alert-circle:{ .critical } Critical | RFC 1813 sec 4.4 | `analyze` | [Detail](F-7.5-squash-misconfiguration.md) |
 | F-7.6 | Absence of Audit Logging | :material-information:{ .medium } Medium | Implementation-specific | Not detectable | [Detail](F-7.6-no-audit-logging.md) |
-| F-7.7 | FreeBSD-Style Truncated Subnet in Export ACL | :material-information-outline:{ .info } Info | Implementation-specific | `analyze` | [Detail](F-7.7-xprtsec-permissive-default.md) |
+| F-7.7 | FreeBSD-Style Truncated Subnet in Export ACL | :material-information-outline:{ .info } Info | Implementation-specific | `analyze` | [Detail](F-7.7-freebsd-truncated-subnet.md) |
 
 ## Findings
 

@@ -209,7 +209,7 @@ This disconnect manifests in several concrete ways:
 
 MOUNT's access control for MNT is based on the client's source IP address, matched against the export's allowed-hosts list. This has two weaknesses:
 
-- **IP spoofing.** On L2-adjacent networks, source IP can be spoofed. MOUNT's UDP listener is particularly vulnerable because UDP has no handshake ([F-3.6](../../security/network/F-3.6-udp-mount-handle-theft.md)). TCP-based spoofing is harder but not impossible in certain network positions.
+- **IP spoofing.** On L2-adjacent networks, source IP can be spoofed. MOUNT's UDP listener is particularly vulnerable because UDP has no handshake. TCP-based spoofing is harder but not impossible in certain network positions.
 - **IP is not identity.** On shared infrastructure, multiple users or containers share an IP. The export ACL cannot distinguish between them. Any process on an allowed IP can mount any export that IP is authorized for.
 
 The export ACL is enforced only at MNT time. The handle returned by MNT carries no record of which IP obtained it and works from any address.

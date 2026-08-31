@@ -18,7 +18,7 @@ NFS reconnaissance is uniquely productive because the protocol's sideband servic
 | [F-5.7](../info-disclosure/F-5.7-case-insensitive-fs.md) | PATHCONF Filesystem Fingerprint | Low | `analyze` | Case sensitivity, chown restriction, symlink/link support (PATHCONF) |
 | [F-5.8](../info-disclosure/F-5.8-auth-none-metadata-leak.md) | Export Root Attributes Leaked via AUTH_NONE | Low | `analyze` | Export root uid, gid, mode, size, and timestamps leaked to unauthenticated clients |
 | [F-5.9](../info-disclosure/F-5.9-read-if-exec-content-disclosure.md) | Execute-Only File Content Disclosure | Low | `analyze` | Files with mode 0111 (execute-only) are readable via the READ_IF_EXEC fallback |
-| [F-5.10](../info-disclosure/F-5.10-pnfs-layout-security-downgrade.md) | pNFS Flex-File Layout Security Downgrade | Medium | `analyze` | pNFS flex-file layout downgrades data path from NFSv4.1 to NFSv3 AUTH_SYS |
+| [F-5.10](../info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Solaris NFS Server Detected (time_delta) | Info | `analyze` | FSINFO time_delta of {0, 1000} ns fingerprints Solaris NFS servers |
 | [F-5.5](../info-disclosure/F-5.5-nfsv4-pseudo-fs-leakage.md) | NFSv4 Pseudo-Filesystem Structure Leakage | Low | `scan` | Export directory structure visible via PUTROOTFH + READDIR without MOUNT |
 | [F-5.3](../info-disclosure/F-5.3-nis-credential-extraction.md) | NIS Domain Detection | High | `scan`, `analyze` | NIS programs (100004/100007) in portmapper indicate credential stores |
 | [F-5.6](../info-disclosure/F-5.6-metadata-on-access-denial.md) | Metadata Disclosed on Access Denial | Low | `analyze` | uid, gid, mode, and size leaked in post_op_attr on NFS3ERR_ACCES/PERM responses |
@@ -68,7 +68,7 @@ None of these services require authentication. None log the queries in a way tha
 
 ## Detection and countermeasures
 
-Filtering port 111 (portmapper) reduces the attack surface but does not eliminate reconnaissance. The scanner falls back to direct port 2049 probing (F-3.5) and NFSv4 pseudo-FS enumeration when the portmapper is filtered. Disabling rquotad and NFS_ACL removes two UID oracle channels but does not affect the core export enumeration through MOUNT EXPORT.
+Filtering port 111 (portmapper) reduces the attack surface but does not eliminate reconnaissance. The scanner falls back to direct port 2049 probing and NFSv4 pseudo-FS enumeration when the portmapper is filtered. Disabling rquotad and NFS_ACL removes two UID oracle channels but does not affect the core export enumeration through MOUNT EXPORT.
 
 The only configuration that blocks all reconnaissance is restricting mountd and nfsd to authenticated access (`sec=krb5` without AUTH_SYS) combined with firewall rules that limit portmapper access to authorized clients. Even then, the portmapper's DUMP response leaks the existence and version of NFS services to any host that can reach port 111 over UDP.
 

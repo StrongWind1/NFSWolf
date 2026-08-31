@@ -592,6 +592,19 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                                 os_guess = Some(format!("{os:?}/{fs:?}"));
                             }
                             drop(timeout(probe_timeout, mount_client.unmount(portmap_addr, &entry.path)).await);
+                        } else {
+                            // Both direct MNT v3 and v1 failed -- try CALLIT relay through portmapper.
+                            job.stealth.wait().await;
+                            if let Ok(Ok(mr)) = timeout(probe_timeout, mount_client.mount_via_callit(portmap_addr, &entry.path)).await {
+                                tracing::info!(export = %entry.path, "CALLIT relay succeeded -- mountd saw request from 127.0.0.1");
+                                entry.auth_flavors = mr.auth_flavors;
+                                entry.handle_hex = mr.handle.to_hex();
+                                if os_guess.is_none() && !mr.handle.as_bytes().is_empty() {
+                                    let os = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_os(&mr.handle);
+                                    let fs = crate::engine::file_handle::FileHandleAnalyzer::fingerprint_fs(&mr.handle);
+                                    os_guess = Some(format!("{os:?}/{fs:?}"));
+                                }
+                            }
                         }
                     }
                 }

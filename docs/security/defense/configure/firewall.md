@@ -125,7 +125,7 @@ With ports pinned, the firewall configuration is straightforward. Allow the fixe
     ```
 
 !!! tip "Disable UDP"
-    The examples above only allow TCP. UDP NFS is susceptible to source-address spoofing and amplification attacks ([F-3.2](../../network/F-3.2-portmapper-amplification.md), [F-3.6](../../network/F-3.6-udp-mount-handle-theft.md)). Disable UDP in `/etc/nfs.conf` with `udp = n` under `[nfsd]` and omit UDP `dport` rules entirely.
+    The examples above only allow TCP. UDP NFS is susceptible to source-address spoofing and amplification attacks ([F-3.2](../../network/F-3.2-portmapper-amplification.md)). Disable UDP in `/etc/nfs.conf` with `udp = n` under `[nfsd]` and omit UDP `dport` rules entirely.
 
 ## NFSv4-only simplification
 

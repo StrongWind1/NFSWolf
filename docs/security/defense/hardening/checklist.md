@@ -92,7 +92,7 @@ Fixed ports enable precise firewall rules instead of relying on portmapper. See 
 
 Eliminates the MOUNT protocol, portmapper, and auxiliary RPC services entirely. See [F-1.6](../../identity/F-1.6-nfsv2-downgrade.md) for the version downgrade attack this prevents.
 
-**Mitigates:** [F-1.6](../../identity/F-1.6-nfsv2-downgrade.md), [F-5.1](../../info-disclosure/F-5.1-export-list-enumeration.md), [F-3.6](../../network/F-3.6-udp-mount-handle-theft.md)
+**Mitigates:** [F-1.6](../../identity/F-1.6-nfsv2-downgrade.md), [F-5.1](../../info-disclosure/F-5.1-export-list-enumeration.md)
 
 ---
 
@@ -116,7 +116,7 @@ Blocks [export escape](../../access-control/F-2.1-export-escape.md) by rejecting
 
 Prevents [RPC service enumeration](../../info-disclosure/F-5.4-rpc-service-enumeration.md) and [amplification attacks](../../network/F-3.2-portmapper-amplification.md) from untrusted networks.
 
-**Mitigates:** [F-5.4](../../info-disclosure/F-5.4-rpc-service-enumeration.md), [F-3.2](../../network/F-3.2-portmapper-amplification.md), [F-3.5](../../network/F-3.5-portmapper-tunnel-bypass.md)
+**Mitigates:** [F-5.4](../../info-disclosure/F-5.4-rpc-service-enumeration.md), [F-3.2](../../network/F-3.2-portmapper-amplification.md)
 
 ### 3.3 Monitor MOUNT DUMP output for unauthorized clients
 
@@ -133,7 +133,7 @@ Surfaces unauthorized mounts via the [MOUNT DUMP list](../../info-disclosure/F-5
 
 Encrypts data in transit without Kerberos infrastructure. Mutual TLS (`mtls`) also provides client certificate authentication. See [NFS over TLS](tls.md) for setup details.
 
-**Mitigates:** [F-3.1](../../network/F-3.1-plaintext-wire-protocol.md), [F-3.4](../../network/F-3.4-striptls-downgrade.md), [F-7.7](../../config/F-7.7-xprtsec-permissive-default.md)
+**Mitigates:** [F-3.1](../../network/F-3.1-plaintext-wire-protocol.md), [F-3.4](../../network/F-3.4-striptls-downgrade.md)
 
 !!! note "Limited availability"
     Requires Linux kernel 6.x+ on both server and client, plus the `tlshd` daemon. Most enterprise distributions now ship a compatible kernel, but the feature is still early-adoption.

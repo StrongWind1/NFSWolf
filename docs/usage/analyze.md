@@ -79,7 +79,7 @@ The analyzer runs every check unconditionally. There are no opt-in flags for ind
 | Server Configuration Issues | F-4.1 through F-4.6 | `no_root_squash` exploitation, SUID/SGID binary creation, device node creation via MKNOD, symlink escape, SELinux/MAC label bypass, unrestricted chown |
 | Information Disclosure | F-5.1 through F-5.17 | Export list enumeration, READDIRPLUS handle harvesting, NIS credential extraction, RPC service enumeration, NFSv4 pseudo-FS leakage, metadata on access denial, filesystem fingerprinting, AUTH_NONE attribute leak, execute-only file disclosure, pNFS layout downgrade, POSIX ACL exposure, rquotad UID oracle |
 | Denial of Service | F-6.x | Out of scope (NLM lock attacks, grace-period blocking, SETCLIENTID state destruction) |
-| Privilege Escalation | F-7.1 through F-7.7 | Wildcard exports, insecure port bypass, nohide/crossmnt exposure, missing nosuid/nodev, all_squash misconfiguration, audit logging gaps, xprtsec permissive default |
+| Privilege Escalation | F-7.1 through F-7.7 | Wildcard exports, insecure port bypass, nohide/crossmnt exposure, missing nosuid/nodev, all_squash misconfiguration, audit logging gaps, FreeBSD truncated subnet fingerprint |
 
 ### Severity levels
 

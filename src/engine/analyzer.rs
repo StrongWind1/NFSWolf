@@ -131,6 +131,18 @@ pub(crate) struct Nfs4Ace {
     pub who: String,
 }
 
+/// Convert a wire-level `NfsAce4` into the display-oriented `Nfs4Ace`.
+fn nfs4_ace_from_wire(ace: &nfs_v4::wire::NfsAce4) -> Nfs4Ace {
+    let ace_type = match ace.ace_type {
+        0 => "ALLOW".to_owned(),
+        1 => "DENY".to_owned(),
+        2 => "AUDIT".to_owned(),
+        3 => "ALARM".to_owned(),
+        other => format!("UNKNOWN({other})"),
+    };
+    Nfs4Ace { ace_type, flags: ace.flag, access_mask: ace.access_mask, who: ace.who.clone() }
+}
+
 /// Squash configuration detected via write-and-check probing.
 ///
 /// Creates a test file and inspects the resulting ownership to infer
@@ -462,15 +474,9 @@ impl Analyzer {
         let squash_anon_uid = check_squash_config(&export_nfs3, &fh, &entry.path, findings).await;
         check_no_root_squash(&export_nfs3, &fh, &entry.path, squash_anon_uid, findings).await;
 
-        // `insecure` export option (F-7.2): intentionally NOT emitted. A sound test
-        // must issue the port-gated MNT operation from a deliberately UNPRIVILEGED
-        // source port (>=1024) and flag only when the server accepts it. The prior
-        // check called MNTPROC_EXPORT (which Linux rpc.mountd does not gate on source
-        // port) and -- when running as root -- the mount client binds a PRIVILEGED
-        // source port anyway, so it tested neither the right operation nor the right
-        // port and fired on essentially every reachable server. Forcing an
-        // unprivileged source port for a control MNT needs connection plumbing not
-        // exposed by NfsMountClient here, so the unsound emission is disabled.
+        // `insecure` export option (F-7.2): probe by issuing MNT from an unprivileged
+        // source port (>= 1024). If the server accepts, the `insecure` option is active.
+        check_insecure_port(&self.mount, addr, &entry.path, findings, self.proxy.as_deref()).await;
 
         // Missing nosuid/nodev (F-7.4): intentionally NOT emitted. nosuid/nodev are
         // CLIENT-side mount options enforced by the mounting kernel, not server
@@ -604,6 +610,24 @@ impl Analyzer {
         let fh = FileHandle::from_bytes(&v4_fh_bytes);
         ea.file_handle = fh.to_hex();
         tracing::info!(export = %entry.path, fh_len = v4_fh_bytes.len(), "NFSv4 fallback: acquired handle via LOOKUP");
+
+        // Attempt to fetch NFSv4 ACLs (FATTR4_ACL, attr 12) for the export root.
+        {
+            use crate::proto::nfs4::types::AttrRequest;
+            let acl_ops = vec![ArgOp::Putfh(v4_fh_bytes.clone()), ArgOp::Getattr(AttrRequest::acl_only())];
+            if let Ok(acl_res) = client.compound(acl_ops).await
+                && acl_res.status == 0
+            {
+                for op in &acl_res.results {
+                    if let ResOpData::Getattr(decoded) = &op.data
+                        && let Some(ref wire_acl) = decoded.acl
+                    {
+                        ea.nfs4_acls = wire_acl.iter().map(nfs4_ace_from_wire).collect();
+                        tracing::info!(export = %entry.path, ace_count = ea.nfs4_acls.len(), "NFSv4 ACL decoded");
+                    }
+                }
+            }
+        }
 
         // Checks that work with raw handles (no v3 client needed).
         run_handle_checks(addr, nfs_port, &fh, &entry.path, findings, self.proxy.as_deref(), &self.stealth).await;
@@ -786,6 +810,37 @@ fn check_export_acls(exports: &[ExportEntry], findings: &mut Vec<Finding>) {
                 Severity::Info,
             ));
         }
+    }
+}
+
+/// Detect the `insecure` export option by attempting MNT from an unprivileged port (F-7.2).
+///
+/// Linux rpc.mountd enforces `secure` by default, rejecting MOUNT requests from
+/// source ports >= 1024. When the `insecure` option is set in `/etc/exports`, the
+/// server accepts connections from any port, enabling unprivileged processes to
+/// mount the export without root or `CAP_NET_BIND_SERVICE`.
+async fn check_insecure_port(mount: &NfsMountClient, addr: SocketAddr, export_path: &str, findings: &mut Vec<Finding>, proxy: Option<&str>) {
+    // Cannot control the source port through a SOCKS5 proxy.
+    if proxy.is_some() {
+        return;
+    }
+    match mount.mount_unprivileged(addr, export_path).await {
+        Ok(_) => {
+            findings.push(make_finding(
+                &FindingSpec {
+                    id: "F-7.2",
+                    title: "Export accepts connections from unprivileged ports (insecure)",
+                    desc: &format!("Export {export_path} accepted a MOUNT MNT request from source port 1024 (unprivileged). The `insecure` export option is active, allowing any user-space process to mount the export without root privileges."),
+                    evidence: "unprivileged_port_accepted=true, source_port=1024",
+                    remediation: "Remove the `insecure` option from /etc/exports. The default `secure` restricts MOUNT to privileged source ports (< 1024), requiring root or CAP_NET_BIND_SERVICE.",
+                    export: Some(export_path),
+                },
+                Severity::Medium,
+            ));
+        },
+        Err(e) => {
+            tracing::debug!(%addr, %export_path, %e, "insecure port probe rejected (secure mode enforced)");
+        },
     }
 }
 
@@ -2720,7 +2775,35 @@ async fn check_rquota(addr: SocketAddr, export_path: &str, findings: &mut Vec<Fi
         }
     }
 
-    if active.is_empty() && block_size.is_none() {
+    // --- RQUOTA v2 GID probing ---
+    let mut active_gids: Vec<String> = Vec::new();
+    let v2_available = {
+        let pmap_addr = SocketAddr::new(addr.ip(), 111);
+        if let Ok(stream) = tokio::net::TcpStream::connect(pmap_addr).await {
+            let io = onc_rpc_client::transport::tokio::TokioIo::new(stream);
+            let mut pm = onc_rpcbind::PortmapperClient::new(io);
+            matches!(pm.getport(100_011, 2, onc_rpcbind::IPPROTO_TCP).await, Ok(port) if port > 0)
+        } else {
+            false
+        }
+    };
+
+    if v2_available {
+        let gid_candidates: &[u32] = &[0, 100, 1000, 65534];
+        for &gid in gid_candidates {
+            let Ok(result) = tokio::time::timeout(std::time::Duration::from_secs(3), crate::proto::rquota::getquota_v2(rquota_addr, export_path, gid, 1, proxy, stealth)).await else {
+                continue;
+            };
+            let Ok(result) = result else { continue };
+            if let Some(ref quota) = result.quota
+                && (quota.curblocks > 0 || quota.curfiles > 0)
+            {
+                active_gids.push(format!("gid={gid} blocks={} files={}", quota.curblocks, quota.curfiles));
+            }
+        }
+    }
+
+    if active.is_empty() && active_gids.is_empty() && block_size.is_none() {
         return;
     }
 
@@ -2731,14 +2814,25 @@ async fn check_rquota(addr: SocketAddr, export_path: &str, findings: &mut Vec<Fi
     if !active.is_empty() {
         evidence_parts.push(format!("active_uids: {}", active.join(", ")));
     }
+    if !active_gids.is_empty() {
+        evidence_parts.push(format!("active_gids: {}", active_gids.join(", ")));
+    }
+
+    let desc = if active_gids.is_empty() {
+        "The rquotad service (program 100011) returned quota data for probed UIDs. \
+         GETQUOTA reveals which UIDs have disk activity (file/block counts), enabling \
+         targeted credential selection. The block size field fingerprints the filesystem."
+    } else {
+        "The rquotad service (program 100011) returned quota data for probed UIDs and GIDs. \
+         GETQUOTA v1 reveals UID activity; v2 extends this to group quotas, enabling targeted \
+         GID injection (F-1.3). The block size field fingerprints the filesystem."
+    };
 
     findings.push(make_finding(
         &FindingSpec {
             id: "F-5.15",
-            title: "rquotad exposes UID activity via quota queries",
-            desc: "The rquotad service (program 100011) returned quota data for probed UIDs. \
-                   GETQUOTA reveals which UIDs have disk activity (file/block counts), enabling \
-                   targeted credential selection. The block size field fingerprints the filesystem.",
+            title: "rquotad exposes UID/GID activity via quota queries",
+            desc,
             evidence: &evidence_parts.join("; "),
             remediation: "Restrict rquotad access via host-based ACLs or firewall rules. \
                           Consider disabling rquotad if remote quota queries are not needed.",

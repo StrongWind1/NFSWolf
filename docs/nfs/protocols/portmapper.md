@@ -131,7 +131,7 @@ A return value of 0 means the program is not registered. nfswolf uses this to de
 !!! warning "CALLIT attack surface"
     **Amplification**: A small CALLIT request can trigger a large response from the target program, amplified through the portmapper. Combined with UDP source-address spoofing, this enables DDoS reflection attacks with factors of 7x-28x ([F-3.2](../../security/network/F-3.2-portmapper-amplification.md)).
 
-    **Firewall bypass**: CALLIT can reach programs on non-standard ports that are not directly accessible to the attacker. The portmapper forwards the call to `localhost`, bypassing firewall rules that only block external access to the target port ([F-3.5](../../security/network/F-3.5-portmapper-tunnel-bypass.md)).
+    **Firewall bypass**: CALLIT can reach programs on non-standard ports that are not directly accessible to the attacker. The portmapper forwards the call to `localhost`, bypassing firewall rules that only block external access to the target port.
 
 Modern rpcbind implementations restrict CALLIT to prevent these attacks, but legacy systems and misconfigured firewalls still expose it.
 
@@ -197,7 +197,7 @@ A single DUMP call reveals every RPC service on the host, including services the
 
 ### CALLIT is a proxy and amplifier
 
-CALLIT enables two distinct attacks: DDoS amplification via UDP source spoofing ([F-3.2](../../security/network/F-3.2-portmapper-amplification.md)), and firewall bypass by proxying calls through localhost ([F-3.5](../../security/network/F-3.5-portmapper-tunnel-bypass.md)).
+CALLIT enables two distinct attacks: DDoS amplification via UDP source spoofing ([F-3.2](../../security/network/F-3.2-portmapper-amplification.md)), and firewall bypass by proxying calls through localhost.
 
 ### GETTIME undermines AUTH_DH
 
@@ -236,6 +236,5 @@ Both clients are generic over `RpcTransport` and accept AUTH_NONE, matching the 
 !!! info "Related findings"
     - [F-5.4: RPC Service Enumeration](../../security/info-disclosure/F-5.4-rpc-service-enumeration.md) -- DUMP leaks the full service map
     - [F-3.2: Portmapper UDP Amplification](../../security/network/F-3.2-portmapper-amplification.md) -- CALLIT/DUMP for DDoS reflection
-    - [F-3.5: Portmapper Tunnel Bypass](../../security/network/F-3.5-portmapper-tunnel-bypass.md) -- CALLIT as a firewall bypass proxy
     - [F-3.7: AUTH_DH Obsolete](../../security/network/F-3.7-auth-dh-obsolete.md) -- GETTIME enables clock-based attacks
     - [F-5.3: NIS Credential Extraction](../../security/info-disclosure/F-5.3-nis-credential-extraction.md) -- DUMP reveals NIS presence

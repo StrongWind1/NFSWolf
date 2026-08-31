@@ -59,7 +59,7 @@ The 62 findings trace back to four fundamental design properties of NFS:
 | [Privilege Escalation](privesc/index.md) | F-4.1 -- F-4.6 | 6 | 1 Critical, 4 High, 1 Medium | Post-access escalation: no_root_squash, SUID/SGID creation, device nodes, symlink escape, chown abuse |
 | [Information Disclosure](info-disclosure/index.md) | F-5.1 -- F-5.17 | 17 | 2 High, 6 Medium, 6 Low, 3 Info | Data leakage: export enumeration, handle harvesting, NIS extraction, metadata on denial, pNFS downgrade |
 | [Denial of Service](dos/index.md) | F-6.1 -- F-6.3 | 3 | 3 Medium | Lock and state attacks (out of scope -- documented only) |
-| [Configuration Weaknesses](config/index.md) | F-7.1 -- F-7.7 | 7 | 1 Critical, 2 High, 4 Medium | Server misconfigurations: wildcard exports, missing nosuid/nodev, squash errors, TLS coexistence |
+| [Configuration Weaknesses](config/index.md) | F-7.1 -- F-7.7 | 7 | 1 Critical, 2 High, 3 Medium, 1 Info | Server misconfigurations: wildcard exports, missing nosuid/nodev, squash errors, FreeBSD subnet fingerprint |
 
 ---
 
@@ -69,9 +69,9 @@ The 62 findings trace back to four fundamental design properties of NFS:
 |----------|------:|------------|
 | :material-alert-circle:{ .critical } **Critical** | 10 | 16% |
 | :material-alert:{ .high } **High** | 21 | 34% |
-| :material-alert-outline:{ .medium } **Medium** | 19 | 31% |
+| :material-alert-outline:{ .medium } **Medium** | 18 | 29% |
 | :material-information-outline:{ .low } **Low** | 7 | 11% |
-| :material-information:{ .info } **Info** | 5 | 8% |
+| :material-information:{ .info } **Info** | 6 | 10% |
 
 !!! danger "Half of all findings are Critical or High"
 
@@ -149,8 +149,8 @@ Every finding in the catalog, sorted by ID. The **Detected By** column lists the
 | F-3.2 | [Portmapper UDP Amplification](network/F-3.2-portmapper-amplification.md) | Medium | Network | `scan` (UDP DUMP amplification) |
 | F-3.3 | [IP Spoofing Against Host ACLs](network/F-3.3-ip-spoofing-host-trust.md) | High | Network | `analyze` (host-based ACL detection) |
 | F-3.4 | [STRIPTLS Downgrade](network/F-3.4-striptls-downgrade.md) | High | Network | `analyze` (AUTH_TLS probe) |
-| F-3.5 | [Portmapper Tunnel Bypass](network/F-3.5-portmapper-tunnel-bypass.md) | Medium | Network | `scan` (direct 2049 probe) |
-| F-3.6 | [UDP MOUNT Handle Theft](network/F-3.6-udp-mount-handle-theft.md) | Critical | Network | `scan --scan-udp` |
+| F-3.5 | [pNFS Metadata Server Detected](network/F-3.5-pnfs-metadata-server-detected.md) | Info | Network | `analyze` (NFSv4.1 EXCHANGE_ID) |
+| F-3.6 | [Mixed Security Zones (Per-Path SECINFO)](network/F-3.6-mixed-secinfo-zones.md) | Medium | Network | `analyze` (NFSv4 SECINFO) |
 | F-3.7 | [AUTH_DH Advertised](network/F-3.7-auth-dh-obsolete.md) | Medium | Network | `analyze` (flavor 3 detection) |
 | F-3.8 | [RPC-with-TLS Supported](network/F-3.8-rpc-with-tls.md) | Info | Network | `analyze` (AUTH_TLS NULL probe) |
 | F-3.9 | [AUTH_SHORT Session Credentials](network/F-3.9-auth-short-session-credentials.md) | Info | Network | `analyze` (flavor 2 detection) |
@@ -169,7 +169,7 @@ Every finding in the catalog, sorted by ID. The **Detected By** column lists the
 | F-5.7 | [Case-Insensitive Filesystem](info-disclosure/F-5.7-case-insensitive-fs.md) | Low | Info Disclosure | `analyze` (PATHCONF) |
 | F-5.8 | [AUTH_NONE Metadata Leak](info-disclosure/F-5.8-auth-none-metadata-leak.md) | Low | Info Disclosure | `analyze` (AUTH_NONE GETATTR) |
 | F-5.9 | [Execute-Only File Content Disclosure](info-disclosure/F-5.9-read-if-exec-content-disclosure.md) | Low | Info Disclosure | `analyze` (read-if-exec check) |
-| F-5.10 | [pNFS Layout Security Downgrade](info-disclosure/F-5.10-pnfs-layout-security-downgrade.md) | Medium | Info Disclosure | Not implemented (documented) |
+| F-5.10 | [Solaris NFS Server Detected (time_delta)](info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Info | Info Disclosure | `analyze` (FSINFO) |
 | F-5.11 | [Filesystem Lacks Link/Symlink Support](info-disclosure/F-5.11-filesystem-lacks-link-symlink.md) | Info | Info Disclosure | `analyze` (FSINFO) |
 | F-5.12 | [Near Inode Exhaustion](info-disclosure/F-5.12-near-inode-exhaustion.md) | Medium | Info Disclosure | `analyze` (FSSTAT) |
 | F-5.13 | [NFSv4 Named Attributes Exposed](info-disclosure/F-5.13-nfsv4-named-attributes-exposed.md) | Info | Info Disclosure | `analyze` (OPENATTR) |
@@ -186,4 +186,4 @@ Every finding in the catalog, sorted by ID. The **Detected By** column lists the
 | F-7.4 | [Missing nosuid/nodev](config/F-7.4-missing-nosuid-nodev.md) | High | Configuration | Not server-observable (client-side) |
 | F-7.5 | [all_squash with anonuid=0](config/F-7.5-squash-misconfiguration.md) | Critical | Configuration | `analyze` |
 | F-7.6 | [No Audit Logging](config/F-7.6-no-audit-logging.md) | Medium | Configuration | Not remotely detectable (documented) |
-| F-7.7 | [xprtsec Permissive Default](config/F-7.7-xprtsec-permissive-default.md) | Medium | Configuration | Not implemented (documented) |
+| F-7.7 | [FreeBSD-Style Truncated Subnet (OS Fingerprint)](config/F-7.7-freebsd-truncated-subnet.md) | Info | Configuration | `analyze` (MOUNT EXPORT ACL) |

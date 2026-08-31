@@ -29,7 +29,7 @@ Every option available in `/etc/exports` on Linux, with defaults, security impli
 | `no_acl` | No | :material-alert: Warning | Disables POSIX ACLs |
 | `fsid=0` | -- | :material-alert: Warning | NFSv4 pseudo-root ([F-5.5](../../info-disclosure/F-5.5-nfsv4-pseudo-fs-leakage.md)) |
 | `mountpoint` | -- | :material-shield-check: Safe | Conditional export |
-| `pnfs` | No | :material-alert: Warning | pNFS layout exposure ([F-5.10](../../info-disclosure/F-5.10-pnfs-layout-security-downgrade.md)) |
+| `pnfs` | No | :material-alert: Warning | pNFS layout exposure |
 | `security_label` | No | :material-shield-check: Safe | SELinux labels over NFS |
 
 ---
@@ -184,7 +184,7 @@ No direct security implications, but replica servers must enforce the same acces
 
 Enables pNFS layouts for this export. pNFS allows clients to perform I/O directly to storage devices (block, object, or file layout), bypassing the NFS server for data transfer.
 
-!!! warning "Layout security downgrade ([F-5.10](../../info-disclosure/F-5.10-pnfs-layout-security-downgrade.md))"
+!!! warning "Layout security downgrade"
     pNFS layouts expose storage-layer topology (block device addresses, object store endpoints, or data server hostnames) to clients. The data path between client and storage device may bypass NFS authentication entirely, depending on the layout type. Block and object layouts are particularly exposed: the client receives raw storage addresses.
 
 ### `security_label`
@@ -320,7 +320,7 @@ Controls whether the server requires clients to connect from a privileged source
 
 Controls RPC-with-TLS (RFC 9289) transport security requirements. Available on Linux kernel 6.x+ with TLS-capable nfsd.
 
-!!! danger "Permissive default ([F-7.7](../../config/F-7.7-xprtsec-permissive-default.md))"
+!!! danger "Permissive default"
     Adding `xprtsec=tls` does NOT disable plaintext. The kernel default `ex_xprtsec_modes` is `NFSEXP_XPRTSEC_ALL`, which sets the NONE, TLS, and MTLS bits simultaneously. To actually require TLS, you must ensure the `none` bit is cleared. Some kernel versions require specifying `xprtsec=tls` alone without the `none` mode. An attacker simply connects without TLS and all operations succeed. Verify enforcement with nfswolf's scanner, which probes both TLS and plaintext paths.
 
 ### NFSv4 pseudo-filesystem interaction

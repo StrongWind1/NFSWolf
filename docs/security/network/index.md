@@ -10,8 +10,8 @@ NFS was designed for trusted local networks. The protocol has no built-in encryp
 | [F-3.2](F-3.2-portmapper-amplification.md) | Portmapper UDP Amplification (DDoS) | Medium | RFC 1057 Appendix A | `scan` (UDP DUMP amplification factor) |
 | [F-3.3](F-3.3-ip-spoofing-host-trust.md) | IP Spoofing Against Host-Based ACLs | High | RFC 2623 sec. 2.6, RFC 7530 sec. 19 | `analyze` (host-based ACL detection) |
 | [F-3.4](F-3.4-striptls-downgrade.md) | STRIPTLS Downgrade (RFC 9289) | High | RFC 9289 sec. 6.1.1 | `analyze` (AUTH_TLS probe) |
-| [F-3.5](F-3.5-portmapper-tunnel-bypass.md) | pNFS Metadata Server Detected | Info | RFC 5661 sec. 18.35 | `analyze` (NFSv4.1 EXCHANGE_ID + GETDEVICELIST) |
-| [F-3.6](F-3.6-udp-mount-handle-theft.md) | Mixed Security Zones via Per-Path SECINFO | Medium | RFC 7530 sec. 19 | `analyze` (NFSv4 SECINFO per-path probing) |
+| [F-3.5](F-3.5-pnfs-metadata-server-detected.md) | pNFS Metadata Server Detected | Info | RFC 5661 sec. 18.35 | `analyze` (NFSv4.1 EXCHANGE_ID + GETDEVICELIST) |
+| [F-3.6](F-3.6-mixed-secinfo-zones.md) | Mixed Security Zones via Per-Path SECINFO | Medium | RFC 7530 sec. 19 | `analyze` (NFSv4 SECINFO per-path probing) |
 | [F-3.7](F-3.7-auth-dh-obsolete.md) | AUTH_DH Advertised (Cryptographically Broken) | Medium | RFC 5531 sec. 14, RFC 2695 | `analyze` (flavor 3 in MOUNT/SECINFO) |
 | [F-3.8](F-3.8-rpc-with-tls.md) | RPC-with-TLS Supported (RFC 9289) | Info | RFC 9289 sec. 4.1, sec. 6.3 | `analyze` (AUTH_TLS NULL probe) |
 | [F-3.9](F-3.9-auth-short-session-credentials.md) | AUTH_SHORT Session Credentials | Info | RFC 5531 sec. 14, RFC 1057 sec. 9.3 | `analyze` (flavor 2 in MOUNT/SECINFO) |
@@ -113,4 +113,4 @@ Even without network access to the NFS segment, an attacker can:
 | Network segmentation (dedicated NFS VLAN) | F-3.1, F-3.3, F-3.5 (limits attacker positioning, hides pNFS topology) |
 | Uniform `sec=` across export tree | F-3.6 (eliminates per-path auth flavor mismatches) |
 | Remove AUTH_DH from export configurations | F-3.7 |
-| Require `xprtsec=tls` without `xprtsec=none` | F-3.1, F-3.4 (see also F-7.7) |
+| Require `xprtsec=tls` without `xprtsec=none` | F-3.1, F-3.4 |

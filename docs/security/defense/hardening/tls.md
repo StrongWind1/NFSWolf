@@ -234,5 +234,5 @@ The scanner sends an AUTH_TLS NULL call and checks for the STARTTLS verifier in 
 - [F-3.8: RPC-with-TLS](../../network/F-3.8-rpc-with-tls.md) -- AUTH_SYS remains forgeable inside TLS
 - [F-3.4: STRIPTLS downgrade](../../network/F-3.4-striptls-downgrade.md) -- downgrade attack against the AUTH_TLS handshake
 - [F-3.1: Plaintext wire protocol](../../network/F-3.1-plaintext-wire-protocol.md) -- what TLS fixes
-- [F-7.7: xprtsec permissive default](../../config/F-7.7-xprtsec-permissive-default.md) -- why `tls-required` matters
+- [Hardening: export-options xprtsec](../configure/export-options.md#xprtsec) -- why `tls-required` matters
 - [Hardening checklist](checklist.md) -- TLS in context of the full hardening path

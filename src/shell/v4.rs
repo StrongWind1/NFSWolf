@@ -244,7 +244,7 @@ impl ShellOps for V4Ops {
                     };
                     if i == last_idx {
                         let info = match res.results.get(3).map(|op| &op.data) {
-                            Some(ResOpData::Getattr(a)) => v4_info(&Nfs4FileInfo::from(a.clone())),
+                            Some(ResOpData::Getattr(a)) => v4_info(&Nfs4FileInfo::from(*a.clone())),
                             _ => v4_info(&Nfs4FileInfo::default()),
                         };
                         return Ok((ShellHandle(fh), info));
@@ -593,7 +593,7 @@ async fn list_dir_v4(base_client: &Nfs4Client, rd_client: &Nfs4Client, dir: &She
             _ => None,
         });
         let info = res.results.get(3).and_then(|op| match &op.data {
-            ResOpData::Getattr(a) => Some(v4_info(&Nfs4FileInfo::from(a.clone()))),
+            ResOpData::Getattr(a) => Some(v4_info(&Nfs4FileInfo::from(*a.clone()))),
             _ => None,
         });
         result.push(ShellEntry { name: "..".to_owned(), info, handle: fh.map(ShellHandle) });

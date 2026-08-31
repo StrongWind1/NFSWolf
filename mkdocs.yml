@@ -1,5 +1,5 @@
 site_name: NFSWolf
-site_description: NFS security toolkit — recon, analysis, escape, shell, and exploitation in one native binary
+site_description: NFS security toolkit -- recon, analysis, escape, shell, and exploitation in one native binary
 site_url: https://strongwind.dev/NFSWolf/
 repo_url: https://github.com/StrongWind1/NFSWolf
 repo_name: StrongWind1/NFSWolf
@@ -14,7 +14,7 @@ theme:
   icon:
     repo: fontawesome/brands/github
   palette:
-    # Dark mode (default) — respects system preference
+    # Dark mode (default) -- respects system preference
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
       primary: custom
@@ -22,7 +22,7 @@ theme:
       toggle:
         icon: material/weather-night
         name: Switch to light mode
-    # Light mode — respects system preference
+    # Light mode -- respects system preference
     - media: "(prefers-color-scheme: light)"
       scheme: default
       primary: custom
@@ -103,6 +103,9 @@ markdown_extensions:
 exclude_docs: |
   includes/
 
+not_in_nav: |
+  security/**/F-*.md
+
 nav:
   - NFSWolf:
       - index.md
@@ -173,6 +176,7 @@ nav:
           - Lateral Movement: security/by-stage/lateral.md
           - Privilege Escalation: security/by-stage/privesc.md
           - Data Exfiltration: security/by-stage/exfil.md
+      - HTB Testing Results: security/htb-results.md
       - Defense:
           - security/defense/index.md
           - Installing NFS:
@@ -198,7 +202,6 @@ nav:
       - Kernel Source Map: reference/kernel.md
       - Filesystem Escape Matrix: reference/escape-matrix.md
       - Spec Completeness: reference/spec-completeness.md
-      - Comparison: reference/comparison.md
       - Glossary: reference/glossary.md
       - Changelog: reference/changelog.md
 
@@ -218,7 +221,7 @@ extra_css:
 strict: true
 
 validation:
-  omitted_files: info
+  omitted_files: warn
   absolute_links: warn
   unrecognized_links: warn
   anchors: warn

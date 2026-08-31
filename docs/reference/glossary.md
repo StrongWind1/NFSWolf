@@ -1,5 +1,7 @@
 # Glossary
 
+Key terms used across nfswolf documentation, NFS protocol references, and security findings.
+
 ACL
 :   Access Control List. A list of rules that define which users or groups can access a file or directory, and what operations they can perform. NFS supports both POSIX ACLs (via the NFS_ACL sideband protocol) and NFSv4 rich ACLs (built into the protocol).
 

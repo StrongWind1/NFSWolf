@@ -18,6 +18,7 @@ use crate::util::stealth::StealthConfig;
 
 const RQUOTA_PROGRAM: u32 = 100_011;
 const RQUOTA_V1: u32 = 1;
+const RQUOTA_V2: u32 = 2;
 const RQUOTAPROC_GETQUOTA: u32 = 1;
 
 // --- XDR types ---
@@ -109,13 +110,41 @@ impl GetquotaResult {
     }
 }
 
+/// GETQUOTA v2 args: export path + id + type (0=user, 1=group).
+struct GetquotaArgsV2 {
+    path: Opaque<'static>,
+    id: u32,
+    id_type: u32,
+}
+
+impl Pack for GetquotaArgsV2 {
+    fn pack(&self, out: &mut impl std::io::Write) -> onc_xdr::Result<usize> {
+        let mut n = self.path.pack(out)?;
+        n += self.id.pack(out)?;
+        n += self.id_type.pack(out)?;
+        Ok(n)
+    }
+
+    fn packed_size(&self) -> usize {
+        self.path.packed_size() + 4 + 4
+    }
+}
+
 // --- Client ---
 
-/// Query disk quota for a UID on a specific export path.
+/// Query disk quota for a UID on a specific export path (RQUOTA v1).
 pub(crate) async fn getquota(addr: SocketAddr, export_path: &str, uid: u32, proxy: Option<&str>, stealth: &StealthConfig) -> anyhow::Result<GetquotaResult> {
     let mut rpc = crate::proto::sideband::connect_sideband(addr, proxy, stealth).await?;
     let args = GetquotaArgs { path: Opaque::owned(export_path.as_bytes().to_vec()), uid };
     let raw: RawReply = rpc.call(RQUOTA_PROGRAM, RQUOTA_V1, RQUOTAPROC_GETQUOTA, &args).await.context("GETQUOTA RPC")?;
+    GetquotaResult::decode(&raw.data)
+}
+
+/// Query user (type=0) or group (type=1) quota via RQUOTA v2.
+pub(crate) async fn getquota_v2(addr: SocketAddr, export_path: &str, id: u32, id_type: u32, proxy: Option<&str>, stealth: &StealthConfig) -> anyhow::Result<GetquotaResult> {
+    let mut rpc = crate::proto::sideband::connect_sideband(addr, proxy, stealth).await?;
+    let args = GetquotaArgsV2 { path: Opaque::owned(export_path.as_bytes().to_vec()), id, id_type };
+    let raw: RawReply = rpc.call(RQUOTA_PROGRAM, RQUOTA_V2, RQUOTAPROC_GETQUOTA, &args).await.context("GETQUOTA v2 RPC")?;
     GetquotaResult::decode(&raw.data)
 }
 

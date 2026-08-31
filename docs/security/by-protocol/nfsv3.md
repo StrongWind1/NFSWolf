@@ -49,11 +49,11 @@ NFSv3 (RFC 1813) is the most commonly deployed NFS version and the primary targe
 | [F-2.5](../access-control/F-2.5-stale-handle-persistence.md) | Stale Handle Persistence | UMNT removes the mount list entry but does not invalidate the handle. Handles survive permission revocation. |
 | [F-2.10](../access-control/F-2.10-sign-fh-root-exemption.md) | SIGN_FH Root Exemption | Linux knfsd's handle signing skips root handles (fileid_type=0). Root handles can be constructed without the MAC key. |
 | [F-3.2](../network/F-3.2-portmapper-amplification.md) | Portmapper Amplification | UDP DUMP returns 486-1930 bytes for a 68-byte request. Spoofed-source DDoS vector. |
-| [F-3.5](../network/F-3.5-portmapper-tunnel-bypass.md) | Filtered Portmapper Bypass | Port 111 filtered but 2049 open. NFS works without portmapper; mount ports can be guessed. |
+| [F-3.5](../network/F-3.5-pnfs-metadata-server-detected.md) | pNFS Metadata Server Detected | NFSv4.1 finding; not applicable to NFSv3-only deployments. Listed for cross-reference completeness. |
 | [F-3.7](../network/F-3.7-auth-dh-obsolete.md) | AUTH_DH Advertised | AUTH_DH uses 192-bit DH + 56-bit DES. Trivially breakable by modern standards. |
 | [F-4.5](../privesc/F-4.5-selinux-label-bypass.md) | SELinux Label Bypass | NFS-created files get default SELinux contexts. NFS root with `CAP_MAC_OVERRIDE` bypasses all MAC enforcement. |
 | [F-5.1](../info-disclosure/F-5.1-export-list-enumeration.md) | Export List Enumeration | MNTPROC_EXPORT reveals full export topology without authentication. |
-| [F-5.10](../info-disclosure/F-5.10-pnfs-layout-security-downgrade.md) | pNFS Layout Downgrade | Flex-file layouts hand out NFSv3 AUTH_SYS file handles on the data path, downgrading from v4.1 krb5p security. |
+| [F-5.10](../info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Solaris Time Delta Fingerprint | FSINFO time_delta of {0, 1000} nanoseconds identifies Solaris NFS servers, enabling targeted attack selection. |
 | F-5.12 | Near Inode Exhaustion | FSSTAT reports available inodes. Below 1000 = DoS risk via inode exhaustion. |
 | F-5.14 | POSIX ACL Exposure | NFS_ACL sideband (program 100227) returns named USER/GROUP ACL entries invisible to mode-bit analysis. |
 | F-5.15 | rquotad UID Oracle | GETQUOTA reveals per-UID disk activity and filesystem block size without authentication. |
@@ -61,7 +61,6 @@ NFSv3 (RFC 1813) is the most commonly deployed NFS version and the primary targe
 | [F-7.2](../config/F-7.2-privileged-port-bypass.md) | Privileged Port Bypass | `insecure` export option allows unprivileged-port connections. Any process, not just root, can connect. |
 | [F-7.3](../config/F-7.3-nohide-crossmnt-exposure.md) | nohide/crossmnt Exposure | Sub-mounted filesystems exposed across LOOKUP boundaries that RFC 1813 Section 3.3.3 says should be blocked. |
 | [F-7.6](../config/F-7.6-no-audit-logging.md) | No Audit Logging | knfsd processes file operations in kernel space, bypassing auditd. All NFS attacks run in a detection blind spot. |
-| [F-7.7](../config/F-7.7-xprtsec-permissive-default.md) | xprtsec Permissive Default | Adding `xprtsec=tls` does not remove plaintext acceptance unless `xprtsec=none` is explicitly excluded. |
 
 ### Low / Info
 
@@ -77,6 +76,7 @@ NFSv3 (RFC 1813) is the most commonly deployed NFS version and the primary targe
 | F-5.16 | Silly-Rename Detection | `.nfs*` filenames in READDIRPLUS indicate active open-unlinked state and NFS client activity. |
 | [F-3.8](../network/F-3.8-rpc-with-tls.md) | RPC-with-TLS Supported | Informational. TLS encrypts the wire but AUTH_SYS inside TLS still allows UID forgery. |
 | [F-3.9](../network/F-3.9-auth-short-session-credentials.md) | AUTH_SHORT Session | Informational. Linux knfsd never issues AUTH_SHORT. Relevant only for non-Linux implementations. |
+| [F-7.7](../config/F-7.7-freebsd-truncated-subnet.md) | FreeBSD-Style Truncated Subnet | Export ACL entries using 2-3 octet dotted notation (e.g., `10.0.1`) fingerprint a FreeBSD NFS server. |
 
 ## Protocol-specific exploitation notes
 
