@@ -1,6 +1,6 @@
 # Shell
 
-The `shell` subcommand opens an interactive readline REPL over a remote NFS export. It works entirely in userspace via raw ONC RPC calls, with no kernel NFS client needed, no `mount(8)`, and no root privileges on the attacker's machine. The shell supports 52 commands across navigation, file operations, credential manipulation, security scanning, and export escape.
+The `shell` subcommand opens an interactive readline REPL over a remote NFS export. It works entirely in userspace via raw ONC RPC calls, with no kernel NFS client needed, no `mount(8)`, and no root privileges on the attacker's machine. The shell supports 54 commands across navigation, file operations, credential manipulation, security scanning, and export escape.
 
 ## Usage
 
@@ -203,7 +203,7 @@ NFSv2 identity changes work by reconnecting: new TCP socket + new AUTH_SYS crede
 
 ## See also
 
-- [Shell Commands](shell-commands.md) -- Complete reference for all 52 commands
+- [Shell Commands](shell-commands.md) -- Complete reference for all 54 commands
 - [Mount](mount.md) -- FUSE mount for using standard tools against NFS exports
 - [Escape](escape.md) -- Export escape algorithm and filesystem support matrix
 - [Global Options](global-options.md) -- All flags that apply across subcommands

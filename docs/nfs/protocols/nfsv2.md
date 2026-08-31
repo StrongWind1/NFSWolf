@@ -228,7 +228,7 @@ nfswolf provides full NFSv2 support across the entire attack path.
 
 ### Shell
 
-`--nfs-version 2` enters an NFSv2 shell with all 52 commands via `NfsShell<V2Ops>`. The shell connects through MOUNT v1 MNT to obtain the root handle, then operates over NFSv2 on port 2049. `--handle HEX` bypasses MOUNT entirely for direct handle-based access.
+`--nfs-version 2` enters an NFSv2 shell with all 54 commands via `NfsShell<V2Ops>`. The shell connects through MOUNT v1 MNT to obtain the root handle, then operates over NFSv2 on port 2049. `--handle HEX` bypasses MOUNT entirely for direct handle-based access.
 
 Identity changes (`uid`, `gid`, `hostname`, `impersonate`, `su`) work differently in v2 than in v3/v4: because v2 connections carry a single credential bound at connect time, changing identity requires tearing down the TCP session and reconnecting with new AUTH_SYS credentials + re-MOUNT. `V2Ops` handles this transparently.
 

@@ -52,7 +52,7 @@ These limitations make NFSv2 a less efficient attack platform, but they do not r
 
 ### V2 in the nfswolf shell
 
-nfswolf supports NFSv2 via `--nfs-version 2` or `--handle HEX` with v2 auto-detection. The `NfsShell<V2Ops>` implementation provides all 52 shell commands over NFSv2. Identity changes work differently in v2 than in v3/v4: because v2 connections carry a single credential bound at connect time, changing UID requires a full TCP reconnect (new socket, new AUTH_SYS credential, re-MOUNT). This is handled transparently by `V2Ops`.
+nfswolf supports NFSv2 via `--nfs-version 2` or `--handle HEX` with v2 auto-detection. The `NfsShell<V2Ops>` implementation provides all 54 shell commands over NFSv2. Identity changes work differently in v2 than in v3/v4: because v2 connections carry a single credential bound at connect time, changing UID requires a full TCP reconnect (new socket, new AUTH_SYS credential, re-MOUNT). This is handled transparently by `V2Ops`.
 
 The auto-version detection in `resolve_version` probes v3 first, then v2, then v4. When v2 is the only available version, nfswolf automatically selects it and adapts all shell operations to the v2 procedure set. The credential ladder and escape algorithm work identically; only the wire encoding changes.
 

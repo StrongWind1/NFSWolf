@@ -124,7 +124,7 @@ nfswolf escape [OPTIONS] <TARGET>
 
 ## nfswolf shell
 
-Interactive NFS exploration shell with 52 commands over NFSv2, v3, and v4. See [Shell Commands](shell-commands.md) for the interactive command reference.
+Interactive NFS exploration shell with 54 commands over NFSv2, v3, and v4. See [Shell Commands](shell-commands.md) for the interactive command reference.
 
 ```
 nfswolf shell [OPTIONS] <TARGET>

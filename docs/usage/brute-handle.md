@@ -90,6 +90,51 @@ NFSv2 handles get no writability hint because NFSv2 has no ACCESS procedure.
 | `--gen-start GEN` | 0 | Start of the generation range (inclusive). |
 | `--gen-end GEN` | 0 | End of the generation range (inclusive). 0 means only generation 0 is tried. |
 | `-e, --export PATH` | -- | Alternative to the `host:/export` positional syntax. |
+| `--mask HEXMASK` | -- | Nibble-mask mode: hex handle with `?` for unknown nibbles (see below). |
+
+## Nibble-mask mode
+
+The `--mask` flag enables OS-agnostic file handle brute force. Instead of varying inode/generation numbers within a known Linux filesystem handle layout, mask mode treats the handle as raw hex and enumerates all combinations of nibbles marked with `?`.
+
+```bash
+nfswolf brute-handle 10.0.0.5 --mask 0100020000??00000200000000000000
+```
+
+Each `?` represents one hex nibble (4 bits, values 0-F). The tool substitutes every possible value for each `?`, probing 16^N combinations total. Up to 16 wild nibbles are supported (64-bit counter).
+
+This mode requires no filesystem-specific knowledge -- it works against any NFS server regardless of operating system (Linux, OpenBSD, FreeBSD, Solaris, NetApp, Windows Server, etc.). Where the standard inode sweep depends on knowing the handle layout for a specific Linux filesystem type, mask mode works with any handle format by brute-forcing the unknown bytes directly.
+
+### When to use mask mode
+
+Use `--mask` when:
+
+- The target runs a non-Linux NFS server (OpenBSD, FreeBSD, Solaris) where nfswolf has no built-in handle layout knowledge
+- `nfswolf decode` shows an unrecognized handle format
+- You have a partial handle from a packet capture or log and need to recover the missing bytes
+- The filesystem type is unknown and the standard inode sweep found nothing
+
+### Workflow
+
+1. Obtain a valid handle from MOUNT, escape, or a packet capture
+2. Use `nfswolf decode` to inspect the handle structure and identify which fields vary
+3. Replace the unknown nibbles with `?` in the hex string
+4. Run the mask sweep
+
+```bash
+# Step 1: decode a known handle to understand the structure
+nfswolf decode 0000000062e9877c0c00000002000000fc4fad170000000000000000
+
+# Step 2: the decode output shows bytes 8-9 are the inode field (0c00 = inode 12)
+# and bytes 10-13 are a random/generation field. Replace them with ?:
+nfswolf brute-handle 10.0.0.5 --mask 0000000062e9877c??000000??000000fc4fad170000000000000000
+
+# Step 3: cap the probe count if the search space is large
+nfswolf brute-handle 10.0.0.5 --mask 0000000062e9877c??000000????????fc4fad170000000000000000 --max-attempts 100000
+```
+
+### Interaction with other flags
+
+When `--mask` is provided, the tool connects directly to the NFS port without mounting. The `--seed-handle`, `--inode-start/end`, and `--gen-start/end` flags are ignored. The `--max-attempts` flag still applies to cap the total number of probes.
 
 ## Output
 

@@ -11,7 +11,7 @@ NFSWolf replaces 10+ fragmented NFS security tools with one fast Rust binary. It
 | Recon | `scan` | Port discovery, service enumeration, export listing, OS/FS fingerprinting |
 | Analysis | `analyze` | 30+ security checks across 62 findings, risk scoring, multi-format reports |
 | Escape | `escape` | Export directory escape to reach the full filesystem via file handle manipulation |
-| Shell | `shell` | Interactive NFS shell with 52 commands — `ls`, `cat`, `get`, `put`, SUID scanning, secrets scanning |
+| Shell | `shell` | Interactive NFS shell with 54 commands -- `ls`, `cat`, `get`, `put`, `append`, `grep`, SUID scanning, secrets scanning |
 | Mount | `mount` | FUSE mount of remote NFS exports as local directories |
 | Brute | `brute-handle` | File handle brute-force using the STALE/BADHANDLE oracle |
 | Spray | `uid-spray` | UID/GID brute-force for access to restricted files |

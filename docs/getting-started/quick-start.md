@@ -187,7 +187,7 @@ nfswolf shell 10.0.0.1:/srv/nfs
     nfs:/srv/nfs/webapp> exit
     ```
 
-The shell supports 52 commands. Some highlights:
+The shell supports 54 commands. Some highlights:
 
 | Command | Description |
 |---------|-------------|
