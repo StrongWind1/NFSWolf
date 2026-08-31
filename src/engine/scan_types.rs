@@ -256,7 +256,7 @@ impl HostResult {
 mod duration_ms {
     use std::time::Duration;
 
-    use serde::{self, Serializer};
+    use serde::Serializer;
 
     pub(super) fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_u64(d.as_millis().try_into().map_err(serde::ser::Error::custom)?)
