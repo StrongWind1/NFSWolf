@@ -1159,6 +1159,18 @@ impl AttrRequest {
         Self { words: vec![0, 0, 1 << 16] }
     }
 
+    /// Request just the ACL attribute (bit 12 in word 0, RFC 7530 S5.11).
+    #[must_use]
+    pub fn acl_only() -> Self {
+        Self { words: vec![1 << 12, 0] }
+    }
+
+    /// Request just fs_locations (bit 24 in word 0, RFC 7530 S5.8.1.25).
+    #[must_use]
+    pub fn fs_locations_only() -> Self {
+        Self { words: vec![1 << 24, 0] }
+    }
+
     /// Request the standard set of file attributes for shell display.
     ///
     /// Includes type, change, size, fsid, fileid (word 0) and mode,
@@ -2257,6 +2269,28 @@ fn encode_getdevicelist(layout_type: u32) -> Vec<u8> {
 
 // --- CompoundRes ---
 
+/// Pathname component sequence (RFC 7530 S2.2.6).
+#[derive(Debug, Clone, Default)]
+pub struct Fs4Pathname(pub Vec<String>);
+
+/// One fs_location entry: server names + root path (RFC 7530 S5.8.1.25).
+#[derive(Debug, Clone)]
+pub struct Fs4Location {
+    /// Server hostnames or addresses for this location.
+    pub servers: Vec<String>,
+    /// Root path on the target server.
+    pub rootpath: Fs4Pathname,
+}
+
+/// fs_locations attribute value (RFC 7530 S5.8.1.25).
+#[derive(Debug, Clone)]
+pub struct Fs4Locations {
+    /// Root of the filesystem on the current server.
+    pub fs_root: Fs4Pathname,
+    /// Alternative server locations for this filesystem.
+    pub locations: Vec<Fs4Location>,
+}
+
 /// Decoded NFSv4 file attributes (RFC 7530 S5).
 ///
 /// Produced by `decode_fattr4()` from raw bitmap + attrvals bytes.
@@ -2275,8 +2309,12 @@ pub struct Fattr4Decoded {
     pub fsid: Option<(u64, u64)>,
     /// Lease time in seconds (attr 10, word 0 bit 10, RFC 7530 S5.8.1.11).
     pub lease_time: Option<u32>,
+    /// NFSv4 ACL entries (attr 12, word 0 bit 12, RFC 7530 S5.11).
+    pub acl: Option<Vec<NfsAce4>>,
     /// File ID / inode number (attr 20, word 0 bit 20, RFC 7530 S5.8.1.21).
     pub fileid: Option<u64>,
+    /// Filesystem locations for referral resolution (attr 24, word 0 bit 24, RFC 7530 S5.8.1.25).
+    pub fs_locations: Option<Fs4Locations>,
     /// POSIX mode bits (attr 33, word 1 bit 1, RFC 7530 S5.8.2.8).
     pub mode: Option<u32>,
     /// Hard link count (attr 35, word 1 bit 3, RFC 7530 S5.8.2.10).
@@ -2310,7 +2348,9 @@ impl Fattr4Decoded {
             && self.size.is_none()
             && self.fsid.is_none()
             && self.lease_time.is_none()
+            && self.acl.is_none()
             && self.fileid.is_none()
+            && self.fs_locations.is_none()
             && self.mode.is_none()
             && self.numlinks.is_none()
             && self.owner.is_none()
@@ -2333,7 +2373,7 @@ impl Fattr4Decoded {
 ///
 /// This handles the common case (server returns exactly what we asked for
 /// via `AttrRequest::shell_attrs()`) and degrades gracefully otherwise.
-#[expect(clippy::indexing_slicing, clippy::match_same_arms, clippy::cognitive_complexity, reason = "bounds checked before macro indexing; same-arm returns are intentional for readability; flat bitmap decoder is inherently a long match")]
+#[expect(clippy::indexing_slicing, clippy::cognitive_complexity, reason = "bounds checked before macro indexing; flat bitmap decoder is inherently a long match")]
 fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
     let mut out = Fattr4Decoded::default();
     let mut off: usize = 0;
@@ -2425,7 +2465,7 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
     //   9 (unique_handles): bool(u32) -- skip 4
     //  10 (lease_time): u32
     //  11 (rdattr_error): u32 -- skip 4
-    //  12 (acl): variable -- STOP
+    //  12 (acl): variable -- DECODED
     //  13 (aclsupport): u32 -- skip 4
     //  14 (archive): bool(u32) -- skip 4
     //  15 (cansettime): bool(u32) -- skip 4
@@ -2437,7 +2477,7 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
     //  21 (files_avail): u64 -- skip 8
     //  22 (files_free): u64 -- skip 8
     //  23 (files_total): u64 -- skip 8
-    //  24 (fs_locations): variable -- STOP
+    //  24 (fs_locations): variable -- DECODED
     //  25 (hidden): bool(u32) -- skip 4
     //  26 (homogeneous): bool(u32) -- skip 4
     //  27 (maxfilesize): u64 -- skip 8
@@ -2495,8 +2535,18 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
                 }
             },
             12 => {
-                // acl: variable length -- can't skip
-                return out;
+                // acl: list of NfsAce4 entries (RFC 7530 S5.11).
+                // XDR: u32 count, then count x {u32 type, u32 flag, u32 mask, string who}.
+                let count = read_u32!();
+                let mut aces = Vec::with_capacity(count.min(4096) as usize);
+                for _ in 0..count {
+                    let ace_type = read_u32!();
+                    let flag = read_u32!();
+                    let access_mask = read_u32!();
+                    let who = read_string!();
+                    aces.push(NfsAce4 { ace_type, flag, access_mask, who });
+                }
+                out.acl = Some(aces);
             },
             13..=18 => {
                 // u32 each: aclsupport(13), archive(14), cansettime(15),
@@ -2520,8 +2570,31 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
                 }
             },
             24 => {
-                // fs_locations: variable length -- can't skip
-                return out;
+                // fs_locations (RFC 7530 S5.8.1.25):
+                // pathname4 fs_root, then u32 loc_count x fs_location4.
+                // pathname4 = u32 comp_count x utf8str_component (string).
+                // fs_location4 = u32 server_count x utf8str_cis (string), pathname4 rootpath.
+                let root_count = read_u32!() as usize;
+                let mut fs_root = Vec::with_capacity(root_count.min(256));
+                for _ in 0..root_count {
+                    fs_root.push(read_string!());
+                }
+                let loc_count = read_u32!() as usize;
+                let mut locations = Vec::with_capacity(loc_count.min(256));
+                for _ in 0..loc_count {
+                    let server_count = read_u32!() as usize;
+                    let mut servers = Vec::with_capacity(server_count.min(64));
+                    for _ in 0..server_count {
+                        servers.push(read_string!());
+                    }
+                    let rp_count = read_u32!() as usize;
+                    let mut rootpath = Vec::with_capacity(rp_count.min(256));
+                    for _ in 0..rp_count {
+                        rootpath.push(read_string!());
+                    }
+                    locations.push(Fs4Location { servers, rootpath: Fs4Pathname(rootpath) });
+                }
+                out.fs_locations = Some(Fs4Locations { fs_root: Fs4Pathname(fs_root), locations });
             },
             25 | 26 => {
                 // hidden(25), homogeneous(26): bool(u32)
@@ -2820,7 +2893,7 @@ pub enum ResOpData {
     /// Contains all decoded attributes from the response bitmap.
     /// Access individual fields (fsid, mode, owner, etc.) through
     /// the `Fattr4Decoded` struct.
-    Getattr(Fattr4Decoded),
+    Getattr(Box<Fattr4Decoded>),
     /// Directory entries from READDIR (RFC 7530 S16.24), plus EOF flag.
     Readdir {
         /// Server's cookie verifier (RFC 7530 S16.24).
@@ -3073,7 +3146,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
             n += pad;
 
             let decoded = decode_fattr4(&bitmap_words, &attrvals);
-            Ok((ResOpData::Getattr(decoded), n))
+            Ok((ResOpData::Getattr(Box::new(decoded)), n))
         },
 
         // SECINFO / SECINFO_NO_NAME result: variable-length array of secinfo4.
@@ -6969,6 +7042,108 @@ mod tests {
         let decoded = decode_fattr4(&bitmap, &attrvals);
         assert_eq!(decoded.fileid, Some(42));
         assert!(decoded.ftype.is_none());
+    }
+
+    #[test]
+    fn decode_fattr4_acl_two_entries() {
+        // Bitmap: word 0 bit 12 (acl) only.
+        let bitmap = [1u32 << 12];
+        let mut attrvals = Vec::new();
+        // ACE count = 2
+        2u32.pack(&mut attrvals).unwrap();
+        // ACE 1: ALLOW, no flags, read mask, user "alice@example.com"
+        0u32.pack(&mut attrvals).unwrap(); // ace_type = ALLOW
+        0u32.pack(&mut attrvals).unwrap(); // flag = 0
+        0x0004_1FFFu32.pack(&mut attrvals).unwrap(); // access_mask
+        onc_xdr::pack_string("alice@example.com", &mut attrvals).unwrap();
+        // ACE 2: DENY, identifier_group flag, write mask, "EVERYONE@"
+        1u32.pack(&mut attrvals).unwrap(); // ace_type = DENY
+        0x0040u32.pack(&mut attrvals).unwrap(); // flag = IDENTIFIER_GROUP
+        0x0000_0002u32.pack(&mut attrvals).unwrap(); // access_mask = WRITE_DATA
+        onc_xdr::pack_string("EVERYONE@", &mut attrvals).unwrap();
+
+        let decoded = decode_fattr4(&bitmap, &attrvals);
+        let acl = decoded.acl.expect("acl should be Some");
+        assert_eq!(acl.len(), 2);
+        assert_eq!(acl[0].ace_type, 0); // ALLOW
+        assert_eq!(acl[0].who, "alice@example.com");
+        assert_eq!(acl[0].access_mask, 0x0004_1FFF);
+        assert_eq!(acl[1].ace_type, 1); // DENY
+        assert_eq!(acl[1].flag, 0x0040);
+        assert_eq!(acl[1].who, "EVERYONE@");
+    }
+
+    #[test]
+    fn decode_fattr4_acl_unblocks_fileid() {
+        // Bitmap: word 0 bit 12 (acl) + bit 20 (fileid).
+        // Before the fix, the decoder returned early at bit 12 and fileid was lost.
+        let bitmap = [(1u32 << 12) | (1 << 20)];
+        let mut attrvals = Vec::new();
+        // ACL: 1 entry
+        1u32.pack(&mut attrvals).unwrap();
+        0u32.pack(&mut attrvals).unwrap(); // ace_type
+        0u32.pack(&mut attrvals).unwrap(); // flag
+        0u32.pack(&mut attrvals).unwrap(); // access_mask
+        onc_xdr::pack_string("root@localhost", &mut attrvals).unwrap();
+        // Skip bits 13-18: not set in bitmap, so nothing to encode.
+        // Skip bit 19 (filehandle): not set.
+        // fileid (bit 20)
+        12345u64.pack(&mut attrvals).unwrap();
+
+        let decoded = decode_fattr4(&bitmap, &attrvals);
+        assert!(decoded.acl.is_some());
+        assert_eq!(decoded.acl.unwrap().len(), 1);
+        assert_eq!(decoded.fileid, Some(12345));
+    }
+
+    #[test]
+    fn decode_fattr4_fs_locations() {
+        // Bitmap: word 0 bit 24 (fs_locations) only.
+        let bitmap = [1u32 << 24];
+        let mut attrvals = Vec::new();
+        // fs_root: pathname4 with 2 components
+        2u32.pack(&mut attrvals).unwrap();
+        onc_xdr::pack_string("export", &mut attrvals).unwrap();
+        onc_xdr::pack_string("data", &mut attrvals).unwrap();
+        // locations count = 1
+        1u32.pack(&mut attrvals).unwrap();
+        // location 0: 2 servers + rootpath with 1 component
+        2u32.pack(&mut attrvals).unwrap(); // server count
+        onc_xdr::pack_string("nfs1.example.com", &mut attrvals).unwrap();
+        onc_xdr::pack_string("nfs2.example.com", &mut attrvals).unwrap();
+        1u32.pack(&mut attrvals).unwrap(); // rootpath component count
+        onc_xdr::pack_string("data", &mut attrvals).unwrap();
+
+        let decoded = decode_fattr4(&bitmap, &attrvals);
+        let fsloc = decoded.fs_locations.expect("fs_locations should be Some");
+        assert_eq!(fsloc.fs_root.0, vec!["export", "data"]);
+        assert_eq!(fsloc.locations.len(), 1);
+        assert_eq!(fsloc.locations[0].servers, vec!["nfs1.example.com", "nfs2.example.com"]);
+        assert_eq!(fsloc.locations[0].rootpath.0, vec!["data"]);
+    }
+
+    #[test]
+    fn decode_fattr4_acl_and_fs_locations_together() {
+        // Bitmap: word 0 bit 12 (acl) + bit 24 (fs_locations) + bit 20 (fileid).
+        let bitmap = [(1u32 << 12) | (1 << 20) | (1 << 24)];
+        let mut attrvals = Vec::new();
+        // ACL: 0 entries (empty list)
+        0u32.pack(&mut attrvals).unwrap();
+        // bits 13-19 not set in bitmap
+        // fileid (bit 20)
+        999u64.pack(&mut attrvals).unwrap();
+        // bits 21-23 not set
+        // fs_locations (bit 24): empty
+        0u32.pack(&mut attrvals).unwrap(); // fs_root: 0 components
+        0u32.pack(&mut attrvals).unwrap(); // 0 locations
+
+        let decoded = decode_fattr4(&bitmap, &attrvals);
+        let acl = decoded.acl.expect("acl should be Some");
+        assert!(acl.is_empty());
+        assert_eq!(decoded.fileid, Some(999));
+        let fsloc = decoded.fs_locations.expect("fs_locations should be Some");
+        assert!(fsloc.fs_root.0.is_empty());
+        assert!(fsloc.locations.is_empty());
     }
 
     // --- CompoundBuilder Phase 5 tests ---

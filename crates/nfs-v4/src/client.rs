@@ -315,7 +315,7 @@ impl<T: RpcTransport> Nfs4Client<T> {
             _ => return Err(Nfs4Error::MissingResult),
         };
         let info = match res.results.get(3).map(|op| &op.data) {
-            Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from(attrs.clone()),
+            Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from(*attrs.clone()),
             _ => Nfs4FileInfo::default(),
         };
         Ok((fh, info))
@@ -329,7 +329,7 @@ impl<T: RpcTransport> Nfs4Client<T> {
         let res = self.compound(ops).await?;
         check_status(res.status)?;
         match res.results.get(1).map(|op| &op.data) {
-            Some(ResOpData::Getattr(attrs)) => Ok(Nfs4FileInfo::from(attrs.clone())),
+            Some(ResOpData::Getattr(attrs)) => Ok(Nfs4FileInfo::from(*attrs.clone())),
             _ => Err(Nfs4Error::MissingResult),
         }
     }
@@ -651,7 +651,7 @@ impl<T: RpcTransport> Nfs4Client<T> {
 
         // Extract attributes (index 3: GETATTR). Fall back to default on mismatch.
         let info = match res.results.get(3).map(|op| &op.data) {
-            Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from(attrs.clone()),
+            Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from(*attrs.clone()),
             _ => Nfs4FileInfo::default(),
         };
 

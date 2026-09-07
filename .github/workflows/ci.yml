@@ -391,11 +391,19 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install hygiene tools
+        run: |
+          set -euo pipefail
+          pip install --user --quiet yamllint editorconfig-checker
+          npm install -g markdownlint-cli2
+          go install github.com/rhysd/actionlint/cmd/actionlint@latest
+          cargo install taplo-cli --locked
+
       - name: Run hygiene targets
-        # The Makefile encodes the ASCII/LF policy the project has chosen.
-        # Keeping the rules in the Makefile means contributors can run the
-        # same check locally with one command.
-        run: make hygiene
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/go/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+          make hygiene
 
   # ---------------------------------------------------------------------------
   # unused-deps -- cargo-machete flags dependencies listed in Cargo.toml that

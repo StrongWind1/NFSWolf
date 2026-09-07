@@ -341,7 +341,7 @@ async fn do_mount<O: crate::shell::ops::ShellOps>(ops: O, root_fh: crate::shell:
     config.acl = fuser::SessionACL::All;
 
     let rt_handle = tokio::runtime::Handle::current();
-    let fs = crate::fuse::NfsFuse::new(crate::fuse::NfsFuseConfig { ops, root_fh, allow_write: args.allow_write, rt: rt_handle });
+    let fs = crate::fuse::NfsFuse::new(crate::fuse::NfsFuseConfig { ops, root_fh, allow_write: args.allow_write, rt: rt_handle, mountpoint: args.mountpoint.clone() });
 
     let mountpoint = Path::new(&args.mountpoint).to_path_buf();
     tokio::task::spawn_blocking(move || fuser::mount(fs, &mountpoint, &config)).await??;

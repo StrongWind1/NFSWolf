@@ -85,7 +85,7 @@ jobs:
             local flags="${2:-}"
             echo "::group::Publishing ${crate}"
             local output
-            if output="$(cargo publish -p "${crate}" ${flags} 2>&1)"; then
+            if output="$(cargo publish -p "${crate}" ${flags:+"${flags}"} 2>&1)"; then
               echo "${output}"
             elif echo "${output}" | grep -q 'already exists'; then
               echo "${output}"

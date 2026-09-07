@@ -120,6 +120,23 @@ impl NfsMountClient {
         self
     }
 
+    /// Mount via PMAPPROC_CALLIT relay (RFC 1057 Appendix A, proc 5).
+    ///
+    /// Relays the MNT request through the portmapper so mountd sees the
+    /// request originating from 127.0.0.1. Bypasses IP-based export ACLs
+    /// on systems where localhost is allowed or where CALLIT forwarding is
+    /// not restricted. Tries v3 MNT first, falls back to v1.
+    pub(crate) async fn mount_via_callit(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        let pm = if let Some(ref p) = self.proxy { crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()) } else { crate::proto::portmap::PortmapClient::default_port() };
+        match pm.callit_mount(addr, export).await {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                tracing::debug!(%addr, %export, "CALLIT MOUNT v3 failed ({e}), trying v1");
+                pm.callit_mount_v1(addr, export).await
+            },
+        }
+    }
+
     /// Mount an export and return the root file handle + auth flavors.
     ///
     /// Calls MNTPROC_MNT. Auth flavors reveal whether the server supports
@@ -215,6 +232,31 @@ impl NfsMountClient {
         }
         let handle = FileHandle::from_bytes(&result.fhandle);
         Ok(MountResult { handle, auth_flavors: vec![1], _parsed_flavors: vec![AuthFlavor::Sys] })
+    }
+
+    /// Attempt MOUNT MNT from an unprivileged source port (>= 1024).
+    ///
+    /// If the server accepts, the `insecure` export option is active (F-7.2).
+    /// If rejected (`MNT3ERR_ACCES`), the default `secure` option is enforced.
+    /// Proxied connections are not meaningful for this test because the proxy
+    /// controls the outbound source port.
+    pub(crate) async fn mount_unprivileged(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        let portmap = match &self.proxy {
+            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
+            None => crate::proto::portmap::PortmapClient::default_port(),
+        };
+        let port = match self.mount_port {
+            Some(p) => p,
+            None => portmap.query_port(addr, 100_005, 3).await.with_context(|| "GETPORT for MOUNT v3 (insecure probe)")?,
+        };
+        let mount_addr = SocketAddr::new(addr.ip(), port);
+        let io = connect_unprivileged(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} from unprivileged port"))?;
+        let client = MountClient::v3(DirectTransport::with_auth(io, self.credential.to_opaque_auth(), onc_rpc_client::rpc::opaque_auth::default()));
+        let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
+        let res = client.v3_mnt(path).await.with_context(|| format!("MNT {export} (unprivileged)"))?;
+        let handle = FileHandle::from_bytes(res.fhandle.0.as_ref());
+        let parsed_flavors = res.auth_flavors.iter().map(|&f| parse_flavor(f)).collect();
+        Ok(MountResult { handle, auth_flavors: res.auth_flavors, _parsed_flavors: parsed_flavors })
     }
 
     /// Unmount an export (MNTPROC_UMNT) for stealth cleanup (F-2.5).
@@ -489,6 +531,14 @@ async fn connect_privileged_only(addr: SocketAddr) -> std::io::Result<crate::pro
         }
     }
     Err(last_err.unwrap_or_else(|| std::io::Error::other("privileged source port range 300-1023 exhausted")))
+}
+
+/// Connect to `addr` from an unprivileged source port (1024) for F-7.2 `insecure` detection.
+async fn connect_unprivileged(addr: SocketAddr) -> std::io::Result<crate::proto::conn::NfsIo> {
+    use onc_rpc_client::transport::net::Connector as _;
+    use onc_rpc_client::transport::tokio::TokioConnector;
+
+    TokioConnector.connect_with_port(addr, 1024).await
 }
 
 /// Convert raw auth flavor u32 to the `AuthFlavor` enum.

@@ -37,6 +37,7 @@ use crate::shell::ops::{CHUNK_SIZE, READ_ALL_MAX};
 /// All commands available in the NFSv3 interactive shell (for Tab completion of the first token).
 /// v3/v4 command list (sorted for binary search / tab completion).
 pub(crate) const V3V4_SHELL_COMMANDS: &[&str] = &[
+    "append",
     "cat",
     "cd",
     "chmod",
@@ -52,6 +53,7 @@ pub(crate) const V3V4_SHELL_COMMANDS: &[&str] = &[
     "find",
     "get",
     "gid",
+    "grep",
     "handle",
     "help",
     "history",
@@ -95,6 +97,7 @@ pub(crate) const V3V4_SHELL_COMMANDS: &[&str] = &[
 
 /// v2 command list: base + root (no mknod or verifier).
 pub(crate) const V2_SHELL_COMMANDS: &[&str] = &[
+    "append",
     "cat",
     "cd",
     "chmod",
@@ -110,6 +113,7 @@ pub(crate) const V2_SHELL_COMMANDS: &[&str] = &[
     "find",
     "get",
     "gid",
+    "grep",
     "handle",
     "help",
     "history",
@@ -272,6 +276,7 @@ impl<O: ShellOps> NfsShell<O> {
             "cat" | "type" => self.cmd_cat(arg).await,
             "get" | "download" => self.cmd_get(arg).await,
             "put" | "upload" => self.cmd_put(arg).await,
+            "append" => self.cmd_append(arg).await,
             "rm" | "del" => self.cmd_rm(arg).await,
             "mkdir" => self.cmd_mkdir(arg).await,
             "rmdir" => self.cmd_rmdir(arg).await,
@@ -293,6 +298,7 @@ impl<O: ShellOps> NfsShell<O> {
             // Devices
             "mknod" => self.cmd_mknod(arg).await,
             // Analysis
+            "grep" => self.cmd_grep(arg).await,
             "suid-scan" => self.cmd_suid_scan().await,
             "world-writable" => self.cmd_world_writable().await,
             "secrets-scan" => self.cmd_secrets_scan().await,
@@ -512,6 +518,60 @@ impl<O: ShellOps> NfsShell<O> {
         walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
     }
 
+    /// Search remote file contents for a pattern.
+    async fn cmd_grep(&self, line: &str) {
+        let mut recursive = false;
+        let mut case_insensitive = false;
+        let mut show_line_numbers = false;
+        let mut pattern: Option<&str> = None;
+        let mut target: Option<&str> = None;
+
+        for token in line.split_whitespace() {
+            if pattern.is_none() && token.starts_with('-') && !token.starts_with("--") {
+                for ch in token[1..].chars() {
+                    match ch {
+                        'r' => recursive = true,
+                        'i' => case_insensitive = true,
+                        'n' => show_line_numbers = true,
+                        _ => {
+                            eprintln!("{}", format!("grep: unknown flag: -{ch}").yellow());
+                            return;
+                        },
+                    }
+                }
+            } else if pattern.is_none() {
+                pattern = Some(token);
+            } else if target.is_none() {
+                target = Some(token);
+            }
+        }
+
+        let Some(pattern) = pattern else {
+            eprintln!("{}", "usage: grep [-r] [-i] [-n] <pattern> <path>".yellow());
+            return;
+        };
+        let target = target.unwrap_or(".");
+
+        let (fh, info) = match self.lookup_path(target).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}", format!("grep: {e}").red());
+                return;
+            },
+        };
+
+        match info.file_type {
+            ShellFileType::Regular => {
+                grep_file(&self.ops, &fh, target, pattern, case_insensitive, show_line_numbers).await;
+            },
+            ShellFileType::Directory => {
+                let base = if target == "." { self.cwd_path.clone() } else { target.to_owned() };
+                grep_walk(&self.ops, fh, base, pattern, case_insensitive, show_line_numbers, recursive).await;
+            },
+            _ => eprintln!("{}", format!("grep: {target}: not a regular file or directory").yellow()),
+        }
+    }
+
     // -------------------------------------------------------------------------
     // File operations
     // -------------------------------------------------------------------------
@@ -713,9 +773,51 @@ impl<O: ShellOps> NfsShell<O> {
             },
         };
 
-        match upload_data(&self.ops, &file_fh, &data).await {
+        match upload_data(&self.ops, &file_fh, &data, 0).await {
             Ok(n) => println!("{}", format!("put: {n} bytes -> {remote}").green()),
             Err(e) => eprintln!("{}", format!("put: write error: {e}").red()),
+        }
+    }
+
+    /// Append text or hex data to an existing remote file.
+    async fn cmd_append(&self, line: &str) {
+        let (remote_path, data_str) = split2(line);
+        if remote_path.is_empty() || data_str.is_empty() {
+            eprintln!("{}", "usage: append <file> <text|0xHEX>".yellow());
+            return;
+        }
+        if !self.require_write() {
+            return;
+        }
+
+        let (fh, info) = match self.lookup_path(remote_path).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}", format!("append: {e}").red());
+                return;
+            },
+        };
+
+        let data = if data_str.starts_with("0x") || data_str.starts_with("0X") {
+            match decode_hex(&data_str[2..]) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("{}", format!("append: bad hex: {e}").red());
+                    return;
+                },
+            }
+        } else {
+            parse_echo_escapes(data_str)
+        };
+
+        if data.is_empty() {
+            eprintln!("{}", "append: no data to write".yellow());
+            return;
+        }
+
+        match upload_data(&self.ops, &fh, &data, info.size).await {
+            Ok(n) => println!("{}", format!("appended {n} bytes at offset {} (new size {})", info.size, info.size + n).green()),
+            Err(e) => eprintln!("{}", format!("append: write error: {e}").red()),
         }
     }
 
@@ -856,7 +958,7 @@ impl<O: ShellOps> NfsShell<O> {
             },
         };
 
-        match upload_data(&self.ops, &dst_fh, &data).await {
+        match upload_data(&self.ops, &dst_fh, &data, 0).await {
             Ok(n) => println!("{}", format!("copied {n} bytes {src} -> {dst}").green()),
             Err(e) => eprintln!("{}", format!("cp: write {dst}: {e}").red()),
         }
@@ -1635,6 +1737,7 @@ impl<O: ShellOps> NfsShell<O> {
         println!("  pwd                        print current path");
         println!("  tree [depth]               recursive tree (default depth 3; hidden dirs always shown)");
         println!("  find <pattern>             find filenames containing pattern");
+        println!("  grep [-r] [-i] [-n] <pat> <path>  search file contents");
         println!();
         println!("{}", "File operations:".bold().underline());
         println!("  cat <file>                 print file contents (alias: type)");
@@ -1648,6 +1751,7 @@ impl<O: ShellOps> NfsShell<O> {
         println!("  symlink <target> <name>    create symlink  [--allow-write]");
         println!("  link <existing> <name>     create hard link  [--allow-write]");
         println!("  readlink <path>            read symlink target");
+        println!("  append <file> <text|0xHEX> append data to existing file  [--allow-write]");
         println!();
         println!("{}", "Attributes:".bold().underline());
         println!("  stat [path]                show file attributes");
@@ -1742,20 +1846,22 @@ async fn download_file<O: ShellOps>(ops: &O, fh: &ShellHandle, dest_path: &str) 
 /// Driven by a byte cursor into `data`: NFSv3 WRITE may legally write fewer
 /// bytes than requested (RFC 1813 sec. 3.3.7), so we advance only by the
 /// server-acknowledged count, resending the unwritten tail from the exact byte.
-async fn upload_data<O: ShellOps>(ops: &O, fh: &ShellHandle, data: &[u8]) -> anyhow::Result<u64> {
+async fn upload_data<O: ShellOps>(ops: &O, fh: &ShellHandle, data: &[u8], start_offset: u64) -> anyhow::Result<u64> {
     let chunk_size = usize::try_from(CHUNK_SIZE).unwrap_or(65536);
-    let mut pos = 0usize;
-    while pos < data.len() {
-        let end = pos.saturating_add(chunk_size).min(data.len());
-        let Some(slice) = data.get(pos..end) else { break };
-        let written = ops.write_chunk(fh, pos as u64, slice).await?;
+    let mut data_pos = 0usize;
+    let mut file_offset = start_offset;
+    while data_pos < data.len() {
+        let end = data_pos.saturating_add(chunk_size).min(data.len());
+        let Some(slice) = data.get(data_pos..end) else { break };
+        let written = ops.write_chunk(fh, file_offset, slice).await?;
         let adv = usize::try_from(written).unwrap_or(0).min(slice.len());
         if adv == 0 {
-            anyhow::bail!("WRITE at {pos}: server acknowledged 0 bytes (no progress)");
+            anyhow::bail!("WRITE at {file_offset}: server acknowledged 0 bytes (no progress)");
         }
-        pos = pos.saturating_add(adv);
+        data_pos = data_pos.saturating_add(adv);
+        file_offset = file_offset.saturating_add(adv as u64);
     }
-    Ok(pos as u64)
+    Ok(data_pos as u64)
 }
 
 /// Recursively download a remote directory tree to a local path.
@@ -1868,7 +1974,7 @@ fn upload_tree<'a, O: ShellOps>(ops: &'a O, local_dir: &'a Path, remote_fh: &'a 
                         continue;
                     },
                 };
-                match upload_data(ops, &file_fh, &data).await {
+                match upload_data(ops, &file_fh, &data, 0).await {
                     Ok(n) => {
                         total += n;
                         bar.inc(1);
@@ -1949,6 +2055,91 @@ where
                 && let Some(ref fh) = entry.handle
             {
                 walk_recursive(ops, fh.clone(), full_path, filter).await;
+            }
+        }
+    })
+}
+
+/// Parse echo-e-style escape sequences in a string, returning raw bytes.
+fn parse_echo_escapes(s: &str) -> Vec<u8> {
+    let s = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(s);
+    let mut out = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push(b'\n'),
+                Some('t') => out.push(b'\t'),
+                Some('r') => out.push(b'\r'),
+                Some('0') => out.push(0),
+                Some('a') => out.push(0x07),
+                Some('b') => out.push(0x08),
+                Some('\\') | None => out.push(b'\\'),
+                Some(other) => {
+                    out.push(b'\\');
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+                },
+            }
+        } else {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    out
+}
+
+/// Decode a hex string (without 0x prefix) into bytes.
+fn decode_hex(hex: &str) -> anyhow::Result<Vec<u8>> {
+    let hex = hex.trim();
+    anyhow::ensure!(hex.len().is_multiple_of(2), "hex string must have even length");
+    (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| anyhow::anyhow!("invalid hex at offset {i}: {e}"))).collect()
+}
+
+/// Check whether data looks like a binary file (contains null bytes in the first 512 bytes).
+fn is_binary(data: &[u8]) -> bool {
+    data.get(..data.len().min(512)).is_some_and(|prefix| prefix.contains(&0))
+}
+
+/// Search one file's contents for a pattern, printing matching lines.
+async fn grep_file<O: ShellOps>(ops: &O, fh: &ShellHandle, path: &str, pattern: &str, case_insensitive: bool, show_line_numbers: bool) {
+    let Ok(data) = ops.read_file(fh).await else { return };
+    if is_binary(&data) {
+        return;
+    }
+    let text = String::from_utf8_lossy(&data);
+    let pat = if case_insensitive { pattern.to_ascii_lowercase() } else { pattern.to_owned() };
+    for (idx, line) in text.lines().enumerate() {
+        let haystack = if case_insensitive { line.to_ascii_lowercase() } else { line.to_owned() };
+        if haystack.contains(&pat) {
+            if show_line_numbers {
+                println!("{}:{}:{}", path.cyan(), (idx + 1).to_string().green(), line);
+            } else {
+                println!("{}:{}", path.cyan(), line);
+            }
+        }
+    }
+}
+
+/// Recursively search file contents for a pattern across a directory tree.
+fn grep_walk<'a, O: ShellOps>(ops: &'a O, handle: ShellHandle, base_path: String, pattern: &'a str, case_insensitive: bool, show_line_numbers: bool, recursive: bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let Ok(entries) = ops.list_dir(&handle).await else { return };
+        for entry in &entries {
+            if entry.name == "." || entry.name == ".." {
+                continue;
+            }
+            let full_path = format!("{}/{}", base_path.trim_end_matches('/'), entry.name);
+            let is_dir = entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory);
+            let is_file = entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Regular);
+            if is_file && let Some(ref fh) = entry.handle {
+                grep_file(ops, fh, &full_path, pattern, case_insensitive, show_line_numbers).await;
+            }
+            if is_dir
+                && recursive
+                && let Some(ref fh) = entry.handle
+            {
+                grep_walk(ops, fh.clone(), full_path, pattern, case_insensitive, show_line_numbers, true).await;
             }
         }
     })

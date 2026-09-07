@@ -1,7 +1,7 @@
 .PHONY: fmt fmt-fix lint lint-fix doc dev build check \
         test test-matrix \
         audit machete \
-        ascii-check lf-check hygiene \
+        editorconfig yamllint actionlint taplo markdownlint hygiene \
         build-linux-musl build-linux-x86-full \
         build-linux-arm-musl build-linux-arm-full \
         build-macos-arm build-macos-x86 build-macos-universal \
@@ -118,68 +118,27 @@ machete:
 	$(CARGO) machete
 
 # -- File hygiene --------------------------------------------------------------
+# Five tools enforce file-level consistency. editorconfig-checker subsumes the
+# old ascii-check + lf-check (LF endings, final newline, charset, whitespace).
 
-# Repository paths excluded from all hygiene checks.
-#   vendor/**  - third-party code, not our policy to enforce
-#   ref/**     - reference material / external docs
-HYGIENE_EXCLUDES := ':!vendor/**' ':!ref/**' ':!docs/**' ':!Makefile'
+editorconfig:
+	ec
 
-# Files held to strict ASCII: TAB, LF, printable ASCII only. Nothing else.
-HYGIENE_STRICT_GLOBS := \
-    '*.toml' '*.yml' '*.yaml' '*.json' '*.sh' '*.lock' \
-     'LICENSE' '.editorconfig' '.gitignore' '.gitattributes'
+yamllint:
+	yamllint --strict -c .yamllint.yml .
 
-# Files allowed the project allowlist (§) on top of strict ASCII.
-#   .rs  - § in RFC-section comments
-#   .md  - § for protocol references
-HYGIENE_ALLOWLIST_GLOBS := '*.rs' '*.md'
+actionlint:
+	actionlint .github/workflows/*.yml
 
-HYGIENE_ALL_GLOBS := $(HYGIENE_STRICT_GLOBS) $(HYGIENE_ALLOWLIST_GLOBS)
+taplo:
+	taplo fmt --check Cargo.toml pyproject.toml
+	taplo lint Cargo.toml pyproject.toml
 
-# PCRE codepoint classes (codepoint-aware under LC_ALL=C.UTF-8).
-#    \x{0A} LF, \x{20}-\x{7E} printable ASCII (excludes DEL).
-# CR (\x{0D}) intentionally not allowed; the project is LF-only and lf-check
-# enforces that separately.
-HYGIENE_STRICT_CLASS    := [^\x{0A}\x{20}-\x{7E}]
-
-# Allowlist adds:
-#   §  U+00A7 SECTION SIGN
-HYGIENE_ALLOWLIST_CLASS := [^\x{0A}\x{20}-\x{7E}\x{A7}]
-
-ascii-check:
-	@echo "Checking for non-ASCII code points in tracked source files..."
-	@fail=0; \
-	for f in $$(git ls-files -- $(HYGIENE_STRICT_GLOBS) $(HYGIENE_EXCLUDES)); do \
-		if LC_ALL=C.UTF-8 grep -aPn '$(HYGIENE_STRICT_CLASS)' "$$f" > /dev/null 2>&1; then \
-			echo "  NON-ASCII: $$f"; \
-			LC_ALL=C.UTF-8 grep -aPn '$(HYGIENE_STRICT_CLASS)' "$$f"; \
-			fail=1; \
-		fi; \
-	done; \
-	for f in $$(git ls-files -- $(HYGIENE_ALLOWLIST_GLOBS) $(HYGIENE_EXCLUDES)); do \
-		if LC_ALL=C.UTF-8 grep -aPn '$(HYGIENE_ALLOWLIST_CLASS)' "$$f" > /dev/null 2>&1; then \
-			echo "  NON-ASCII (outside allowlist): $$f"; \
-			LC_ALL=C.UTF-8 grep -aPn '$(HYGIENE_ALLOWLIST_CLASS)' "$$f"; \
-			fail=1; \
-		fi; \
-	done; \
-	if [ "$$fail" -eq 1 ]; then echo "FAIL: non-ASCII bytes found"; exit 1; fi
-	@echo "OK: tracked files conform to ASCII / allowlisted-UTF-8 policy."
-
-lf-check:
-	@echo "Checking for CRLF line endings in tracked files..."
-	@fail=0; \
-	for f in $$(git ls-files -- $(HYGIENE_ALL_GLOBS) $(HYGIENE_EXCLUDES)); do \
-		if grep -Pq '\r$$' "$$f" 2>/dev/null; then \
-			echo "  CRLF: $$f"; \
-			fail=1; \
-		fi; \
-	done; \
-	if [ "$$fail" -eq 1 ]; then echo "FAIL: CRLF line endings found"; exit 1; fi
-	@echo "OK: all source files use LF."
+markdownlint:
+	markdownlint-cli2
 
 .PHONY: hygiene
-hygiene: ascii-check lf-check
+hygiene: editorconfig yamllint actionlint taplo markdownlint
 
 # -- Platform-specific build targets -------------------------------------------
 #

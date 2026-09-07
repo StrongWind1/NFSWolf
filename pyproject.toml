@@ -1,0 +1,24 @@
+[project]
+name = "nfswolf-docs"
+version = "0.0.0"
+requires-python = ">=3.11,<3.15"
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+docs = ["mkdocs-material>=9.0"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.ty.analysis]
+strict-equality-semantics = true
+strict-generic-narrowing = true
+respect-type-ignore-comments = false
