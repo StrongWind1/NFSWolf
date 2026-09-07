@@ -5,20 +5,20 @@
 # test files readable without loosening production-code rules.
 
 # --- Complexity thresholds ---------------------------------------------------
-cognitive-complexity-threshold          = 30
-too-many-arguments-threshold            = 18
-too-many-lines-threshold                = 500
-type-complexity-threshold               = 500
-max-struct-bools                        = 20
-max-fn-params-bools                     = 10
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 18
+too-many-lines-threshold = 500
+type-complexity-threshold = 500
+max-struct-bools = 20
+max-fn-params-bools = 10
 
 # --- Strictness settings -----------------------------------------------------
 avoid-breaking-exported-api = false
 check-private-items = true
 
 # --- Test-only relaxations ----------------------------------------------------
-allow-unwrap-in-consts          = true
-allow-expect-in-tests           = true
-allow-unwrap-in-tests           = true
+allow-unwrap-in-consts = true
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
 allow-indexing-slicing-in-tests = true
-allow-panic-in-tests            = true
+allow-panic-in-tests = true
