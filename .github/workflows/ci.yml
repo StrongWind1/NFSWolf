@@ -394,10 +394,9 @@ jobs:
       - name: Install hygiene tools
         run: |
           set -euo pipefail
-          pip install --user --quiet yamllint
+          pip install --user --quiet yamllint editorconfig-checker
           npm install -g markdownlint-cli2
           go install github.com/rhysd/actionlint/cmd/actionlint@latest
-          go install github.com/editorconfig-checker/editorconfig-checker/v3/cmd/ec@latest
           cargo install taplo-cli --locked
 
       - name: Run hygiene targets
