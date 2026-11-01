@@ -215,6 +215,7 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
         analyzer = analyzer.with_proxy(p.clone());
     }
     let config = AnalyzeConfig { host: host_for_config, port: 2049, test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
+    tracing::info!(%host, "running security checks");
     analyzer.analyze(&config).await
 }
 

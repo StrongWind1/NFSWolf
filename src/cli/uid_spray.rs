@@ -10,7 +10,6 @@
 //! identities the server happens to recognise.
 
 use clap::Parser;
-use colored::Colorize as _;
 
 use crate::cli::probe::{lookup_path, make_client_with_hostname, make_mount_client, parse_addr_with_port};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_IDENTITY, H_STEALTH, H_TARGET};
@@ -104,10 +103,13 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
         );
     }
 
+    tracing::info!(host = %host, export = %export, "starting UID spray");
+    tracing::info!(uid_start = args.uid_start, uid_end = args.uid_end, paired_gid, attempts, "spray configuration");
+
     if paired_gid {
-        eprintln!("{}", format!("[*] Spraying UIDs {}-{} (gid = uid) on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end).yellow());
+        eprintln!("{}", crate::output::status_info(&format!("Spraying UIDs {}-{} (gid = uid) on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end)));
     } else {
-        eprintln!("{}", format!("[*] Spraying UIDs {}-{} x GIDs {}-{} on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end, gid_range.start(), gid_range.end()).yellow());
+        eprintln!("{}", crate::output::status_info(&format!("Spraying UIDs {}-{} x GIDs {}-{} on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end, gid_range.start(), gid_range.end())));
     }
 
     let addr = parse_addr_with_port(&host, globals.nfs_port)?;
@@ -124,7 +126,8 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
     let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range, paired_gid, auxiliary_gids: globals.aux_gids.clone(), _target_path: args.path, _concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };
 
     let results = sprayer.spray(&config, &target_fh).await;
-    eprintln!("{}", format!("[+] {} credential(s) granted access", results.len()).green());
+    tracing::info!(hits = results.len(), "spray complete");
+    eprintln!("{}", crate::output::status_ok(&format!("{} credential(s) granted access", results.len())));
     for r in &results {
         let flags = access_summary(r.access);
         eprintln!("    uid={} gid={} [{flags}]", r.uid, r.gid);

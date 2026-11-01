@@ -126,6 +126,8 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
     }
     let config = ScanConfig { concurrency: args.concurrency, timeout: Duration::from_millis(globals.timeout), scan_udp: args.scan_udp, nfs_ports: probe_ports, mount_port: globals.mount_port, rpc_port: globals.rpc_port, skip_rpc: globals.skip_rpc, skip_mountd: globals.skip_mountd };
 
+    tracing::info!(concurrency = args.concurrency, timeout_ms = globals.timeout, udp = args.scan_udp, "scan configuration");
+
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let mut scanner = Scanner::new(config, stealth);
     if let Some(ref p) = globals.proxy {
@@ -133,6 +135,7 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
     }
     let output = scanner.scan_range(targets).await;
     let ScanOutput { results, total, interrupted } = output;
+    tracing::info!(hosts_scanned = total, with_nfs = results.len(), "scan complete");
 
     // Table + per-host detail always goes to stdout (even on interrupt -- partial data).
     print_table(&results, args.scan_udp);

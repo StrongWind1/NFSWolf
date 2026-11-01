@@ -82,6 +82,7 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
             tracing::debug!("Probing {} ...", candidate.label);
         }
         if probe_candidate(probe, candidate, export_fileid, export_handle).await {
+            tracing::debug!(candidate = %candidate.label, "escape probe: confirmed");
             return EscapeRootOutcome::Success(candidate.clone());
         }
     }
@@ -94,6 +95,7 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
             tracing::debug!("Probing BTRFS subvol {} ...", candidate.inode_number);
         }
         if probe_candidate(probe, candidate, export_fileid, export_handle).await {
+            tracing::debug!(subvol = candidate.inode_number, "escape probe: BTRFS subvol confirmed");
             return EscapeRootOutcome::Success(candidate.clone());
         }
     }
@@ -116,6 +118,7 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
             tracing::debug!("Probing {} ...", candidate.label);
         }
         if probe_candidate(probe, candidate, export_fileid, export_handle).await {
+            tracing::debug!(candidate = %candidate.label, "escape probe: confirmed");
             return EscapeRootOutcome::Success(candidate.clone());
         }
     }
@@ -150,7 +153,9 @@ pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export
         }
     }
 
-    if found_stale { EscapeRootOutcome::StaleNoRoot } else { EscapeRootOutcome::Unsupported }
+    let outcome = if found_stale { EscapeRootOutcome::StaleNoRoot } else { EscapeRootOutcome::Unsupported };
+    tracing::debug!(found_stale, "escape complete: no root handle found");
+    outcome
 }
 
 /// Probe a brute-force candidate. Returns `Some(Success)` if the candidate is

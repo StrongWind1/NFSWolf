@@ -140,6 +140,7 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     };
 
     let fs = FileHandleAnalyzer::fingerprint_fs(&seed);
+    tracing::info!(fs_type = ?fs, "seed handle fingerprinted");
     let inode_start = args.inode_start;
     let inode_end = args.inode_end;
     let gen_start = args.gen_start;
@@ -184,6 +185,7 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
             if result {
                 result
             } else {
+                tracing::info!("NFSv3 sweep found nothing, falling back to NFSv2");
                 eprintln!("{}", crate::output::status_info("NFSv3 sweep failed; retrying with NFSv2"));
                 sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals).await
             }
@@ -521,6 +523,7 @@ async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &s
     let search_space: u64 = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
     let limit = search_space.min(max_attempts);
 
+    tracing::info!(wild_nibbles = nibble_count, total_candidates = search_space, "starting mask sweep");
     eprintln!("{}", crate::output::status_info(&format!("Mask sweep: {} bytes, {} wild nibble(s), {search_space} candidates (probing up to {limit})", template.len(), nibble_count)));
 
     let mut found_any = false;

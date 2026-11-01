@@ -188,7 +188,7 @@ async fn run_repl<O: crate::shell::ops::ShellOps>(shell: &mut NfsShell<O>, host:
         return Ok(());
     }
 
-    // Interactive REPL with Tab completion.
+    tracing::info!("entering REPL");
     let completer = shell.make_completer();
     let mut rl = Editor::<ShellCompleter, DefaultHistory>::new()?;
     rl.set_helper(Some(completer));
@@ -265,6 +265,7 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
         && port > 0
         && verify_nfs_version_tcp(host, port, 3, probe_timeout, globals.proxy.as_deref()).await
     {
+        tracing::info!(version = 3u32, port, "NFS version detected");
         eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv3 on port {port}")));
         return Ok(3);
     }
@@ -274,6 +275,7 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
         && port > 0
         && verify_nfs_version_tcp(host, port, 2, probe_timeout, globals.proxy.as_deref()).await
     {
+        tracing::info!(version = 2u32, port, "NFS version detected");
         eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv2 on port {port}")));
         return Ok(2);
     }
@@ -287,6 +289,7 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
     })
     .await
     {
+        tracing::info!(version = 4u32, port = nfs_port, "NFS version detected");
         eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv4 on port {nfs_port}")));
         return Ok(4);
     }

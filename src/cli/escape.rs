@@ -158,6 +158,7 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
     let nfs_port = globals.nfs_port.unwrap_or(2049);
 
     // --- Phase 1: Gather seeds ---
+    tracing::info!("phase 1: gathering seed handles");
     if !globals.quiet && !config.json {
         eprintln!("{}", crate::output::status_info(&format!("Escaping {host} ({})", if config.fast { "fast mode" } else { "comprehensive" })));
     }
@@ -179,6 +180,7 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
     }
 
     // --- Phase 2: Construct candidates ---
+    tracing::info!(seeds = seeds.len(), "phase 2: constructing candidates");
     let (candidates, candidates_before_dedup) = construct_candidates(&seeds, &config);
 
     if !globals.quiet && !config.json {
@@ -186,6 +188,7 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
     }
 
     // --- Phase 3: Probe candidates ---
+    tracing::info!(candidates = candidates.len(), "phase 3: probing candidates");
     let active_version = if config.fast {
         seeds.first().and_then(|s| match s.nfs_version {
             Some(3) => Some(ActiveVersion::V3),
@@ -204,6 +207,7 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
     }
 
     // --- Phase 4: Dedup and filter ---
+    tracing::info!(tree_tops = tree_tops.len(), "phase 4: dedup and rootfs detection");
     let confirmed_count = tree_tops.len();
     let mut filtered = dedup_and_filter(tree_tops, &known_boundaries);
     let filtered_count = confirmed_count - filtered.len();
@@ -212,6 +216,7 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
     rootfs_detection(&mut filtered, addr, &export, &stealth, nfs_port, globals).await;
 
     // --- Phase 5: Score and annotate ---
+    tracing::info!("phase 5: scoring and annotation");
     let annotated = score_and_annotate(filtered);
     let annotated = if config.all_handles { annotated } else { dedup_by_filesystem(annotated) };
 

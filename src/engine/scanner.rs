@@ -256,6 +256,7 @@ struct ScanJob {
 async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     let start = Instant::now();
     let ip = target.ip;
+    tracing::debug!(host = %ip, "scanning host");
     let probe_timeout = job.timeout;
     let rpc_port_num = job.rpc_port.unwrap_or(111);
     let portmap_addr = SocketAddr::new(ip, rpc_port_num);
@@ -317,6 +318,8 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     };
 
     let ((rpc_tcp, rpc_udp), (nfs_2049_tcp, nfs_2049_udp, extra_port_probes)) = tokio::join!(rpc_future, nfs_future);
+
+    tracing::debug!(host = %ip, rpc_tcp, rpc_udp, nfs_2049_tcp, nfs_2049_udp, "port probes complete");
 
     let portmap_reachability = if job.skip_rpc { PortReachability::Unreachable } else { PortReachability::from_probes(rpc_tcp, rpc_udp) };
     let portmap_reachable = portmap_reachability.is_reachable();
@@ -456,6 +459,13 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                 }
             }
         }
+    }
+
+    {
+        let v2 = nfs_ports_info.iter().any(|p| p.v2);
+        let v3 = nfs_ports_info.iter().any(|p| p.v3);
+        let v4 = nfs_ports_info.iter().any(|p| p.v4);
+        tracing::debug!(host = %ip, v2, v3, v4, "NFS versions confirmed");
     }
 
     // --- Skip logic ---
@@ -669,6 +679,9 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     } else {
         None
     };
+
+    let export_count = exports_v3.as_ref().map_or(0, Vec::len) + exports_v2.as_ref().map_or(0, Vec::len) + exports_v4.as_ref().map_or(0, Vec::len);
+    tracing::debug!(host = %ip, exports = export_count, "exports enumerated");
 
     // --- Assembly ---
     Some(HostResult { ip, hostname: target.hostname, portmap_reachability, nfs_ports: nfs_ports_info, mount_ports: mount_port_infos, rpc_services: dump_entries, exports_v2, exports_v3, exports_v4, mounts, hint, rdma_detected, os_guess, scan_duration: start.elapsed() })
