@@ -124,7 +124,7 @@ impl NfsConnection {
         let nfs_port = match portmap.query_port(addr, NFS_PROGRAM, NFS_VERSION_3).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(%addr, err = %e, port = NFS_DEFAULT_PORT, "portmapper did not answer for NFSv3; assuming the conventional port");
+                tracing::info!(%addr, err = %e, port = NFS_DEFAULT_PORT, "portmapper did not answer for NFSv3; assuming the conventional port");
                 NFS_DEFAULT_PORT
             },
         };
@@ -343,6 +343,6 @@ async fn connect_privileged_nfs(addr: SocketAddr) -> std::io::Result<NfsIo> {
             }
         }
     }
-    tracing::warn!(%addr, "privileged NFS port binding failed after retries, falling back to ephemeral port");
+    tracing::info!(%addr, "privileged NFS port binding failed after retries, falling back to ephemeral port");
     TokioConnector.connect(addr).await
 }

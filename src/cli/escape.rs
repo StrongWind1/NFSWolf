@@ -468,7 +468,7 @@ async fn discover_exports(host: &str, addr: SocketAddr, mount: &NfsMountClient, 
             export_map.entry(e.path.clone()).or_default().push("MOUNT v3 EXPORT");
         }
     } else {
-        tracing::warn!("MOUNT v3 EXPORT failed");
+        tracing::info!("MOUNT v3 EXPORT failed");
     }
 
     // Channel 2: MOUNT v1 EXPORT
@@ -478,7 +478,7 @@ async fn discover_exports(host: &str, addr: SocketAddr, mount: &NfsMountClient, 
             export_map.entry(e.path.clone()).or_default().push("MOUNT v1 EXPORT");
         }
     } else {
-        tracing::warn!("MOUNT v1 EXPORT failed");
+        tracing::info!("MOUNT v1 EXPORT failed");
     }
 
     // Channel 3: NFSv4 pseudo-FS walk
@@ -504,7 +504,7 @@ async fn discover_exports(host: &str, addr: SocketAddr, mount: &NfsMountClient, 
             }
         }
     } else {
-        tracing::warn!("MOUNT v3 DUMP failed");
+        tracing::info!("MOUNT v3 DUMP failed");
     }
 
     // Channel 5: MOUNT v1 DUMP
@@ -520,7 +520,7 @@ async fn discover_exports(host: &str, addr: SocketAddr, mount: &NfsMountClient, 
             }
         }
     } else {
-        tracing::warn!("MOUNT v1 DUMP failed");
+        tracing::info!("MOUNT v1 DUMP failed");
     }
 
     let _ = existing_count; // suppress unused

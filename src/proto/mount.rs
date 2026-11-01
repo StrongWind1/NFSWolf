@@ -157,7 +157,7 @@ impl NfsMountClient {
             Err(e) if self.privileged_required => Err(e),
             Err(e) => {
                 if downcast_mnt_acces(&e) {
-                    tracing::warn!(%addr, %export, "MNT returned ACCES from ephemeral source port; retrying with privileged-only");
+                    tracing::info!(%addr, %export, "MNT returned ACCES from ephemeral source port; retrying with privileged-only");
                     let priv_client = Self { mount_port: self.mount_port, privileged_required: true, proxy: self.proxy.clone(), credential: self.credential.clone() };
                     priv_client.mount_once(addr, export).await.with_context(|| format!("MNT {export} (privileged retry)"))
                 } else {
@@ -188,7 +188,7 @@ impl NfsMountClient {
             Err(e) if self.privileged_required => Err(e),
             Err(e) => {
                 if downcast_mnt_acces(&e) {
-                    tracing::warn!(%addr, %export, "MNT v1 returned ACCES; retrying with privileged-only");
+                    tracing::info!(%addr, %export, "MNT v1 returned ACCES; retrying with privileged-only");
                     let priv_client = Self { mount_port: self.mount_port, privileged_required: true, proxy: self.proxy.clone(), credential: self.credential.clone() };
                     priv_client.mount_v1_once(addr, export).await.with_context(|| format!("MNT v1 {export} (privileged retry)"))
                 } else {
@@ -416,7 +416,7 @@ impl NfsMountClient {
             None => match portmap.query_port(addr, 100_005, 3).await {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(%addr, error = %e, "portmapper unavailable, trying mountd on well-known fallback ports");
+                    tracing::info!(%addr, error = %e, "portmapper unavailable, trying mountd on well-known fallback ports");
                     self.probe_mountd_fallback(addr).await.with_context(|| format!("portmapper unavailable and mountd not found on fallback ports (2049, 20048) -- use --mount-port to specify manually\n  portmapper error: {e}"))?
                 },
             },
@@ -506,7 +506,7 @@ async fn connect_privileged_or_fallback(addr: SocketAddr) -> std::io::Result<cra
             },
         }
     }
-    tracing::warn!(%addr, "privileged port binding failed, falling back to ephemeral port -- server may reject with EACCES");
+    tracing::info!(%addr, "privileged port binding failed, falling back to ephemeral port -- server may reject with EACCES");
     TokioConnector.connect(addr).await
 }
 
