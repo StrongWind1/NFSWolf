@@ -104,10 +104,5 @@ fn init_tracing(verbose: u8, quiet: bool) {
         EnvFilter::new(directive)
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .without_time()
-        .with_writer(std::io::stderr)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).without_time().with_writer(std::io::stderr).init();
 }

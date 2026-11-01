@@ -115,10 +115,8 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     if let Some(ref mask) = args.mask {
         let (_, _, client) = make_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
         let found = sweep_mask(&client, mask, args.max_attempts, &host, globals.quiet).await?;
-        if !found {
-            if !globals.quiet {
-                eprintln!("{}", crate::output::status_warn("No valid handle found. Try marking different nibbles or widening --max-attempts."));
-            }
+        if !found && !globals.quiet {
+            eprintln!("{}", crate::output::status_warn("No valid handle found. Try marking different nibbles or widening --max-attempts."));
         }
         crate::cli::emit_replay(globals);
         return Ok(());
@@ -203,10 +201,8 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
         NfsVersion::V2Only => sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals, globals.quiet).await,
     };
 
-    if !found {
-    if !globals.quiet {
+    if !found && !globals.quiet {
         eprintln!("{}", crate::output::status_warn("No valid handle found. Try widening --inode-start/--inode-end or --gen-start/--gen-end."));
-    }
     }
     crate::cli::emit_replay(globals);
     Ok(())
