@@ -105,6 +105,7 @@ pub(crate) fn credential_ladder_with(caller: (u32, u32), owner: Option<(u32, u32
     // twice.
     let mut seen = std::collections::HashSet::new();
     list.retain(|pair| seen.insert(*pair));
+    tracing::debug!(caller = ?(caller.0, caller.1), owner = ?owner, rungs = list.len(), "credential ladder built");
     list
 }
 

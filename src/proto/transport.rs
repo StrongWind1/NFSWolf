@@ -219,6 +219,8 @@ impl RpcTransport for PooledTransport {
         C: Pack + Send + Sync,
         R: Unpack,
     {
+        let prog_name = onc_rpcbind::program_name(prog).unwrap_or("unknown");
+        tracing::debug!(program = prog_name, version = vers, procedure = proc, "RPC call");
         let mut conn = self.checkout().await.map_err(|e| checkout_error(&e))?;
         let timed = tokio::time::timeout(RPC_TIMEOUT, conn.call::<C, R>(prog, vers, proc, args)).await;
         self.finish(conn, timed)
@@ -230,6 +232,8 @@ impl RpcTransport for PooledTransport {
         C: Pack + Send + Sync,
         R: Unpack,
     {
+        let prog_name = onc_rpcbind::program_name(prog).unwrap_or("unknown");
+        tracing::debug!(program = prog_name, version = vers, procedure = proc, "RPC call_as");
         let mut conn = self.checkout().await.map_err(|e| checkout_error(&e))?;
         let timed = tokio::time::timeout(RPC_TIMEOUT, conn.call_as::<C, R>(cred, prog, vers, proc, args)).await;
         self.finish(conn, timed)

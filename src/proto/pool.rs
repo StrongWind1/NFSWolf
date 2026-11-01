@@ -97,16 +97,12 @@ impl ConnectionPool {
         let permit = Arc::clone(&self.inner.admission).acquire_owned().await.map_err(|e| anyhow::anyhow!("connection pool closed: {e}"))?;
 
         if let Some(mut conn) = self.try_pop(&key).await {
-            // Re-stamp the reused connection with the REQUESTED credential before
-            // returning it: see `restamp_credential` for why uid/gid keying alone
-            // is not enough (aux-gids + machinename are not part of PoolKey).
+            tracing::debug!(host = %key.host, export = %key.export, uid = key.uid, "pool: reused idle connection");
             restamp_credential(&mut conn, credential);
             return Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit });
         }
 
-        // No idle connection  --  create a new one (via proxy if configured). A
-        // fresh connection is stamped with `credential` at construction, so it
-        // needs no re-stamp here.
+        tracing::debug!(host = %key.host, export = %key.export, uid = key.uid, "pool: new connection");
         let conn = NfsConnection::connect(key.host, &key.export, credential, reconnect, self.inner.proxy.as_deref()).await?;
         Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit })
     }
@@ -120,7 +116,8 @@ impl ConnectionPool {
         // freed and the next waiter woken only once the connection is back in the
         // idle queue. No manual counter/notify is needed here.
         if conn.health.poisoned {
-            return; // discard
+            tracing::debug!(host = %key.host, "pool: poisoned connection discarded");
+            return;
         }
 
         // Clone the queue handle out and drop the DashMap entry guard before
