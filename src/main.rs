@@ -27,14 +27,12 @@ mod fuse;
 mod shell;
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).with_target(false).init();
-
     let cli = cli::Cli::parse();
     let globals = cli.global_opts();
+
+    init_tracing(globals.verbose, globals.quiet);
 
     // Apply no-color globally before any output is produced.
     output::apply_no_color(globals.no_color);
@@ -88,4 +86,28 @@ fn main() -> anyhow::Result<()> {
             },
         }
     })
+}
+
+fn init_tracing(verbose: u8, quiet: bool) {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = if std::env::var_os("RUST_LOG").is_some() {
+        EnvFilter::from_default_env()
+    } else {
+        let directive = match (verbose, quiet) {
+            (0, true) => "nfswolf=error",
+            (0, false) => "nfswolf=warn",
+            (1, _) => "nfswolf=info",
+            (2, _) => "nfswolf=debug",
+            _ => "nfswolf=trace",
+        };
+        EnvFilter::new(directive)
+    };
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .init();
 }
