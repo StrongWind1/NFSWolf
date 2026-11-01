@@ -412,8 +412,24 @@ async fn phase1_gather_seeds_full(host: &str, export: &str, addr: SocketAddr, mo
     // Phase 1b: Acquire handles from each export
     let v3 = make_v3_client(addr, export, stealth.clone(), nfs_port, globals);
 
+    let pb1 = if !globals.quiet && exports.len() > 1 {
+        let pb = indicatif::ProgressBar::new(u64::try_from(exports.len()).unwrap_or(u64::MAX));
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Gathering {bar:40.cyan/blue}  {pos}/{len} exports  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("0 seeds");
+        Some(pb)
+    } else {
+        None
+    };
+
     for exp in &exports {
         acquire_handles_for_export(host, &exp.path, addr, mount, &v3, stealth, nfs_port, globals, &mut seeds, &mut seen, &mut known_boundaries).await;
+        if let Some(ref pb) = pb1 {
+            pb.set_message(format!("{} seed(s)", seeds.len()));
+            pb.inc(1);
+        }
+    }
+    if let Some(pb) = pb1 {
+        pb.finish_and_clear();
     }
 
     // Phase 1c: Protocol-specific handle sources

@@ -515,7 +515,10 @@ impl<O: ShellOps> NfsShell<O> {
                 None
             }
         };
-        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::default_spinner().template("{spinner} scanned {pos} entries").unwrap_or_else(|_| ProgressStyle::default_spinner()));
+        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter, &pb).await;
+        pb.finish_and_clear();
     }
 
     /// Search remote file contents for a pattern.
@@ -566,7 +569,10 @@ impl<O: ShellOps> NfsShell<O> {
             },
             ShellFileType::Directory => {
                 let base = if target == "." { self.cwd_path.clone() } else { target.to_owned() };
-                grep_walk(&self.ops, fh, base, pattern, case_insensitive, show_line_numbers, recursive).await;
+                let pb = ProgressBar::new_spinner();
+                pb.set_style(ProgressStyle::default_spinner().template("{spinner} searched {pos} files").unwrap_or_else(|_| ProgressStyle::default_spinner()));
+                grep_walk(&self.ops, fh, base, pattern, case_insensitive, show_line_numbers, recursive, &pb).await;
+                pb.finish_and_clear();
             },
             _ => eprintln!("{}", format!("grep: {target}: not a regular file or directory").yellow()),
         }
@@ -672,7 +678,14 @@ impl<O: ShellOps> NfsShell<O> {
                 Err(e) => eprintln!("{}", format!("get -r: {e}").red()),
             }
         } else {
-            match download_file(&self.ops, &fh, dest).await {
+            let dl_pb = if info.size > u64::from(CHUNK_SIZE) {
+                let pb = ProgressBar::new(info.size);
+                pb.set_style(ProgressStyle::default_bar().template("[*] Download  {bar:40.cyan/blue}  {bytes}/{total_bytes}  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| ProgressStyle::default_bar()));
+                Some(pb)
+            } else {
+                None
+            };
+            match download_file(&self.ops, &fh, dest, dl_pb.as_ref()).await {
                 Ok((bytes, hash)) => {
                     println!("{}", format!("saved {bytes} bytes -> {dest}  sha256:{hash}").green());
                     if let Some(ref expected) = verify_hash {
@@ -1272,7 +1285,10 @@ impl<O: ShellOps> NfsShell<O> {
                 None
             }
         };
-        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::default_spinner().template("{spinner} scanned {pos} entries").unwrap_or_else(|_| ProgressStyle::default_spinner()));
+        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter, &pb).await;
+        pb.finish_and_clear();
     }
 
     /// Recursively walk and report world-writable files and directories.
@@ -1288,7 +1304,10 @@ impl<O: ShellOps> NfsShell<O> {
                 None
             }
         };
-        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::default_spinner().template("{spinner} scanned {pos} entries").unwrap_or_else(|_| ProgressStyle::default_spinner()));
+        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter, &pb).await;
+        pb.finish_and_clear();
     }
 
     /// Recursively walk and report files matching known credential/secret patterns.
@@ -1310,7 +1329,10 @@ impl<O: ShellOps> NfsShell<O> {
                 None
             }
         };
-        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter).await;
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::default_spinner().template("{spinner} scanned {pos} entries").unwrap_or_else(|_| ProgressStyle::default_spinner()));
+        walk_recursive(&self.ops, self.cwd.clone(), self.cwd_path.clone(), &filter, &pb).await;
+        pb.finish_and_clear();
     }
 
     /// `last [N]` / `lastb [N]` -- decode `/var/log/wtmp` (or `/var/log/btmp`).
@@ -1817,7 +1839,7 @@ impl<O: ShellOps> NfsShell<O> {
 /// Returns `(bytes_written, sha256_hex)`.  The SHA-256 is computed over the
 /// full downloaded content and printed alongside the byte count so the operator
 /// has an instant integrity reference for report evidence chains.
-async fn download_file<O: ShellOps>(ops: &O, fh: &ShellHandle, dest_path: &str) -> anyhow::Result<(u64, String)> {
+async fn download_file<O: ShellOps>(ops: &O, fh: &ShellHandle, dest_path: &str, pb: Option<&ProgressBar>) -> anyhow::Result<(u64, String)> {
     let mut file = std::fs::File::create(dest_path).map_err(|e| anyhow::anyhow!("create {dest_path}: {e}"))?;
     let mut hasher = Sha256::new();
     let mut offset = 0u64;
@@ -1829,9 +1851,15 @@ async fn download_file<O: ShellOps>(ops: &O, fh: &ShellHandle, dest_path: &str) 
         file.write_all(&data).map_err(|e| anyhow::anyhow!("write: {e}"))?;
         hasher.update(&data);
         offset = offset.saturating_add(data.len() as u64);
+        if let Some(pb) = pb {
+            pb.set_position(offset);
+        }
         if offset > READ_ALL_MAX {
             anyhow::bail!("download aborted at {offset} bytes: exceeds {READ_ALL_MAX}-byte cap (untrusted server returning endless non-EOF data)");
         }
+    }
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
     let hash = hasher.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
         use std::fmt::Write as _;
@@ -1904,7 +1932,7 @@ fn download_tree<'a, O: ShellOps>(ops: &'a O, dir_fh: &'a ShellHandle, local_roo
                     },
                 };
                 bar.set_message(format!("{local_root}/{}", entry.name));
-                match download_file(ops, &fh, &local_entry).await {
+                match download_file(ops, &fh, &local_entry, None).await {
                     Ok((bytes, _hash)) => {
                         total += bytes;
                         bar.inc(1);
@@ -2037,7 +2065,7 @@ fn tree_recursive<'a, O: ShellOps>(ops: &'a O, dir_fh: ShellHandle, prefix: Stri
 /// returns `Some(line)`, the line is printed. Directories are always recursed
 /// into regardless of filter outcome, matching the behavior of the individual
 /// scanners this replaces (suid-scan, world-writable, secrets-scan, find).
-fn walk_recursive<'a, O: ShellOps, F>(ops: &'a O, handle: ShellHandle, base_path: String, filter: &'a F) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+fn walk_recursive<'a, O: ShellOps, F>(ops: &'a O, handle: ShellHandle, base_path: String, filter: &'a F, pb: &'a ProgressBar) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
 where
     F: Fn(&ShellEntry, &str) -> Option<String> + Send + Sync,
 {
@@ -2048,13 +2076,14 @@ where
                 continue;
             }
             let full_path = format!("{}/{}", base_path.trim_end_matches('/'), entry.name);
+            pb.inc(1);
             if let Some(line) = filter(entry, &full_path) {
-                println!("{line}");
+                pb.suspend(|| println!("{line}"));
             }
             if entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory)
                 && let Some(ref fh) = entry.handle
             {
-                walk_recursive(ops, fh.clone(), full_path, filter).await;
+                walk_recursive(ops, fh.clone(), full_path, filter, pb).await;
             }
         }
     })
@@ -2122,7 +2151,7 @@ async fn grep_file<O: ShellOps>(ops: &O, fh: &ShellHandle, path: &str, pattern: 
 }
 
 /// Recursively search file contents for a pattern across a directory tree.
-fn grep_walk<'a, O: ShellOps>(ops: &'a O, handle: ShellHandle, base_path: String, pattern: &'a str, case_insensitive: bool, show_line_numbers: bool, recursive: bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+fn grep_walk<'a, O: ShellOps>(ops: &'a O, handle: ShellHandle, base_path: String, pattern: &'a str, case_insensitive: bool, show_line_numbers: bool, recursive: bool, pb: &'a ProgressBar) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
         let Ok(entries) = ops.list_dir(&handle).await else { return };
         for entry in &entries {
@@ -2133,13 +2162,14 @@ fn grep_walk<'a, O: ShellOps>(ops: &'a O, handle: ShellHandle, base_path: String
             let is_dir = entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory);
             let is_file = entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Regular);
             if is_file && let Some(ref fh) = entry.handle {
+                pb.inc(1);
                 grep_file(ops, fh, &full_path, pattern, case_insensitive, show_line_numbers).await;
             }
             if is_dir
                 && recursive
                 && let Some(ref fh) = entry.handle
             {
-                grep_walk(ops, fh.clone(), full_path, pattern, case_insensitive, show_line_numbers, true).await;
+                grep_walk(ops, fh.clone(), full_path, pattern, case_insensitive, show_line_numbers, true, pb).await;
             }
         }
     })
