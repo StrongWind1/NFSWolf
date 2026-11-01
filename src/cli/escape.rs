@@ -200,7 +200,7 @@ pub(crate) async fn run(args: EscapeArgs, globals: &GlobalOpts) -> anyhow::Resul
         None
     };
 
-    let tree_tops = probe_candidates(&candidates, addr, &export, &stealth, nfs_port, globals, active_version).await;
+    let tree_tops = probe_candidates(&candidates, addr, &export, &stealth, nfs_port, globals, active_version, !globals.quiet && !config.json).await;
 
     if !globals.quiet && !config.json {
         eprintln!("{}", crate::output::status_info(&format!("{} tree-top(s) confirmed", tree_tops.len())));
@@ -268,7 +268,7 @@ pub(crate) async fn run_fast(host: &str, export: &str, globals: &GlobalOpts) -> 
     });
 
     // Phase 3
-    let tree_tops = probe_candidates(&candidates, addr, export, &stealth, nfs_port, globals, active_version).await;
+    let tree_tops = probe_candidates(&candidates, addr, export, &stealth, nfs_port, globals, active_version, false).await;
 
     // Phase 4
     let mut filtered = dedup_and_filter(tree_tops, &known_boundaries);
@@ -839,7 +839,7 @@ async fn upward_chain_v4_lookup_dotdot(client: &mut crate::proto::nfs4::compound
 /// the active version only in fast mode). Confirm tree-tops via LOOKUP ".."
 /// == self, with credential escalation on ACCES.
 #[expect(clippy::similar_names, reason = "working_uid and working_gid are a uid/gid pair -- naming is clear")]
-async fn probe_candidates(candidates: &[EscapeCandidate], addr: SocketAddr, export: &str, stealth: &StealthConfig, nfs_port: u16, globals: &GlobalOpts, active_version: Option<ActiveVersion>) -> Vec<VerifiedTreeTop> {
+async fn probe_candidates(candidates: &[EscapeCandidate], addr: SocketAddr, export: &str, stealth: &StealthConfig, nfs_port: u16, globals: &GlobalOpts, active_version: Option<ActiveVersion>, show_progress: bool) -> Vec<VerifiedTreeTop> {
     let mut results: Vec<VerifiedTreeTop> = Vec::new();
 
     // Build clients for each version we'll use
@@ -853,6 +853,15 @@ async fn probe_candidates(candidates: &[EscapeCandidate], addr: SocketAddr, expo
     };
 
     let v4_client = if active_version.is_none() || active_version == Some(ActiveVersion::V4) { Some(make_v4_pooled_client(addr, export, stealth.clone(), nfs_port, globals)) } else { None };
+
+    let pb = if show_progress {
+        let pb = indicatif::ProgressBar::new(u64::try_from(candidates.len()).unwrap_or(u64::MAX));
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Probing   {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("0 tree-tops");
+        Some(pb)
+    } else {
+        None
+    };
 
     for candidate in candidates {
         let mut v3_confirmed = false;
@@ -890,8 +899,15 @@ async fn probe_candidates(candidates: &[EscapeCandidate], addr: SocketAddr, expo
         if v3_confirmed || v2_confirmed || v4_confirmed {
             results.push(VerifiedTreeTop { candidate: candidate.clone(), v3_confirmed, v2_confirmed, v4_confirmed, uid: working_uid, gid: working_gid, rootfs_score: 0, rootfs_dirs: Vec::new(), os_escape: false, access_rank: AccessRank::Unknown });
         }
+        if let Some(ref pb) = pb {
+            pb.set_message(format!("{} tree-top(s)", results.len()));
+            pb.inc(1);
+        }
     }
 
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
     results
 }
 

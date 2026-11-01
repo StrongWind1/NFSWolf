@@ -114,6 +114,15 @@ pub(crate) async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Resu
     let targets = collect_targets(&args)?;
     let mut all_results: Vec<AnalysisResult> = Vec::with_capacity(targets.len());
 
+    let pb = if targets.len() > 1 && !globals.quiet && args.json.is_none() {
+        let pb = indicatif::ProgressBar::new(u64::try_from(targets.len()).unwrap_or(u64::MAX));
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Analyzing {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("0 finding(s)");
+        Some(pb)
+    } else {
+        None
+    };
+
     for host in &targets {
         tracing::info!(%host, "analyzing NFS server");
         if !globals.quiet && args.json.is_none() {
@@ -142,6 +151,15 @@ pub(crate) async fn run(args: AnalyzeArgs, globals: &GlobalOpts) -> anyhow::Resu
             }
         }
         all_results.push(result);
+        if let Some(ref pb) = pb {
+            let total_findings: usize = all_results.iter().map(|r| r.findings.len()).sum();
+            pb.set_message(format!("{total_findings} finding(s)"));
+            pb.inc(1);
+        }
+    }
+
+    if let Some(ref pb) = pb {
+        pb.finish_and_clear();
     }
 
     if let Some(dest) = &args.json {

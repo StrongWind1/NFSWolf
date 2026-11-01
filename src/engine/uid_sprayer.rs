@@ -100,7 +100,7 @@ impl UidSprayer {
     /// the AUTH_SYS credential per-call (RFC 1057 S9.2).  This avoids
     /// creating one connection per (uid, gid) pair, which would exhaust the
     /// privileged source-port range (300-1023) after a few hundred attempts.
-    pub(crate) async fn spray(&self, config: &SprayConfig, fh: &FileHandle) -> Vec<SprayResult> {
+    pub(crate) async fn spray(&self, config: &SprayConfig, fh: &FileHandle, pb: Option<&indicatif::ProgressBar>) -> Vec<SprayResult> {
         let mut results = Vec::new();
         let nfs_fh = fh.to_nfs_fh3();
         let args = ACCESS3args { object: nfs_fh, access: access_bits::ALL };
@@ -162,6 +162,10 @@ impl UidSprayer {
                         conn.poison();
                         break 'outer;
                     },
+                }
+                if let Some(pb) = pb {
+                    pb.set_message(format!("{} hit(s)", results.len()));
+                    pb.inc(1);
                 }
             }
         }

@@ -229,10 +229,15 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
     let sem = Arc::new(Semaphore::new(limit));
     let collected = Arc::new(Mutex::new(Vec::<AutoEscapeResult>::new()));
 
+    let pb = indicatif::ProgressBar::new(u64::try_from(targets.len()).unwrap_or(u64::MAX));
+    pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Escaping  {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+    pb.set_message("0 escaped");
+
     let mut handles = Vec::with_capacity(targets.len());
     for (idx, host, export) in targets {
         let sem = Arc::clone(&sem);
         let collected = Arc::clone(&collected);
+        let pb = pb.clone();
         let g = globals.clone();
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire_owned().await;
@@ -246,7 +251,13 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
                 Ok(Err(e)) => Err(e.to_string()),
                 Err(_) => Err(format!("timed out after {}ms", per_host.as_millis())),
             };
+            let escaped = matches!(&outcome, Ok(Some(_)));
             collected.lock().await.push(AutoEscapeResult { idx, host, export, outcome });
+            if escaped {
+                let esc_count = collected.lock().await.iter().filter(|r| matches!(&r.outcome, Ok(Some(_)))).count();
+                pb.set_message(format!("{esc_count} escaped"));
+            }
+            pb.inc(1);
         });
         handles.push(handle);
     }
@@ -254,6 +265,7 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
         // Task results already collected into the shared vec; JoinError is non-fatal.
         drop(handle.await);
     }
+    pb.finish_and_clear();
 
     // Drain and sort into stable host/export order for printing.
     let mut all = std::mem::take(&mut *collected.lock().await);

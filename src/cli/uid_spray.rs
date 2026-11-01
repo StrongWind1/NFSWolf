@@ -127,7 +127,19 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
     let sprayer = UidSprayer::new(client, circuit, stealth.clone());
     let config = SprayConfig { uid_range: args.uid_start..=args.uid_end, gid_range, paired_gid, auxiliary_gids: globals.aux_gids.clone(), _target_path: args.path, _concurrency: 1, required_access: access_bits::ALL, per_attempt_delay_ms: args.attempt_delay };
 
-    let results = sprayer.spray(&config, &target_fh).await;
+    let pb = if globals.quiet {
+        None
+    } else {
+        let pb = indicatif::ProgressBar::new(attempts);
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Spraying  {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("0 hit(s)");
+        Some(pb)
+    };
+
+    let results = sprayer.spray(&config, &target_fh, pb.as_ref()).await;
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
     tracing::info!(hits = results.len(), "spray complete");
     if !globals.quiet {
         eprintln!("{}", crate::output::status_ok(&format!("{} credential(s) granted access", results.len())));

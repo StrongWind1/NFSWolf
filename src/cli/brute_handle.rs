@@ -297,6 +297,18 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, _fs: FsType, max_a
     let mut stale = 0u64;
     let mut tried = 0u64;
 
+    let inode_count = inode_end - inode_start + 1;
+    let gen_count = u64::from(gen_end - gen_start) + 1;
+    let search_space = inode_count.saturating_mul(gen_count);
+    let pb = if quiet {
+        None
+    } else {
+        let pb = indicatif::ProgressBar::new(max_attempts.min(search_space));
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Sweeping  {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("0 hit(s), 0 STALE");
+        Some(pb)
+    };
+
     'outer: for inode in inode_start..=inode_end {
         if tried >= max_attempts {
             break;
@@ -331,7 +343,14 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, _fs: FsType, max_a
                 Probe::Stale => stale += 1,
                 Probe::Miss => {},
             }
+            if let Some(ref pb) = pb {
+                pb.set_message(format!("{} hit(s), {} STALE", extra_hits.len() + usize::from(found_root), stale));
+                pb.inc(1);
+            }
         }
+    }
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
     if !quiet && !extra_hits.is_empty() {
         eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
@@ -353,6 +372,15 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
     let mut stale = 0u64;
     let mut found_root = false;
     let mut extra_hits: Vec<(u32, String)> = Vec::new();
+    let pb = if quiet {
+        None
+    } else {
+        let total = max_attempts.min(u64::try_from(candidates.len()).unwrap_or(u64::MAX));
+        let pb = indicatif::ProgressBar::new(total);
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Sweeping  {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("0 hit(s), 0 STALE");
+        Some(pb)
+    };
     for cand in &candidates {
         if tried >= max_attempts {
             break;
@@ -379,6 +407,13 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
             Probe::Stale => stale += 1,
             Probe::Miss => {},
         }
+        if let Some(ref pb) = pb {
+            pb.set_message(format!("{} hit(s), {} STALE", extra_hits.len() + usize::from(found_root), stale));
+            pb.inc(1);
+        }
+    }
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
     if !quiet && !extra_hits.is_empty() {
         eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
@@ -408,6 +443,18 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
     let mut extra_hits: Vec<(u64, u32, String)> = Vec::new();
     let mut stale = 0u64;
     let mut tried = 0u64;
+
+    let v2_inode_count = inode_end - inode_start + 1;
+    let v2_gen_count = u64::from(gen_end - gen_start) + 1;
+    let v2_search_space = v2_inode_count.saturating_mul(v2_gen_count);
+    let pb = if quiet {
+        None
+    } else {
+        let pb = indicatif::ProgressBar::new(max_attempts.min(v2_search_space));
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Sweeping  {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("v2: 0 hit(s), 0 STALE");
+        Some(pb)
+    };
 
     'outer: for inode in inode_start..=inode_end {
         if tried >= max_attempts {
@@ -441,7 +488,14 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
                     }
                 },
             }
+            if let Some(ref pb) = pb {
+                pb.set_message(format!("v2: {} hit(s), {} STALE", extra_hits.len() + usize::from(found_root), stale));
+                pb.inc(1);
+            }
         }
+    }
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
     if !quiet && !extra_hits.is_empty() {
         eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
@@ -547,6 +601,15 @@ async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &s
     let mut stale = 0u64;
     let mut tried = 0u64;
 
+    let pb = if quiet {
+        None
+    } else {
+        let pb = indicatif::ProgressBar::new(limit);
+        pb.set_style(indicatif::ProgressStyle::default_bar().template("[*] Sweeping  {bar:40.cyan/blue}  {pos}/{len}  ({msg})  [{elapsed_precise} / ~{eta_precise}]").unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()));
+        pb.set_message("0 hit(s), 0 STALE");
+        Some(pb)
+    };
+
     for counter in 0..limit {
         let bytes = apply_counter(&template, &wild_positions, counter);
         let fh = FileHandle::from_bytes(&bytes);
@@ -584,15 +647,16 @@ async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &s
             Probe::Stale => stale += 1,
             Probe::Miss => {},
         }
-
-        if tried.is_multiple_of(10000) {
-            let pct = tried.checked_mul(100).and_then(|n| n.checked_div(limit)).unwrap_or(100);
-            if !quiet {
-                eprintln!("{}", crate::output::status_info(&format!("Mask sweep: {tried}/{limit} probed ({pct}%), {stale} STALE")));
-            }
+        if let Some(ref pb) = pb {
+            let hit_count = hits.len() + usize::from(found_any);
+            pb.set_message(format!("{hit_count} hit(s), {stale} STALE"));
+            pb.inc(1);
         }
     }
 
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
     if !quiet {
         if !hits.is_empty() {
             eprintln!("{}", crate::output::status_info(&format!("{} non-directory handle(s) found:", hits.len())));
