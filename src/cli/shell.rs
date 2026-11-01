@@ -133,7 +133,9 @@ impl ShellSetup {
         let gids = build_gid_list(gid, &globals.aux_gids);
         let cred = if let Some(ref hex) = args.short_token {
             let token = ShellHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --short-token hex: {e}"))?;
-            eprintln!("{}", crate::output::status_info(&format!("Using AUTH_SHORT token ({} bytes)", token.0.len())));
+            if !globals.quiet {
+                eprintln!("{}", crate::output::status_info(&format!("Using AUTH_SHORT token ({} bytes)", token.0.len())));
+            }
             Credential::Short(token.0)
         } else if let Some(ref netname) = args.auth_dh_netname {
             #[cfg(feature = "auth-dh")]
@@ -154,8 +156,10 @@ impl ShellSetup {
                 secret[20..24].copy_from_slice(&sub);
                 let mut session = onc_rpc_client::auth_dh::AuthDhSession::new(netname, &pubkey, &secret);
                 let (cred_auth, _verf_auth) = session.first_credential();
-                eprintln!("{}", crate::output::status_info(&format!("AUTH_DH session established for {netname} (192-bit DH + 56-bit DES)")));
-                eprintln!("{}", crate::output::status_warn("AUTH_DH crypto is broken: 192-bit DH is factorable in seconds, 56-bit DES brute-forced in hours"));
+                if !globals.quiet {
+                    eprintln!("{}", crate::output::status_info(&format!("AUTH_DH session established for {netname} (192-bit DH + 56-bit DES)")));
+                    eprintln!("{}", crate::output::status_warn("AUTH_DH crypto is broken: 192-bit DH is factorable in seconds, 56-bit DES brute-forced in hours"));
+                }
                 Credential::Raw(cred_auth)
             }
             #[cfg(not(feature = "auth-dh"))]
@@ -251,7 +255,9 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
     let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
     let host = target.host;
 
-    eprintln!("{}", crate::output::status_info("No --nfs-version specified, probing server..."));
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_info("No --nfs-version specified, probing server..."));
+    }
 
     let probe_timeout = Duration::from_secs(2);
     let pmap_addr = SocketAddr::new(host, 111);
@@ -266,7 +272,9 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
         && verify_nfs_version_tcp(host, port, 3, probe_timeout, globals.proxy.as_deref()).await
     {
         tracing::info!(version = 3u32, port, "NFS version detected");
-        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv3 on port {port}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv3 on port {port}")));
+        }
         return Ok(3);
     }
 
@@ -276,7 +284,9 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
         && verify_nfs_version_tcp(host, port, 2, probe_timeout, globals.proxy.as_deref()).await
     {
         tracing::info!(version = 2u32, port, "NFS version detected");
-        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv2 on port {port}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv2 on port {port}")));
+        }
         return Ok(2);
     }
 
@@ -290,7 +300,9 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
     .await
     {
         tracing::info!(version = 4u32, port = nfs_port, "NFS version detected");
-        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv4 on port {nfs_port}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv4 on port {nfs_port}")));
+        }
         return Ok(4);
     }
 
@@ -371,15 +383,21 @@ async fn connect_v3(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
     // exists to bypass.
     let (root_fh, pool_key, direct_nfs_port) = if let Some(ref hex) = handle_hex_arg {
         let fh = FileHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?;
-        eprintln!("{}", crate::output::status_info(&format!("Using raw handle: {hex}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_info(&format!("Using raw handle: {hex}")));
+        }
 
         let nfs_port = setup.nfs_port.unwrap_or(2049);
-        eprintln!("{}", crate::output::status_info(&format!("Session via {host}:{nfs_port} (MOUNT bypassed)")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_info(&format!("Session via {host}:{nfs_port} (MOUNT bypassed)")));
+        }
         let key = PoolKey { host: SocketAddr::new(host, nfs_port), export: format!("__handle__{nfs_port}"), uid, gid };
         (fh, key, Some(nfs_port))
     } else {
         let mount_client = make_mount_client(globals);
-        eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export}")));
+        }
         let (mount_result, via_v1) = match mount_client.mount(addr, &export).await {
             Ok(r) => (r, false),
             Err(v3_err) => {
@@ -405,8 +423,10 @@ async fn connect_v3(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
     let root_handle = ShellHandle(root_fh.as_bytes().to_vec());
     let mut shell = NfsShell::new(ops, root_handle, setup.allow_write, setup.hostname.clone(), host.to_string(), export.clone(), globals.clone());
     shell.refresh_tab_cache().await;
-    eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid}{}   --   type 'help' for commands", if setup.allow_write { "  [write enabled]" } else { "" })));
-    eprintln!("# rerun: nfswolf shell {host}:{export} --nfs-version 3 --uid {uid} --gid {gid}");
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid}{}   --   type 'help' for commands", if setup.allow_write { "  [write enabled]" } else { "" })));
+        eprintln!("# rerun: nfswolf shell {host}:{export} --nfs-version 3 --uid {uid} --gid {gid}");
+    }
 
     run_repl(&mut shell, host, setup.command.as_deref(), "", globals).await
 }
@@ -429,7 +449,9 @@ async fn connect_v4(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
     let uid = setup.uid;
     let gid = setup.gid;
 
-    eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
+    }
 
     // Build the pooled transport -- same pattern as the v3 and v2 shells.
     // NFSv4 needs no MOUNT, so we use `new_direct` to bypass portmapper.
@@ -442,7 +464,9 @@ async fn connect_v4(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
 
     // Get root FH or use --handle for direct bypass.
     let root_fh = if let TargetSource::Handle(hex) = &setup.target.source {
-        eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv4): {hex}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv4): {hex}")));
+        }
         ShellHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?
     } else {
         let fh_bytes = client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?;
@@ -452,8 +476,10 @@ async fn connect_v4(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
     let v4ops = V4Ops::new(client);
     let mut shell = NfsShell::new(v4ops, root_fh, setup.allow_write, setup.hostname.clone(), host.to_string(), "/".to_owned(), globals.clone());
     shell.refresh_tab_cache().await;
-    eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid} (NFSv4 shell  --  type 'help' for commands)")));
-    eprintln!("# rerun: nfswolf shell {host} --nfs-version 4 --uid {uid} --gid {gid}");
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid} (NFSv4 shell  --  type 'help' for commands)")));
+        eprintln!("# rerun: nfswolf shell {host} --nfs-version 4 --uid {uid} --gid {gid}");
+    }
 
     run_repl(&mut shell, host, setup.command.as_deref(), " [v4]", globals).await
 }
@@ -479,7 +505,9 @@ async fn connect_v2(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
         Source::Export(p) => {
             let mount_client = make_mount_client(globals);
             let addr = SocketAddr::new(host, 111);
-            eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{p} (MOUNT v1)")));
+            if !globals.quiet {
+                eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{p} (MOUNT v1)")));
+            }
             let mount_result = mount_client.mount_v1(addr, p).await?;
             let fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
             (fh, p.clone())
@@ -487,14 +515,18 @@ async fn connect_v2(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
         Source::Handle(hex) => {
             let generic = FileHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?;
             let fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(generic.as_bytes());
-            eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv2): {hex}")));
+            if !globals.quiet {
+                eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv2): {hex}")));
+            }
             (fh, String::from("/"))
         },
         Source::None => {
             let mount_client = make_mount_client(globals);
             let addr = SocketAddr::new(host, 111);
             let export = "/".to_owned();
-            eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:/ (MOUNT v1)")));
+            if !globals.quiet {
+                eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:/ (MOUNT v1)")));
+            }
             let mount_result = mount_client.mount_v1(addr, &export).await?;
             let fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(mount_result.handle.as_bytes());
             (fh, export)
@@ -513,8 +545,10 @@ async fn connect_v2(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
     let root = ShellHandle(root_fh.0.to_vec());
     let mut shell = NfsShell::new(v2ops, root, setup.allow_write, setup.hostname.clone(), host.to_string(), export.clone(), globals.clone());
     shell.refresh_tab_cache().await;
-    eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid} (NFSv2 shell  --  type 'help' for commands)")));
-    eprintln!("# rerun: nfswolf shell {host}:{export} --nfs-version 2 --uid {uid} --gid {gid}");
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_ok(&format!("Connected to {host} as uid={uid} gid={gid} (NFSv2 shell  --  type 'help' for commands)")));
+        eprintln!("# rerun: nfswolf shell {host}:{export} --nfs-version 2 --uid {uid} --gid {gid}");
+    }
 
     run_repl(&mut shell, host, setup.command.as_deref(), " [v2]", globals).await
 }

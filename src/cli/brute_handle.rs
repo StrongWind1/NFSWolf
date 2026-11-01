@@ -114,9 +114,11 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     // --- Mask mode: OS-agnostic nibble brute force ---
     if let Some(ref mask) = args.mask {
         let (_, _, client) = make_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
-        let found = sweep_mask(&client, mask, args.max_attempts, &host).await?;
+        let found = sweep_mask(&client, mask, args.max_attempts, &host, globals.quiet).await?;
         if !found {
-            eprintln!("{}", crate::output::status_warn("No valid handle found. Try marking different nibbles or widening --max-attempts."));
+            if !globals.quiet {
+                eprintln!("{}", crate::output::status_warn("No valid handle found. Try marking different nibbles or widening --max-attempts."));
+            }
         }
         crate::cli::emit_replay(globals);
         return Ok(());
@@ -131,7 +133,9 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
             if let Ok(mnt) = mc.mount(addr, path).await {
                 (mnt.handle, path.clone(), NfsVersion::V3)
             } else {
-                eprintln!("{}", crate::output::status_info("MOUNT v3 failed, trying MOUNT v1 (NFSv2)"));
+                if !globals.quiet {
+                    eprintln!("{}", crate::output::status_info("MOUNT v3 failed, trying MOUNT v1 (NFSv2)"));
+                }
                 let mnt = mc.mount_v1(addr, path).await.with_context(|| format!("MNT v3 and v1 both failed for {path}"))?;
                 (mnt.handle, path.clone(), NfsVersion::V2Only)
             }
@@ -166,18 +170,22 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
     let search_space = inode_count.saturating_mul(gen_count);
 
     let ver_label = if matches!(nfs_ver, NfsVersion::V2Only) { "v2" } else { "v3" };
-    eprintln!("{}", crate::output::status_info(&format!("Brute-forcing handles on {host} [{fs:?}, {ver_label}] inodes {inode_start}..={inode_end} x gen {gen_start}..={gen_end} ({search_space} candidates, max {})", args.max_attempts)));
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_info(&format!("Brute-forcing handles on {host} [{fs:?}, {ver_label}] inodes {inode_start}..={inode_end} x gen {gen_start}..={gen_end} ({search_space} candidates, max {})", args.max_attempts)));
+    }
 
     let found = match nfs_ver {
         NfsVersion::V3 => {
             let (_, _, client) = make_client_with_hostname(addr, &pool_export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
             let result = if matches!(fs, FsType::Btrfs) {
-                sweep_btrfs(&client, &seed, args.max_attempts, &host).await
+                sweep_btrfs(&client, &seed, args.max_attempts, &host, globals.quiet).await
             } else {
-                let r = sweep_inodes(&client, &seed, fs, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host).await;
+                let r = sweep_inodes(&client, &seed, fs, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals.quiet).await;
                 if !r && matches!(fs, FsType::Unknown) {
-                    eprintln!("{}", crate::output::status_info("Inode sweep found nothing; trying BTRFS subvolume sweep as fallback"));
-                    sweep_btrfs(&client, &seed, args.max_attempts, &host).await
+                    if !globals.quiet {
+                        eprintln!("{}", crate::output::status_info("Inode sweep found nothing; trying BTRFS subvolume sweep as fallback"));
+                    }
+                    sweep_btrfs(&client, &seed, args.max_attempts, &host, globals.quiet).await
                 } else {
                     r
                 }
@@ -186,15 +194,19 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
                 result
             } else {
                 tracing::info!("NFSv3 sweep found nothing, falling back to NFSv2");
-                eprintln!("{}", crate::output::status_info("NFSv3 sweep failed; retrying with NFSv2"));
-                sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals).await
+                if !globals.quiet {
+                    eprintln!("{}", crate::output::status_info("NFSv3 sweep failed; retrying with NFSv2"));
+                }
+                sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals, globals.quiet).await
             }
         },
-        NfsVersion::V2Only => sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals).await,
+        NfsVersion::V2Only => sweep_inodes_v2(addr, &seed, args.max_attempts, inode_start, inode_end, gen_start, gen_end, &host, globals, globals.quiet).await,
     };
 
     if !found {
+    if !globals.quiet {
         eprintln!("{}", crate::output::status_warn("No valid handle found. Try widening --inode-start/--inode-end or --gen-start/--gen-end."));
+    }
     }
     crate::cli::emit_replay(globals);
     Ok(())
@@ -283,7 +295,7 @@ async fn report_hit(client: &Nfs3Client, candidate: &EscapeResult, note: &str, h
 /// Every valid handle is reported. The first root directory is printed as the
 /// primary result with writability hint and next-steps; all other hits
 /// (directories, files, denied handles) are listed as additional discoveries.
-async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, _fs: FsType, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str) -> bool {
+async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, _fs: FsType, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str, quiet: bool) -> bool {
     let mut found_root = false;
     let mut extra_hits: Vec<(u64, u32, String)> = Vec::new();
     let mut stale = 0u64;
@@ -325,18 +337,20 @@ async fn sweep_inodes(client: &Nfs3Client, seed: &FileHandle, _fs: FsType, max_a
             }
         }
     }
-    if !extra_hits.is_empty() {
+    if !quiet && !extra_hits.is_empty() {
         eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
         for (inode, generation, hex) in &extra_hits {
             eprintln!("    inode {inode:>6}  gen {generation:>6}  {hex}");
         }
     }
-    eprintln!("{}", crate::output::status_info(&format!("Probed {tried} candidates, {stale} STALE")));
+    if !quiet {
+        eprintln!("{}", crate::output::status_info(&format!("Probed {tried} candidates, {stale} STALE")));
+    }
     found_root
 }
 
 /// BTRFS subvolume sweep (subvol IDs 5 and 256+). Reports all discovered subvolumes.
-async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, host: &str) -> bool {
+async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, host: &str, quiet: bool) -> bool {
     let max = u32::try_from(max_attempts.min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
     let candidates = FileHandleAnalyzer::construct_btrfs_subvol_handles(seed, max);
     let mut tried = 0u64;
@@ -370,13 +384,15 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
             Probe::Miss => {},
         }
     }
-    if !extra_hits.is_empty() {
+    if !quiet && !extra_hits.is_empty() {
         eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
         for (subvol, hex) in &extra_hits {
             eprintln!("    subvol {subvol:>6}  {hex}");
         }
     }
-    eprintln!("{}", crate::output::status_info(&format!("Tried {tried} BTRFS subvols, {stale} STALE")));
+    if !quiet {
+        eprintln!("{}", crate::output::status_info(&format!("Tried {tried} BTRFS subvols, {stale} STALE")));
+    }
     found_root
 }
 
@@ -385,7 +401,7 @@ async fn sweep_btrfs(client: &Nfs3Client, seed: &FileHandle, max_attempts: u64, 
 /// NFSv2 has no BADHANDLE oracle (all rejections are NFSERR_STALE per
 /// RFC 1094 S2.3.1), so we can't distinguish format errors from wrong
 /// inode/gen. Handles are fixed 32 bytes, zero-padded.
-async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str, globals: &GlobalOpts) -> bool {
+async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_attempts: u64, inode_start: u64, inode_end: u64, gen_start: u32, gen_end: u32, host: &str, globals: &GlobalOpts, quiet: bool) -> bool {
     use crate::cli::probe::make_v2_client_with_hostname;
     use nfs_v2::wire::Nfs2FileHandle;
 
@@ -431,13 +447,15 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
             }
         }
     }
-    if !extra_hits.is_empty() {
+    if !quiet && !extra_hits.is_empty() {
         eprintln!("{}", crate::output::status_info(&format!("{} additional valid handle(s) discovered:", extra_hits.len())));
         for (inode, generation, hex) in &extra_hits {
             eprintln!("    inode {inode:>6}  gen {generation:>6}  {hex}");
         }
     }
-    eprintln!("{}", crate::output::status_info(&format!("Probed {tried} candidates (v2), {stale} STALE")));
+    if !quiet {
+        eprintln!("{}", crate::output::status_info(&format!("Probed {tried} candidates (v2), {stale} STALE")));
+    }
     found_root
 }
 
@@ -516,7 +534,7 @@ fn apply_counter(template: &[u8], wild_positions: &[usize], counter: u64) -> Vec
 
 /// Nibble-mask brute force: enumerate all combinations of `?`-marked nibbles
 /// in the mask and probe each with GETATTR.
-async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &str) -> anyhow::Result<bool> {
+async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &str, quiet: bool) -> anyhow::Result<bool> {
     let (template, wild_positions) = parse_mask(mask)?;
     let nibble_count = wild_positions.len();
     let shift = u32::try_from(nibble_count * 4).unwrap_or(64);
@@ -524,7 +542,9 @@ async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &s
     let limit = search_space.min(max_attempts);
 
     tracing::info!(wild_nibbles = nibble_count, total_candidates = search_space, "starting mask sweep");
-    eprintln!("{}", crate::output::status_info(&format!("Mask sweep: {} bytes, {} wild nibble(s), {search_space} candidates (probing up to {limit})", template.len(), nibble_count)));
+    if !quiet {
+        eprintln!("{}", crate::output::status_info(&format!("Mask sweep: {} bytes, {} wild nibble(s), {search_space} candidates (probing up to {limit})", template.len(), nibble_count)));
+    }
 
     let mut found_any = false;
     let mut hits: Vec<String> = Vec::new();
@@ -550,7 +570,9 @@ async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &s
             },
             Probe::NonDir => {
                 let hex = fh.to_hex();
-                eprintln!("{}", crate::output::status_info(&format!("Valid handle (non-directory): {hex}")));
+                if !quiet {
+                    eprintln!("{}", crate::output::status_info(&format!("Valid handle (non-directory): {hex}")));
+                }
                 hits.push(hex);
                 found_any = true;
             },
@@ -569,17 +591,21 @@ async fn sweep_mask(client: &Nfs3Client, mask: &str, max_attempts: u64, host: &s
 
         if tried.is_multiple_of(10000) {
             let pct = tried.checked_mul(100).and_then(|n| n.checked_div(limit)).unwrap_or(100);
-            eprintln!("{}", crate::output::status_info(&format!("Mask sweep: {tried}/{limit} probed ({pct}%), {stale} STALE")));
+            if !quiet {
+                eprintln!("{}", crate::output::status_info(&format!("Mask sweep: {tried}/{limit} probed ({pct}%), {stale} STALE")));
+            }
         }
     }
 
-    if !hits.is_empty() {
-        eprintln!("{}", crate::output::status_info(&format!("{} non-directory handle(s) found:", hits.len())));
-        for hex in &hits {
-            eprintln!("    {hex}");
+    if !quiet {
+        if !hits.is_empty() {
+            eprintln!("{}", crate::output::status_info(&format!("{} non-directory handle(s) found:", hits.len())));
+            for hex in &hits {
+                eprintln!("    {hex}");
+            }
         }
+        eprintln!("{}", crate::output::status_info(&format!("Mask sweep complete: {tried} probed, {stale} STALE, {} hit(s)", if found_any { hits.len() + 1 } else { 0 })));
     }
-    eprintln!("{}", crate::output::status_info(&format!("Mask sweep complete: {tried} probed, {stale} STALE, {} hit(s)", if found_any { hits.len() + 1 } else { 0 })));
     Ok(found_any)
 }
 

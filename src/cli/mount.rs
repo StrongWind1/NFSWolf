@@ -109,7 +109,9 @@ async fn resolve_mount_version(args: &MountArgs, host: std::net::IpAddr, globals
         return Ok(v);
     }
 
-    eprintln!("{}", crate::output::status_info("No --nfs-version specified, probing server..."));
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_info("No --nfs-version specified, probing server..."));
+    }
     let probe_timeout = Duration::from_secs(2);
     let pmap_addr = SocketAddr::new(host, 111);
     let portmap = match &globals.proxy {
@@ -121,7 +123,9 @@ async fn resolve_mount_version(args: &MountArgs, host: std::net::IpAddr, globals
         && port > 0
         && crate::cli::shell::verify_nfs_version_tcp(host, port, 3, probe_timeout, globals.proxy.as_deref()).await
     {
-        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv3 on port {port}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv3 on port {port}")));
+        }
         return Ok(3);
     }
 
@@ -129,7 +133,9 @@ async fn resolve_mount_version(args: &MountArgs, host: std::net::IpAddr, globals
         && port > 0
         && crate::cli::shell::verify_nfs_version_tcp(host, port, 2, probe_timeout, globals.proxy.as_deref()).await
     {
-        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv2 on port {port}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv2 on port {port}")));
+        }
         return Ok(2);
     }
 
@@ -141,7 +147,9 @@ async fn resolve_mount_version(args: &MountArgs, host: std::net::IpAddr, globals
     })
     .await
     {
-        eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv4 on port {nfs_port}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv4 on port {nfs_port}")));
+        }
         return Ok(4);
     }
 
@@ -182,9 +190,11 @@ async fn connect_v3_mount(args: &MountArgs, target: &crate::cli::target::Target,
         FileHandle::from_hex(hex)?
     } else {
         let mc = make_mount_client(globals);
-        eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export} (NFSv3)")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export} (NFSv3)")));
+        }
         let mr = mc.mount(addr, &export).await?;
-        stealth_unmount(&mc, addr, &export, args.hide).await;
+        stealth_unmount(&mc, addr, &export, args.hide, globals.quiet).await;
         mr.handle
     };
 
@@ -227,9 +237,11 @@ async fn connect_v2_mount(args: &MountArgs, target: &crate::cli::target::Target,
     } else {
         let mc = make_mount_client(globals);
         let addr = SocketAddr::new(host, 111);
-        eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export} (MOUNT v1 / NFSv2)")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_info(&format!("Mounting {host}:{export} (MOUNT v1 / NFSv2)")));
+        }
         let mr = mc.mount_v1(addr, &export).await?;
-        stealth_unmount(&mc, addr, &export, args.hide).await;
+        stealth_unmount(&mc, addr, &export, args.hide, globals.quiet).await;
         nfs_v2::wire::Nfs2FileHandle::from_bytes(mr.handle.as_bytes())
     };
 
@@ -263,7 +275,9 @@ async fn connect_v4_mount(args: &MountArgs, target: &crate::cli::target::Target,
     let nfs_port = globals.nfs_port.unwrap_or(2049);
     let addr = SocketAddr::new(host, nfs_port);
 
-    eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
+    }
 
     let pool = Arc::new(match &globals.proxy {
         Some(p) => ConnectionPool::with_proxy(p.clone()),
@@ -278,7 +292,9 @@ async fn connect_v4_mount(args: &MountArgs, target: &crate::cli::target::Target,
     let client = Arc::new(PooledNfs4Client::new(transport));
 
     let root_fh = if let Some(hex) = &handle_hex {
-        eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv4): {hex}")));
+        if !globals.quiet {
+            eprintln!("{}", crate::output::status_info(&format!("Using raw handle (NFSv4): {hex}")));
+        }
         ShellHandle::from_hex(hex).map_err(|e| anyhow::anyhow!("invalid --handle: {e}"))?
     } else {
         // Navigate from the pseudo-root into the export path via LOOKUP.
@@ -288,7 +304,9 @@ async fn connect_v4_mount(args: &MountArgs, target: &crate::cli::target::Target,
         let fh_bytes = if components.is_empty() {
             client.get_root_fh().await.map_err(|e| anyhow::anyhow!("PUTROOTFH failed: {e}"))?
         } else {
-            eprintln!("{}", crate::output::status_info(&format!("Navigating to export {export}")));
+            if !globals.quiet {
+                eprintln!("{}", crate::output::status_info(&format!("Navigating to export {export}")));
+            }
             client.lookup_fh(&components).await.map_err(|e| anyhow::anyhow!("LOOKUP into {export} failed: {e}"))?
         };
         ShellHandle(fh_bytes)
@@ -312,10 +330,14 @@ fn parse_source(target: &crate::cli::target::Target) -> (String, Option<String>)
 }
 
 #[cfg(feature = "fuse")]
-async fn stealth_unmount(mc: &crate::proto::mount::NfsMountClient, addr: std::net::SocketAddr, export: &str, hide: bool) {
+async fn stealth_unmount(mc: &crate::proto::mount::NfsMountClient, addr: std::net::SocketAddr, export: &str, hide: bool, quiet: bool) {
     if hide {
         match mc.unmount(addr, export).await {
-            Ok(()) => eprintln!("{}", crate::output::status_info("Stealth: unmounted from server")),
+            Ok(()) => {
+                if !quiet {
+                    eprintln!("{}", crate::output::status_info("Stealth: unmounted from server"));
+                }
+            },
             Err(e) => tracing::warn!(error = %e, "stealth UMNT failed; server may still show this client in its mount table"),
         }
     }

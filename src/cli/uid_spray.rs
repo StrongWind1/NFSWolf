@@ -106,10 +106,12 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
     tracing::info!(host = %host, export = %export, "starting UID spray");
     tracing::info!(uid_start = args.uid_start, uid_end = args.uid_end, paired_gid, attempts, "spray configuration");
 
-    if paired_gid {
-        eprintln!("{}", crate::output::status_info(&format!("Spraying UIDs {}-{} (gid = uid) on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end)));
-    } else {
-        eprintln!("{}", crate::output::status_info(&format!("Spraying UIDs {}-{} x GIDs {}-{} on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end, gid_range.start(), gid_range.end())));
+    if !globals.quiet {
+        if paired_gid {
+            eprintln!("{}", crate::output::status_info(&format!("Spraying UIDs {}-{} (gid = uid) on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end)));
+        } else {
+            eprintln!("{}", crate::output::status_info(&format!("Spraying UIDs {}-{} x GIDs {}-{} on {host}:{export}  --  {attempts} probes", args.uid_start, args.uid_end, gid_range.start(), gid_range.end())));
+        }
     }
 
     let addr = parse_addr_with_port(&host, globals.nfs_port)?;
@@ -127,10 +129,12 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
 
     let results = sprayer.spray(&config, &target_fh).await;
     tracing::info!(hits = results.len(), "spray complete");
-    eprintln!("{}", crate::output::status_ok(&format!("{} credential(s) granted access", results.len())));
-    for r in &results {
-        let flags = access_summary(r.access);
-        eprintln!("    uid={} gid={} [{flags}]", r.uid, r.gid);
+    if !globals.quiet {
+        eprintln!("{}", crate::output::status_ok(&format!("{} credential(s) granted access", results.len())));
+        for r in &results {
+            let flags = access_summary(r.access);
+            eprintln!("    uid={} gid={} [{flags}]", r.uid, r.gid);
+        }
     }
 
     crate::cli::emit_replay(globals);
