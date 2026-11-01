@@ -16,7 +16,7 @@
   <a href="#quick-start">Quick start</a> &bull;
   <a href="#cli-reference">CLI reference</a> &bull;
   <a href="#installation">Installation</a> &bull;
-  <a href="docs/FINDINGS.md">Findings catalog</a> &bull;
+  <a href="https://strongwind.dev/NFSWolf/security/">Findings catalog</a> &bull;
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -32,7 +32,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 | Async / concurrent scan | yes | no | no | yes | no | no |
 | AUTH_SYS UID spraying | yes | no | yes | yes | no | no |
 | Export escape (18 filesystem types) | yes | no | no | no | no | no |
-| Interactive NFS shell (52 commands) | yes | no | no | no | no | yes |
+| Interactive NFS shell (47 commands) | yes | no | no | no | no | yes |
 | FUSE mount (`nfswolf mount`) | yes | no | no | no | no | no |
 | Portmapper / mountd enumeration | yes | partial | no | no | no | no |
 | Self-contained HTML / JSON / CSV reports | yes | no | no | no | no | no |
@@ -42,7 +42,7 @@ The NFS security ecosystem is scattered across a dozen small tools written in th
 
 ## Features at a glance
 
-- **Documented security findings** across export, transport, file-handle, and credential attack categories - full catalog in [docs/FINDINGS.md](docs/FINDINGS.md).
+- **Documented security findings** across export, transport, file-handle, and credential attack categories - full catalog on the [docs site](https://strongwind.dev/NFSWolf/security/).
 - **Protocols**: NFSv2 / NFSv3 / NFSv4.0 over TCP (UDP transport for portmapper), MOUNT v1/v3, portmapper v2, NFS_ACL (program 100227), RQUOTA (program 100011).
 - **Engines**: pool-backed RPC with circuit breaker, AUTH_SYS stamp injection, AUTH_DH cryptographic sessions (RFC 2695, optional `auth-dh` feature), AUTH_SHORT credential replay, auto-UID escalation ladder, handle-oracle disambiguation (STALE vs BADHANDLE).
 - **Offensive subcommands**: `escape` (export breakout across 18 filesystem types -- ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs -- cascading through v3 MOUNT, handle matrix, v2 MOUNT, v4 handle escape, and v4 LOOKUPP; `--all` reports every working root handle from all seed sources), `brute-handle` (inode/generation cross-product sweep with handle oracle), `uid-spray` (last-resort credential discovery).
@@ -166,7 +166,7 @@ nfswolf convert -i results.json --format console
 | Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
 | Recon | `analyze` | Per-host security audit against the documented finding catalog |
 | Recon | `escape` | Seven-phase escape pipeline: seed gathering, candidate construction, multi-version probing, rootfs detection, scoring. Full mode discovers all exports; `--fast` for single-export. `--json`, `--read-shadow`, `--all-handles`. Covers 18 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, NTFS3, reiserfs, JFS, f2fs, VFAT, squashfs) |
-| Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4 (auto-detected when `--nfs-version` is omitted); 52 commands incl. `escape-root`, `exports` (F-2.12 sibling discovery), `suid-scan`, `secrets-scan`; `get -r` / `put -r` / `--verify` / `--handle` / `-c`; AUTH_DH sessions (`--auth-dh-netname`), AUTH_SHORT replay (`--short-token`) |
+| Connect | `shell` | Interactive REPL over NFSv2, NFSv3, or NFSv4 (auto-detected when `--nfs-version` is omitted); 47 commands incl. `escape-root`, `exports` (F-2.12 sibling discovery), `suid-scan`, `secrets-scan`; `get -r` / `put -r` / `--verify` / `--handle` / `-c`; AUTH_DH sessions (`--auth-dh-netname`), AUTH_SHORT replay (`--short-token`) |
 | Connect | `mount` | FUSE mount over NFSv2, v3, or v4 (auto-detected) with spoofed AUTH_SYS credentials (`--features fuse`) |
 | Advanced | `brute-handle` | Brute-force file handles via inode/generation cross-product sweep with STALE / BADHANDLE oracle; reports all discovered handles; NFSv2 auto-fallback |
 | Advanced | `uid-spray` | Last-resort UID/GID brute force when auto-UID escalation fails |
@@ -228,16 +228,16 @@ The NFS protocol stack is split into eight standalone crates, published on [crat
 | [`nfs-mount`](https://crates.io/crates/nfs-mount) | MOUNT v1/v3 (RFC 1094 / RFC 1813) |
 | [`nfs-v2`](https://crates.io/crates/nfs-v2) | NFSv2 (RFC 1094): all 18 procedures |
 | [`nfs-v3`](https://crates.io/crates/nfs-v3) | NFSv3 (RFC 1813): all 22 procedures + domain types |
-| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): all 37 ops typed, 66 status codes, stateful client (SETCLIENTID/OPEN/CLOSE/LOCK), 47 public methods, 244 tests |
+| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): all 37 ops typed, 66 status codes, stateful client (SETCLIENTID/OPEN/CLOSE/LOCK), 45 public methods, 248 tests |
 
 ## Development
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 790 tests across 8 workspace crates and the binary. The short version:
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 804 tests across 8 workspace crates and the binary. The short version:
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
-make check-all    # full gate: fmt, lint, audit, check, test-matrix (790 tests), doc, hygiene, machete
+make check-all    # full gate: fmt, lint, audit, check, test-matrix (804 tests), doc, hygiene, machete
 ```
 
 ## Credits

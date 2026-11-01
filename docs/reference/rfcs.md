@@ -22,7 +22,7 @@ The protocol specifications that define NFSv2, v3, v4.0, v4.1, and v4.2. These a
 | [2624](https://www.rfc-editor.org/rfc/rfc2624) | 1999 | NFS Version 4 Design Considerations | Informational | Historical context for why NFSv4 merged MOUNT into the protocol, added COMPOUND batching, and introduced SECINFO security negotiation. |
 | [3010](https://www.rfc-editor.org/rfc/rfc3010) | 2000 | NFS version 4 Protocol | Proposed Standard | Original NFSv4 specification. Obsoleted by RFC 3530, then RFC 7530. Historical reference only. |
 | [3530](https://www.rfc-editor.org/rfc/rfc3530) | 2003 | Network File System (NFS) version 4 Protocol | Proposed Standard | Revised NFSv4.0 specification. Obsoleted by RFC 7530. Referenced in RFC 5661's backward-compatibility notes. |
-| :material-star: [7530](https://www.rfc-editor.org/rfc/rfc7530) | 2015 | Network File System (NFS) Version 4 Protocol | Proposed Standard | Full implementation in `nfs-v4` crate: all 37 ops with typed args and response decoders, 66 named status codes, stateful infrastructure (SETCLIENTID lifecycle, OPEN/CLOSE/LOCK state), 47 public client methods. **Most-cited RFC in codebase** with 430+ references. Drives findings F-1.1 through F-5.15. |
+| :material-star: [7530](https://www.rfc-editor.org/rfc/rfc7530) | 2015 | Network File System (NFS) Version 4 Protocol | Proposed Standard | Full implementation in `nfs-v4` crate: all 37 ops with typed args and response decoders, 66 named status codes, stateful infrastructure (SETCLIENTID lifecycle, OPEN/CLOSE/LOCK state), 45 public client methods. **Most-cited RFC in codebase** with 430+ references. Drives findings F-1.1 through F-5.15. |
 | [7531](https://www.rfc-editor.org/rfc/rfc7531) | 2015 | NFS Version 4 External Data Representation Standard (XDR) Description | Proposed Standard | XDR companion to RFC 7530. Wire types cross-referenced during `nfs-v4` crate development for COMPOUND encoding verification. |
 | [5661](https://www.rfc-editor.org/rfc/rfc5661) | 2010 | NFS Version 4 Minor Version 1 Protocol | Proposed Standard | Obsoleted by RFC 8881. Introduced sessions, directory delegations, and pNFS. Referenced 29 times in source for NFSv4.1 context. |
 | [5662](https://www.rfc-editor.org/rfc/rfc5662) | 2010 | NFS Version 4 Minor Version 1 XDR Description | Proposed Standard | XDR companion to RFC 5661. Machine-readable type definitions for NFSv4.1. |
@@ -184,7 +184,7 @@ Quick lookup from primary RFCs to the nfswolf crate that implements them.
 | 1094 App. A, 1813 App. I | `nfs-mount` | MOUNT v1/v3: NULL, MNT, UMNT, DUMP, UMNTALL, EXPORT |
 | 1094 | `nfs-v2` | NFSv2: 18 procedures, fixed 32-byte handles, domain API |
 | 1813 | `nfs-v3` | NFSv3: 22 procedures, domain types, `Nfs3Error` classification |
-| 7530 | `nfs-v4` | NFSv4.0: 37 ops, COMPOUND, stateful infrastructure, 47 public methods |
+| 7530 | `nfs-v4` | NFSv4.0: 37 ops, COMPOUND, stateful infrastructure, 45 public methods |
 | 2695 | `onc-rpc-client` | AUTH_DH cryptographic sessions (behind `auth-dh` feature) |
 
 ---

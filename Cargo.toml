@@ -87,7 +87,7 @@ fuser = { version = "0.18", optional = true }
 rustyline = "18"
 indicatif = "0.18"
 colored = "3"
-tabled = { version = "0.21", default-features = false, features = ["ansi"] }
+tabled = { version = "0.22", default-features = false, features = ["ansi"] }
 sha2 = "0.11"
 rand = "0.10"
 anyhow = "1"

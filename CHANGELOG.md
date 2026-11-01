@@ -433,7 +433,8 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.8.0...v1.0.0
 [0.8.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.7.0...v0.8.0

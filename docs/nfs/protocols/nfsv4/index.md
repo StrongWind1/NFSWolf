@@ -117,14 +117,14 @@ NFSv4 file handles have the same internal byte structure as v2/v3 on Linux knfsd
 
 ## nfswolf NFSv4 support
 
-nfswolf implements the full NFSv4.0 protocol stack in the `nfs-v4` crate (244 tests). The implementation covers:
+nfswolf implements the full NFSv4.0 protocol stack in the `nfs-v4` crate (248 tests). The implementation covers:
 
 - All 37 operations (ops 3-39) fully typed with response decoders
 - 66 named status codes with classification predicates
 - SETCLIENTID lifecycle, OPEN/CLOSE/LOCK state, crash recovery
 - Domain types (`Nfs4FileInfo`, `Nfs4DirEntry`, `Nfs4FileType`)
-- 47 public client methods in `Nfs4Client`
-- `V4Ops` implementing `ShellOps` for the unified 52-command shell
+- 45 public client methods in `Nfs4Client`
+- `V4Ops` implementing `ShellOps` for the unified 47-command shell
 - `Nfs4EscapeProbe` for the escape engine on v4-only servers
 - Auto-version detection probing v3, v2, then v4
 
@@ -137,7 +137,7 @@ nfswolf implements the full NFSv4.0 protocol stack in the `nfs-v4` crate (244 te
 
 ### Auto-version detection
 
-When `--nfs-version` is omitted, `resolve_version` probes in order: v3 (portmapper GETPORT + NULL verification), v2 (portmapper GETPORT + NULL verification), v4 (direct COMPOUND to port 2049). The first version that responds successfully is selected. This means v4-only servers (no portmapper, no MOUNT) are detected automatically and the full 52-command shell works without manual configuration.
+When `--nfs-version` is omitted, `resolve_version` probes in order: v3 (portmapper GETPORT + NULL verification), v2 (portmapper GETPORT + NULL verification), v4 (direct COMPOUND to port 2049). The first version that responds successfully is selected. This means v4-only servers (no portmapper, no MOUNT) are detected automatically and the full 47-command shell works without manual configuration.
 
 ## In this section
 

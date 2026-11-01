@@ -8,14 +8,14 @@ Coverage of each in-tree protocol crate against its authoritative RFC. All crate
 |-------|-----|--------------|----------------|-------|-------|
 | `onc-xdr` | RFC 4506 | **Complete** | All XDR types | 57 | `Pack`, `Unpack`, `Opaque`, `List`, `BoundedList`, `Void`, padding, length-hardened readers |
 | `onc-xdr-derive` | RFC 4506 | **Complete** | `#[derive(XdrCodec)]` | 7 | Generates `Pack`/`Unpack` for structs and enums |
-| `onc-rpc-client` | RFC 5531 | **Complete** | RPC v2 message types, AUTH_SYS, AUTH_DH | 85 | `RpcTransport` seam, `DirectTransport`, `AuthSys`, `AuthDhSession` (feature-gated), all 19 auth flavors, all 19 auth status codes |
+| `onc-rpc-client` | RFC 5531 | **Complete** | RPC v2 message types, AUTH_SYS, AUTH_DH | 54 | `RpcTransport` seam, `DirectTransport`, `AuthSys`, `AuthDhSession` (feature-gated), all 19 auth flavors, all 19 auth status codes |
 | `onc-rpcbind` | RFC 1057 / RFC 1833 | **Complete** | Portmapper v2 (DUMP, GETPORT, SET, UNSET, NULL) + rpcbind v3/v4 (GETTIME, GETSTAT) | 18 | Full IANA RPC program numbers registry (1251 entries) |
 | `nfs-mount` | RFC 1094 App A / RFC 1813 App I | **Complete** | v1: NULL, MNT, UMNT, DUMP, EXPORT; v3: NULL, MNT, UMNT, UMNTALL, DUMP, EXPORT | 14 | Shared by `nfs-v2` and `nfs-v3` |
-| `nfs-v2` | RFC 1094 | **Complete** | All 18 procedures | 44 | Fixed 32-byte handles, domain API |
-| `nfs-v3` | RFC 1813 | **Complete** | All 22 procedures | 50 | Domain types (`FileHandle`, `FileAttrs`, `FileType`, `DirEntryPlus`), `Nfs3Error` with classification predicates |
-| `nfs-v4` | RFC 7530 | **Complete** | All 37 ops typed with response decoders | 244 | 66 named `Nfs4Status` codes, stateful infrastructure (SETCLIENTID, OPEN/CLOSE/LOCK), session lifecycle, 47 public client methods |
+| `nfs-v2` | RFC 1094 | **Complete** | All 18 procedures | 36 | Fixed 32-byte handles, domain API |
+| `nfs-v3` | RFC 1813 | **Complete** | All 22 procedures | 39 | Domain types (`FileHandle`, `FileAttrs`, `FileType`, `DirEntryPlus`), `Nfs3Error` with classification predicates |
+| `nfs-v4` | RFC 7530 | **Complete** | All 37 ops typed with response decoders | 248 | 66 named `Nfs4Status` codes, stateful infrastructure (SETCLIENTID, OPEN/CLOSE/LOCK), session lifecycle, 45 public client methods |
 
-**Total: 519 tests across 8 crates.**
+**Total: 473 tests across 8 crates.**
 
 ## Per-crate detail
 
