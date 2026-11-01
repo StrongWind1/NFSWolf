@@ -141,10 +141,13 @@ impl Getacl3Result {
 
 /// Retrieve POSIX ACLs for a file handle via the NFS_ACL sideband protocol.
 pub(crate) async fn getacl3(addr: SocketAddr, fh_bytes: &[u8], proxy: Option<&str>, stealth: &StealthConfig) -> anyhow::Result<Getacl3Result> {
+    tracing::debug!(%addr, fh_len = fh_bytes.len(), "GETACL3 request");
     let mut rpc = crate::proto::sideband::connect_sideband(addr, proxy, stealth).await?;
     let args = Getacl3Args { fh: Opaque::owned(fh_bytes.to_vec()), mask: NFS_ACL_MASK | NFS_DFACL_MASK };
     let raw: RawReply = rpc.call(NFS_ACL_PROGRAM, NFS_ACL_V3, ACLPROC3_GETACL, &args).await.context("GETACL3 RPC")?;
-    Getacl3Result::decode(&raw.data)
+    let result = Getacl3Result::decode(&raw.data)?;
+    tracing::debug!(%addr, status = result.status, access_acl = result.access_acl.len(), default_acl = result.default_acl.len(), "GETACL3 response");
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -80,7 +80,6 @@ pub(crate) struct QuotaData {
 /// GETQUOTA result after XDR decoding.
 #[derive(Debug)]
 pub(crate) struct GetquotaResult {
-    #[cfg_attr(not(test), expect(dead_code, reason = "read in tests and by future callers"))]
     pub status: QuotaStatus,
     pub quota: Option<QuotaData>,
 }
@@ -134,18 +133,25 @@ impl Pack for GetquotaArgsV2 {
 
 /// Query disk quota for a UID on a specific export path (RQUOTA v1).
 pub(crate) async fn getquota(addr: SocketAddr, export_path: &str, uid: u32, proxy: Option<&str>, stealth: &StealthConfig) -> anyhow::Result<GetquotaResult> {
+    tracing::debug!(%addr, export = export_path, uid, "GETQUOTA v1 request");
     let mut rpc = crate::proto::sideband::connect_sideband(addr, proxy, stealth).await?;
     let args = GetquotaArgs { path: Opaque::owned(export_path.as_bytes().to_vec()), uid };
     let raw: RawReply = rpc.call(RQUOTA_PROGRAM, RQUOTA_V1, RQUOTAPROC_GETQUOTA, &args).await.context("GETQUOTA RPC")?;
-    GetquotaResult::decode(&raw.data)
+    let result = GetquotaResult::decode(&raw.data)?;
+    tracing::debug!(%addr, uid, status = ?result.status, "GETQUOTA v1 response");
+    Ok(result)
 }
 
 /// Query user (type=0) or group (type=1) quota via RQUOTA v2.
 pub(crate) async fn getquota_v2(addr: SocketAddr, export_path: &str, id: u32, id_type: u32, proxy: Option<&str>, stealth: &StealthConfig) -> anyhow::Result<GetquotaResult> {
+    let kind = if id_type == 0 { "user" } else { "group" };
+    tracing::debug!(%addr, export = export_path, id, kind, "GETQUOTA v2 request");
     let mut rpc = crate::proto::sideband::connect_sideband(addr, proxy, stealth).await?;
     let args = GetquotaArgsV2 { path: Opaque::owned(export_path.as_bytes().to_vec()), id, id_type };
     let raw: RawReply = rpc.call(RQUOTA_PROGRAM, RQUOTA_V2, RQUOTAPROC_GETQUOTA, &args).await.context("GETQUOTA v2 RPC")?;
-    GetquotaResult::decode(&raw.data)
+    let result = GetquotaResult::decode(&raw.data)?;
+    tracing::debug!(%addr, id, kind, status = ?result.status, "GETQUOTA v2 response");
+    Ok(result)
 }
 
 #[cfg(test)]

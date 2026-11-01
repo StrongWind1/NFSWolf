@@ -126,6 +126,7 @@ impl PortmapClient {
         let mut versions: Vec<u32> = entries.iter().filter(|e| e.program == PROG_NFS && e.protocol == IPPROTO_TCP).map(|e| e.version).collect();
         versions.sort_unstable();
         versions.dedup();
+        tracing::debug!(%addr, ?versions, "portmapper NFS versions detected");
         Ok(versions)
     }
 
@@ -134,7 +135,9 @@ impl PortmapClient {
         let entries = self.dump(addr).await?;
         let ypserv = entries.iter().find(|e| e.program == PROG_YPSERV && e.protocol == IPPROTO_TCP);
         let ypbind_present = entries.iter().any(|e| e.program == PROG_YPBIND);
-        Ok(NisDetection { ypserv_present: ypserv.is_some(), ypserv_port: ypserv.map(|e| e.port), ypbind_present })
+        let result = NisDetection { ypserv_present: ypserv.is_some(), ypserv_port: ypserv.map(|e| e.port), ypbind_present };
+        tracing::debug!(%addr, ypserv = result.ypserv_present, ypbind = result.ypbind_present, "NIS detection");
+        Ok(result)
     }
 
     /// Measure UDP amplification by comparing DUMP request/response sizes.
@@ -150,6 +153,7 @@ impl PortmapClient {
         let response_bytes = entries.len().saturating_mul(20).saturating_add(8);
         // Entry counts are always small (< 1000); u32->f64 is exact for values this size.
         let factor = f64::from(u32::try_from(response_bytes).unwrap_or(u32::MAX)) / f64::from(u32::try_from(request_bytes).unwrap_or(1u32));
+        tracing::debug!(%addr, request_bytes, response_bytes, factor, "portmapper amplification measured");
         Ok(PortmapAmplificationResult { request_bytes, response_bytes, factor })
     }
 
@@ -162,7 +166,9 @@ impl PortmapClient {
 
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let list: portmap::pmaplist = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 4, &Void, probe_timeout).await.context("PMAPPROC_DUMP over UDP")?;
-        Ok(list.0.into_iter().filter_map(|m| u16::try_from(m.port).ok().map(|port| PortmapEntry { program: m.prog, version: m.vers, protocol: m.prot, port })).collect())
+        let entries: Vec<PortmapEntry> = list.0.into_iter().filter_map(|m| u16::try_from(m.port).ok().map(|port| PortmapEntry { program: m.prog, version: m.vers, protocol: m.prot, port })).collect();
+        tracing::debug!(%addr, entries = entries.len(), "portmapper DUMP (UDP)");
+        Ok(entries)
     }
 
     /// Relay a MOUNT v3 MNT request through PMAPPROC_CALLIT (RFC 1057 Appendix A, proc 5).
@@ -172,6 +178,7 @@ impl PortmapClient {
     /// ACL this bypasses IP-based restrictions. Modern rpcbind may restrict
     /// CALLIT forwarding.
     pub(crate) async fn callit_mount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        tracing::debug!(%addr, export, "CALLIT MOUNT v3 relay");
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let io = self.connect_tcp(pmap_addr).await.context("connect to portmapper for CALLIT")?;
         let mut pm = PortmapperClient::new(io);
@@ -187,6 +194,7 @@ impl PortmapClient {
     ///
     /// Returns a fixed 32-byte NFSv2 handle (RFC 1094 Appendix A).
     pub(crate) async fn callit_mount_v1(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        tracing::debug!(%addr, export, "CALLIT MOUNT v1 relay");
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let io = self.connect_tcp(pmap_addr).await.context("connect to portmapper for CALLIT v1")?;
         let mut pm = PortmapperClient::new(io);
@@ -203,6 +211,7 @@ impl PortmapClient {
         let pmap_addr = SocketAddr::new(addr.ip(), self.port);
         let query = portmap::mapping { prog: program, vers: version, prot: IPPROTO_TCP, port: 0 };
         let port: u32 = crate::proto::udp::call_rpc_udp(pmap_addr, portmap::PROGRAM, portmap::VERSION, 3, &query, probe_timeout).await.context("PMAPPROC_GETPORT over UDP")?;
+        tracing::debug!(program, version, port, "portmapper GETPORT (UDP)");
         u16::try_from(port).with_context(|| format!("port {port} out of u16 range"))
     }
 }

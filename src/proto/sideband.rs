@@ -59,6 +59,7 @@ pub(crate) async fn connect_sideband(addr: SocketAddr, proxy: Option<&str>, stea
         TcpStream::connect(addr).await.context("sideband TCP connect")?
     };
 
+    tracing::debug!(%addr, "sideband TCP connect");
     let auth = crate::proto::auth::AuthSys::new(0, 0, "localhost").to_opaque_auth(crate::proto::auth::next_stamp());
     Ok(RpcClient::new_with_auth(TokioIo::new(stream), auth, onc_rpc_client::rpc::opaque_auth::default()))
 }

@@ -169,6 +169,7 @@ impl NfsMountClient {
 
     /// Single MNT attempt without the auto-retry wrapper.
     async fn mount_once(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        tracing::debug!(%addr, export, "MOUNT v3 MNT");
         let client = self.connect(addr).await?;
         let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
         let res = client.v3_mnt(path).await.with_context(|| format!("MNT {export}"))?;
@@ -202,6 +203,7 @@ impl NfsMountClient {
     async fn mount_v1_once(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
         use onc_rpc_client::rpc::RpcClient;
 
+        tracing::debug!(%addr, export, "MOUNT v1 MNT");
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
             None => crate::proto::portmap::PortmapClient::default_port(),
@@ -241,6 +243,7 @@ impl NfsMountClient {
     /// Proxied connections are not meaningful for this test because the proxy
     /// controls the outbound source port.
     pub(crate) async fn mount_unprivileged(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
+        tracing::debug!(%addr, export, "MOUNT insecure-port probe");
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
             None => crate::proto::portmap::PortmapClient::default_port(),
@@ -261,6 +264,7 @@ impl NfsMountClient {
 
     /// Unmount an export (MNTPROC_UMNT) for stealth cleanup (F-2.5).
     pub(crate) async fn unmount(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
+        tracing::debug!(%addr, export, "MOUNT v3 UMNT");
         let client = self.connect(addr).await?;
         let path = dirpath(Opaque::owned(export.as_bytes().to_vec()));
         client.umnt(path).await.with_context(|| format!("UMNT {export}"))
@@ -274,6 +278,7 @@ impl NfsMountClient {
     pub(crate) async fn unmount_v1(&self, addr: SocketAddr, export: &str) -> anyhow::Result<()> {
         use onc_rpc_client::rpc::RpcClient;
 
+        tracing::debug!(%addr, export, "MOUNT v1 UMNT");
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
             None => crate::proto::portmap::PortmapClient::default_port(),
@@ -307,9 +312,12 @@ impl NfsMountClient {
     /// A wildcard or empty `allowed_hosts` list means the export is world-accessible (F-7.1).
     /// This queries MOUNT version 3 -- for NFSv2 exports, use `list_exports_v1()`.
     pub(crate) async fn list_exports(&self, addr: SocketAddr) -> anyhow::Result<Vec<ExportEntry>> {
+        tracing::debug!(%addr, "MOUNT v3 EXPORT");
         let client = self.connect(addr).await?;
         let exports = client.export().await.context("MNTPROC_EXPORT v3")?;
-        Ok(exports.into_inner().into_iter().map(export_entry_from).collect())
+        let entries: Vec<ExportEntry> = exports.into_inner().into_iter().map(export_entry_from).collect();
+        tracing::debug!(%addr, exports = entries.len(), "MOUNT v3 EXPORT response");
+        Ok(entries)
     }
 
     /// List NFSv2 exports via MOUNT v1 EXPORT (program 100005, version 1, proc 5).
@@ -326,6 +334,7 @@ impl NfsMountClient {
         use onc_rpc_client::rpc::RpcClient;
         use onc_xdr::Void;
 
+        tracing::debug!(%addr, "MOUNT v1 EXPORT");
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
             None => crate::proto::portmap::PortmapClient::default_port(),
@@ -357,9 +366,12 @@ impl NfsMountClient {
     ///
     /// Returns hosts that currently have an export mounted.
     pub(crate) async fn dump_clients(&self, addr: SocketAddr) -> anyhow::Result<Vec<MountedClient>> {
+        tracing::debug!(%addr, "MOUNT v3 DUMP");
         let client = self.connect(addr).await?;
         let dump = client.dump().await.context("MNTPROC_DUMP")?;
-        Ok(dump.into_inner().into_iter().map(|b| MountedClient { hostname: bytes_to_string(b.ml_hostname.0.as_ref()), directory: bytes_to_string(b.ml_directory.0.as_ref()) }).collect())
+        let clients: Vec<MountedClient> = dump.into_inner().into_iter().map(|b| MountedClient { hostname: bytes_to_string(b.ml_hostname.0.as_ref()), directory: bytes_to_string(b.ml_directory.0.as_ref()) }).collect();
+        tracing::debug!(%addr, clients = clients.len(), "MOUNT v3 DUMP response");
+        Ok(clients)
     }
 
     /// List connected clients via MOUNT v1 MNTPROC_DUMP (program 100005, version 1, proc 2).
@@ -371,6 +383,7 @@ impl NfsMountClient {
         use onc_rpc_client::rpc::RpcClient;
         use onc_xdr::Void;
 
+        tracing::debug!(%addr, "MOUNT v1 DUMP");
         let portmap = match &self.proxy {
             Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
             None => crate::proto::portmap::PortmapClient::default_port(),

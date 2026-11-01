@@ -64,6 +64,7 @@ impl Nfs4DirectClient {
 
     /// Connect via an optional SOCKS5 proxy, using AUTH_NONE.
     pub(crate) async fn connect_proxy(addr: SocketAddr, proxy: Option<&str>) -> anyhow::Result<Self> {
+        tracing::debug!(%addr, "NFSv4 direct connect (AUTH_NONE)");
         let null_auth = onc_rpc_client::rpc::opaque_auth::default();
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, null_auth.clone(), null_auth);
@@ -73,6 +74,7 @@ impl Nfs4DirectClient {
     /// Connect with AUTH_SYS via an optional SOCKS5 proxy.
     pub(crate) async fn connect_with_auth_proxy(addr: SocketAddr, uid: u32, gid: u32, hostname: &str, proxy: Option<&str>) -> anyhow::Result<Self> {
         use crate::proto::auth::AuthSys;
+        tracing::debug!(%addr, uid, gid, "NFSv4 direct connect (AUTH_SYS)");
         let opaque = AuthSys::new(uid, gid, hostname).to_opaque_auth(crate::proto::auth::next_stamp());
         let io = Self::connect_tcp(addr, proxy).await?;
         let rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
@@ -127,6 +129,7 @@ impl Nfs4DirectClient {
     ///
     /// Uses an empty tag and minorversion=0 (NFSv4.0).
     pub(crate) async fn compound(&mut self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
+        tracing::debug!(addr = %self.addr, op_count = ops.len(), "NFSv4 COMPOUND");
         // Pace v4 traffic like the v2/v3 clients (Critical Design Rule 10).
         self.stealth.wait().await;
         let args = CompoundArgs { tag: String::new(), minorversion: 0, ops };
@@ -139,6 +142,7 @@ impl Nfs4DirectClient {
     /// minorversion=1 in the COMPOUND tag; v4.0-only servers reject them with
     /// NFS4ERR_MINOR_VERS_MISMATCH or NFS4ERR_OP_ILLEGAL.
     pub(crate) async fn compound_v41(&mut self, ops: Vec<ArgOp>) -> anyhow::Result<CompoundRes> {
+        tracing::debug!(addr = %self.addr, op_count = ops.len(), "NFSv4.1 COMPOUND");
         self.stealth.wait().await;
         let args = CompoundArgs { tag: String::new(), minorversion: 1, ops };
         self.rpc.call::<CompoundArgs, CompoundRes>(NFS4_PROGRAM, NFS4_VERSION, NFS4_PROC_COMPOUND, &args).await.context("NFSv4.1 COMPOUND")

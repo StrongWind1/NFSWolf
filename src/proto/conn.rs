@@ -111,6 +111,7 @@ impl NfsConnection {
     /// `secure` export option and refuse calls from ports above 1023. A proxy
     /// controls its own outbound port, so that step is skipped when tunnelling.
     pub(crate) async fn connect(addr: SocketAddr, export: &str, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
+        tracing::debug!(%addr, export, "NFS connection establishing (MOUNT path)");
         let mut mount = crate::proto::mount::NfsMountClient::default().with_credential(credential.clone());
         let mut portmap = crate::proto::portmap::PortmapClient::default_port();
         if let Some(p) = proxy {
@@ -143,6 +144,7 @@ impl NfsConnection {
     /// because none was obtained, so health checks use `NULL` rather than a
     /// `GETATTR` against a handle that does not exist.
     pub(crate) async fn connect_direct(addr: SocketAddr, nfs_port: u16, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
+        tracing::debug!(%addr, nfs_port, "NFS connection establishing (direct, no MOUNT)");
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
         let io = Self::open(nfs_addr, proxy).await.with_context(|| format!("direct NFS connect to {nfs_addr}"))?;
         let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), onc_rpc_client::rpc::opaque_auth::default());
@@ -208,6 +210,7 @@ impl NfsConnection {
     /// Connections that bypassed MOUNT have no root handle, so they fall back
     /// to `NULL`.
     pub(crate) async fn health_check(&mut self) -> bool {
+        tracing::trace!(addr = %self.addr, export = %self.export, "connection health check");
         let Some(root) = self.root.clone() else {
             return self.call::<Void, Void>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_NULL, &Void).await.is_ok();
         };
