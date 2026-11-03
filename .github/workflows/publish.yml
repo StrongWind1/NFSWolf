@@ -82,10 +82,10 @@ jobs:
 
           publish_crate() {
             local crate="$1"
-            local flags="${2:-}"
+            shift
             echo "::group::Publishing ${crate}"
             local output
-            if output="$(cargo publish -p "${crate}" ${flags:+"${flags}"} 2>&1)"; then
+            if output="$(cargo publish -p "${crate}" "$@" 2>&1)"; then
               echo "${output}"
             elif echo "${output}" | grep -q 'already exists'; then
               echo "${output}"
@@ -105,7 +105,7 @@ jobs:
           # with --no-verify. Strip the [dev-dependencies] section before
           # publish; --no-verify means tests won't run anyway.
           sed -i '/^\[dev-dependencies\]$/,/^$/d' crates/onc-xdr-derive/Cargo.toml
-          publish_crate onc-xdr-derive "--no-verify --allow-dirty"
+          publish_crate onc-xdr-derive --no-verify --allow-dirty
           git checkout -- crates/onc-xdr-derive/Cargo.toml
 
           # Layer 2: XDR codec
