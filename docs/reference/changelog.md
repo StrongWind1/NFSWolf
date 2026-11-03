@@ -4,6 +4,23 @@ All notable changes to nfswolf are documented here. Versions follow [Semantic Ve
 
 ---
 
+## v1.3.0 (2026-11-02)
+
+**Observability, progress bars, and documentation overhaul.**
+
+- Wire `-v`/`-vv`/`-vvv` verbosity flags to the tracing subscriber for runtime log control
+- Log every RPC call at debug level across all network-facing functions
+- Add verbose instrumentation across all subcommands (scan, escape, brute-handle, uid-spray, analyze)
+- Add progress bars with `indicatif` to all long-running subcommands (escape, scan, brute-handle, uid-spray)
+- Add progress indicators to shell scans and file downloads
+- Gate `status_*` output on `--quiet` in all subcommands
+- Demote recovery-path `tracing::warn` to `info` to reduce noise at default log level
+- Resolve clippy 1.98 lints
+- Restructure documentation site: add features page, reorganize navigation
+- Rewrite README around the attack path with verified output examples
+- Bump `tabled` from 0.21.0 to 0.22.0
+- Pin all GitHub Actions to latest SHA for reproducibility
+
 ## v1.2.0 (2026-08-17)
 
 **Scanner redesign, escape pipeline rewrite, and offline handle decoder.**
