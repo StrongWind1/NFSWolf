@@ -4,6 +4,8 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-02
+
 ### Added
 
 - **Progress bars** on all long-running subcommands (`escape`, `brute-handle`, `uid-spray`, `scan`) and shell scans/file downloads via `indicatif`.
@@ -17,6 +19,7 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ### Changed
 
+- README rewritten for operators: hero section shows the full attack chain with verified output format, features restructured around outcomes, comparison table replaced, installation simplified.
 - Bumped `tabled` from 0.21.0 to 0.22.0.
 - Pinned all GitHub Actions to SHA digests.
 - Docs site restructured with feature pages and updated stats.
@@ -450,7 +453,8 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.8.0...v1.0.0
