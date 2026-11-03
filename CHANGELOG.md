@@ -4,6 +4,23 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+### Added
+
+- **Progress bars** on all long-running subcommands (`escape`, `brute-handle`, `uid-spray`, `scan`) and shell scans/file downloads via `indicatif`.
+- **Verbose tracing instrumentation** -- `-v`/`-vv`/`-vvv` wired to `tracing-subscriber` filter levels. Every RPC call and network-facing function logs at debug level. All subcommands emit structured tracing spans.
+
+### Fixed
+
+- **`--quiet` flag honored everywhere** -- `status_info`/`status_warn`/`status_err` output now gated on `--quiet` in all subcommands, not just `scan`/`analyze`.
+- **Recovery-path log noise** -- transient reconnect/retry messages demoted from `warn` to `info` so they no longer clutter normal output.
+- **Clippy 1.98 compatibility** -- resolved all `clippy::needless_lifetimes` and other 1.98-era lints that broke CI.
+
+### Changed
+
+- Bumped `tabled` from 0.21.0 to 0.22.0.
+- Pinned all GitHub Actions to SHA digests.
+- Docs site restructured with feature pages and updated stats.
+
 ## [1.2.0] - 2026-08-17
 
 ### Added
