@@ -114,6 +114,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
+          lookup-only: true
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-release-
@@ -176,6 +177,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
+          lookup-only: true
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-release-
@@ -278,6 +280,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
+          lookup-only: true
           key: ${{ runner.os }}-cargo-release-${{ matrix.label }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-release-${{ matrix.label }}-
@@ -344,6 +347,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
+          lookup-only: true
           key: ${{ runner.os }}-cargo-release-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-release-${{ matrix.arch }}-
@@ -413,7 +417,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          find . -maxdepth 1 -type f -not -name SHA256SUMS -printf '%f\n' | sort | xargs shasum -a 256 -b > /tmp/sha256sums
+          find . -maxdepth 1 -type f -not -name SHA256SUMS -exec basename {} \; | sort | xargs shasum -a 256 -b > /tmp/sha256sums
           mv /tmp/sha256sums SHA256SUMS
           cat SHA256SUMS
 
