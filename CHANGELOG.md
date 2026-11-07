@@ -4,6 +4,13 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-07
+
+### Added
+
+- **`clean` subcommand** -- remove your mount list entries from an NFS server. Two modes: `nfswolf clean <host> --list` inspects the mount list (MNTPROC_DUMP), `nfswolf clean <host>` drains your entries. Sends UMNTALL first (instant when the server can reverse-resolve the caller's IP), then falls back to a looped UMNT drain that decrements nfs-utils rmtab reference counts by 2 per round (v3 + v1). A stall detector bails when only other clients' entries remain, since Linux mountd matches UMNT by TCP source IP, not AUTH_SYS machinename. New "Stealth" category in `--help`.
+- **`unmount_all()` and `unmount_all_v1()`** on `NfsMountClient` -- MNTPROC_UMNTALL for MOUNT v3 (RFC 1813 Appendix I sec. 5.2.4) and v1 (RFC 1094 Appendix A sec. A.5.5).
+
 ## [1.3.0] - 2026-11-02
 
 ### Added

@@ -4,6 +4,17 @@ All notable changes to nfswolf are documented here. Versions follow [Semantic Ve
 
 ---
 
+## v1.3.1 (2026-11-07)
+
+**Mount list cleanup subcommand.**
+
+- Add `nfswolf clean` subcommand for removing advisory rmtab entries from NFS servers (`showmount -a` cleanup)
+- Two modes: `--list` to inspect the mount list (MNTPROC_DUMP), bare invocation to drain your entries
+- Drain strategy: UMNTALL first, then looped per-export UMNT to decrement reference counts (v3 + v1)
+- Stall detection bails when only other clients' entries remain (Linux mountd matches by source IP)
+- Add UMNTALL methods to `NfsMountClient` (MOUNT v3 and v1)
+- New "Stealth" command category in `--help`
+
 ## v1.3.0 (2026-11-02)
 
 **Observability, progress bars, and documentation overhaul.**
