@@ -307,6 +307,54 @@ impl NfsMountClient {
         Ok(())
     }
 
+    /// Remove all mount entries for this client via MOUNT v3 UMNTALL
+    /// (MNTPROC3_UMNTALL, proc 4, RFC 1813 Appendix I sec. 5.2.4).
+    ///
+    /// Clears every rmtab entry whose client identity matches the caller.
+    /// Best-effort: callers should drop the result.
+    pub(crate) async fn unmount_all(&self, addr: SocketAddr) -> anyhow::Result<()> {
+        tracing::debug!(%addr, "MOUNT v3 UMNTALL");
+        let client = self.connect(addr).await?;
+        client.umntall().await.context("UMNTALL")
+    }
+
+    /// Remove all mount entries via MOUNT v1 UMNTALL (program 100005, version 1,
+    /// proc 4, RFC 1094 Appendix A sec. A.5.5).
+    ///
+    /// `unmount_all()` connects at MOUNT v3; this variant connects at version 1
+    /// so the server's v1 rmtab entries are also cleaned up. Best-effort: callers
+    /// should drop the result.
+    pub(crate) async fn unmount_all_v1(&self, addr: SocketAddr) -> anyhow::Result<()> {
+        use onc_rpc_client::rpc::RpcClient;
+
+        tracing::debug!(%addr, "MOUNT v1 UMNTALL");
+        let portmap = match &self.proxy {
+            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
+            None => crate::proto::portmap::PortmapClient::default_port(),
+        };
+        let port = match self.mount_port {
+            Some(p) => p,
+            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1 UMNTALL")?,
+        };
+        let mount_addr = SocketAddr::new(addr.ip(), port);
+        let io = if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
+            onc_rpc_client::transport::tokio::TokioIo::new(stream)
+        } else if self.privileged_required {
+            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
+        } else {
+            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
+        };
+        let opaque = self.credential.to_opaque_auth();
+        let mut rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
+
+        // MOUNT v1 UMNTALL: program=100005, version=1, proc=4
+        // args = void, result = void
+        let _: onc_xdr::Void = rpc.call(100_005, 1, 4, &onc_xdr::Void).await.context("UMNTALL v1")?;
+        Ok(())
+    }
+
     /// List all exports with their ACLs via MOUNT v3 EXPORT (MNTPROC_EXPORT).
     ///
     /// A wildcard or empty `allowed_hosts` list means the export is world-accessible (F-7.1).

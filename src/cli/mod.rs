@@ -2,6 +2,7 @@
 
 pub(crate) mod analyze;
 pub(crate) mod brute_handle;
+pub(crate) mod clean;
 pub(crate) mod convert;
 pub(crate) mod decode;
 pub(crate) mod escape;
@@ -178,6 +179,10 @@ pub(crate) enum Command {
     /// UID/GID spray (last-resort credential discovery)
     UidSpray(uid_spray::UidSprayArgs),
 
+    // --- Stealth: anti-forensic cleanup ---
+    /// Remove mount list entries from an NFS server (UMNT / UMNTALL)
+    Clean(clean::CleanArgs),
+
     // --- Utilities: reporting and shell integration ---
     /// Convert an `analyze --json` dump into HTML/Markdown/CSV/TXT/console
     Convert(convert::ConvertArgs),
@@ -209,6 +214,8 @@ const COMMANDS_HELP: &str = concat!(
     "  Advanced:\n",
     "    brute-handle  Brute-force file handles via the STALE/BADHANDLE oracle\n",
     "    uid-spray     UID/GID spray (last-resort credential discovery)\n",
+    "  Stealth:\n",
+    "    clean         Remove mount list entries from an NFS server\n",
     "  Utilities:\n",
     "    convert       Render an `analyze --json` dump to HTML/MD/CSV/TXT/console\n",
     "    decode        Decode an NFS file handle and print every field\n",
@@ -230,6 +237,8 @@ const COMMANDS_HELP: &str = concat!(
     "  Advanced:\n",
     "    brute-handle  Brute-force file handles via the STALE/BADHANDLE oracle\n",
     "    uid-spray     UID/GID spray (last-resort credential discovery)\n",
+    "  Stealth:\n",
+    "    clean         Remove mount list entries from an NFS server\n",
     "  Utilities:\n",
     "    convert       Render an `analyze --json` dump to HTML/MD/CSV/TXT/console\n",
     "    decode        Decode an NFS file handle and print every field\n",
