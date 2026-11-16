@@ -8,7 +8,8 @@ use onc_xdr::{Pack, Unpack};
 use crate::error::RpcError;
 use crate::transport::io::{AsyncRead, AsyncWrite};
 
-/// Largest RPC reply this client will accept in one fragment.
+/// Largest RPC reply this client will accept, summed across all of its
+/// record-marking fragments.
 ///
 /// Generous against real servers -- Linux knfsd's default `rtmax` is 1 MiB --
 /// and small enough that a forged fragment header cannot exhaust memory.
@@ -111,6 +112,7 @@ where
             return Err(RpcError::WrongLength);
         }
         io.async_write_all(&buf).await?;
+        io.async_flush().await?;
         Ok(())
     }
 
@@ -130,9 +132,11 @@ where
             let frag_len = frag.fragment_length();
 
             // Guard total assembled size against allocation amplification.
+            // The fragment body has not been read, so the stream is now out of
+            // step: the error must be one that marks the connection unusable.
             let new_total = assembled.len().saturating_add(frag_len as usize);
             if new_total > MAX_REPLY_BYTES as usize {
-                return Err(RpcError::WrongLength);
+                return Err(RpcError::FragmentedReply);
             }
 
             let start = assembled.len();
@@ -191,5 +195,58 @@ where
         let msg = rpc_msg { xid: self.xid, body: msg_body::CALL(call) };
         self.xid = self.xid.wrapping_add(1);
         Self::send_call(&mut self.io, &msg, args).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onc_xdr::Void;
+
+    /// In-memory stream: replays a canned reply, swallows writes, counts flushes.
+    struct ScriptedIo {
+        reply: std::io::Cursor<Vec<u8>>,
+        flushes: usize,
+    }
+
+    impl AsyncRead for ScriptedIo {
+        async fn async_read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut self.reply, buf)
+        }
+    }
+
+    impl AsyncWrite for ScriptedIo {
+        async fn async_write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        async fn async_flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    fn client(reply: Vec<u8>) -> RpcClient<ScriptedIo> {
+        RpcClient::new_with_auth(ScriptedIo { reply: std::io::Cursor::new(reply), flushes: 0 }, opaque_auth::default(), opaque_auth::default())
+    }
+
+    /// A fragment header claiming more than the limit is rejected before its
+    /// body is read, so the error must mark the connection unusable.
+    #[tokio::test]
+    async fn oversized_reply_is_not_reusable() {
+        let header = (fragment_header::MASK & (MAX_REPLY_BYTES + 4)) | 0x8000_0000;
+        let mut rpc = client(header.to_be_bytes().to_vec());
+        let err = rpc.call::<Void, Void>(100_003, 3, 0, &Void).await.expect_err("oversized reply must fail");
+        assert!(matches!(err, RpcError::FragmentedReply), "got {err:?}");
+        assert!(!err.is_connection_reusable(), "unread fragment data is still in the socket");
+    }
+
+    /// Every request is flushed before the client waits for the reply.
+    #[tokio::test]
+    async fn request_is_flushed_before_reading() {
+        let mut rpc = client(Vec::new());
+        let err = rpc.call::<Void, Void>(100_003, 3, 0, &Void).await.expect_err("empty stream has no reply");
+        assert!(matches!(err, RpcError::Io(_)), "got {err:?}");
+        assert_eq!(rpc.io.flushes, 1);
     }
 }

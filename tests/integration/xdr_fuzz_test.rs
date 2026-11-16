@@ -2,35 +2,8 @@
 //!
 //! Feeds random/adversarial byte sequences into Unpack implementations to
 //! catch panics, infinite loops, or excessive allocations from malformed
+
 //! wire data. Every decoder must return Ok or Err -- never crash.
-#![allow(
-    unused_crate_dependencies,
-    unused_qualifications,
-    missing_docs,
-    missing_debug_implementations,
-    unused_import_braces,
-    unused_lifetimes,
-    single_use_lifetimes,
-    trivial_casts,
-    trivial_numeric_casts,
-    elided_lifetimes_in_paths,
-    explicit_outlives_requirements,
-    variant_size_differences,
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::cargo,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    let_underscore_drop,
-    reason = "integration test  --  all lints suppressed per project policy"
-)]
 
 use std::io::Cursor;
 

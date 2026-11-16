@@ -178,6 +178,6 @@ impl UidSprayer {
 
     /// Check the circuit breaker using the real server address from the client.
     fn check_circuit(&self) -> anyhow::Result<()> {
-        self.circuit.check_or_wait(self.nfs3.host())
+        self.circuit.check(self.nfs3.host())
     }
 }

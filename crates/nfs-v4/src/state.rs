@@ -5,7 +5,7 @@
 //! This module holds the bookkeeping for those stateids and for byte-range
 //! locks acquired via LOCK.
 
-use crate::wire::{LockOwner4, LockType4, OpenDelegation4, Stateid4};
+use crate::wire::{CompoundRes, LockOwner4, LockType4, OpenDelegation4, Stateid4};
 
 /// State for an opened file (OPEN result + subsequent mutations).
 #[derive(Debug, Clone)]
@@ -45,8 +45,31 @@ pub struct LockState {
     pub lock_stateid: Stateid4,
     /// Lock owner.
     pub lock_owner: LockOwner4,
+    /// Seqid to send on this lock-owner's next LOCK or LOCKU.
+    ///
+    /// A lock-owner has a sequence of its own, separate from the open-owner's
+    /// (RFC 7530 sec. 9.1.7). The LOCK that creates the lock-owner starts it
+    /// with [`LockState::INITIAL_SEQID`]; each later operation advances it per
+    /// [`record_outcome`](Self::record_outcome).
+    pub seqid: u32,
     /// Active lock ranges.
     pub ranges: Vec<LockRange>,
+}
+
+impl LockState {
+    /// The `lock_seqid` sent in the LOCK that creates a lock-owner.
+    ///
+    /// Any value is accepted for a lock-owner the server has not seen
+    /// (RFC 7530 sec. 16.10.4).
+    pub const INITIAL_SEQID: u32 = 1;
+
+    /// Advance the lock-owner sequence if the LOCK or LOCKU at `op_index` of
+    /// `res` consumed its seqid (see [`CompoundRes::seqid_consumed`]).
+    pub fn record_outcome(&mut self, res: &CompoundRes, op_index: usize) {
+        if res.seqid_consumed(op_index) {
+            self.seqid = self.seqid.wrapping_add(1);
+        }
+    }
 }
 
 /// A single byte-range lock.
@@ -79,7 +102,7 @@ mod tests {
 
     #[test]
     fn lock_state_empty_ranges() {
-        let state = LockState { lock_stateid: Stateid4::ANONYMOUS, lock_owner: LockOwner4 { clientid: 42, owner: vec![0x01] }, ranges: vec![] };
+        let state = LockState { lock_stateid: Stateid4::ANONYMOUS, lock_owner: LockOwner4 { clientid: 42, owner: vec![0x01] }, seqid: LockState::INITIAL_SEQID, ranges: vec![] };
 
         assert_eq!(state.lock_stateid, Stateid4::ANONYMOUS);
         assert_eq!(state.lock_owner.clientid, 42);

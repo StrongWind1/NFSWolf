@@ -19,6 +19,9 @@ type Event = (Instant, bool);
 struct HostHealth {
     /// Sliding window of (timestamp, success) events.
     events: VecDeque<Event>,
+    /// How many of `events` are failures, kept in step with every push and
+    /// eviction so the error rate costs O(1) instead of a scan of the window.
+    failures: usize,
     /// Number of times this host has tripped the breaker (for backoff).
     trip_count: u32,
     /// The breaker is open until this instant (None = closed).
@@ -27,14 +30,33 @@ struct HostHealth {
 
 impl HostHealth {
     const fn new() -> Self {
-        Self { events: VecDeque::new(), trip_count: 0, tripped_until: None }
+        Self { events: VecDeque::new(), failures: 0, trip_count: 0, tripped_until: None }
     }
 
     /// Evict events older than `window` from the front of the deque.
     fn evict_stale(&mut self, window: Duration) {
-        let cutoff = Instant::now().checked_sub(window).unwrap_or_else(Instant::now);
-        while self.events.front().is_some_and(|(ts, _)| *ts < cutoff) {
+        // `None` only while the monotonic clock is younger than the window
+        // (just after boot). No event can be older than the window then, so
+        // there is nothing to evict -- falling back to "now" as the cutoff
+        // would discard the whole history instead.
+        let Some(cutoff) = Instant::now().checked_sub(window) else {
+            return;
+        };
+        while let Some(&(ts, ok)) = self.events.front()
+            && ts < cutoff
+        {
             _ = self.events.pop_front();
+            if !ok {
+                self.failures -= 1;
+            }
+        }
+    }
+
+    /// Append an outcome to the window.
+    fn push(&mut self, at: Instant, ok: bool) {
+        self.events.push_back((at, ok));
+        if !ok {
+            self.failures += 1;
         }
     }
 
@@ -43,9 +65,8 @@ impl HostHealth {
         if self.events.is_empty() {
             return 0.0;
         }
-        let failures = self.events.iter().filter(|(_, ok)| !ok).count();
         // Event counts fit in u32 (bounded by window size); u32->f64 is always exact.
-        f64::from(u32::try_from(failures).unwrap_or(u32::MAX)) / f64::from(u32::try_from(self.events.len()).unwrap_or(u32::MAX))
+        f64::from(u32::try_from(self.failures).unwrap_or(u32::MAX)) / f64::from(u32::try_from(self.events.len()).unwrap_or(u32::MAX))
     }
 
     /// Success rate = 1 - error_rate.
@@ -91,7 +112,7 @@ impl CircuitBreaker {
     pub(crate) fn record_success(&self, addr: SocketAddr) {
         let mut h = self.hosts.entry(addr).or_insert_with(HostHealth::new);
         h.evict_stale(self.window);
-        h.events.push_back((Instant::now(), true));
+        h.push(Instant::now(), true);
         // Reset trip_count when success rate is high enough to indicate recovery.
         if h.success_rate() > 1.0 - (self.error_threshold / 2.0) {
             h.trip_count = 0;
@@ -105,7 +126,7 @@ impl CircuitBreaker {
         let now = Instant::now();
         let mut h = self.hosts.entry(addr).or_insert_with(HostHealth::new);
         h.evict_stale(self.window);
-        h.events.push_back((now, false));
+        h.push(now, false);
 
         // Only escalate on a fresh closed->open transition. While the breaker
         // is already open (tripped_until still in the future), a burst of
@@ -130,8 +151,10 @@ impl CircuitBreaker {
 
     /// Return `Ok(())` if the breaker is closed, `Err` if open.
     ///
-    /// Logs a warning when within 20% of the trip threshold.
-    pub(crate) fn check_or_wait(&self, addr: SocketAddr) -> anyhow::Result<()> {
+    /// Never waits for the cooldown: an open breaker fails the call at once,
+    /// and the caller decides whether to retry later. Logs a warning when
+    /// within 20% of the trip threshold.
+    pub(crate) fn check(&self, addr: SocketAddr) -> anyhow::Result<()> {
         if self.is_tripped(addr) {
             anyhow::bail!("circuit breaker open for {addr}");
         }
@@ -180,7 +203,7 @@ mod tests {
     #[test]
     fn circuit_breaker_check_ok_when_closed() {
         let cb = CircuitBreaker::default_config();
-        assert!(cb.check_or_wait(loopback(2049)).is_ok());
+        assert!(cb.check(loopback(2049)).is_ok());
     }
 
     #[test]
@@ -203,7 +226,7 @@ mod tests {
             cb.record_failure(addr);
         }
         assert!(cb.is_tripped(addr), "breaker must open after sustained failures");
-        assert!(cb.check_or_wait(addr).is_err(), "check_or_wait must fail when open");
+        assert!(cb.check(addr).is_err(), "check must fail when open");
     }
 
     #[test]
@@ -262,8 +285,8 @@ mod tests {
         for _ in 0..50 {
             cb.record_success(addr);
         }
-        // Verify state by checking check_or_wait passes
-        assert!(cb.check_or_wait(addr).is_ok());
+        // Verify state by checking check passes
+        assert!(cb.check(addr).is_ok());
     }
 
     #[test]
@@ -312,23 +335,55 @@ mod tests {
         }
         assert!(cb.is_tripped(addr_a));
         assert!(!cb.is_tripped(addr_b));
-        assert!(cb.check_or_wait(addr_b).is_ok());
+        assert!(cb.check(addr_b).is_ok());
+    }
+
+    /// The running failure count must follow evictions, or the error rate
+    /// would remember failures that have left the window.
+    #[test]
+    fn failure_count_tracks_evictions() {
+        let window = Duration::from_millis(30);
+        let mut h = HostHealth::new();
+        for _ in 0..4 {
+            h.push(Instant::now(), false);
+        }
+        h.push(Instant::now(), true);
+        assert_eq!(h.failures, 4);
+        assert!((h.error_rate() - 0.8).abs() < f64::EPSILON);
+
+        std::thread::sleep(Duration::from_millis(60));
+        h.evict_stale(window);
+        h.push(Instant::now(), true);
+        assert_eq!(h.failures, 0, "evicted failures must leave the count");
+        assert_eq!(h.events.len(), 1);
+        assert!(h.error_rate().abs() < f64::EPSILON);
+    }
+
+    /// A window longer than the monotonic clock's age must not discard the
+    /// history: nothing in it can be older than the window yet.
+    #[test]
+    fn window_longer_than_uptime_keeps_history() {
+        let mut h = HostHealth::new();
+        h.push(Instant::now(), false);
+        h.evict_stale(Duration::MAX);
+        assert_eq!(h.events.len(), 1);
+        assert_eq!(h.failures, 1);
     }
 
     #[test]
-    fn check_or_wait_returns_ok_when_closed() {
+    fn check_returns_ok_when_closed() {
         let cb = CircuitBreaker::default_config();
         let addr = loopback(6001);
-        assert!(cb.check_or_wait(addr).is_ok());
+        assert!(cb.check(addr).is_ok());
     }
 
     #[test]
-    fn check_or_wait_returns_err_when_tripped() {
+    fn check_returns_err_when_tripped() {
         let cb = CircuitBreaker::new(Duration::from_mins(1), 0.80, 10, Duration::from_mins(1), Duration::from_mins(5));
         let addr = loopback(6002);
         for _ in 0..15 {
             cb.record_failure(addr);
         }
-        assert!(cb.check_or_wait(addr).is_err());
+        assert!(cb.check(addr).is_err());
     }
 }

@@ -1,0 +1,7 @@
+error: proc-macro derive panicked
+ --> tests/ui/two_catch_alls.rs:4:10
+  |
+4 | #[derive(XdrCodec)]
+  |          ^^^^^^^^
+  |
+  = help: message: Only one variant may be #[xdr(other)]; 'Second' is a second

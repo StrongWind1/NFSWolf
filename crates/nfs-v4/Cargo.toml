@@ -21,5 +21,8 @@ onc-xdr = { workspace = true }
 onc-rpc-client = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true }
+
 [lints]
 workspace = true

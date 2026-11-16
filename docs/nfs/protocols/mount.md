@@ -249,25 +249,28 @@ The `nfs-mount` crate implements MOUNT v1 and v3 as standalone protocol clients,
 
 | Component | What it does |
 |-----------|-------------|
-| `crates/nfs-mount/src/` | Wire types and `MountClient` (v3) / `MountV1Client` (v1): NULL, MNT, UMNT, DUMP, UMNTALL, EXPORT |
+| `crates/nfs-mount/src/` | Wire types and `MountClient`, one client for MOUNT v1 and v3: NULL, MNT, UMNT, DUMP, UMNTALL, EXPORT |
 | `src/proto/mount.rs` | `NfsMountClient`: policy layer wrapping `nfs-mount`, with `dump_clients`, `dump_clients_v1`, `unmount_v1`, auth-flavor extraction |
 | `src/cli/escape.rs` | Escape pipeline Phase 1 gathers seed handles from MOUNT v3 MNT, MOUNT v1 MNT, and NFSv4 LOOKUP |
 | `src/engine/scanner.rs` | Scanner calls MOUNT EXPORT and DUMP during Phase 3 (data collection) |
 | `src/engine/analyzer.rs` | Analyzer checks auth flavors returned by MNT for security findings |
 
 ```rust
-use nfs_mount::MountV1Client;
+use nfs_mount::MountClient;
+use nfs_mount::wire::dirpath;
+use onc_xdr::Opaque;
 
 // MOUNT v1: get a 32-byte NFSv2 handle
-let mut mount = MountV1Client::new(transport);
-let fhstatus = mount.mnt("/export").await?;
+let mount = MountClient::v1(transport);
+let mounted = mount.mnt(dirpath(Opaque::borrowed(b"/export"))).await?;
+// mounted.bytes        -> root handle (32 bytes)
+// mounted.auth_flavors -> [AUTH_SYS]; v1 has no flavor negotiation
 
 // MOUNT v3: get a variable handle + auth flavors
-use nfs_v3::MountClient;
-let mount = MountClient::new(transport);
-let res = mount.mnt(dirpath(Opaque::borrowed(b"/export"))).await?;
-// res.fhandle  -> root handle (up to 64 bytes)
-// res.auth_flavors -> vec of accepted auth mechanisms
+let mount = MountClient::v3(transport);
+let mounted = mount.mnt(dirpath(Opaque::borrowed(b"/export"))).await?;
+// mounted.bytes        -> root handle (up to 64 bytes)
+// mounted.auth_flavors -> vec of accepted auth mechanisms
 ```
 
 For the complete list of MOUNT-related security findings, see [MOUNT Findings](../../security/by-protocol/mount.md).

@@ -131,11 +131,18 @@ pub enum auth_stat {
     RPCSEC_GSS_PRIVILEGE_PROBLEM = 17,
     /// Unknown structured privilege assertion (RFC 7861).
     RPCSEC_GSS_UNKNOWN_MESSAGE = 18,
+    /// A rejection code this list does not name, kept as sent.
+    ///
+    /// Without it an unlisted code would fail the decode of the whole reply,
+    /// turning an authentication rejection into an XDR error.
+    #[xdr(other)]
+    Unknown(u32),
 }
 
 impl std::fmt::Display for auth_stat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
+            Self::Unknown(v) => return write!(f, "AUTH_STAT_UNKNOWN({v})"),
             Self::AUTH_OK => "AUTH_OK",
             Self::AUTH_BADCRED => "AUTH_BADCRED",
             Self::AUTH_REJECTEDCRED => "AUTH_REJECTEDCRED",
@@ -172,6 +179,12 @@ pub enum auth_flavor {
     RPCSEC_GSS = 6,
     /// RFC 9289 S4.1 -- RPC-with-TLS STARTTLS probe.
     AUTH_TLS = 7,
+    /// A flavor this list does not name, kept as sent.
+    ///
+    /// Reply verifiers carry a flavor too, and an unlisted one would otherwise
+    /// fail the decode of the whole reply before the result is reached.
+    #[xdr(other)]
+    Unknown(u32),
 }
 
 #[derive(Clone, Debug, XdrCodec)]
@@ -832,5 +845,31 @@ mod tests {
         let mut repacked = Vec::new();
         let _ = decoded.pack(&mut repacked).expect("pack");
         assert_eq!(repacked, GOLDEN);
+    }
+
+    /// An unlisted rejection code must decode as a rejection, keeping its value.
+    #[test]
+    fn auth_stat_unlisted_value_decodes() {
+        let wire = 99u32.to_be_bytes();
+        let (stat, n) = auth_stat::unpack(&mut Cursor::new(&wire)).expect("an unlisted auth_stat must decode");
+        assert_eq!(n, 4);
+        assert_eq!(stat, auth_stat::Unknown(99));
+        assert_eq!(stat.to_string(), "AUTH_STAT_UNKNOWN(99)");
+    }
+
+    /// A verifier with an unlisted flavor must not fail the decode, and must
+    /// pack back to the same bytes.
+    #[test]
+    fn opaque_auth_unlisted_flavor_round_trips() {
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&42u32.to_be_bytes());
+        wire.extend_from_slice(&4u32.to_be_bytes());
+        wire.extend_from_slice(&[1, 2, 3, 4]);
+        let (verf, n) = opaque_auth::unpack(&mut Cursor::new(&wire)).expect("an unlisted flavor must decode");
+        assert_eq!(n, 12);
+        assert_eq!(verf.flavor, auth_flavor::Unknown(42));
+        let mut repacked = Vec::new();
+        let _ = verf.pack(&mut repacked).expect("pack");
+        assert_eq!(repacked, wire);
     }
 }

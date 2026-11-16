@@ -10,17 +10,22 @@ use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 
-use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, try_with_escalation};
+use super::ops::{CredCache, IoSizes, ReadReply, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, WriteReply, try_with_escalation};
 
 /// NFSv3 backend wrapping a pooled `Nfs3Client` with credential escalation.
 pub(crate) struct V3Ops {
     pub nfs3: Arc<Nfs3Client>,
     cred_cache: CredCache,
+    /// The server's transfer sizes, from the first FSINFO that answers. One
+    /// value per session: the limits belong to the server's RPC layer, which
+    /// knfsd shares across every export, and a READ larger than a filesystem
+    /// allows is answered short rather than refused.
+    io_sizes: std::sync::OnceLock<IoSizes>,
 }
 
 impl V3Ops {
     pub(crate) fn new(nfs3: Arc<Nfs3Client>) -> Self {
-        Self { nfs3, cred_cache: CredCache::new() }
+        Self { nfs3, cred_cache: CredCache::new(), io_sizes: std::sync::OnceLock::new() }
     }
 
     fn make_v3(&self, uid: u32, gid: u32) -> Nfs3Client {
@@ -130,7 +135,7 @@ impl ShellOps for V3Ops {
         Ok(to_shell_entries(entries))
     }
 
-    async fn read_file(&self, fh: &ShellHandle) -> anyhow::Result<Vec<u8>> {
+    async fn read_at(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<ReadReply> {
         let fh3 = to_v3_fh(fh);
         let nfs3 = &self.nfs3;
         try_with_escalation(
@@ -142,26 +147,7 @@ impl ShellOps for V3Ops {
             |uid, gid| {
                 let c = self.make_v3(uid, gid);
                 let fh = fh3.clone();
-                async move { read_all_v3(&c, &fh).await }
-            },
-            "NFS3ERR_ACCES: permission denied reading file",
-        )
-        .await
-    }
-
-    async fn read_chunk(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
-        let fh3 = to_v3_fh(fh);
-        let nfs3 = &self.nfs3;
-        try_with_escalation(
-            (nfs3.uid(), nfs3.gid()),
-            &self.cred_cache,
-            fh,
-            getattr_owner(nfs3, &fh3),
-            is_nfs_acces,
-            |uid, gid| {
-                let c = self.make_v3(uid, gid);
-                let fh = fh3.clone();
-                async move { read_chunk_v3(&c, &fh, offset, count).await }
+                async move { read_at_v3(&c, &fh, offset, count).await }
             },
             "NFS3ERR_ACCES: permission denied reading file chunk",
         )
@@ -173,8 +159,30 @@ impl ShellOps for V3Ops {
         Ok(ack.count)
     }
 
+    async fn write_unstable(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<WriteReply> {
+        let ack = self.nfs3.write_at(&to_v3_fh(fh), offset, data, stable_how::UNSTABLE).await.map_err(fault_to_anyhow)?;
+        // A server may commit more durably than asked (RFC 1813 sec. 3.3.7).
+        let stable = ack.committed != stable_how::UNSTABLE;
+        Ok(WriteReply { count: ack.count, stable, verifier: Some(ack.verifier) })
+    }
+
+    async fn io_sizes(&self, fh: &ShellHandle) -> IoSizes {
+        if let Some(sizes) = self.io_sizes.get() {
+            return *sizes;
+        }
+        // FSINFO (RFC 1813 sec. 3.3.19): the preferred size, never above the
+        // maximum. A server that refuses FSINFO gets the default, uncached, so
+        // a later file may still learn the real sizes.
+        let Ok(info) = self.nfs3.info_fs(&to_v3_fh(fh)).await else {
+            return IoSizes::DEFAULT;
+        };
+        let sizes = IoSizes::from_server(preferred_within_max(info.rtpref, info.rtmax), preferred_within_max(info.wtpref, info.wtmax));
+        _ = self.io_sizes.set(sizes);
+        sizes
+    }
+
     async fn create_file(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<ShellHandle> {
-        if let Some(fh) = self.nfs3.create_file(&to_v3_fh(dir), name, sattr3_with_mode(mode)).await.map_err(fault_to_anyhow)? {
+        if let Some(fh) = self.nfs3.create_file(&to_v3_fh(dir), name, sattr3_new_file(mode)).await.map_err(fault_to_anyhow)? {
             return Ok(from_v3_fh(&fh));
         }
         let (fh, _) = self.nfs3.resolve(&to_v3_fh(dir), name).await.map_err(fault_to_anyhow)?;
@@ -350,6 +358,15 @@ fn to_shell_entries(entries: Vec<DirEntryPlus>) -> Vec<ShellEntry> {
     entries.into_iter().map(|e| ShellEntry { name: e.name, info: e.attrs.as_ref().map(v3_info), handle: e.handle.as_ref().map(from_v3_fh) }).collect()
 }
 
+/// Attributes for `create_file`: the mode, and size 0.
+///
+/// An UNCHECKED CREATE of a name that exists applies these attributes to the
+/// existing file (RFC 1813 sec. 3.3.8), so the size truncates it: a file
+/// replaced by a shorter one must not keep the old one's tail.
+fn sattr3_new_file(mode: u32) -> sattr3 {
+    sattr3 { size: Nfs3Option::Some(0), ..sattr3_with_mode(mode) }
+}
+
 fn sattr3_with_mode(mode: u32) -> sattr3 {
     sattr3 { mode: Nfs3Option::Some(mode), uid: Nfs3Option::None, gid: Nfs3Option::None, size: Nfs3Option::None, atime: set_atime::DONT_CHANGE, mtime: set_mtime::DONT_CHANGE }
 }
@@ -357,10 +374,11 @@ fn sattr3_with_mode(mode: u32) -> sattr3 {
 const MAX_DIR_ENTRIES: usize = 1_000_000;
 
 async fn list_dir_v3(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<Vec<DirEntryPlus>> {
-    let mut out = nfs3.list_dir(dir_fh, MAX_DIR_ENTRIES).await.map_err(|e| anyhow::anyhow!("READDIRPLUS: {e}"))?;
-    if out.len() >= MAX_DIR_ENTRIES {
-        tracing::warn!(entries = out.len(), "READDIRPLUS hit entry cap; listing truncated");
+    let listing = nfs3.list_dir_capped(dir_fh, MAX_DIR_ENTRIES).await.map_err(|e| anyhow::anyhow!("READDIRPLUS: {e}"))?;
+    if listing.truncated {
+        tracing::warn!(entries = listing.value.len(), "READDIRPLUS hit entry cap; listing truncated");
     }
+    let mut out = listing.value;
     for entry in &mut out {
         if entry.attrs.is_some() || entry.name == "." || entry.name == ".." {
             continue;
@@ -372,29 +390,21 @@ async fn list_dir_v3(nfs3: &Nfs3Client, dir_fh: &FileHandle) -> anyhow::Result<V
     Ok(out)
 }
 
-async fn read_chunk_v3(nfs3: &Nfs3Client, fh: &FileHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
-    let chunk = nfs3.read_at(fh, offset, count).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(chunk.data)
+/// The preferred transfer size capped by the maximum, or whichever of the
+/// two the server reported; zero means "not reported".
+fn preferred_within_max(pref: u32, max: u32) -> Option<u64> {
+    let size = match (pref, max) {
+        (0, 0) => return None,
+        (0, m) => m,
+        (p, 0) => p,
+        (p, m) => p.min(m),
+    };
+    Some(u64::from(size))
 }
 
-async fn read_all_v3(nfs3: &Nfs3Client, fh: &FileHandle) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    let mut offset = 0u64;
-    loop {
-        let chunk = nfs3.read_at(fh, offset, super::ops::CHUNK_SIZE).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        if chunk.data.is_empty() {
-            break;
-        }
-        buf.extend_from_slice(&chunk.data);
-        if buf.len() as u64 > super::ops::READ_ALL_MAX {
-            anyhow::bail!("file exceeds 256 MiB read cap");
-        }
-        offset += chunk.data.len() as u64;
-        if chunk.eof {
-            break;
-        }
-    }
-    Ok(buf)
+async fn read_at_v3(nfs3: &Nfs3Client, fh: &FileHandle, offset: u64, count: u32) -> anyhow::Result<ReadReply> {
+    let chunk = nfs3.read_at(fh, offset, count).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(ReadReply { data: chunk.data, eof: chunk.eof })
 }
 
 /// Convert a `ShellSetAttr` to the NFSv3 `sattr3` wire type.

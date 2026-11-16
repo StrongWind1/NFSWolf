@@ -18,6 +18,11 @@ use crate::rpc::{RpcClient, opaque_auth};
 /// Calls are serialised by an async mutex, because ONC RPC over a stream
 /// interleaves nothing -- a reply is matched to its call by XID, and this
 /// client reads the next reply off the socket rather than demultiplexing.
+///
+/// Dropping a call's future before it completes (a `select!`, an outer
+/// timeout) can leave a request half-written or a reply unread. The borrowed
+/// credential of [`call_as`](RpcTransport::call_as) is still restored, but the
+/// stream itself is out of step, so discard the transport rather than reuse it.
 #[derive(Debug)]
 pub struct DirectTransport<IO> {
     rpc: Mutex<RpcClient<IO>>,
@@ -71,10 +76,63 @@ where
     {
         let mut guard = self.rpc.lock().await;
         let previous = std::mem::replace(&mut guard.credential, cred);
-        let result = guard.call::<C, R>(prog, vers, proc, args).await;
-        // Restore unconditionally: leaving a borrowed identity on the
-        // connection would silently mis-attribute every later call.
-        guard.credential = previous;
-        result
+        // Restore from a drop guard rather than after the await: if this
+        // future is dropped mid-call, a plain statement after the await never
+        // runs, and the borrowed identity would silently mis-attribute every
+        // later call on this transport.
+        let restore = CredentialRestore { rpc: &mut *guard, previous: Some(previous) };
+        restore.rpc.call::<C, R>(prog, vers, proc, args).await
+    }
+}
+
+/// Puts the transport's own credential back when a borrowed-identity call
+/// ends, whether it returned, failed, or was cancelled.
+struct CredentialRestore<'a, IO> {
+    rpc: &'a mut RpcClient<IO>,
+    previous: Option<opaque_auth<'static>>,
+}
+
+impl<IO> Drop for CredentialRestore<'_, IO> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            self.rpc.credential = previous;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::auth_flavor;
+    use onc_xdr::{Opaque, Void};
+
+    /// A stream that accepts every write and never produces a reply.
+    struct Silent;
+
+    impl AsyncRead for Silent {
+        async fn async_read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            std::future::pending().await
+        }
+    }
+
+    impl AsyncWrite for Silent {
+        async fn async_write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+    }
+
+    /// `call_as` must put the transport's own credential back even when the
+    /// call is cancelled while waiting for the reply.
+    #[tokio::test]
+    async fn cancelled_call_as_restores_credential() {
+        let own = opaque_auth { flavor: auth_flavor::AUTH_UNIX, body: Opaque::owned(vec![1, 2, 3, 4]) };
+        let transport = DirectTransport::with_auth(Silent, own.clone(), opaque_auth::default());
+        let borrowed = opaque_auth { flavor: auth_flavor::AUTH_UNIX, body: Opaque::owned(vec![9, 9, 9, 9]) };
+
+        let call = transport.call_as::<Void, Void>(borrowed, 100_003, 3, 0, &Void);
+        assert!(::tokio::time::timeout(std::time::Duration::from_millis(20), call).await.is_err(), "the stream never answers");
+
+        let rpc = transport.into_inner();
+        assert_eq!(rpc.credential.body.as_ref(), own.body.as_ref(), "the borrowed identity leaked past a cancelled call");
     }
 }

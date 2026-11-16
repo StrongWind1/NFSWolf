@@ -56,9 +56,12 @@ pub enum AuthFlavor {
 impl AuthFlavor {
     /// Classify a flavor number from the wire.
     ///
-    /// Kerberos pseudo-flavors (390003-390005, RFC 2623 sec. 2.1.1) map to
-    /// [`AuthFlavor::Gss`], since for any security question the answer that
-    /// matters is "this export wants Kerberos".
+    /// The RPCSEC_GSS pseudo-flavors map to [`AuthFlavor::Gss`], since for any
+    /// security question the answer that matters is "this export wants
+    /// Kerberos": AUTH_SPNEGO (390000, RFC 5531 sec. 13) and the Kerberos
+    /// pseudo-flavors krb5, krb5i and krb5p (390003-390005, RFC 2623
+    /// sec. 2.1.1). The rest of the 390000-390255 pseudo-flavor block is
+    /// unassigned and classifies as [`AuthFlavor::Unknown`].
     #[must_use]
     pub const fn from_u32(v: u32) -> Self {
         match v {
@@ -440,6 +443,12 @@ mod tests {
         assert_eq!(AuthFlavor::from_u32(390_003), AuthFlavor::Gss);
         assert_eq!(AuthFlavor::from_u32(390_004), AuthFlavor::Gss);
         assert_eq!(AuthFlavor::from_u32(390_005), AuthFlavor::Gss);
+    }
+
+    /// RFC 5531 sec. 13 assigns 390000 to AUTH_SPNEGO, a GSS pseudo-flavor.
+    #[test]
+    fn auth_flavor_spnego_390000_is_gss() {
+        assert_eq!(AuthFlavor::from_u32(390_000), AuthFlavor::Gss);
     }
 
     #[test]

@@ -9,11 +9,33 @@
 //! RENEW) are implemented. The stateful path uses [`Nfs4Session`] for client
 //! identity and [`OpenState`] for per-file open state tracking.
 
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use onc_rpc_client::RpcTransport;
 
 use crate::session::Nfs4Session;
 use crate::state::{LockRange, LockState, OpenState};
-use crate::wire::{ArgOp, AttrRequest, ChangeInfo4, CompoundArgs, CompoundRes, CreateType4, Fattr4, LockOwner4, LockType4, Locker4, NFS4_PROC_COMPOUND, NFS4_PROGRAM, NFS4_VERSION, Nfs4DirEntry, Nfs4FileInfo, Nfs4Status, OpenClaim4, OpenDelegationType4, OpenFlag4, ResOpData, SecInfoEntry, Stateid4};
+use crate::wire::{
+    ArgOp, AttrRequest, ChangeInfo4, CompoundArgs, CompoundRes, CreateType4, DirEntry4, Fattr4, LockOwner4, LockType4, Locker4, NFS4_PROC_COMPOUND, NFS4_PROGRAM, NFS4_VERSION, Nfs4DirEntry, Nfs4FileInfo, Nfs4Status, OpenClaim4, OpenDelegationType4, OpenFlag4, ResOpData, SecInfoEntry, Stateid4,
+};
+
+/// Largest file [`Nfs4Client::read_file`] will assemble in memory.
+pub const READ_FILE_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Bytes per READ or WRITE in the whole-file helpers.
+const IO_CHUNK: u32 = 65_536;
+
+/// Most READDIR entries a listing will collect before giving up on `eof`.
+const MAX_READDIR_ENTRIES: usize = 1_000_000;
+
+/// `OPEN4_RESULT_CONFIRM` in OPEN's `rflags` (RFC 7530 sec. 16.16.4).
+const OPEN4_RESULT_CONFIRM: u32 = 0x0002;
+
+/// `FILE_SYNC4` (RFC 7530 sec. 16.36.4): data and metadata are on stable
+/// storage before the WRITE reply.
+const FILE_SYNC4: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -39,6 +61,19 @@ pub enum Nfs4Error<E> {
     /// directory entries, read data) was absent from the response. This is a
     /// server bug or a wire-level mismatch, not a permissions issue.
     MissingResult,
+    /// The data exceeds a size limit this client imposes.
+    ///
+    /// Raised by the client, not the server: the server was still answering.
+    TooLarge {
+        /// The limit, in bytes.
+        limit: usize,
+    },
+    /// A WRITE succeeded but accepted no bytes, so the transfer cannot make
+    /// progress.
+    WriteStalled {
+        /// File offset of the write that accepted nothing.
+        offset: u64,
+    },
 }
 
 impl<E: std::fmt::Display> std::fmt::Display for Nfs4Error<E> {
@@ -47,6 +82,8 @@ impl<E: std::fmt::Display> std::fmt::Display for Nfs4Error<E> {
             Self::Rpc(e) => e.fmt(f),
             Self::Status(s) => write!(f, "NFSv4 error: {s}"),
             Self::MissingResult => f.write_str("NFSv4: expected result op missing from COMPOUND response"),
+            Self::TooLarge { limit } => write!(f, "NFSv4: data exceeds the client's {limit}-byte limit"),
+            Self::WriteStalled { offset } => write!(f, "NFSv4: WRITE at offset {offset} accepted no bytes"),
         }
     }
 }
@@ -56,7 +93,7 @@ impl<E: std::error::Error + 'static> std::error::Error for Nfs4Error<E> {
         match self {
             Self::Rpc(e) => Some(e),
             Self::Status(s) => Some(s),
-            Self::MissingResult => None,
+            Self::MissingResult | Self::TooLarge { .. } | Self::WriteStalled { .. } => None,
         }
     }
 }
@@ -228,45 +265,50 @@ impl<T: RpcTransport> Nfs4Client<T> {
     /// Returns entry names excluding `"."` and `".."`. Requests no inline
     /// attributes (`AttrRequest::empty`) to keep the response compact.
     ///
-    /// NFSv4 READDIR is paginated (RFC 7530 S16.24): a directory larger than
-    /// `maxcount` is returned across multiple calls, each ending with `eof=false`,
-    /// and the client must resume from the last entry's cookie. This loops until
-    /// `eof`, accumulating entries. The loop is bounded by `MAX_READDIR_ENTRIES`
-    /// so a hostile server (untrusted-server hardening) that never sets `eof`
-    /// cannot spin or exhaust memory.
+    /// Pages through the whole directory (RFC 7530 S16.24), stopping at
+    /// `eof`, an empty page, a cookie that does not advance, or one million
+    /// raw entries -- the server is untrusted, so `eof` cannot be the only
+    /// exit.
     pub async fn list_dir(&self, dir_fh: &[u8]) -> Result<Vec<String>, Nfs4Error<T::Error>> {
-        // Hard cap against a server that never signals eof.
-        const MAX_READDIR_ENTRIES: usize = 1_000_000;
         let mut names = Vec::new();
-        // Bound on RAW entries seen (not the filtered `names`): a hostile server
-        // can return non-empty pages whose entries are all "." / ".." with a
-        // cycling cookie, which would never grow `names` and never break.
+        self.readdir_pages(dir_fh, 4096, &AttrRequest::empty(), |e| names.push(e.name.clone())).await?;
+        Ok(names)
+    }
+
+    /// Run READDIR to the end of the directory, handing each entry other than
+    /// `"."` and `".."` to `each`.
+    ///
+    /// NFSv4 READDIR is paginated (RFC 7530 S16.24): a directory larger than
+    /// `maxcount` is returned across multiple calls, each ending with
+    /// `eof=false`, and the client must resume from the last entry's cookie,
+    /// echoing the server's cookie verifier so it can detect a directory that
+    /// changed between pages.
+    ///
+    /// The server is untrusted, so `eof` is not the only exit: the loop also
+    /// stops on an empty page, on a cookie that does not advance, and after
+    /// [`MAX_READDIR_ENTRIES`] raw entries. It counts raw entries rather than
+    /// the ones handed on, because a hostile server can send pages of nothing
+    /// but `"."` and `".."` with a cycling cookie.
+    async fn readdir_pages(&self, dir_fh: &[u8], dircount: u32, attr_request: &AttrRequest, mut each: impl FnMut(&DirEntry4) + Send) -> Result<(), Nfs4Error<T::Error>> {
         let mut raw_seen: usize = 0;
         let mut cookie: u64 = 0;
-        // RFC 7530 S16.24: first call sends cookieverf=0; subsequent calls echo
-        // the server's verifier so it can detect directory mutations between pages.
+        // RFC 7530 S16.24: the first call sends cookieverf=0.
         let mut cookieverf: u64 = 0;
         loop {
-            let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie, cookieverf, dircount: 4096, maxcount: 65536, attr_request: AttrRequest::empty() }];
+            let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie, cookieverf, dircount, maxcount: 65536, attr_request: attr_request.clone() }];
             let res = self.compound(ops).await?;
             check_status(res.status)?;
             let (server_verf, entries, eof) = match res.results.get(1).map(|op| &op.data) {
                 Some(ResOpData::Readdir { cookieverf, entries, eof }) => (*cookieverf, entries, *eof),
                 _ => return Err(Nfs4Error::MissingResult),
             };
-            // Echo the server's verifier on the next continuation call.
             cookieverf = u64::from_be_bytes(server_verf);
-            // An empty page means no forward progress is possible (no cookie to
-            // resume from); stop rather than re-issue the same request forever.
+            // An empty page leaves no cookie to resume from.
             let Some(last_cookie) = entries.last().map(|e| e.cookie) else {
                 break;
             };
             raw_seen = raw_seen.saturating_add(entries.len());
-            for e in entries {
-                if e.name != "." && e.name != ".." {
-                    names.push(e.name.clone());
-                }
-            }
+            entries.iter().filter(|e| e.name != "." && e.name != "..").for_each(&mut each);
             if eof {
                 break;
             }
@@ -274,14 +316,12 @@ impl<T: RpcTransport> Nfs4Client<T> {
                 tracing::warn!(count = raw_seen, "NFSv4 READDIR hit entry cap; directory listing truncated");
                 break;
             }
-            // Resume from the last entry's cookie. If it did not advance, stop to
-            // avoid an infinite loop on a misbehaving server.
             if last_cookie == cookie {
                 break;
             }
             cookie = last_cookie;
         }
-        Ok(names)
+        Ok(())
     }
 
     /// Read a chunk of file data from `file_fh` at `offset`.
@@ -316,7 +356,7 @@ impl<T: RpcTransport> Nfs4Client<T> {
         };
         let info = match res.results.get(3).map(|op| &op.data) {
             Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from(*attrs.clone()),
-            _ => Nfs4FileInfo::default(),
+            _ => return Err(Nfs4Error::MissingResult),
         };
         Ok((fh, info))
     }
@@ -330,6 +370,20 @@ impl<T: RpcTransport> Nfs4Client<T> {
         check_status(res.status)?;
         match res.results.get(1).map(|op| &op.data) {
             Some(ResOpData::Getattr(attrs)) => Ok(Nfs4FileInfo::from(*attrs.clone())),
+            _ => Err(Nfs4Error::MissingResult),
+        }
+    }
+
+    /// The server's largest READ and WRITE for the filesystem holding `fh`,
+    /// in bytes (`maxread` and `maxwrite`, RFC 7530 S5.8.2.16-17).
+    ///
+    /// Either is `None` when the server does not report it.
+    pub async fn transfer_limits(&self, fh: &[u8]) -> Result<(Option<u64>, Option<u64>), Nfs4Error<T::Error>> {
+        let ops = vec![ArgOp::Putfh(fh.to_vec()), ArgOp::Getattr(AttrRequest::transfer_limits())];
+        let res = self.compound(ops).await?;
+        check_status(res.status)?;
+        match res.results.get(1).map(|op| &op.data) {
+            Some(ResOpData::Getattr(attrs)) => Ok((attrs.maxread, attrs.maxwrite)),
             _ => Err(Nfs4Error::MissingResult),
         }
     }
@@ -364,52 +418,21 @@ impl<T: RpcTransport> Nfs4Client<T> {
 
     // --- High-level API: directory listing with attributes ---
 
-    /// List directory entries with inline attributes.
+    /// List directory entries with inline attributes and file handles.
     ///
-    /// The NFSv4 equivalent of NFSv3 READDIRPLUS. Requests inline attrs
-    /// per entry via `shell_attrs_with_fh()`. Paginates internally until
-    /// EOF or the entry cap is hit.
-    ///
-    /// Note: file handles are requested via the FATTR4_FILEHANDLE bit, but
-    /// the current attribute decoder skips them, so `Nfs4DirEntry.fh` will
-    /// be `None`. A future decoder enhancement will populate them.
+    /// The NFSv4 equivalent of NFSv3 READDIRPLUS. Each entry asks for the
+    /// shell attributes plus `FATTR4_FILEHANDLE`, so [`Nfs4DirEntry::fh`] is
+    /// filled whenever the server returns the handle and no per-entry LOOKUP
+    /// is needed. Pages to the end of the directory with the same bounds as
+    /// [`list_dir`](Self::list_dir).
     pub async fn readdir_plus(&self, dir_fh: &[u8]) -> Result<Vec<Nfs4DirEntry>, Nfs4Error<T::Error>> {
-        const MAX_READDIR_ENTRIES: usize = 1_000_000;
         let mut entries = Vec::new();
-        let mut raw_seen: usize = 0;
-        let mut cookie: u64 = 0;
-        let mut cookieverf: u64 = 0;
-        loop {
-            let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Readdir { cookie, cookieverf, dircount: 8192, maxcount: 65536, attr_request: AttrRequest::shell_attrs_with_fh() }];
-            let res = self.compound(ops).await?;
-            check_status(res.status)?;
-            let (server_verf, dir_entries, eof) = match res.results.get(1).map(|op| &op.data) {
-                Some(ResOpData::Readdir { cookieverf, entries, eof }) => (*cookieverf, entries, *eof),
-                _ => return Err(Nfs4Error::MissingResult),
-            };
-            cookieverf = u64::from_be_bytes(server_verf);
-            let Some(last_cookie) = dir_entries.last().map(|e| e.cookie) else {
-                break;
-            };
-            raw_seen = raw_seen.saturating_add(dir_entries.len());
-            for e in dir_entries {
-                if e.name != "." && e.name != ".." {
-                    let info = e.attrs.as_ref().map(|a| Nfs4FileInfo::from(a.clone()));
-                    entries.push(Nfs4DirEntry { name: e.name.clone(), cookie: e.cookie, fh: None, info });
-                }
-            }
-            if eof {
-                break;
-            }
-            if raw_seen >= MAX_READDIR_ENTRIES {
-                tracing::warn!(count = raw_seen, "NFSv4 readdir_plus hit entry cap");
-                break;
-            }
-            if last_cookie == cookie {
-                break;
-            }
-            cookie = last_cookie;
-        }
+        self.readdir_pages(dir_fh, 8192, &AttrRequest::shell_attrs_with_fh(), |e| {
+            let fh = e.attrs.as_ref().and_then(|a| a.filehandle.clone());
+            let info = e.attrs.as_ref().map(|a| Nfs4FileInfo::from(a.clone()));
+            entries.push(Nfs4DirEntry { name: e.name.clone(), cookie: e.cookie, fh, info });
+        })
+        .await?;
         Ok(entries)
     }
 
@@ -539,18 +562,18 @@ impl<T: RpcTransport> Nfs4Client<T> {
     /// Establish an NFSv4.0 client identity (RFC 7530 S16.33 + S16.34).
     ///
     /// Issues SETCLIENTID + SETCLIENTID_CONFIRM in two COMPOUNDs. Returns a
-    /// confirmed session ready for OPEN/LOCK operations. The verifier is
-    /// hardcoded to "nfswolf\0" so the server can detect client reboots.
+    /// confirmed session ready for OPEN/LOCK operations.
+    ///
+    /// Every call sends a new verifier, so each session is a new incarnation
+    /// of `client_name`: once it is confirmed the server discards whatever
+    /// open and lock state an earlier session under that name left behind
+    /// (RFC 7530 S16.33.5). That is what lets a caller recover from a
+    /// sequence-id mismatch by establishing again. A constant verifier would
+    /// do the opposite -- the server would treat the new session as the old
+    /// incarnation and keep its stale state.
     pub async fn establish(&self, client_name: &str, callback_addr: &str) -> Result<Nfs4Session, Nfs4Error<T::Error>> {
         // Step 1: SETCLIENTID -- negotiate a clientid.
-        let ops = vec![ArgOp::Setclientid {
-            client_verifier: [0x6E, 0x66, 0x73, 0x77, 0x6F, 0x6C, 0x66, 0x00], // "nfswolf\0"
-            client_id: client_name.as_bytes().to_vec(),
-            cb_program: 0x4000_0000,
-            cb_netid: "tcp".to_owned(),
-            cb_addr: callback_addr.to_owned(),
-            callback_ident: 1,
-        }];
+        let ops = vec![ArgOp::Setclientid { client_verifier: fresh_verifier(), client_id: client_name.as_bytes().to_vec(), cb_program: 0x4000_0000, cb_netid: "tcp".to_owned(), cb_addr: callback_addr.to_owned(), callback_ident: 1 }];
         let res = self.compound(ops).await?;
         check_status(res.status)?;
 
@@ -585,9 +608,10 @@ impl<T: RpcTransport> Nfs4Client<T> {
     /// Issues OPEN with CLAIM_PREVIOUS during the server's grace period.
     /// Only succeeds if the server is in grace and the open state is reclaimable.
     pub async fn reclaim_open(&self, session: &Nfs4Session, fh: &[u8], delegation_type: OpenDelegationType4) -> Result<OpenState, Nfs4Error<T::Error>> {
-        let seqid = session.next_seqid();
+        let seqid = session.current_seqid();
         let ops = vec![ArgOp::Putfh(fh.to_vec()), ArgOp::Open { seqid, share_access: 1, share_deny: 0, owner: session.open_owner().clone(), openhow: OpenFlag4::NoCreate, claim: OpenClaim4::Previous(delegation_type) }];
         let res = self.compound(ops).await?;
+        session.record_outcome(&res, 1);
         check_status(res.status)?;
         let (stateid, delegation) = match res.results.get(1).map(|op| &op.data) {
             Some(ResOpData::Open { stateid, delegation, .. }) => (*stateid, delegation.clone()),
@@ -632,9 +656,11 @@ impl<T: RpcTransport> Nfs4Client<T> {
     /// Automatically issues OPEN_CONFIRM when the server's rflags request it
     /// (OPEN4_RESULT_CONFIRM, bit 1 of rflags per RFC 7530 S16.16.4).
     async fn open_file(&self, session: &Nfs4Session, dir_fh: &[u8], name: &str, share_access: u32, share_deny: u32) -> Result<(OpenState, Nfs4FileInfo), Nfs4Error<T::Error>> {
-        let seqid = session.next_seqid();
+        let seqid = session.current_seqid();
         let ops = vec![ArgOp::Putfh(dir_fh.to_vec()), ArgOp::Open { seqid, share_access, share_deny, owner: session.open_owner().clone(), openhow: OpenFlag4::NoCreate, claim: OpenClaim4::Null(name.to_owned()) }, ArgOp::Getfh, ArgOp::Getattr(AttrRequest::shell_attrs())];
         let res = self.compound(ops).await?;
+        // Index 1 is OPEN. If PUTFH failed it never ran and the seqid is unspent.
+        session.record_outcome(&res, 1);
         check_status(res.status)?;
 
         // Extract OPEN result (index 1: after PUTFH).
@@ -649,19 +675,19 @@ impl<T: RpcTransport> Nfs4Client<T> {
             _ => return Err(Nfs4Error::MissingResult),
         };
 
-        // Extract attributes (index 3: GETATTR). Fall back to default on mismatch.
+        // Extract attributes (index 3: GETATTR).
         let info = match res.results.get(3).map(|op| &op.data) {
             Some(ResOpData::Getattr(attrs)) => Nfs4FileInfo::from(*attrs.clone()),
-            _ => Nfs4FileInfo::default(),
+            _ => return Err(Nfs4Error::MissingResult),
         };
 
         let mut open_state = OpenState { stateid, fh, share_access, share_deny, delegation, confirmed: false };
 
-        // OPEN_CONFIRM if the server set OPEN4_RESULT_CONFIRM (bit 1).
-        if rflags & 0x0002 != 0 {
-            let confirm_seqid = session.next_seqid();
+        if rflags & OPEN4_RESULT_CONFIRM != 0 {
+            let confirm_seqid = session.current_seqid();
             let confirm_ops = vec![ArgOp::Putfh(open_state.fh.clone()), ArgOp::OpenConfirm { stateid: open_state.stateid.to_bytes(), seqid: confirm_seqid }];
             let cres = self.compound(confirm_ops).await?;
+            session.record_outcome(&cres, 1);
             check_status(cres.status)?;
             // OPEN_CONFIRM returns an updated stateid.
             if let Some(ResOpData::Stateid(new_stateid)) = cres.results.get(1).map(|op| &op.data) {
@@ -678,9 +704,10 @@ impl<T: RpcTransport> Nfs4Client<T> {
     /// Releases the open stateid on the server. The open state should not be
     /// used after this call.
     pub async fn close_file(&self, session: &Nfs4Session, open_state: &OpenState) -> Result<(), Nfs4Error<T::Error>> {
-        let seqid = session.next_seqid();
+        let seqid = session.current_seqid();
         let ops = vec![ArgOp::Putfh(open_state.fh.clone()), ArgOp::Close { seqid, stateid: open_state.stateid.to_bytes() }];
         let res = self.compound(ops).await?;
+        session.record_outcome(&res, 1);
         check_status(res.status)?;
         Ok(())
     }
@@ -721,86 +748,124 @@ impl<T: RpcTransport> Nfs4Client<T> {
     /// Read an entire file via OPEN + READ loop + CLOSE.
     ///
     /// Opens the file for reading, reads until EOF in 64 KiB chunks, then
-    /// closes. Returns `(file_data, file_info)`. Close errors are silently
-    /// ignored (the data was already read successfully).
+    /// closes. Returns `(file_data, file_info)`. CLOSE is sent whether or not
+    /// the reads succeed, so a failed transfer does not leave the open behind
+    /// until the lease expires; a CLOSE error after a successful read is
+    /// ignored, since the data is already in hand.
+    ///
+    /// Files larger than [`READ_FILE_MAX_BYTES`] fail with
+    /// [`Nfs4Error::TooLarge`]: the server controls both the data and the
+    /// end-of-file flag, so neither can be the only bound on the allocation.
     pub async fn read_file(&self, session: &Nfs4Session, dir_fh: &[u8], name: &str) -> Result<(Vec<u8>, Nfs4FileInfo), Nfs4Error<T::Error>> {
         let (open_state, info) = self.open_read(session, dir_fh, name).await?;
+        let data = self.read_open_file(&open_state).await;
+        drop(self.close_file(session, &open_state).await);
+        Ok((data?, info))
+    }
+
+    /// The READ loop behind [`read_file`](Self::read_file).
+    async fn read_open_file(&self, open_state: &OpenState) -> Result<Vec<u8>, Nfs4Error<T::Error>> {
         let mut data = Vec::new();
         let mut offset = 0u64;
         loop {
-            let (chunk, eof) = self.read_via_open(&open_state, offset, 65536).await?;
+            let (chunk, eof) = self.read_via_open(open_state, offset, IO_CHUNK).await?;
+            if data.len().saturating_add(chunk.len()) > READ_FILE_MAX_BYTES {
+                return Err(Nfs4Error::TooLarge { limit: READ_FILE_MAX_BYTES });
+            }
             offset += chunk.len() as u64;
             data.extend_from_slice(&chunk);
             if eof || chunk.is_empty() {
-                break;
+                return Ok(data);
             }
         }
-        // Best-effort close -- data is already captured.
-        drop(self.close_file(session, &open_state).await);
-        Ok((data, info))
     }
 
-    /// Write data to a file via OPEN + WRITE loop + COMMIT + CLOSE.
+    /// Write data to a file via OPEN + WRITE loop + CLOSE.
     ///
-    /// Opens the file for writing, writes in 64 KiB chunks (UNSTABLE for all
-    /// but the last chunk which uses FILE_SYNC), issues COMMIT if unstable
-    /// writes were used, fetches final attributes, then closes. Returns the
-    /// final file info.
+    /// Opens the file for writing and writes in 64 KiB chunks, each
+    /// `FILE_SYNC4`: the data is on stable storage when each reply arrives, so
+    /// there is no COMMIT to fail and no write verifier to watch for a server
+    /// restart. A short write is legal, so the offset advances by the count
+    /// the server accepted and the rest is resent; a write that accepts
+    /// nothing fails with [`Nfs4Error::WriteStalled`].
+    ///
+    /// Returns the file's attributes after the write. CLOSE is sent whether
+    /// or not the writes succeed; a CLOSE error after a successful write is
+    /// ignored, since the data is already durable.
     pub async fn write_file(&self, session: &Nfs4Session, dir_fh: &[u8], name: &str, data: &[u8]) -> Result<Nfs4FileInfo, Nfs4Error<T::Error>> {
         let (open_state, _) = self.open_write(session, dir_fh, name).await?;
-        let mut offset = 0usize;
-        let chunk_size = 65536usize;
-        while offset < data.len() {
-            let end = std::cmp::min(offset + chunk_size, data.len());
-            let chunk = data.get(offset..end).unwrap_or_default();
-            // FILE_SYNC4 = 2 for the last chunk, UNSTABLE4 = 0 otherwise.
-            let stable = if end == data.len() { 2 } else { 0 };
-            let _write_res = self.write_via_open(&open_state, offset as u64, stable, chunk).await?;
-            offset = end;
-        }
-        // COMMIT if any UNSTABLE writes were issued (multi-chunk case).
-        if data.len() > chunk_size {
-            drop(self.commit(open_state.fh(), 0, 0).await);
-        }
-        // Fetch final attributes; fall back to default on error.
-        let info = self.getattr(open_state.fh()).await.unwrap_or_default();
+        let info = match self.write_open_file(&open_state, data).await {
+            Ok(()) => self.getattr(open_state.fh()).await,
+            Err(e) => Err(e),
+        };
         drop(self.close_file(session, &open_state).await);
-        Ok(info)
+        info
+    }
+
+    /// The WRITE loop behind [`write_file`](Self::write_file).
+    async fn write_open_file(&self, open_state: &OpenState, data: &[u8]) -> Result<(), Nfs4Error<T::Error>> {
+        let mut offset = 0usize;
+        while let Some(rest) = data.get(offset..).filter(|rest| !rest.is_empty()) {
+            let chunk = rest.get(..rest.len().min(IO_CHUNK as usize)).unwrap_or(rest);
+            let (count, _committed, _verf) = self.write_via_open(open_state, offset as u64, FILE_SYNC4, chunk).await?;
+            let accepted = (count as usize).min(chunk.len());
+            if accepted == 0 {
+                return Err(Nfs4Error::WriteStalled { offset: offset as u64 });
+            }
+            offset += accepted;
+        }
+        Ok(())
     }
 
     // --- Stateful API: byte-range locking (RFC 7530 S16.10-S16.12) ---
 
     /// Acquire a byte-range lock on an opened file (RFC 7530 S16.10).
     ///
-    /// Issues PUTFH + LOCK in one COMPOUND. The lock is associated with a new
-    /// lock-owner derived from the open stateid. Returns a `LockState` tracking
-    /// the lock stateid and range for subsequent unlock/extend operations.
+    /// Issues PUTFH + LOCK in one COMPOUND, creating a new lock-owner tied to
+    /// the open stateid. That LOCK carries two sequence ids (RFC 7530
+    /// sec. 9.1.7): `open_seqid` continues the open-owner's sequence and is
+    /// recorded against `session`, while `lock_seqid` starts the new
+    /// lock-owner's own sequence. The returned [`LockState`] carries that
+    /// sequence for [`unlock`](Self::unlock).
+    ///
+    /// Each call uses a lock-owner name not used before in this process, so
+    /// its sequence always starts fresh.
     pub async fn lock(&self, session: &Nfs4Session, open_state: &OpenState, locktype: LockType4, offset: u64, length: u64) -> Result<LockState, Nfs4Error<T::Error>> {
-        let lock_seqid = session.next_seqid();
-        let lock_owner = LockOwner4 { clientid: session.clientid(), owner: b"nfswolf-lock".to_vec() };
-        let ops = vec![ArgOp::Putfh(open_state.fh.clone()), ArgOp::Lock { locktype, reclaim: false, offset, length, locker: Locker4::NewLockOwner { open_seqid: session.next_seqid(), open_stateid: open_state.stateid, lock_seqid, lock_owner: lock_owner.clone() } }];
+        static LOCK_OWNERS: AtomicU64 = AtomicU64::new(0);
+        let owner = format!("nfswolf-lock-{}", LOCK_OWNERS.fetch_add(1, Ordering::Relaxed));
+        let lock_owner = LockOwner4 { clientid: session.clientid(), owner: owner.into_bytes() };
+        let locker = Locker4::NewLockOwner { open_seqid: session.current_seqid(), open_stateid: open_state.stateid, lock_seqid: LockState::INITIAL_SEQID, lock_owner: lock_owner.clone() };
+        let ops = vec![ArgOp::Putfh(open_state.fh.clone()), ArgOp::Lock { locktype, reclaim: false, offset, length, locker }];
         let res = self.compound(ops).await?;
+        session.record_outcome(&res, 1);
         check_status(res.status)?;
         let lock_stateid = match res.results.get(1).map(|op| &op.data) {
             Some(ResOpData::Stateid(sid)) => *sid,
             _ => return Err(Nfs4Error::MissingResult),
         };
-        Ok(LockState { lock_stateid, lock_owner, ranges: vec![LockRange { offset, length, locktype }] })
+        // The LOCK spent INITIAL_SEQID on the new lock-owner's sequence.
+        Ok(LockState { lock_stateid, lock_owner, seqid: LockState::INITIAL_SEQID.wrapping_add(1), ranges: vec![LockRange { offset, length, locktype }] })
     }
 
     /// Release a byte-range lock (RFC 7530 S16.12).
     ///
-    /// Issues PUTFH + LOCKU in one COMPOUND. Returns the updated lock stateid
-    /// from the server (the caller should update their `LockState` accordingly).
-    pub async fn unlock(&self, session: &Nfs4Session, fh: &[u8], lock_state: &LockState, locktype: LockType4, offset: u64, length: u64) -> Result<Stateid4, Nfs4Error<T::Error>> {
-        let seqid = session.next_seqid();
-        let ops = vec![ArgOp::Putfh(fh.to_vec()), ArgOp::Locku { locktype, seqid, lock_stateid: lock_state.lock_stateid, offset, length }];
+    /// Issues PUTFH + LOCKU with the lock-owner's seqid from `lock_state`,
+    /// then records the outcome there: the sequence advances per RFC 7530
+    /// sec. 9.1.7, and on success the new lock stateid replaces the old one
+    /// and the released range is dropped from `ranges`. Returns the new lock
+    /// stateid.
+    pub async fn unlock(&self, fh: &[u8], lock_state: &mut LockState, locktype: LockType4, offset: u64, length: u64) -> Result<Stateid4, Nfs4Error<T::Error>> {
+        let ops = vec![ArgOp::Putfh(fh.to_vec()), ArgOp::Locku { locktype, seqid: lock_state.seqid, lock_stateid: lock_state.lock_stateid, offset, length }];
         let res = self.compound(ops).await?;
+        lock_state.record_outcome(&res, 1);
         check_status(res.status)?;
-        match res.results.get(1).map(|op| &op.data) {
-            Some(ResOpData::Stateid(sid)) => Ok(*sid),
-            _ => Err(Nfs4Error::MissingResult),
-        }
+        let sid = match res.results.get(1).map(|op| &op.data) {
+            Some(ResOpData::Stateid(sid)) => *sid,
+            _ => return Err(Nfs4Error::MissingResult),
+        };
+        lock_state.lock_stateid = sid;
+        lock_state.ranges.retain(|r| (r.offset, r.length) != (offset, length));
+        Ok(sid)
     }
 
     /// Test for a byte-range lock without acquiring it (RFC 7530 S16.11).
@@ -838,6 +903,21 @@ impl<T: RpcTransport> Nfs4Client<T> {
     }
 }
 
+/// A SETCLIENTID verifier that no earlier call in this process has used.
+///
+/// RFC 7530 S16.33 asks for a verifier that changes when the client restarts.
+/// A base taken from the clock and process ID at first use separates
+/// processes; the counter separates calls within one.
+fn fresh_verifier() -> [u8; 8] {
+    static BASE: OnceLock<u64> = OnceLock::new();
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let base = *BASE.get_or_init(|| {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        now.as_secs().rotate_left(32) ^ u64::from(now.subsec_nanos()) ^ u64::from(std::process::id()).rotate_left(16)
+    });
+    base.wrapping_add(CALLS.fetch_add(1, Ordering::Relaxed)).to_be_bytes()
+}
+
 /// Translate a non-zero COMPOUND status into a typed error.
 fn check_status<E>(status: u32) -> Result<(), Nfs4Error<E>> {
     if status == 0 { Ok(()) } else { Err(Nfs4Error::Status(Nfs4Status::from_u32(status))) }
@@ -850,6 +930,173 @@ mod tests {
 
     // Use io::Error as the concrete transport error for classification tests.
     type TestError = Nfs4Error<std::io::Error>;
+
+    // --- Sequence ids against canned replies ---
+
+    /// A transport that answers each call with the next canned COMPOUND reply.
+    struct Canned(std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>);
+
+    impl Canned {
+        fn client(replies: Vec<Vec<u8>>) -> Nfs4Client<Self> {
+            Nfs4Client::new(Self(std::sync::Mutex::new(replies.into())))
+        }
+    }
+
+    impl RpcTransport for Canned {
+        type Error = std::io::Error;
+
+        async fn call<C, R>(&self, _prog: u32, _vers: u32, _proc: u32, _args: &C) -> Result<R, std::io::Error>
+        where
+            C: onc_xdr::Pack + Send + Sync,
+            R: onc_xdr::Unpack,
+        {
+            let bytes = self.0.lock().unwrap().pop_front().expect("a canned reply per call");
+            R::unpack(&mut std::io::Cursor::new(bytes)).map(|(r, _)| r).map_err(std::io::Error::other)
+        }
+
+        async fn call_as<C, R>(&self, _cred: onc_rpc_client::rpc::opaque_auth<'static>, prog: u32, vers: u32, proc: u32, args: &C) -> Result<R, std::io::Error>
+        where
+            C: onc_xdr::Pack + Send + Sync,
+            R: onc_xdr::Unpack,
+        {
+            self.call(prog, vers, proc, args).await
+        }
+    }
+
+    /// Encode a COMPOUND reply: each op is (opcode, status, result body).
+    fn compound_reply(ops: &[(u32, u32, &[u8])]) -> Vec<u8> {
+        let status = ops.last().map_or(0, |&(_, st, _)| st);
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&status.to_be_bytes());
+        wire.extend_from_slice(&0u32.to_be_bytes()); // empty tag
+        wire.extend_from_slice(&u32::try_from(ops.len()).unwrap().to_be_bytes());
+        for &(op, st, body) in ops {
+            wire.extend_from_slice(&op.to_be_bytes());
+            wire.extend_from_slice(&st.to_be_bytes());
+            wire.extend_from_slice(body);
+        }
+        wire
+    }
+
+    const PUTFH: u32 = 22;
+    const OPEN: u32 = 18;
+    const LOCK: u32 = 12;
+    const LOCKU: u32 = 14;
+
+    fn stateid(seqid: u32) -> Vec<u8> {
+        let mut sid = seqid.to_be_bytes().to_vec();
+        sid.extend_from_slice(&[0xAB; 12]);
+        sid
+    }
+
+    fn open_state() -> OpenState {
+        OpenState { stateid: Stateid4 { seqid: 1, other: [0xCD; 12] }, fh: vec![1, 2, 3, 4], share_access: 3, share_deny: 0, delegation: crate::wire::OpenDelegation4::None, confirmed: true }
+    }
+
+    /// The finding's case: PUTFH of a stale directory stops the COMPOUND, OPEN
+    /// never runs, and the client must not consume a seqid for it.
+    #[tokio::test]
+    async fn open_with_stale_directory_does_not_advance_seqid() {
+        let session = Nfs4Session::new(7, [0; 8], b"test");
+        let client = Canned::client(vec![compound_reply(&[(PUTFH, 70, &[])])]);
+        let err = client.open_read(&session, &[9], "f").await.expect_err("stale directory");
+        assert!(err.is_stale());
+        assert_eq!(session.current_seqid(), 1);
+    }
+
+    /// An OPEN that ran and was refused does advance the sequence.
+    #[tokio::test]
+    async fn refused_open_advances_seqid() {
+        let session = Nfs4Session::new(7, [0; 8], b"test");
+        let client = Canned::client(vec![compound_reply(&[(PUTFH, 0, &[]), (OPEN, 13, &[])])]);
+        let err = client.open_read(&session, &[9], "f").await.expect_err("access denied");
+        assert!(err.is_permission_denied());
+        assert_eq!(session.current_seqid(), 2);
+    }
+
+    /// LOCK spends one open-owner seqid and starts the lock-owner's own
+    /// sequence; LOCKU continues the lock-owner's sequence, not the
+    /// open-owner's.
+    #[tokio::test]
+    async fn lock_and_unlock_keep_separate_sequences() {
+        let session = Nfs4Session::new(7, [0; 8], b"test");
+        let lock_sid = stateid(1);
+        let unlock_sid = stateid(2);
+        let client = Canned::client(vec![compound_reply(&[(PUTFH, 0, &[]), (LOCK, 0, &lock_sid)]), compound_reply(&[(PUTFH, 0, &[]), (LOCKU, 10026, &[])]), compound_reply(&[(PUTFH, 0, &[]), (LOCKU, 0, &unlock_sid)])]);
+
+        let mut lock = client.lock(&session, &open_state(), LockType4::WriteLt, 0, 10).await.expect("lock");
+        assert_eq!(session.current_seqid(), 2, "LOCK continues the open-owner sequence exactly once");
+        assert_eq!(lock.seqid, LockState::INITIAL_SEQID + 1, "the new lock-owner's first seqid is spent");
+
+        let err = client.unlock(&[1, 2, 3, 4], &mut lock, LockType4::WriteLt, 0, 10).await.expect_err("bad seqid");
+        assert_eq!(err.nfs_status(), Some(Nfs4Status::BadSeqid));
+        assert_eq!(lock.seqid, LockState::INITIAL_SEQID + 1, "NFS4ERR_BAD_SEQID leaves the sequence where it was");
+
+        let sid = client.unlock(&[1, 2, 3, 4], &mut lock, LockType4::WriteLt, 0, 10).await.expect("unlock");
+        assert_eq!(sid.seqid, 2);
+        assert_eq!(lock.lock_stateid.seqid, 2);
+        assert_eq!(lock.seqid, LockState::INITIAL_SEQID + 2);
+        assert!(lock.ranges.is_empty());
+        assert_eq!(session.current_seqid(), 2, "LOCKU does not touch the open-owner sequence");
+    }
+
+    const GETFH: u32 = 10;
+    const GETATTR: u32 = 9;
+    const WRITE: u32 = 38;
+    const CLOSE: u32 = 4;
+
+    /// PUTFH + OPEN + GETFH + GETATTR, as `open_write` sends, with no
+    /// OPEN_CONFIRM requested.
+    fn open_reply() -> Vec<u8> {
+        let mut open = stateid(1);
+        open.extend_from_slice(&[0; 20]); // change_info4
+        open.extend_from_slice(&0u32.to_be_bytes()); // rflags
+        open.extend_from_slice(&0u32.to_be_bytes()); // empty attrset
+        open.extend_from_slice(&0u32.to_be_bytes()); // OPEN_DELEGATE_NONE
+        let mut fh = 4u32.to_be_bytes().to_vec();
+        fh.extend_from_slice(&[1, 2, 3, 4]);
+        let empty_attrs = [0u8; 8]; // bitmap count 0, attrvals length 0
+        compound_reply(&[(PUTFH, 0, &[]), (OPEN, 0, &open), (GETFH, 0, &fh), (GETATTR, 0, &empty_attrs)])
+    }
+
+    fn write_reply(count: u32) -> Vec<u8> {
+        let mut body = count.to_be_bytes().to_vec();
+        body.extend_from_slice(&FILE_SYNC4.to_be_bytes());
+        body.extend_from_slice(&[0; 8]);
+        compound_reply(&[(PUTFH, 0, &[]), (WRITE, 0, &body)])
+    }
+
+    fn close_reply() -> Vec<u8> {
+        compound_reply(&[(PUTFH, 0, &[]), (CLOSE, 0, &stateid(2))])
+    }
+
+    /// A short write is legal: the rest is resent from where the server
+    /// stopped, and the transfer only ends when every byte was accepted.
+    #[tokio::test]
+    async fn write_file_resends_after_a_short_write() {
+        let session = Nfs4Session::new(7, [0; 8], b"test");
+        let getattr = compound_reply(&[(PUTFH, 0, &[]), (GETATTR, 0, &[0u8; 8])]);
+        let client = Canned::client(vec![open_reply(), write_reply(4), write_reply(6), getattr, close_reply()]);
+        let _info = client.write_file(&session, &[9], "f", &[7; 10]).await.expect("write");
+        assert!(client.transport().0.lock().unwrap().is_empty(), "every canned reply, CLOSE included, must be used");
+        assert_eq!(session.current_seqid(), 3, "OPEN and CLOSE each spend one seqid");
+    }
+
+    /// A WRITE that accepts nothing fails the transfer, and the file is still
+    /// closed rather than left open until the lease expires.
+    #[tokio::test]
+    async fn write_file_stops_on_zero_progress_and_still_closes() {
+        let session = Nfs4Session::new(7, [0; 8], b"test");
+        let client = Canned::client(vec![open_reply(), write_reply(0), close_reply()]);
+        let err = client.write_file(&session, &[9], "f", &[7; 10]).await.expect_err("stalled write");
+        assert!(matches!(err, Nfs4Error::WriteStalled { offset: 0 }), "got {err:?}");
+        assert!(client.transport().0.lock().unwrap().is_empty(), "CLOSE must be sent after a failed write");
+    }
+
+    #[test]
+    fn verifiers_differ_between_calls() {
+        assert_ne!(fresh_verifier(), fresh_verifier(), "each session must be a new incarnation");
+    }
 
     #[test]
     fn is_transient_positive() {

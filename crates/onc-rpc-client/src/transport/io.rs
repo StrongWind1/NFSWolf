@@ -67,4 +67,16 @@ pub trait AsyncWrite: Send {
             Ok(())
         }
     }
+
+    /// Push any buffered bytes out to the peer.
+    ///
+    /// The RPC client calls this after every request, because it then waits
+    /// for a reply: a request left sitting in a userspace buffer -- a
+    /// `BufWriter`, a TLS session -- would never reach the server, and the
+    /// call would wait for an answer that cannot come. The default does
+    /// nothing, which is correct for an unbuffered stream such as a plain TCP
+    /// socket.
+    fn async_flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
+        async { Ok(()) }
+    }
 }

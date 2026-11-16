@@ -85,7 +85,7 @@ When `path` is a regular file, searches that file. When `path` is a directory, s
 
 ### cat
 
-Read and print file contents to stdout. Truncated at 1 MiB; use `get` for larger files. **Alias:** `type`
+Read and print file contents to stdout. Truncated at 1 MiB; use `get` for larger files. The file is read with the same pipelined transfer as `get`. **Alias:** `type`
 
 ```
 cat <file>
@@ -106,6 +106,8 @@ get [-r] [--verify <sha256>] <remote> [local]
 
 If `local` is omitted, saves in the local cwd with the remote basename. If `local` is a directory or ends with `/`, appends the remote basename (scp semantics). Every download reports bytes and SHA-256. A 256 MiB cap per file guards against hostile servers.
 
+Reads use the transfer size the server advertises (NFSv3 FSINFO, NFSv4 `maxread`; 1 MiB on Linux knfsd, 8 KiB on NFSv2) and keep several READs in flight, about 4 MiB worth (4 to 16 calls), each on its own pooled connection. Hashing and writing the local file run on a separate thread, overlapping the reads. With `-r`, up to 8 files of each directory transfer at once.
+
 ??? example "Example"
     ```
     nfswolf> get /etc/shadow ./shadow
@@ -117,11 +119,13 @@ If `local` is omitted, saves in the local cwd with the remote basename. If `loca
 
 ### put :material-pencil:
 
-Upload a local file or directory tree. Local permissions are preserved. **Alias:** `upload`
+Upload a local file or directory tree. Local permissions are preserved. An existing remote file is replaced: it is truncated before the new contents are written. **Alias:** `upload`
 
 ```
 put [-r] <local> <remote>
 ```
+
+Writes use the server's advertised transfer size and keep several WRITEs in flight, like `get`. On NFSv3 and NFSv4 they go out `UNSTABLE` and a single COMMIT at the end makes them durable, instead of the server syncing on every write; if the write verifiers do not match the COMMIT's (the server restarted mid-upload and may have lost cached data), the file is written again durably. A file that fits in one WRITE is written durably straight away, which saves the COMMIT round trip. NFSv2 has no unstable writes, so every write is durable. With `-r`, up to 8 files of each directory transfer at once.
 
 ### rm :material-pencil:
 

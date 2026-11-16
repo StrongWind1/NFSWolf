@@ -204,10 +204,13 @@ impl<T: RpcTransport> MountClient<T> {
     }
 }
 
-/// Map a MOUNT v1 error status (UNIX errno) to the closest mountstat3 value.
+/// Map a MOUNT v1 error status (UNIX errno) onto a mountstat3 value.
 ///
 /// MOUNT v1 returns raw UNIX errno values, not the typed mountstat3 enum.
-/// This mapping covers the common cases so callers get a uniform error type.
+/// The MOUNT v3 codes reuse the errno numbering (RFC 1813 Appendix I), so the
+/// named cases map one to one and anything else keeps its real value in
+/// [`mountstat3::Unknown`](crate::wire::mountstat3::Unknown) rather than being
+/// reported as a server fault.
 const fn v1_status_to_mountstat3(errno: u32) -> crate::wire::mountstat3 {
     use crate::wire::mountstat3;
     match errno {
@@ -217,7 +220,23 @@ const fn v1_status_to_mountstat3(errno: u32) -> crate::wire::mountstat3 {
         13 => mountstat3::MNT3ERR_ACCES,
         20 => mountstat3::MNT3ERR_NOTDIR,
         22 => mountstat3::MNT3ERR_INVAL,
-        // Catch-all for unexpected errno values.
-        _ => mountstat3::MNT3ERR_SERVERFAULT,
+        63 => mountstat3::MNT3ERR_NAMETOOLONG,
+        other => mountstat3::Unknown(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::mountstat3;
+
+    /// MOUNT v1 statuses are errnos. The ones MOUNT v3 names map across, and
+    /// the rest keep their value instead of turning into a server fault.
+    #[test]
+    fn v1_status_keeps_unlisted_errno() {
+        assert_eq!(v1_status_to_mountstat3(13), mountstat3::MNT3ERR_ACCES);
+        assert_eq!(v1_status_to_mountstat3(2), mountstat3::MNT3ERR_NOENT);
+        assert_eq!(v1_status_to_mountstat3(30), mountstat3::Unknown(30));
+        assert_eq!(v1_status_to_mountstat3(116), mountstat3::Unknown(116));
     }
 }

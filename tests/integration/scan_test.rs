@@ -9,33 +9,7 @@
 //!    on an ephemeral port and verify that a real `MountClient` + `Nfs3Client`
 //!    can MOUNT, GETATTR, and LOOKUP files through it. This exercises the same
 //!    code path as nfswolf's scanner engine.
-#![allow(
-    unused_crate_dependencies,
-    unused_qualifications,
-    missing_docs,
-    missing_debug_implementations,
-    unused_import_braces,
-    unused_lifetimes,
-    single_use_lifetimes,
-    trivial_casts,
-    trivial_numeric_casts,
-    elided_lifetimes_in_paths,
-    explicit_outlives_requirements,
-    variant_size_differences,
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::cargo,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "integration test  --  all lints suppressed per project policy"
-)]
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -167,9 +141,7 @@ async fn memfs_portmapper_responds_to_getport() {
 
 /// Start a MemFs-backed NFS server on an ephemeral port.
 /// Returns (server_task, port).
-#[path = "helpers.rs"]
-mod helpers;
-use helpers::{mount_client, nfs3_client, start_server};
+use crate::helpers::{mount_client, nfs3_client, start_server};
 
 #[tokio::test]
 async fn memfs_mount_returns_root_handle() {

@@ -114,28 +114,8 @@ name = "nfswolf"
 path = "src/main.rs"
 
 [[test]]
-name = "scan_test"
-path = "tests/integration/scan_test.rs"
-
-[[test]]
-name = "nfs3_protocol_test"
-path = "tests/integration/nfs3_protocol_test.rs"
-
-[[test]]
-name = "escape_test"
-path = "tests/integration/escape_test.rs"
-
-[[test]]
-name = "analyzer_test"
-path = "tests/integration/analyzer_test.rs"
-
-[[test]]
-name = "credential_test"
-path = "tests/integration/credential_test.rs"
-
-[[test]]
-name = "xdr_fuzz_test"
-path = "tests/integration/xdr_fuzz_test.rs"
+name = "integration"
+path = "tests/integration/main.rs"
 
 [profile.dev]
 # Catch integer overflows in debug builds rather than wrapping silently.
@@ -206,7 +186,6 @@ bindings_with_variant_name = "deny"
 conflicting_repr_hints = "forbid"
 dangerous_implicit_autorefs = "deny"
 dependency_on_unit_never_type_fallback = "deny"
-duplicate_features = "deny"
 elided_lifetimes_in_associated_constant = "deny"
 enum_intrinsics_non_enums = "deny"
 explicit_builtin_cfgs_in_flags = "deny"
@@ -250,7 +229,6 @@ impl_trait_redundant_captures = "warn"
 keyword_idents_2018 = "warn"
 keyword_idents_2024 = "warn"
 let_underscore_drop = "warn"
-linker_info = "warn"
 linker_messages = "warn"
 macro_use_extern_crate = "warn"
 meta_variable_misuse = "warn"

@@ -14,6 +14,58 @@ pub(crate) const CHUNK_SIZE: u32 = 65_536; // 64 KiB
 /// Maximum bytes read by `read_file` / `download_file` before bailing.
 pub(crate) const READ_ALL_MAX: u64 = 256 * 1024 * 1024; // 256 MiB
 
+/// Largest READ or WRITE payload `get` and `put` will issue, whatever the
+/// server advertises.
+///
+/// Linux knfsd advertises 1 MiB. Bounding it keeps a server that claims a
+/// huge transfer size from making each in-flight request a large allocation,
+/// and stays well under the RPC client's 8 MiB reply limit.
+pub(crate) const MAX_IO_SIZE: u32 = 1024 * 1024;
+
+/// Smallest transfer size taken from a server; a smaller advertised value is
+/// treated as a misreport and replaced by [`CHUNK_SIZE`].
+pub(crate) const MIN_IO_SIZE: u32 = 4096;
+
+/// Transfer sizes for one file, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IoSizes {
+    pub read: u32,
+    pub write: u32,
+}
+
+impl IoSizes {
+    /// What `get` and `put` use when the server does not say.
+    pub(crate) const DEFAULT: Self = Self { read: CHUNK_SIZE, write: CHUNK_SIZE };
+
+    /// Sizes from server-advertised values, each clamped to
+    /// [`MIN_IO_SIZE`]..=[`MAX_IO_SIZE`] or replaced by the default when
+    /// missing or implausibly small.
+    pub(crate) fn from_server(read: Option<u64>, write: Option<u64>) -> Self {
+        let pick = |v: Option<u64>| v.filter(|&n| n >= u64::from(MIN_IO_SIZE)).map_or(CHUNK_SIZE, |n| u32::try_from(n.min(u64::from(MAX_IO_SIZE))).unwrap_or(MAX_IO_SIZE));
+        Self { read: pick(read), write: pick(write) }
+    }
+}
+
+/// Result of [`ShellOps::read_at`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ReadReply {
+    pub data: Vec<u8>,
+    /// The server says no data follows this reply.
+    pub eof: bool,
+}
+
+/// Result of [`ShellOps::write_unstable`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WriteReply {
+    /// Bytes the server accepted.
+    pub count: u32,
+    /// Whether the data is already on stable storage.
+    pub stable: bool,
+    /// The write verifier, for comparing against a later COMMIT. `None` when
+    /// the write was stable and there is nothing to check.
+    pub verifier: Option<[u8; 8]>,
+}
+
 // ---------------------------------------------------------------------------
 // Version-neutral types
 // ---------------------------------------------------------------------------
@@ -57,13 +109,13 @@ pub(crate) struct ShellFileInfo {
     pub size: u64,
     pub fileid: u64,
     pub atime_secs: u64,
-    #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "read by the FUSE adapter"))]
     pub atime_nsecs: u32,
     pub mtime_secs: u64,
-    #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "read by the FUSE adapter"))]
     pub mtime_nsecs: u32,
     pub ctime_secs: u64,
-    #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "read by the FUSE adapter"))]
     pub ctime_nsecs: u32,
     pub used: u64,
     pub rdev: (u32, u32),
@@ -244,7 +296,6 @@ pub(crate) fn shell_err_to_errno(e: &anyhow::Error) -> libc::c_int {
 
 /// Atomic setattr request. Each field is `None` = don't change.
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
 pub(crate) struct ShellSetAttr {
     pub mode: Option<u32>,
     pub uid: Option<u32>,
@@ -256,7 +307,7 @@ pub(crate) struct ShellSetAttr {
 
 /// Timestamp value for `ShellSetAttr`.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
+#[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "read by the FUSE adapter"))]
 pub(crate) enum ShellTimeSpec {
     Now,
     At(u64, u32),
@@ -264,7 +315,7 @@ pub(crate) enum ShellTimeSpec {
 
 /// Filesystem statistics for `df` / FUSE `statfs`.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
+#[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "read by the FUSE adapter"))]
 pub(crate) struct ShellFsStat {
     pub total_bytes: u64,
     pub free_bytes: u64,
@@ -328,11 +379,11 @@ impl ShellHandle {
         s
     }
 
+    /// Parse a handle (or any other byte string) given as hex.
+    ///
+    /// Same syntax everywhere the tool reads hex: see [`nfs_v3::decode_hex`].
     pub(crate) fn from_hex(hex: &str) -> anyhow::Result<Self> {
-        let hex = hex.trim();
-        anyhow::ensure!(hex.len().is_multiple_of(2), "hex string must have even length");
-        let bytes: Result<Vec<u8>, _> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16)).collect();
-        Ok(Self(bytes.map_err(|e| anyhow::anyhow!("invalid hex: {e}"))?))
+        nfs_v3::decode_hex(hex).map(Self).map_err(anyhow::Error::from)
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
@@ -446,14 +497,56 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
 
     // -- File I/O --
 
-    fn read_file(&self, fh: &ShellHandle) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send;
+    /// Read the whole file into memory through the pipelined transfer engine
+    /// ([`read_whole`](crate::shell::transfer::read_whole)), capped at
+    /// [`READ_ALL_MAX`].
+    ///
+    /// `size_hint` is the size a lookup or listing reported, or 0 when unknown:
+    /// it only sets how far reads run ahead, and the file is read to its end
+    /// either way.
+    fn read_file(&self, fh: &ShellHandle, size_hint: u64) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send
+    where
+        Self: Sized,
+    {
+        // Boxed: the transfer's state is large, and every command that reads a
+        // file would otherwise carry it inline.
+        async move { Box::pin(crate::shell::transfer::read_whole(self, fh, size_hint)).await }
+    }
 
-    fn read_chunk(&self, fh: &ShellHandle, offset: u64, count: u32) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send;
+    /// READ up to `count` bytes at `offset`, with the server's end-of-file
+    /// flag. A short reply mid-file is legal and is not end-of-file.
+    fn read_at(&self, fh: &ShellHandle, offset: u64, count: u32) -> impl Future<Output = anyhow::Result<ReadReply>> + Send;
 
+    /// [`read_at`](Self::read_at) without the end-of-file flag.
+    #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "used by the FUSE adapter"))]
+    fn read_chunk(&self, fh: &ShellHandle, offset: u64, count: u32) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send {
+        async move { Ok(self.read_at(fh, offset, count).await?.data) }
+    }
+
+    /// WRITE `data` at `offset`, durably: the reply arrives once the data is
+    /// on stable storage. Returns the bytes accepted.
     fn write_chunk(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> impl Future<Output = anyhow::Result<u32>> + Send;
+
+    /// WRITE `data` at `offset` without waiting for stable storage.
+    ///
+    /// Much faster on a disk-backed server, which otherwise syncs on every
+    /// write, but the data is only safe after [`write_verifier`](Self::write_verifier)
+    /// (a COMMIT) returns the verifier this write did. The default writes
+    /// stably, for versions with no unstable write (NFSv2).
+    fn write_unstable(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> impl Future<Output = anyhow::Result<WriteReply>> + Send {
+        async move { Ok(WriteReply { count: self.write_chunk(fh, offset, data).await?, stable: true, verifier: None }) }
+    }
+
+    /// The READ and WRITE sizes to use for `fh`, from what the server
+    /// advertises. Never fails: a server that will not say gets the default.
+    fn io_sizes(&self, _fh: &ShellHandle) -> impl Future<Output = IoSizes> + Send {
+        async { IoSizes::DEFAULT }
+    }
 
     // -- Mutations --
 
+    /// Create `name` in `dir`, or truncate it to empty if it already exists:
+    /// every caller is about to write the file's whole new contents.
     fn create_file(&self, dir: &ShellHandle, name: &str, mode: u32) -> impl Future<Output = anyhow::Result<ShellHandle>> + Send;
 
     fn mkdir(&self, dir: &ShellHandle, name: &str, mode: u32) -> impl Future<Output = anyhow::Result<ShellHandle>> + Send;
@@ -507,9 +600,12 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
         async { Ok(None) }
     }
 
-    /// Retrieve the server's write verifier (reboot oracle, RFC 1813 S3.3.21).
+    /// COMMIT the whole file and return the server's write verifier (RFC 1813
+    /// S3.3.21: offset 0, count 0 flushes to end of file).
     ///
-    /// Only NFSv3 supports COMMIT; v2 returns `Ok(None)`.
+    /// Doubles as the reboot oracle, and as the check that
+    /// [`write_unstable`](Self::write_unstable) data survived. NFSv2 has no
+    /// COMMIT and returns `Ok(None)`.
     fn write_verifier(&self, _fh: &ShellHandle) -> impl Future<Output = anyhow::Result<Option<[u8; 8]>>> + Send {
         async { Ok(None) }
     }
@@ -586,6 +682,14 @@ mod tests {
     #[test]
     fn shell_handle_from_hex_invalid_chars_rejected() {
         assert!(ShellHandle::from_hex("zzzz").is_err());
+    }
+
+    /// A multi-byte character in an even-length input used to panic on a
+    /// char-boundary slice and end the session.
+    #[test]
+    fn shell_handle_from_hex_non_ascii_is_an_error() {
+        assert!(ShellHandle::from_hex("a\u{e9}1").is_err());
+        assert!(ShellHandle::from_hex("+1+2").is_err());
     }
 
     #[test]

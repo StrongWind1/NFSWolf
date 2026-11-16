@@ -124,10 +124,8 @@ impl ShellSetup {
         let gid = globals.gid;
         let hostname = globals.hostname.clone();
 
-        let pool = Arc::new(match &globals.proxy {
-            Some(p) => ConnectionPool::with_proxy(p.clone()),
-            None => ConnectionPool::default_config(),
-        });
+        // As many idle connections per identity as a transfer keeps in flight.
+        let pool = Arc::new(ConnectionPool::for_parallel_transfers(crate::shell::transfer::MAX_PIPELINE_DEPTH, globals.proxy.clone()));
         let circuit = Arc::new(CircuitBreaker::default_config());
         let stealth = StealthConfig::new(globals.delay, globals.jitter);
         let gids = build_gid_list(gid, &globals.aux_gids);
@@ -493,8 +491,9 @@ async fn connect_v4(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
 /// The v2 data client uses `PooledTransport`, so `--proxy`, `--delay`/`--jitter`,
 /// and mid-session credential swaps all work the same as the v3 path.
 async fn connect_v2(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<()> {
-    use crate::cli::probe::{make_v2_client_with_hostname, parse_addr_with_port};
+    use crate::cli::probe::parse_addr_with_port;
     use crate::cli::target::Source;
+    use crate::proto::nfs2::Nfs2Client;
     use crate::shell::v2::V2Ops;
 
     let host = setup.host;
@@ -536,10 +535,14 @@ async fn connect_v2(setup: &ShellSetup, globals: &GlobalOpts) -> anyhow::Result<
     // NFSv2 servers often support only MOUNT v1/v2, so the pooled transport
     // must never attempt a lazy MOUNT v3 discovery. Force direct NFS port to
     // bypass the MOUNT-based port resolution path entirely.
-    let nfs_port = Some(setup.nfs_port.unwrap_or(2049));
-    let addr = parse_addr_with_port(&host.to_string(), nfs_port)?;
-    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, &export, uid, gid, &globals.aux_gids, setup.stealth.clone(), globals.proxy.as_deref(), nfs_port, &setup.hostname);
-    let client = Arc::new(client);
+    let nfs_port = setup.nfs_port.unwrap_or(2049);
+    let addr = parse_addr_with_port(&host.to_string(), Some(nfs_port))?;
+    // The session's shared pool, like the v3 and v4 shells: it keeps as many
+    // idle connections per identity as a transfer keeps calls in flight.
+    // A pool of its own with the default four would close and reopen the
+    // rest on every round of a pipelined `get` or `put`.
+    let pool_key = PoolKey { host: addr, export: export.clone(), uid, gid };
+    let client = Arc::new(Nfs2Client::new(PooledTransport::new_direct(Arc::clone(&setup.pool), pool_key, Arc::clone(&setup.circuit), setup.stealth.clone(), setup.cred.clone(), ReconnectStrategy::Persistent, nfs_port)));
 
     let v2ops = V2Ops::new(client);
     let root = ShellHandle(root_fh.0.to_vec());

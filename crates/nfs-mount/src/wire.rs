@@ -134,7 +134,7 @@ pub type exports<'a, 'b> = List<export_node<'a, 'b>>;
 pub struct fhandle3<'a>(pub Opaque<'a>);
 
 /// MOUNT v3 status codes (RFC 1813 Appendix I sec. 4).
-#[derive(Copy, Clone, Debug, XdrCodec)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, XdrCodec)]
 #[non_exhaustive]
 #[repr(u32)]
 pub enum mountstat3 {
@@ -148,6 +148,13 @@ pub enum mountstat3 {
     MNT3ERR_NAMETOOLONG = 63,
     MNT3ERR_NOTSUPP = 10004,
     MNT3ERR_SERVERFAULT = 10006,
+    /// A status this list does not name, kept as sent.
+    ///
+    /// Servers return other errno values, and MOUNT v1 statuses are raw
+    /// errnos. Decoding them as an error would misreport a refusal as a
+    /// transport failure.
+    #[xdr(other)]
+    Unknown(u32),
 }
 
 impl std::fmt::Display for mountstat3 {
@@ -163,6 +170,7 @@ impl std::fmt::Display for mountstat3 {
             Self::MNT3ERR_NAMETOOLONG => "MNT3ERR_NAMETOOLONG",
             Self::MNT3ERR_NOTSUPP => "MNT3ERR_NOTSUPP",
             Self::MNT3ERR_SERVERFAULT => "MNT3ERR_SERVERFAULT",
+            Self::Unknown(v) => return write!(f, "MNT3ERR_UNKNOWN({v})"),
         };
         write!(f, "{value}")
     }
@@ -367,7 +375,24 @@ mod tests {
             assert_eq!(wire, expected_disc.to_be_bytes(), "packed {variant:?} must match RFC discriminant {expected_disc}");
             let (decoded, consumed) = mountstat3::unpack(&mut Cursor::new(&wire)).expect("unpack mountstat3");
             assert_eq!(consumed, 4);
-            assert_eq!(decoded as u32, expected_disc, "{variant:?} must survive pack/unpack");
+            assert_eq!(decoded, variant, "{variant:?} must survive pack/unpack");
+        }
+    }
+
+    /// A status outside the ten RFC values is a server refusal, not a decode
+    /// failure: it must decode, keep its value, and pack back unchanged.
+    #[test]
+    fn mountstat3_unlisted_value_round_trips() {
+        let wire = 30u32.to_be_bytes(); // EROFS
+        let (decoded, consumed) = mountres3::unpack(&mut Cursor::new(&wire)).expect("an unlisted status must still decode");
+        assert_eq!(consumed, 4);
+        match decoded {
+            mountres3::Err(stat) => {
+                assert_eq!(stat, mountstat3::Unknown(30));
+                assert_eq!(stat.to_string(), "MNT3ERR_UNKNOWN(30)");
+                assert_eq!(pack_to_vec(&stat), wire);
+            },
+            mountres3::Ok(_) => panic!("expected Err, got Ok"),
         }
     }
 
@@ -424,7 +449,7 @@ mod tests {
         let (decoded, consumed) = mountres3::unpack(&mut Cursor::new(&wire)).expect("unpack mountres3 Err");
         assert_eq!(consumed, 4);
         match decoded {
-            mountres3::Err(stat) => assert_eq!(stat as u32, 13),
+            mountres3::Err(stat) => assert_eq!(stat, mountstat3::MNT3ERR_ACCES),
             mountres3::Ok(_) => panic!("expected Err, got Ok"),
         }
     }
@@ -469,5 +494,133 @@ mod tests {
         assert_eq!(decoded.ex_groups.0.len(), 2);
         assert_eq!(decoded.ex_groups.0[0].0.as_ref(), b"host1");
         assert_eq!(decoded.ex_groups.0[1].0.as_ref(), b"host2");
+    }
+
+    // --- Golden vectors: hand-built byte sequences checked against the RFCs ---
+
+    /// MOUNT v1 MNT success with a real 32-byte handle (fsid_type=4, from lab
+    /// testing).
+    ///
+    /// Wire layout (RFC 1094 Appendix A):
+    ///   status(4)=0 | fhandle(32) -- fixed-length opaque, no length prefix
+    /// Total: 36 bytes.
+    #[test]
+    fn golden_fhstatus_ok() {
+        #[rustfmt::skip]
+        let golden: &[u8] = &[
+            // status = 0 (success)
+            0x00, 0x00, 0x00, 0x00,
+            // fhandle: real lab handle (fsid_type=4, fixed 32 bytes, no length prefix)
+            0x01, 0x00, 0x04, 0x00, 0x29, 0x00, 0x12, 0x00,
+            0xE6, 0x8D, 0x6A, 0x0C, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(golden.len(), 36);
+
+        let (decoded, consumed) = FhStatus::unpack(&mut Cursor::new(golden)).expect("unpack golden FhStatus ok");
+        assert_eq!(consumed, 36);
+        assert_eq!(decoded.status, 0, "status must be success");
+        assert_eq!(&decoded.fhandle[..], &golden[4..], "handle bytes must match lab capture");
+        assert_eq!(pack_to_vec(&decoded), golden, "pack must reproduce the golden vector byte-for-byte");
+    }
+
+    /// MOUNT v3 MNT success with a real 28-byte handle (fsid_type=7, from lab
+    /// testing) and two auth flavors (AUTH_UNIX=1, krb5=390003).
+    ///
+    /// Wire layout (RFC 1813 Appendix I):
+    ///   status(4)=0 | fhandle3_len(4)=28 | fhandle3_data(28) |
+    ///   auth_flavors_count(4)=2 | flavor(4)=1 | flavor(4)=390003
+    /// Total: 48 bytes.
+    #[test]
+    fn golden_mountres3_ok() {
+        #[rustfmt::skip]
+        let golden: &[u8] = &[
+            // status = MNT3_OK (0)
+            0x00, 0x00, 0x00, 0x00,
+            // fhandle3 length = 28
+            0x00, 0x00, 0x00, 0x1C,
+            // fhandle3 data: real lab handle (fsid_type=7, 28 bytes)
+            0x01, 0x00, 0x07, 0x00, 0x29, 0x00, 0x12, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0xDD, 0xBD, 0x7B, 0xF5,
+            0x10, 0x1E, 0x43, 0x7B, 0x9E, 0x84, 0x87, 0xE8,
+            0xB5, 0xAA, 0xD5, 0x6A,
+            // auth_flavors count = 2
+            0x00, 0x00, 0x00, 0x02,
+            // AUTH_UNIX = 1
+            0x00, 0x00, 0x00, 0x01,
+            // krb5 = 390003 (0x0005_F373)
+            0x00, 0x05, 0xF3, 0x73,
+        ];
+        assert_eq!(golden.len(), 48);
+
+        let (decoded, consumed) = mountres3::unpack(&mut Cursor::new(golden)).expect("unpack golden mountres3 ok");
+        assert_eq!(consumed, 48);
+        match &decoded {
+            mountres3::Ok(res) => {
+                assert_eq!(res.fhandle.0.as_ref(), &golden[8..36], "handle bytes must match lab capture");
+                assert_eq!(res.auth_flavors, vec![1, 390_003], "auth flavors: AUTH_UNIX + krb5");
+            },
+            mountres3::Err(stat) => panic!("expected Ok, got Err({stat:?})"),
+        }
+        assert_eq!(pack_to_vec(&decoded), golden, "pack must reproduce the golden vector byte-for-byte");
+    }
+
+    /// MOUNT v3 MNT refusal with MNT3ERR_ACCES (13): the status alone, no
+    /// handle or flavors. Total: 4 bytes.
+    #[test]
+    fn golden_mountres3_err_acces() {
+        let golden: &[u8] = &[0x00, 0x00, 0x00, 0x0D];
+
+        let (decoded, consumed) = mountres3::unpack(&mut Cursor::new(golden)).expect("unpack golden mountres3 err");
+        assert_eq!(consumed, 4);
+        match &decoded {
+            mountres3::Err(stat) => assert_eq!(*stat, mountstat3::MNT3ERR_ACCES),
+            mountres3::Ok(_) => panic!("expected Err, got Ok"),
+        }
+        assert_eq!(pack_to_vec(&decoded), golden, "pack must reproduce the golden vector byte-for-byte");
+    }
+
+    /// Export list with one entry -- path "/srv/nfs", one allowed group
+    /// "client1".
+    ///
+    /// Wire layout (RFC 1813 Appendix I, XDR optional-data linked list):
+    ///   TRUE(4) | dirpath_len(4)=8 | "/srv/nfs"(8) |
+    ///   groups TRUE(4) | name_len(4)=7 | "client1"(7) | pad(1) |
+    ///   groups FALSE(4) | exports FALSE(4)
+    /// Total: 40 bytes.
+    #[test]
+    fn golden_export_node() {
+        #[rustfmt::skip]
+        let golden: &[u8] = &[
+            // List<export_node>: value_follows = TRUE
+            0x00, 0x00, 0x00, 0x01,
+            // ex_dir: dirpath length = 8
+            0x00, 0x00, 0x00, 0x08,
+            // ex_dir: "/srv/nfs" (8 bytes, no padding needed)
+            0x2F, 0x73, 0x72, 0x76, 0x2F, 0x6E, 0x66, 0x73,
+            // ex_groups: List<name> value_follows = TRUE
+            0x00, 0x00, 0x00, 0x01,
+            // name length = 7
+            0x00, 0x00, 0x00, 0x07,
+            // "client1" (7 bytes)
+            0x63, 0x6C, 0x69, 0x65, 0x6E, 0x74, 0x31,
+            // XDR padding to 4-byte boundary (1 byte)
+            0x00,
+            // ex_groups: value_follows = FALSE (end of groups)
+            0x00, 0x00, 0x00, 0x00,
+            // List<export_node>: value_follows = FALSE (end of exports)
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(golden.len(), 40);
+
+        let (decoded, consumed) = exports::unpack(&mut Cursor::new(golden)).expect("unpack golden exports");
+        assert_eq!(consumed, 40);
+        assert_eq!(decoded.0.len(), 1, "one export entry");
+        let entry = &decoded.0[0];
+        assert_eq!(entry.ex_dir.0.as_ref(), b"/srv/nfs", "export path");
+        assert_eq!(entry.ex_groups.0.len(), 1, "one allowed group");
+        assert_eq!(entry.ex_groups.0[0].0.as_ref(), b"client1", "group name");
+        assert_eq!(pack_to_vec(&decoded), golden, "pack must reproduce the golden vector byte-for-byte");
     }
 }

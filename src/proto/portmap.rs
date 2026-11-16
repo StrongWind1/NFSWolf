@@ -230,7 +230,7 @@ fn decode_mnt3_response(data: &[u8]) -> anyhow::Result<MountResult> {
     let handle = FileHandle::from_bytes(fh_opaque.as_ref());
 
     let (count, _) = u32::unpack(&mut cur).context("read auth flavor count")?;
-    let mut auth_flavors = Vec::with_capacity(count as usize);
+    let mut auth_flavors = onc_xdr::vec_with_capacity(count as usize);
     for _ in 0..count {
         let (f, _) = u32::unpack(&mut cur).context("read auth flavor")?;
         auth_flavors.push(f);
@@ -249,4 +249,35 @@ fn decode_mnt1_response(data: &[u8]) -> anyhow::Result<MountResult> {
     let fh_bytes = data.get(4..36).context("MNT1 response too short for 32-byte handle")?;
     let handle = FileHandle::from_bytes(fh_bytes);
     Ok(MountResult { handle, auth_flavors: vec![1], _parsed_flavors: vec![crate::proto::auth::AuthFlavor::Sys] })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mnt3_response_decodes_handle_and_flavors() {
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&0u32.to_be_bytes()); // MNT3_OK
+        wire.extend_from_slice(&4u32.to_be_bytes()); // handle length
+        wire.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        wire.extend_from_slice(&2u32.to_be_bytes()); // flavor count
+        wire.extend_from_slice(&1u32.to_be_bytes());
+        wire.extend_from_slice(&390_003u32.to_be_bytes());
+        let res = decode_mnt3_response(&wire).expect("well-formed reply");
+        assert_eq!(res.handle.as_bytes(), &[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(res.auth_flavors, vec![1, 390_003]);
+    }
+
+    /// A forged flavor count must fail on the missing data rather than reserve
+    /// 16 GiB first, which aborts the process where the reservation fails.
+    #[test]
+    fn mnt3_response_forged_flavor_count_fails_cleanly() {
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&0u32.to_be_bytes());
+        wire.extend_from_slice(&0u32.to_be_bytes()); // empty handle
+        wire.extend_from_slice(&u32::MAX.to_be_bytes());
+        wire.extend_from_slice(&1u32.to_be_bytes());
+        assert!(decode_mnt3_response(&wire).is_err());
+    }
 }

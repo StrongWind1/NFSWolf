@@ -17,18 +17,10 @@ pub(crate) struct DecodeArgs {
 }
 
 pub(crate) fn run(args: &DecodeArgs) -> anyhow::Result<()> {
-    let hex = args.handle.trim();
-    anyhow::ensure!(hex.len() >= 8, "handle must be at least 4 bytes (8 hex chars)");
-    anyhow::ensure!(hex.len().is_multiple_of(2), "hex string must have even length");
-
-    let bytes: Vec<u8> = (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            let pair = hex.get(i..i + 2).unwrap_or("00");
-            u8::from_str_radix(pair, 16)
-        })
-        .collect::<Result<_, _>>()
-        .map_err(|e| anyhow::anyhow!("invalid hex: {e}"))?;
+    let bytes = nfs_v3::decode_hex(&args.handle).map_err(|e| anyhow::anyhow!("invalid handle: {e}"))?;
+    anyhow::ensure!(bytes.len() >= 4, "handle must be at least 4 bytes (8 hex chars)");
+    // Echo the handle back in canonical form, not as typed.
+    let hex = FileHandle::from_bytes(&bytes).to_hex();
 
     println!();
     println!("  {} {} bytes", "Handle:".bold(), bytes.len());

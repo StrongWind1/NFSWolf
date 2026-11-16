@@ -59,12 +59,24 @@ pub(crate) struct ConnectionHealth {
     pub request_count: u64,
     /// True if the connection encountered a fatal error and must not be reused.
     pub poisoned: bool,
+    /// True from the moment a call starts until its reply has been read.
+    ///
+    /// If the caller drops the call's future before it completes -- a shorter
+    /// outer timeout, a `select!` -- the flag is never cleared. The request may
+    /// be half-written or its reply unread, and a `call_as` never restored its
+    /// borrowed credential, so the pool must discard the connection.
+    pub in_flight: bool,
 }
 
 impl ConnectionHealth {
     fn new() -> Self {
         let now = Instant::now();
-        Self { _created_at: now, last_used: now, request_count: 0, poisoned: false }
+        Self { _created_at: now, last_used: now, request_count: 0, poisoned: false, in_flight: false }
+    }
+
+    /// Whether the connection may go back into the idle queue.
+    pub(crate) const fn is_reusable(&self) -> bool {
+        !self.poisoned && !self.in_flight
     }
 }
 
@@ -178,7 +190,10 @@ impl NfsConnection {
         self.health.request_count = self.health.request_count.saturating_add(1);
         self.health.last_used = Instant::now();
         self.rpc.credential = self.credential.to_opaque_auth();
-        self.rpc.call::<C, R>(program, version, proc, args).await
+        self.health.in_flight = true;
+        let result = self.rpc.call::<C, R>(program, version, proc, args).await;
+        self.health.in_flight = false;
+        result
     }
 
     /// Issue one call under `cred`, restoring this connection's own credential
@@ -191,7 +206,9 @@ impl NfsConnection {
         self.health.request_count = self.health.request_count.saturating_add(1);
         self.health.last_used = Instant::now();
         self.rpc.credential = cred;
+        self.health.in_flight = true;
         let result = self.rpc.call::<C, R>(program, version, proc, args).await;
+        self.health.in_flight = false;
         self.rpc.credential = self.credential.to_opaque_auth();
         result
     }
@@ -255,6 +272,8 @@ impl NfsConnection {
 /// IPv6 targets are not supported (NFS servers are typically IPv4).
 pub(crate) async fn socks5_connect(proxy_addr: SocketAddr, target: SocketAddr) -> std::io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy_addr).await?;
+    // Same reason as the direct connector: RPC requests must not wait on Nagle.
+    stream.set_nodelay(true)?;
 
     // Step 1: greeting  --  offer NO_AUTH (method 0x00).
     stream.write_all(&[0x05, 0x01, 0x00]).await?;
@@ -348,4 +367,30 @@ async fn connect_privileged_nfs(addr: SocketAddr) -> std::io::Result<NfsIo> {
     }
     tracing::info!(%addr, "privileged NFS port binding failed after retries, falling back to ephemeral port");
     TokioConnector.connect(addr).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A call whose future is dropped before the reply arrives leaves the
+    /// stream out of step. The connection must then refuse to go back into
+    /// the pool, which is what `is_reusable` decides at check-in.
+    #[tokio::test]
+    async fn cancelled_call_is_not_reusable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        // Accept and hold the socket without ever answering.
+        let server = tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+        let mut conn = NfsConnection::connect_direct(addr, addr.port(), Credential::None, ReconnectStrategy::Persistent, None).await.expect("connect");
+        assert!(conn.health.is_reusable());
+
+        let call = conn.call::<Void, Void>(NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_NULL, &Void);
+        assert!(tokio::time::timeout(Duration::from_millis(50), call).await.is_err(), "the server never answers");
+        assert!(!conn.health.is_reusable(), "a cancelled call must keep the connection out of the pool");
+        server.abort();
+    }
 }

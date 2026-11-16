@@ -4,6 +4,60 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+### Performance
+
+- **Shell `get`, `put`, `cp` and their `-r` forms are pipelined.** Transfers keep several READs or WRITEs in flight (about 4 MiB worth, 4 to 16 calls, each on its own pooled connection) instead of one at a time, use the server's advertised transfer size (NFSv3 FSINFO, NFSv4 `maxread`/`maxwrite`, clamped to 4 KiB..1 MiB) instead of a fixed 64 KiB, and upload with `UNSTABLE` writes plus one COMMIT, checked against the write verifiers, instead of a `FILE_SYNC` write per chunk. Download hashing and local writes run on their own thread, and recursive transfers move up to 8 files per directory at once. Measured over NFSv3 and NFSv4 against a lab Linux knfsd export on XFS (sub-millisecond RTT): a 192 MiB `put` went from 44 to about 1,100 MiB/s, a `get` from about 220 to 400 MiB/s (limited there by SHA-256 on a CPU without SHA-NI; about 1.7 GiB/s with hashing set aside), a 64 MiB remote `cp` from 1.6 s to 0.1 s, and a 300-file `get -r` / `put -r` from 0.07 / 0.86 s to 0.02 / 0.58 s.
+- **Whole-file reads in the shell use the same engine.** `cat`, `grep`, `last`, `lastb` and `lastlog` read through `ShellOps::read_file`, now a provided method on the pipelined transfer instead of a sequential 64 KiB loop per version: a 64 MiB `grep` went from 0.22 s to 0.10 s on NFSv3 and NFSv4.
+- **NFSv2** gets the same pipelining with its 8 KiB transfers and 16 calls in flight. Measured live against a lab Linux knfsd serving only NFSv2: a 16 MiB `get` went from 0.21 s to 0.065 s, and a 16 MiB `put` takes about 6 s against 41 s one write at a time -- the server holds each lone v2 write for write gathering (`wdelay`) and syncs every one, so overlapping them is most of the gain. (The previous `put` could not be timed: the server rejected its 64 KiB writes.) An in-process NFSv2 server test checks over real RPC and TCP that 16 calls are in flight.
+- The shell's connection pool keeps up to 16 idle connections per identity so a transfer's parallel connections are reused, and handing a connection back no longer drops it when the per-key queue is momentarily locked.
+- RPC connections set `TCP_NODELAY`, so the tail of a large request does not wait on Nagle's algorithm.
+
+### Fixed
+
+- **`put` over an existing, larger file kept its old tail.** The create step sent only the mode, and UNCHECKED CREATE / OPEN leave an existing file's size alone, so the result was the new data followed by the rest of the old file. `put`, `put -r` and `cp` now create with size 0, which truncates an existing file in the same call.
+- **NFSv2 `put` sent 64 KiB WRITEs**, over the protocol's 8 KiB `NFS_MAXDATA`, and a real server rejects them (`Garbage arguments`), so v2 uploads of more than 8 KiB failed. NFSv2 transfers now use 8 KiB, and offsets beyond NFSv2's 32-bit range are an error instead of silently becoming `u32::MAX`.
+- **The NFSv2 shell used a connection pool of its own** with the default four idle connections instead of the session's pool, unlike the v3 and v4 shells. It now shares the session pool and its credential, which also makes `--short-token` apply to v2 as it does to v3 and v4.
+
+- **NFSv4 attribute numbering** -- word-1 attributes from 51 onward were decoded one position off: `time_delta` was reported as ctime, `time_metadata` as mtime, and `time_modify` was read as an 8-byte `mounted_on_fileid`. `AttrRequest::shell_attrs()` asked for the same wrong bits. Both now follow RFC 7530 sec. 5.6 (`time_metadata` 52, `time_modify` 53, `mounted_on_fileid` 55), so NFSv4 `ls -l` times are correct.
+- **Process abort on a forged element count** -- the NFSv4 GETATTR and READDIR decoders and the CALLIT MOUNT v3 decoder reserved memory from an unchecked wire count. A count of `0xFFFFFFFF` asked for 16 GiB up front and aborted the process wherever that reservation failed. All three now use the capped `onc_xdr::vec_with_capacity`.
+- **NFSv4 open-owner seqids** -- the seqid advanced before each OPEN, OPEN_CONFIRM and CLOSE was sent, even when the op never ran (a stale directory handle stops the COMPOUND at PUTFH) or returned one of the errors RFC 7530 sec. 9.1.7 exempts. One failed create left the shell's session permanently out of step. The seqid now advances only when the reply shows the server consumed it, and the shell drops and re-establishes a session the server refuses with `NFS4ERR_BAD_SEQID`, `STALE_CLIENTID` or `EXPIRED`.
+- **NFSv4 `lock` / `unlock`** -- LOCK took two values from the open-owner sequence and LOCKU used the open-owner's instead of the lock-owner's, so a compliant server refused both. Each lock now uses a fresh lock-owner whose sequence is tracked in `LockState`.
+- **NFSv4 whole-file helpers** -- `read_file` is capped at 256 MiB, `write_file` resends after a short write and fails on a write that accepts nothing, every chunk is `FILE_SYNC4` (no COMMIT or write verifier to lose data on), a failed final GETATTR is an error instead of zeroed attributes, and both send CLOSE even when the transfer fails. `lookup` and `open_*` return `MissingResult` instead of default attributes when GETATTR is missing.
+- **NFSv4 SETCLIENTID verifier** -- was a constant, which tells the server a re-established session is the old incarnation. Each `establish` now sends a new verifier, so the server discards stale state.
+- **NFSv4 `readdir_plus` handles** -- the file handles requested per entry were decoded and thrown away; `Nfs4DirEntry::fh` is now filled.
+- **NFSv2 `root()`** -- sent NFSPROC_ROOT twice with incompatible decoders, so it could never return a handle. It now sends one call and accepts an empty body, a status, a bare handle, or a status followed by a handle.
+- **Oversized RPC replies** -- a reply over the 8 MiB limit returned `WrongLength`, which counts as reusable, so the pool requeued a connection whose unread fragment body was still in the socket. It now returns `FragmentedReply`, which poisons the connection.
+- **Cancelled calls** -- `DirectTransport::call_as` restores the transport's own credential even when the call's future is dropped, and the pool discards a connection whose call was cancelled before the reply was read.
+- **Hex input** -- the four hex parsers (`--handle`, `--short-token`, `--auth-dh-pubkey`, `mount-handle`, `append 0x...`, `decode`) panicked on a multi-byte character, silently turned unaligned pairs into zero bytes, and accepted a leading `+`. They now share one byte-level decoder that rejects anything but hex digits after an optional `0x`.
+- **Unlisted protocol values** -- `auth_stat`, `auth_flavor`, `ftype3` and `mountstat3` gained an `Unknown(u32)` variant. An unlisted verifier flavor, rejection code, file type or MOUNT status no longer fails the decode of the whole reply, and a MOUNT refusal is no longer counted as a transport failure by the circuit breaker. MOUNT v1 errno values outside the named set keep their value instead of becoming `MNT3ERR_SERVERFAULT`.
+- **Circuit breaker** -- the error rate is kept as a running count instead of a scan of the whole window on every call, and the window no longer discards its history during the first minute after boot.
+- **Login records** -- `wtmp`, `btmp` and `lastlog` integers are decoded as little-endian rather than in the host's byte order, and addresses are read byte by byte.
+- **Unknown-lint warnings** -- removed `linker_info` and `duplicate_features` from the lint table; rustc 1.95 knows neither and warned on every target.
+
+### Added
+
+- `#[xdr(other)]` on one `u32` tuple variant of an `XdrCodec` enum makes it open: unlisted discriminants decode into that variant and pack back unchanged. Unit variants of data-carrying enums may give their discriminant as `= N`. Locals in the expanded code use mixed-site hygiene, and a malformed `#[xdr(...)]` attribute is reported as malformed rather than missing.
+- `AsyncWrite::async_flush` (default no-op, overridden by `TokioIo`), called after every request so a buffered stream cannot hold a request back.
+- `nfs_v3::decode_hex`, `Capped<T>`, `Nfs3Client::list_dir_capped` and `read_all_capped` (report whether the cap cut the result), and `From<WriteStable> for stable_how` (`write_at` accepts either).
+- `Nfs2Error::TooLarge`, `Nfs4Error::TooLarge`, `Nfs4Error::WriteStalled`, and `READ_FILE_MAX_BYTES` in `nfs-v2` and `nfs-v4`.
+- `Nfs4Session::record_outcome`, `LockState::record_outcome`, `CompoundRes::seqid_consumed`, `Nfs4Status::leaves_seqid_unchanged`.
+- `Nfs4Client::transfer_limits` and `AttrRequest::transfer_limits` (`maxread` / `maxwrite`), decoded into the new `Fattr4Decoded::maxread` and `maxwrite`.
+
+### Changed
+
+- **Breaking (`nfs-v4`):** `LockState` has a `seqid` field, and `Nfs4Client::unlock` takes `&mut LockState` and no longer takes the session. `Fattr4Decoded` has `filehandle`, `maxread` and `maxwrite` fields.
+- **Breaking (`nfs-v3`):** `WriteAck` has a `verifier` field carrying the WRITE's write verifier. `Nfs3Client::commit_verifier` is documented as what it is: a COMMIT of the whole file.
+- `nfs_v3::FileType` has an `Unknown(u32)` variant.
+- The six integration test binaries are one, `integration`, so the shared helpers are checked for dead code.
+
+### Deprecated
+
+- `Nfs4Session::next_seqid` (advances unconditionally), `nfs_v3::CreateMode` and `nfs_v3::DirEntry` (no method accepts or returns them).
+
+### Removed
+
+- Four source files left over from extracting `nfs-mount` that no `mod` declaration included: `nfs-v2/src/mount.rs`, `nfs-v3/src/mount.rs`, `nfs-v3/src/error_mount.rs`, `nfs-v3/src/wire/mount.rs`. Their golden-vector tests moved to `nfs-mount`.
+
 ## [1.3.1] - 2026-11-07
 
 ### Added

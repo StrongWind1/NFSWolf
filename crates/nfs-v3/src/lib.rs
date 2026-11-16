@@ -39,16 +39,21 @@ pub mod wire;
 mod error;
 mod raw;
 
-pub use api::{CreateMode, DirEntry, DirEntryPlus, DirPage, FileAttrs, FileHandle, FileType, FsInfo, FsStat, HexError, Nfs3Fault, NfsTime, ReadChunk, WriteAck, WriteStable, access};
+pub use api::{Capped, DirEntryPlus, DirPage, FileAttrs, FileHandle, FileType, FsInfo, FsStat, HexError, Nfs3Fault, NfsTime, ReadChunk, WriteAck, WriteStable, access, decode_hex};
+#[expect(deprecated, reason = "re-exported so existing paths keep compiling until the next major release")]
+pub use api::{CreateMode, DirEntry};
 pub use error::Nfs3Error;
 pub use raw::Nfs3Client;
 pub use wire::{PROGRAM, VERSION};
 
-/// Re-export the MOUNT error from `nfswolf-mount` for backward compatibility.
+/// The MOUNT error, re-exported from `nfs-mount` under its old path.
 pub use nfs_mount::MountError;
 
-/// Re-export the MOUNT client from `nfswolf-mount` for backward compatibility.
+/// The MOUNT client, re-exported from `nfs-mount` under its old path.
 ///
-/// `MountClient<T>` here is the unified mount client. New code should use
-/// `nfs_mount::MountClient` directly.
+/// Only the name is kept: this is [`nfs_mount::MountClient`], so construct it
+/// with `MountClient::v3(transport)` (or `new(transport, MountVersion::V3)`)
+/// and expect [`nfs_mount::MountedHandle`] from `mnt`. The client that used to
+/// live in this crate, with its own constructor and return types, is gone.
+/// New code should name `nfs_mount::MountClient` directly.
 pub type MountClient<T> = nfs_mount::MountClient<T>;

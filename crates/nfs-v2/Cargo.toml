@@ -22,5 +22,8 @@ onc-rpc-client = { workspace = true }
 nfs-mount = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true }
+
 [lints]
 workspace = true

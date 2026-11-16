@@ -710,6 +710,7 @@ impl PartialEq<[u8]> for filename3<'_> {
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, XdrCodec)]
 #[non_exhaustive]
+#[repr(u32)]
 pub enum ftype3 {
     #[default]
     NF3REG = 1,
@@ -719,6 +720,11 @@ pub enum ftype3 {
     NF3LNK = 5,
     NF3SOCK = 6,
     NF3FIFO = 7,
+    /// A type outside RFC 1813's seven, kept as sent.
+    ///
+    /// One odd entry must not fail the decode of a whole READDIRPLUS page.
+    #[xdr(other)]
+    Unknown(u32),
 }
 
 impl std::fmt::Display for ftype3 {
@@ -731,6 +737,7 @@ impl std::fmt::Display for ftype3 {
             Self::NF3LNK => "NF3LNK",
             Self::NF3SOCK => "NF3SOCK",
             Self::NF3FIFO => "NF3FIFO",
+            Self::Unknown(v) => return write!(f, "NF3_UNKNOWN({v})"),
         };
         std::fmt::Display::fmt(name, f)
     }
@@ -1628,5 +1635,16 @@ mod tests {
 
         let repacked = pack_to_vec(&status);
         assert_eq!(repacked, GOLDEN);
+    }
+
+    /// A type outside RFC 1813's seven must decode rather than fail the reply.
+    #[test]
+    fn ftype3_unlisted_value_decodes() {
+        let wire = 9u32.to_be_bytes();
+        let (ft, n) = ftype3::unpack(&mut Cursor::new(&wire)).expect("an unlisted ftype3 must decode");
+        assert_eq!(n, 4);
+        assert_eq!(ft, ftype3::Unknown(9));
+        assert_eq!(pack_to_vec(&ft), wire);
+        assert_eq!(crate::api::FileType::from_ftype3(ft), crate::api::FileType::Unknown(9));
     }
 }

@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use nfs_v4::client::Nfs4Error;
 use nfs_v4::wire::{ArgOp, AttrRequest, CreateMode4, CreateType4, Fattr4, OpenClaim4, OpenFlag4, ResOpData, Stateid4};
-use nfs_v4::{Nfs4FileInfo, Nfs4FileType, Nfs4Session};
+use nfs_v4::{Nfs4FileInfo, Nfs4FileType, Nfs4Session, Nfs4Status};
 use onc_xdr::Pack;
 
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs4::{Nfs4Client, PooledNfs4 as _};
 
-use super::ops::{CredCache, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, try_with_escalation};
+use super::ops::{CredCache, IoSizes, ReadReply, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, WriteReply, try_with_escalation};
 
 /// NFSv4 backend wrapping a pooled `Nfs4Client` with lazy session establishment.
 ///
@@ -34,11 +34,15 @@ pub(crate) struct V4Ops {
     /// Unique instance ID to prevent SETCLIENTID collisions between ephemeral
     /// ops instances created by the FUSE credential ladder.
     instance_id: u64,
+    /// The server's maxread / maxwrite, from the first GETATTR that reports
+    /// them; see `V3Ops`'s field of the same name for why one value serves the
+    /// session.
+    io_sizes: std::sync::OnceLock<IoSizes>,
 }
 
 impl V4Ops {
     pub(crate) fn new(client: Arc<Nfs4Client>) -> Self {
-        Self { client, session: tokio::sync::Mutex::new(None), cred_cache: CredCache::new(), instance_id: V4_INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+        Self { client, session: tokio::sync::Mutex::new(None), cred_cache: CredCache::new(), instance_id: V4_INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed), io_sizes: std::sync::OnceLock::new() }
     }
 
     fn make_v4(&self, uid: u32, gid: u32) -> Nfs4Client {
@@ -58,6 +62,84 @@ impl V4Ops {
         }
         Ok(())
     }
+
+    /// OPEN(CREATE) + OPEN_CONFIRM + CLOSE on the current session.
+    ///
+    /// Each seqid-bearing reply is recorded against the session, so a COMPOUND
+    /// that failed before OPEN ran (a stale directory handle, say) does not
+    /// leave the client's sequence ahead of the server's (RFC 7530
+    /// sec. 9.1.7). If the server says the session's sequence or clientid is
+    /// no longer valid, the session is dropped and `SessionLost` returned so
+    /// the caller can retry on a fresh one.
+    async fn open_create(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<OpenCreate> {
+        self.ensure_session().await?;
+        let mut guard = self.session.lock().await;
+        let Some(session) = guard.as_ref() else {
+            anyhow::bail!("session establishment failed unexpectedly");
+        };
+        let attrs_bytes = pack_fattr4(&fattr4_new_file(mode));
+        let seqid = session.current_seqid();
+        let ops = vec![ArgOp::Putfh(dir.0.clone()), ArgOp::Open { seqid, share_access: 3, share_deny: 0, owner: session.open_owner().clone(), openhow: OpenFlag4::Create { mode: CreateMode4::Unchecked, attrs: attrs_bytes }, claim: OpenClaim4::Null(name.to_owned()) }, ArgOp::Getfh];
+        let res = self.client.compound(ops).await.map_err(rpc_err)?;
+        session.record_outcome(&res, 1);
+        if res.status != 0 {
+            if session_lost(res.status) {
+                *guard = None;
+                return Ok(OpenCreate::SessionLost);
+            }
+            anyhow::bail!("OPEN(CREATE) failed: {}", Nfs4Status::from_u32(res.status));
+        }
+        let (stateid, rflags) = match res.results.get(1).map(|op| &op.data) {
+            Some(ResOpData::Open { stateid, rflags, .. }) => (*stateid, *rflags),
+            _ => anyhow::bail!("OPEN result missing"),
+        };
+        let fh = match res.results.get(2).map(|op| &op.data) {
+            Some(ResOpData::Fh(fh)) => fh.clone(),
+            _ => anyhow::bail!("GETFH result missing after OPEN"),
+        };
+        // OPEN_CONFIRM if requested (OPEN4_RESULT_CONFIRM, RFC 7530 sec. 16.16.4).
+        let final_stateid = if rflags & 0x0002 != 0 {
+            let confirm_seqid = session.current_seqid();
+            let cres = self.client.compound(vec![ArgOp::Putfh(fh.clone()), ArgOp::OpenConfirm { stateid: stateid.to_bytes(), seqid: confirm_seqid }]).await.map_err(rpc_err)?;
+            session.record_outcome(&cres, 1);
+            if cres.status != 0 {
+                // The file exists now; a retry's UNCHECKED4 OPEN simply opens it.
+                if session_lost(cres.status) {
+                    *guard = None;
+                    return Ok(OpenCreate::SessionLost);
+                }
+                anyhow::bail!("OPEN_CONFIRM failed: {}", Nfs4Status::from_u32(cres.status));
+            }
+            match cres.results.get(1).map(|op| &op.data) {
+                Some(ResOpData::Stateid(sid)) => *sid,
+                _ => stateid,
+            }
+        } else {
+            stateid
+        };
+        // CLOSE the open state -- it was only needed to create the file. A
+        // failure is not fatal (the file exists), but its outcome still moves
+        // the sequence.
+        let close_seqid = session.current_seqid();
+        if let Ok(cres) = self.client.compound(vec![ArgOp::Putfh(fh.clone()), ArgOp::Close { seqid: close_seqid, stateid: final_stateid.to_bytes() }]).await {
+            session.record_outcome(&cres, 1);
+        }
+        Ok(OpenCreate::Created(ShellHandle(fh)))
+    }
+}
+
+/// Outcome of [`V4Ops::open_create`].
+enum OpenCreate {
+    Created(ShellHandle),
+    /// The session was refused and has been dropped; retry on a new one.
+    SessionLost,
+}
+
+/// Whether a status means the session itself is unusable -- its open-owner
+/// sequence is out of step, or its clientid or lease is gone -- rather than
+/// that this one operation was refused.
+fn session_lost(status: u32) -> bool {
+    matches!(Nfs4Status::from_u32(status), Nfs4Status::BadSeqid | Nfs4Status::StaleClientid | Nfs4Status::Expired)
 }
 
 // --- Conversion helpers -----------------------------------------------------
@@ -131,6 +213,21 @@ fn fattr4_with_mode(mode: u32) -> Fattr4 {
     let bitmap = AttrRequest { words: vec![0, 1 << 1] };
     let mut attrvals = Vec::with_capacity(4);
     // Pack ignores the Result for a Vec writer (infallible).
+    drop(mode.pack(&mut attrvals));
+    Fattr4 { bitmap, attrvals }
+}
+
+/// Attributes for `create_file`: size 0 (attr 4, word 0 bit 4) and the mode
+/// (attr 33, word 1 bit 1), values in bitmap order.
+///
+/// An UNCHECKED4 OPEN of a name that exists applies `createattrs` to the
+/// existing file (RFC 7530 sec. 16.16.5), so the size truncates it: a file
+/// replaced by a shorter one must not keep the old one's tail.
+fn fattr4_new_file(mode: u32) -> Fattr4 {
+    let bitmap = AttrRequest { words: vec![1 << 4, 1 << 1] };
+    let mut attrvals = Vec::with_capacity(12);
+    // Pack ignores the Result for a Vec writer (infallible).
+    drop(0u64.pack(&mut attrvals));
     drop(mode.pack(&mut attrvals));
     Fattr4 { bitmap, attrvals }
 }
@@ -294,7 +391,7 @@ impl ShellOps for V4Ops {
 
     // -- File I/O --
 
-    async fn read_file(&self, fh: &ShellHandle) -> anyhow::Result<Vec<u8>> {
+    async fn read_at(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<ReadReply> {
         let handle_bytes = fh.as_bytes().to_vec();
         try_with_escalation(
             (self.client.uid(), self.client.gid()),
@@ -305,25 +402,7 @@ impl ShellOps for V4Ops {
             |uid, gid| {
                 let c = self.make_v4(uid, gid);
                 let h = handle_bytes.clone();
-                async move { read_all_v4(&c, &h).await }
-            },
-            "NFS4ERR_ACCESS: permission denied reading file",
-        )
-        .await
-    }
-
-    async fn read_chunk(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
-        let handle_bytes = fh.as_bytes().to_vec();
-        try_with_escalation(
-            (self.client.uid(), self.client.gid()),
-            &self.cred_cache,
-            fh,
-            getattr_owner_v4(&self.client, fh.as_bytes()),
-            is_v4_acces,
-            |uid, gid| {
-                let c = self.make_v4(uid, gid);
-                let h = handle_bytes.clone();
-                async move { read_chunk_v4(&c, &h, offset, count).await }
+                async move { read_at_v4(&c, &h, offset, count).await }
             },
             "NFS4ERR_ACCESS: permission denied reading file chunk",
         )
@@ -331,66 +410,40 @@ impl ShellOps for V4Ops {
     }
 
     async fn write_chunk(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
-        // Try anonymous-stateid write first (knfsd allows this for AUTH_SYS
-        // with no_root_squash). Falls back to READ_BYPASS stateid if rejected.
-        let ops = vec![ArgOp::Putfh(fh.0.clone()), ArgOp::Write { stateid: Stateid4::ANONYMOUS.to_bytes(), offset, stable: 2, data: data.to_vec() }];
-        let res = self.client.compound(ops).await.map_err(rpc_err)?;
-        if res.status != 0 {
-            // Anonymous write failed (NFS4ERR_OPENMODE etc.) -- fall back to
-            // the bypass stateid. In NFSv4.0 we cannot OPEN by file handle
-            // (CLAIM_FH is v4.1 only), so this is our best effort.
-            return self.write_chunk_via_open(fh, offset, data).await;
+        Ok(self.write_v4(fh, offset, data, FILE_SYNC4).await?.count)
+    }
+
+    async fn write_unstable(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<WriteReply> {
+        self.write_v4(fh, offset, data, UNSTABLE4).await
+    }
+
+    async fn io_sizes(&self, fh: &ShellHandle) -> IoSizes {
+        if let Some(sizes) = self.io_sizes.get() {
+            return *sizes;
         }
-        match res.results.get(1).map(|op| &op.data) {
-            Some(ResOpData::WriteRes { count, .. }) => Ok(*count),
-            _ => anyhow::bail!("WRITE result missing"),
+        // maxread / maxwrite (RFC 7530 sec. 5.8.2.16-17). A server that will
+        // not report them gets the default, uncached.
+        match self.client.transfer_limits(fh.as_bytes()).await {
+            Ok((read, write)) => {
+                let sizes = IoSizes::from_server(read, write);
+                _ = self.io_sizes.set(sizes);
+                sizes
+            },
+            Err(_) => IoSizes::DEFAULT,
         }
     }
 
     // -- Mutations --
 
     async fn create_file(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<ShellHandle> {
-        self.ensure_session().await?;
-        let guard = self.session.lock().await;
-        let Some(session) = guard.as_ref() else {
-            anyhow::bail!("session establishment failed unexpectedly");
-        };
-        let attrs = fattr4_with_mode(mode);
-        let attrs_bytes = pack_fattr4(&attrs);
-        let seqid = session.next_seqid();
-        let ops = vec![ArgOp::Putfh(dir.0.clone()), ArgOp::Open { seqid, share_access: 3, share_deny: 0, owner: session.open_owner().clone(), openhow: OpenFlag4::Create { mode: CreateMode4::Unchecked, attrs: attrs_bytes }, claim: OpenClaim4::Null(name.to_owned()) }, ArgOp::Getfh];
-        let res = self.client.compound(ops).await.map_err(rpc_err)?;
-        if res.status != 0 {
-            anyhow::bail!("OPEN(CREATE) failed: NFSv4 status={}", res.status);
+        // One retry: a lost session is replaced by a new incarnation, which
+        // the server starts with a clean open-owner sequence.
+        for _ in 0..2 {
+            if let OpenCreate::Created(fh) = self.open_create(dir, name, mode).await? {
+                return Ok(fh);
+            }
         }
-        // Extract open stateid for CLOSE.
-        let (stateid, rflags) = match res.results.get(1).map(|op| &op.data) {
-            Some(ResOpData::Open { stateid, rflags, .. }) => (*stateid, *rflags),
-            _ => anyhow::bail!("OPEN result missing"),
-        };
-        let fh = match res.results.get(2).map(|op| &op.data) {
-            Some(ResOpData::Fh(fh)) => fh.clone(),
-            _ => anyhow::bail!("GETFH result missing after OPEN"),
-        };
-        // OPEN_CONFIRM if requested (bit 1 of rflags).
-        let final_stateid = if rflags & 0x0002 != 0 {
-            let confirm_seqid = session.next_seqid();
-            let cres = self.client.compound(vec![ArgOp::Putfh(fh.clone()), ArgOp::OpenConfirm { stateid: stateid.to_bytes(), seqid: confirm_seqid }]).await.map_err(rpc_err)?;
-            if cres.status != 0 {
-                anyhow::bail!("OPEN_CONFIRM failed: NFSv4 status={}", cres.status);
-            }
-            match cres.results.get(1).map(|op| &op.data) {
-                Some(ResOpData::Stateid(sid)) => *sid,
-                _ => stateid,
-            }
-        } else {
-            stateid
-        };
-        // CLOSE the open state -- we only needed it to create the file.
-        let close_seqid = session.next_seqid();
-        // Best-effort CLOSE; ignore errors (file was already created).
-        drop(self.client.compound(vec![ArgOp::Putfh(fh.clone()), ArgOp::Close { seqid: close_seqid, stateid: final_stateid.to_bytes() }]).await);
-        Ok(ShellHandle(fh))
+        anyhow::bail!("OPEN(CREATE) failed: the server rejected a newly established NFSv4 session")
     }
 
     async fn mkdir(&self, dir: &ShellHandle, name: &str, mode: u32) -> anyhow::Result<ShellHandle> {
@@ -545,23 +598,34 @@ impl ShellOps for V4Ops {
 }
 
 impl V4Ops {
-    /// Fallback write path using the bypass stateid when anonymous-stateid
-    /// writes are rejected (NFS4ERR_OPENMODE).
-    async fn write_chunk_via_open(&self, fh: &ShellHandle, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
-        // NFSv4.0 cannot OPEN by file handle (CLAIM_FH is v4.1 only). Try the
-        // read-bypass stateid (seqid=0xFFFFFFFF, other=0xFF) which bypasses
-        // share reservations on some servers.
-        let ops = vec![ArgOp::Putfh(fh.0.clone()), ArgOp::Write { stateid: Stateid4::READ_BYPASS.to_bytes(), offset, stable: 2, data: data.to_vec() }];
-        let res = self.client.compound(ops).await.map_err(rpc_err)?;
-        if res.status != 0 {
-            anyhow::bail!("WRITE failed: NFSv4 status={} (server requires OPEN but file handle parent is unknown)", res.status);
+    /// WRITE with the given `stable_how4`, without an OPEN.
+    ///
+    /// Tries the anonymous stateid first (knfsd allows it for AUTH_SYS with
+    /// no_root_squash). If that is rejected (NFS4ERR_OPENMODE etc.) it falls
+    /// back to the read-bypass stateid (seqid=0xFFFFFFFF, other=0xFF), which
+    /// bypasses share reservations on some servers: NFSv4.0 cannot OPEN by
+    /// file handle (CLAIM_FH is v4.1 only), so this is the best effort.
+    async fn write_v4(&self, fh: &ShellHandle, offset: u64, data: &[u8], stable: u32) -> anyhow::Result<WriteReply> {
+        let mut last_status = 0;
+        for stateid in [Stateid4::ANONYMOUS, Stateid4::READ_BYPASS] {
+            let ops = vec![ArgOp::Putfh(fh.0.clone()), ArgOp::Write { stateid: stateid.to_bytes(), offset, stable, data: data.to_vec() }];
+            let res = self.client.compound(ops).await.map_err(rpc_err)?;
+            if res.status != 0 {
+                last_status = res.status;
+                continue;
+            }
+            return match res.results.get(1).map(|op| &op.data) {
+                Some(ResOpData::WriteRes { count, committed, writeverf }) => Ok(WriteReply { count: *count, stable: *committed != UNSTABLE4, verifier: Some(*writeverf) }),
+                _ => anyhow::bail!("WRITE result missing"),
+            };
         }
-        match res.results.get(1).map(|op| &op.data) {
-            Some(ResOpData::WriteRes { count, .. }) => Ok(*count),
-            _ => anyhow::bail!("WRITE result missing"),
-        }
+        anyhow::bail!("WRITE failed: {} (server requires OPEN but file handle parent is unknown)", Nfs4Status::from_u32(last_status))
     }
 }
+
+/// `stable_how4` values (RFC 7530 sec. 16.36.1).
+const UNSTABLE4: u32 = 0;
+const FILE_SYNC4: u32 = 2;
 
 // --- Free helper functions for credential-escalated operations ---------------
 
@@ -605,29 +669,9 @@ async fn list_dir_v4(base_client: &Nfs4Client, rd_client: &Nfs4Client, dir: &She
     Ok(result)
 }
 
-async fn read_all_v4(client: &Nfs4Client, fh: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    let mut offset = 0u64;
-    loop {
-        let (data, eof) = client.read_chunk(fh, offset, super::ops::CHUNK_SIZE).await.map_err(v4_err)?;
-        if data.is_empty() {
-            break;
-        }
-        buf.extend_from_slice(&data);
-        if buf.len() as u64 > super::ops::READ_ALL_MAX {
-            anyhow::bail!("file exceeds 256 MiB read cap");
-        }
-        offset += data.len() as u64;
-        if eof {
-            break;
-        }
-    }
-    Ok(buf)
-}
-
-async fn read_chunk_v4(client: &Nfs4Client, fh: &[u8], offset: u64, count: u32) -> anyhow::Result<Vec<u8>> {
-    let (data, _eof) = client.read_chunk(fh, offset, count).await.map_err(v4_err)?;
-    Ok(data)
+async fn read_at_v4(client: &Nfs4Client, fh: &[u8], offset: u64, count: u32) -> anyhow::Result<ReadReply> {
+    let (data, eof) = client.read_chunk(fh, offset, count).await.map_err(v4_err)?;
+    Ok(ReadReply { data, eof })
 }
 
 // --- Remote completion for tab-complete in the v4 shell ----------------------

@@ -8,13 +8,17 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use crate::wire::OpenOwner4;
+use crate::wire::{CompoundRes, OpenOwner4};
 
 /// NFSv4.0 client session state.
 ///
 /// Holds the clientid negotiated via SETCLIENTID + SETCLIENTID_CONFIRM,
 /// the confirm verifier, and the lease duration reported by the server.
-/// Thread-safe: the seqid counter is atomic.
+///
+/// The open-owner seqid counter is atomic, but that does not make concurrent
+/// open-owner operations safe: the server processes them strictly in seqid
+/// order (RFC 7530 sec. 9.1.7), so a caller must issue them one at a time and
+/// record each outcome before sending the next.
 #[derive(Debug)]
 pub struct Nfs4Session {
     /// Server-assigned client ID.
@@ -79,15 +83,36 @@ impl Nfs4Session {
 
     /// Get the next seqid and advance the counter.
     ///
-    /// Each OPEN, CLOSE, OPEN_CONFIRM, OPEN_DOWNGRADE must use a fresh seqid
-    /// (RFC 7530 S9.1.7). The counter starts at 1 because 0 is reserved.
+    /// Advances unconditionally, which is wrong whenever the server did not:
+    /// when the operation never ran, when the call failed, or when it returned
+    /// one of the errors RFC 7530 sec. 9.1.7 exempts. The client is then one
+    /// ahead and every later open-owner operation fails with
+    /// `NFS4ERR_BAD_SEQID`.
+    #[deprecated(note = "advances even when the server does not; send current_seqid() and call record_outcome() with the reply")]
     pub fn next_seqid(&self) -> u32 {
         self.seqid.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Current seqid without advancing (for diagnostics).
+    /// The seqid to send on the next open-owner operation (OPEN, OPEN_CONFIRM,
+    /// OPEN_DOWNGRADE, CLOSE, or a LOCK that creates a lock-owner).
+    ///
+    /// Reading it does not advance it. Once the reply is in, pass it to
+    /// [`record_outcome`](Self::record_outcome).
     pub fn current_seqid(&self) -> u32 {
         self.seqid.load(Ordering::Relaxed)
+    }
+
+    /// Advance the open-owner sequence if the operation at `op_index` of `res`
+    /// consumed the seqid it was sent with (see
+    /// [`CompoundRes::seqid_consumed`]).
+    ///
+    /// When the COMPOUND itself fails to return, call nothing: the server
+    /// most likely never saw the request, and if it did, re-sending the same
+    /// seqid gets its cached reply rather than an error.
+    pub fn record_outcome(&self, res: &CompoundRes, op_index: usize) {
+        if res.seqid_consumed(op_index) {
+            _ = self.seqid.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     // --- Crash recovery helpers ---
@@ -111,9 +136,31 @@ impl Nfs4Session {
 }
 
 #[cfg(test)]
-#[expect(unused_results, reason = "tests call next_seqid() for its side effect")]
 mod tests {
     use super::*;
+    use crate::wire::{ResOp, ResOpData};
+
+    /// A COMPOUND reply of PUTFH then one seqid-bearing op with `status`.
+    fn reply(op_status: Option<u32>) -> CompoundRes {
+        let mut results = vec![ResOp { op_code: 22, status: 0, data: ResOpData::None }];
+        if let Some(status) = op_status {
+            results.push(ResOp { op_code: 18, status, data: ResOpData::None });
+        }
+        CompoundRes { status: op_status.unwrap_or(70), tag: String::new(), results }
+    }
+
+    #[test]
+    fn record_outcome_advances_only_when_the_server_did() {
+        let sess = Nfs4Session::new(1, [0; 8], b"test");
+        sess.record_outcome(&reply(Some(0)), 1);
+        assert_eq!(sess.current_seqid(), 2, "OK advances");
+        sess.record_outcome(&reply(Some(13)), 1);
+        assert_eq!(sess.current_seqid(), 3, "an ordinary error advances");
+        sess.record_outcome(&reply(Some(10026)), 1);
+        assert_eq!(sess.current_seqid(), 3, "NFS4ERR_BAD_SEQID does not");
+        sess.record_outcome(&reply(None), 1);
+        assert_eq!(sess.current_seqid(), 3, "an op that never ran does not");
+    }
 
     #[test]
     fn new_session_has_correct_initial_state() {
@@ -130,6 +177,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated, reason = "the deprecated counter is still covered")]
     fn next_seqid_increments() {
         let sess = Nfs4Session::new(1, [0; 8], b"test");
 
@@ -162,8 +210,8 @@ mod tests {
         let mut sess = Nfs4Session::new(42, [0xBB; 8], b"test");
         sess.mark_confirmed();
         // Advance the seqid a few times.
-        sess.next_seqid();
-        sess.next_seqid();
+        sess.record_outcome(&reply(Some(0)), 1);
+        sess.record_outcome(&reply(Some(0)), 1);
         assert!(sess.is_confirmed());
         assert_eq!(sess.current_seqid(), 3);
 

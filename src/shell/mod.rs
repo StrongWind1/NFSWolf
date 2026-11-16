@@ -6,6 +6,7 @@
 
 pub(crate) mod complete;
 pub(crate) mod ops;
+pub(crate) mod transfer;
 pub(crate) mod v2;
 pub(crate) mod v3;
 pub(crate) mod v4;
@@ -31,11 +32,10 @@ use crate::util::utmp::{LastlogRecord, UTMP_RECORD_SIZE, UtType, UtmpRecord, par
 /// Maximum bytes to read in a single `cat` command.
 const CAT_MAX_BYTES: u32 = 1_048_576; // 1 MiB
 
-/// Maximum bytes per NFS READ/WRITE chunk.
-use crate::shell::ops::{CHUNK_SIZE, READ_ALL_MAX};
+use crate::shell::ops::CHUNK_SIZE;
 
-/// All commands available in the NFSv3 interactive shell (for Tab completion of the first token).
-/// v3/v4 command list (sorted for binary search / tab completion).
+/// Commands of the NFSv3 and NFSv4 shells, offered by Tab completion of the
+/// first token. Order is irrelevant: completion filters the whole list.
 pub(crate) const V3V4_SHELL_COMMANDS: &[&str] = &[
     "append",
     "cat",
@@ -565,7 +565,7 @@ impl<O: ShellOps> NfsShell<O> {
 
         match info.file_type {
             ShellFileType::Regular => {
-                grep_file(&self.ops, &fh, target, pattern, case_insensitive, show_line_numbers).await;
+                grep_file(&self.ops, &fh, info.size, target, pattern, case_insensitive, show_line_numbers).await;
             },
             ShellFileType::Directory => {
                 let base = if target == "." { self.cwd_path.clone() } else { target.to_owned() };
@@ -588,14 +588,14 @@ impl<O: ShellOps> NfsShell<O> {
             eprintln!("{}", "usage: cat <file>".yellow());
             return;
         }
-        let (fh, _) = match self.lookup_path(name).await {
+        let (fh, info) = match self.lookup_path(name).await {
             Ok(pair) => pair,
             Err(e) => {
                 eprintln!("{}", format!("cat: {name}: {e}").red());
                 return;
             },
         };
-        match self.ops.read_file(&fh).await {
+        match self.ops.read_file(&fh, info.size).await {
             Ok(data) => {
                 let mut stdout = std::io::stdout();
                 let len = data.len().min(CAT_MAX_BYTES as usize);
@@ -673,7 +673,7 @@ impl<O: ShellOps> NfsShell<O> {
 
         if recursive && info.file_type == ShellFileType::Directory {
             let mp = MultiProgress::new();
-            match download_tree(&self.ops, &fh, dest, &mp).await {
+            match download_tree(&self.ops, &fh, dest, &mp, &transfer::tree_budget()).await {
                 Ok(bytes) => println!("{}", format!("saved {bytes} bytes -> {dest}/").green()),
                 Err(e) => eprintln!("{}", format!("get -r: {e}").red()),
             }
@@ -685,7 +685,7 @@ impl<O: ShellOps> NfsShell<O> {
             } else {
                 None
             };
-            match download_file(&self.ops, &fh, dest, dl_pb.as_ref()).await {
+            match download_file(&self.ops, &fh, info.size, dest, dl_pb.as_ref(), &transfer::single_file_budget()).await {
                 Ok((bytes, hash)) => {
                     println!("{}", format!("saved {bytes} bytes -> {dest}  sha256:{hash}").green());
                     if let Some(ref expected) = verify_hash {
@@ -744,7 +744,7 @@ impl<O: ShellOps> NfsShell<O> {
                 },
             };
             let mp = MultiProgress::new();
-            match upload_tree(&self.ops, local_path, &dir_fh, &mp).await {
+            match upload_tree(&self.ops, local_path, &dir_fh, &mp, &transfer::tree_budget()).await {
                 Ok(bytes) => println!("{}", format!("put -r: {bytes} bytes -> {remote}/").green()),
                 Err(e) => eprintln!("{}", format!("put -r: {e}").red()),
             }
@@ -786,7 +786,7 @@ impl<O: ShellOps> NfsShell<O> {
             },
         };
 
-        match upload_data(&self.ops, &file_fh, &data, 0).await {
+        match upload_data(&self.ops, &file_fh, &data, 0, &transfer::single_file_budget()).await {
             Ok(n) => println!("{}", format!("put: {n} bytes -> {remote}").green()),
             Err(e) => eprintln!("{}", format!("put: write error: {e}").red()),
         }
@@ -812,7 +812,7 @@ impl<O: ShellOps> NfsShell<O> {
         };
 
         let data = if data_str.starts_with("0x") || data_str.starts_with("0X") {
-            match decode_hex(&data_str[2..]) {
+            match nfs_v3::decode_hex(data_str) {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     eprintln!("{}", format!("append: bad hex: {e}").red());
@@ -828,7 +828,7 @@ impl<O: ShellOps> NfsShell<O> {
             return;
         }
 
-        match upload_data(&self.ops, &fh, &data, info.size).await {
+        match upload_data(&self.ops, &fh, &data, info.size, &transfer::single_file_budget()).await {
             Ok(n) => println!("{}", format!("appended {n} bytes at offset {} (new size {})", info.size, info.size + n).green()),
             Err(e) => eprintln!("{}", format!("append: write error: {e}").red()),
         }
@@ -947,7 +947,7 @@ impl<O: ShellOps> NfsShell<O> {
             },
         };
 
-        let data = match self.ops.read_file(&src_fh).await {
+        let data = match Box::pin(transfer::read_whole(&self.ops, &src_fh, src_info.size)).await {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("{}", format!("cp: read {src}: {e}").red());
@@ -971,7 +971,7 @@ impl<O: ShellOps> NfsShell<O> {
             },
         };
 
-        match upload_data(&self.ops, &dst_fh, &data, 0).await {
+        match upload_data(&self.ops, &dst_fh, &data, 0, &transfer::single_file_budget()).await {
             Ok(n) => println!("{}", format!("copied {n} bytes {src} -> {dst}").green()),
             Err(e) => eprintln!("{}", format!("cp: write {dst}: {e}").red()),
         }
@@ -1364,7 +1364,7 @@ impl<O: ShellOps> NfsShell<O> {
             println!("{}", format!("{path} is empty -- no records to show").yellow());
             return;
         }
-        let bytes = match self.ops.read_file(&fh).await {
+        let bytes = match self.ops.read_file(&fh, info.size).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("{}", format!("{label}: read {path}: {e}").red());
@@ -1407,7 +1407,7 @@ impl<O: ShellOps> NfsShell<O> {
             self.lastlog_hint_lastlog2().await;
             return;
         }
-        let bytes = match self.ops.read_file(&fh).await {
+        let bytes = match self.ops.read_file(&fh, info.size).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("{}", format!("lastlog: read {lastlog_path}: {e}").red());
@@ -1419,7 +1419,7 @@ impl<O: ShellOps> NfsShell<O> {
         // Map UIDs to usernames via /etc/passwd if reachable; missing entries
         // render as "uid=N" rather than failing the whole command.
         let uid_to_user: Vec<(u32, String)> = match self.lookup_path("/etc/passwd").await {
-            Ok((pfh, _)) => match self.ops.read_file(&pfh).await {
+            Ok((pfh, pinfo)) => match self.ops.read_file(&pfh, pinfo.size).await {
                 Ok(b) => parse_passwd(&b),
                 Err(e) => {
                     eprintln!("{}", format!("lastlog: /etc/passwd unreadable ({e}); rendering UIDs numerically").yellow());
@@ -1834,112 +1834,114 @@ impl<O: ShellOps> NfsShell<O> {
 /// or buggy server can return endless non-EOF chunks, so `download_file` must bound
 /// its buffer instead of growing until OOM.
 ///
-/// Download `fh` to a local file path via ShellOps, reading in chunks.
+/// Download `fh` to a local file path via ShellOps.
+///
+/// `size_hint` is the size GETATTR reported; it sets how far reads are issued
+/// ahead in parallel (see [`transfer::download`]).
 ///
 /// Returns `(bytes_written, sha256_hex)`.  The SHA-256 is computed over the
 /// full downloaded content and printed alongside the byte count so the operator
 /// has an instant integrity reference for report evidence chains.
-async fn download_file<O: ShellOps>(ops: &O, fh: &ShellHandle, dest_path: &str, pb: Option<&ProgressBar>) -> anyhow::Result<(u64, String)> {
-    let mut file = std::fs::File::create(dest_path).map_err(|e| anyhow::anyhow!("create {dest_path}: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut offset = 0u64;
-    loop {
-        let data = ops.read_chunk(fh, offset, CHUNK_SIZE).await?;
-        if data.is_empty() {
-            break;
-        }
-        file.write_all(&data).map_err(|e| anyhow::anyhow!("write: {e}"))?;
-        hasher.update(&data);
-        offset = offset.saturating_add(data.len() as u64);
-        if let Some(pb) = pb {
-            pb.set_position(offset);
-        }
-        if offset > READ_ALL_MAX {
-            anyhow::bail!("download aborted at {offset} bytes: exceeds {READ_ALL_MAX}-byte cap (untrusted server returning endless non-EOF data)");
-        }
-    }
+async fn download_file<O: ShellOps>(ops: &O, fh: &ShellHandle, size_hint: u64, dest_path: &str, pb: Option<&ProgressBar>, budget: &transfer::Budget) -> anyhow::Result<(u64, String)> {
+    let file = std::fs::File::create(dest_path).map_err(|e| anyhow::anyhow!("create {dest_path}: {e}"))?;
+    // Hash and write on a blocking thread so both overlap the READs in flight.
+    let (tx, rx) = tokio::sync::mpsc::channel(transfer::SINK_QUEUE);
+    let writer = tokio::task::spawn_blocking(move || write_and_hash(file, rx));
+    // Boxed: the transfer's state is large, and every shell command that
+    // downloads would otherwise carry it inline.
+    let fetched = Box::pin(transfer::download(ops, fh, size_hint, &tx, pb, budget)).await;
+    drop(tx);
+    // A local write error closes the channel and fails the download with a
+    // vaguer message, so report the writer's error first.
+    let hash = writer.await.map_err(|e| anyhow::anyhow!("local writer: {e}"))??;
+    let total = fetched?;
     if let Some(pb) = pb {
         pb.finish_and_clear();
     }
-    let hash = hasher.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
+    Ok((total, hash))
+}
+
+/// Drain `rx` into `file`, returning the SHA-256 of everything written.
+fn write_and_hash(file: std::fs::File, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) -> anyhow::Result<String> {
+    let mut file = std::io::BufWriter::new(file);
+    let mut hasher = Sha256::new();
+    while let Some(data) = rx.blocking_recv() {
+        hasher.update(&data);
+        file.write_all(&data).map_err(|e| anyhow::anyhow!("write: {e}"))?;
+    }
+    file.flush().map_err(|e| anyhow::anyhow!("write: {e}"))?;
+    Ok(hasher.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
         use std::fmt::Write as _;
         let _ = write!(s, "{b:02x}");
         s
-    });
-    Ok((offset, hash))
+    }))
 }
 
-/// Write `data` to `fh` in CHUNK_SIZE slices via ShellOps.
-///
-/// Driven by a byte cursor into `data`: NFSv3 WRITE may legally write fewer
-/// bytes than requested (RFC 1813 sec. 3.3.7), so we advance only by the
-/// server-acknowledged count, resending the unwritten tail from the exact byte.
-async fn upload_data<O: ShellOps>(ops: &O, fh: &ShellHandle, data: &[u8], start_offset: u64) -> anyhow::Result<u64> {
-    let chunk_size = usize::try_from(CHUNK_SIZE).unwrap_or(65536);
-    let mut data_pos = 0usize;
-    let mut file_offset = start_offset;
-    while data_pos < data.len() {
-        let end = data_pos.saturating_add(chunk_size).min(data.len());
-        let Some(slice) = data.get(data_pos..end) else { break };
-        let written = ops.write_chunk(fh, file_offset, slice).await?;
-        let adv = usize::try_from(written).unwrap_or(0).min(slice.len());
-        if adv == 0 {
-            anyhow::bail!("WRITE at {file_offset}: server acknowledged 0 bytes (no progress)");
-        }
-        data_pos = data_pos.saturating_add(adv);
-        file_offset = file_offset.saturating_add(adv as u64);
-    }
-    Ok(data_pos as u64)
+/// Write `data` to `fh` at `start_offset` via ShellOps; see [`transfer::upload`].
+async fn upload_data<O: ShellOps>(ops: &O, fh: &ShellHandle, data: &[u8], start_offset: u64, budget: &transfer::Budget) -> anyhow::Result<u64> {
+    // Boxed for the same reason as the download in `download_file`.
+    Box::pin(transfer::upload(ops, fh, data, start_offset, None, budget)).await
 }
 
 /// Recursively download a remote directory tree to a local path.
 ///
-/// Creates `local_root` if it does not exist. Descends into subdirectories.
-/// Shows a single spinner progress bar shared across the entire tree walk.
-/// Returns total bytes downloaded.
-fn download_tree<'a, O: ShellOps>(ops: &'a O, dir_fh: &'a ShellHandle, local_root: &'a str, mp: &'a MultiProgress) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + 'a>> {
+/// Creates `local_root` if it does not exist. The files of each directory are
+/// fetched [`transfer::TREE_PARALLEL_FILES`] at a time, their READs sharing
+/// `budget`; subdirectories follow one after another. Shows a single spinner
+/// per directory. Returns total bytes downloaded.
+fn download_tree<'a, O: ShellOps>(ops: &'a O, dir_fh: &'a ShellHandle, local_root: &'a str, mp: &'a MultiProgress, budget: &'a transfer::Budget) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + 'a>> {
     Box::pin(async move {
         std::fs::create_dir_all(local_root).map_err(|e| anyhow::anyhow!("mkdir {local_root}: {e}"))?;
 
         let bar = mp.add(ProgressBar::new_spinner());
         bar.set_style(ProgressStyle::default_spinner().template("{spinner} {msg}").unwrap_or_else(|_| ProgressStyle::default_spinner()));
         bar.set_message(local_root.to_owned());
+        let bar = &bar;
 
         let entries = ops.list_dir(dir_fh).await?;
-        let mut total = 0u64;
-
+        let mut subdirs = Vec::new();
+        let mut files = Vec::new();
         for entry in &entries {
             if !is_safe_local_name(&entry.name) {
                 tracing::warn!("skipping entry with unsafe server-supplied name {:?} (path-traversal guard)", entry.name);
                 continue;
             }
             let local_entry = format!("{local_root}/{}", entry.name);
-            let is_dir = entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory);
-
-            if is_dir {
+            if entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Directory) {
                 if let Some(ref fh) = entry.handle {
-                    total += download_tree(ops, fh, &local_entry, mp).await?;
+                    subdirs.push((fh, local_entry));
                 }
             } else {
-                let fh = match &entry.handle {
-                    Some(fh) => fh.clone(),
-                    None => match ops.lookup(dir_fh, &entry.name).await {
-                        Ok((fh, _)) => fh,
-                        Err(e) => {
-                            tracing::warn!("skip {}: {e}", entry.name);
-                            continue;
+                files.push(async move {
+                    let fh = match &entry.handle {
+                        Some(fh) => fh.clone(),
+                        None => match ops.lookup(dir_fh, &entry.name).await {
+                            Ok((fh, _)) => fh,
+                            Err(e) => {
+                                tracing::warn!("skip {}: {e}", entry.name);
+                                return 0;
+                            },
                         },
-                    },
-                };
-                bar.set_message(format!("{local_root}/{}", entry.name));
-                match download_file(ops, &fh, &local_entry, None).await {
-                    Ok((bytes, _hash)) => {
-                        total += bytes;
-                        bar.inc(1);
-                    },
-                    Err(e) => tracing::warn!("download {}: {e}", entry.name),
-                }
+                    };
+                    let size = entry.info.as_ref().map_or(0, |a| a.size);
+                    match download_file(ops, &fh, size, &local_entry, None, budget).await {
+                        Ok((bytes, _hash)) => {
+                            bar.set_message(local_entry);
+                            bar.inc(1);
+                            bytes
+                        },
+                        Err(e) => {
+                            tracing::warn!("download {}: {e}", entry.name);
+                            0
+                        },
+                    }
+                });
             }
+        }
+
+        let mut total: u64 = transfer::run_concurrently(transfer::TREE_PARALLEL_FILES, files).await.into_iter().sum();
+        for (fh, local_entry) in subdirs {
+            total += download_tree(ops, fh, &local_entry, mp, budget).await?;
         }
 
         bar.finish_and_clear();
@@ -1948,15 +1950,20 @@ fn download_tree<'a, O: ShellOps>(ops: &'a O, dir_fh: &'a ShellHandle, local_roo
 }
 
 /// Recursively upload a local directory tree to a remote directory via ShellOps.
-fn upload_tree<'a, O: ShellOps>(ops: &'a O, local_dir: &'a Path, remote_fh: &'a ShellHandle, mp: &'a MultiProgress) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + 'a>> {
+///
+/// The files of each directory are created and written
+/// [`transfer::TREE_PARALLEL_FILES`] at a time, their WRITEs sharing `budget`;
+/// subdirectories follow one after another.
+fn upload_tree<'a, O: ShellOps>(ops: &'a O, local_dir: &'a Path, remote_fh: &'a ShellHandle, mp: &'a MultiProgress, budget: &'a transfer::Budget) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + 'a>> {
     Box::pin(async move {
         let bar = mp.add(ProgressBar::new_spinner());
         bar.set_style(ProgressStyle::default_spinner().template("{spinner} {msg}").unwrap_or_else(|_| ProgressStyle::default_spinner()));
         bar.set_message(local_dir.display().to_string());
+        let bar = &bar;
 
-        let mut total = 0u64;
         let read_dir = std::fs::read_dir(local_dir).map_err(|e| anyhow::anyhow!("read_dir {}: {e}", local_dir.display()))?;
-
+        let mut subdirs = Vec::new();
+        let mut files = Vec::new();
         for entry_result in read_dir {
             let entry = match entry_result {
                 Ok(e) => e,
@@ -1965,25 +1972,14 @@ fn upload_tree<'a, O: ShellOps>(ops: &'a O, local_dir: &'a Path, remote_fh: &'a 
                     continue;
                 },
             };
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
             let local_path = entry.path();
-            bar.set_message(name_str.as_ref().to_owned());
-
             if local_path.is_dir() {
-                #[cfg(unix)]
-                let dir_mode = entry.metadata().map_or(0o755, |m| m.permissions().mode() & 0o7777);
-                #[cfg(not(unix))]
-                let dir_mode = 0o755;
-                let sub_fh = match ops.mkdir(remote_fh, name_str.as_ref(), dir_mode).await {
-                    Ok(fh) => fh,
-                    Err(e) => {
-                        tracing::warn!("mkdir {name_str}: {e}");
-                        continue;
-                    },
-                };
-                total += upload_tree(ops, &local_path, &sub_fh, mp).await?;
-            } else {
+                subdirs.push(entry);
+                continue;
+            }
+            files.push(async move {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
                 #[cfg(unix)]
                 let file_mode = entry.metadata().map_or(0o644, |m| m.permissions().mode() & 0o7777);
                 #[cfg(not(unix))]
@@ -1992,24 +1988,46 @@ fn upload_tree<'a, O: ShellOps>(ops: &'a O, local_dir: &'a Path, remote_fh: &'a 
                     Ok(d) => d,
                     Err(e) => {
                         tracing::warn!("read {}: {e}", local_path.display());
-                        continue;
+                        return 0;
                     },
                 };
                 let file_fh = match ops.create_file(remote_fh, name_str.as_ref(), file_mode).await {
                     Ok(fh) => fh,
                     Err(e) => {
                         tracing::warn!("create {name_str}: {e}");
-                        continue;
+                        return 0;
                     },
                 };
-                match upload_data(ops, &file_fh, &data, 0).await {
+                match upload_data(ops, &file_fh, &data, 0, budget).await {
                     Ok(n) => {
-                        total += n;
+                        bar.set_message(name_str.into_owned());
                         bar.inc(1);
+                        n
                     },
-                    Err(e) => tracing::warn!("write {name_str}: {e}"),
+                    Err(e) => {
+                        tracing::warn!("write {name_str}: {e}");
+                        0
+                    },
                 }
-            }
+            });
+        }
+
+        let mut total: u64 = transfer::run_concurrently(transfer::TREE_PARALLEL_FILES, files).await.into_iter().sum();
+        for entry in subdirs {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            #[cfg(unix)]
+            let dir_mode = entry.metadata().map_or(0o755, |m| m.permissions().mode() & 0o7777);
+            #[cfg(not(unix))]
+            let dir_mode = 0o755;
+            let sub_fh = match ops.mkdir(remote_fh, name_str.as_ref(), dir_mode).await {
+                Ok(fh) => fh,
+                Err(e) => {
+                    tracing::warn!("mkdir {name_str}: {e}");
+                    continue;
+                },
+            };
+            total += upload_tree(ops, &entry.path(), &sub_fh, mp, budget).await?;
         }
 
         bar.finish_and_clear();
@@ -2118,21 +2136,14 @@ fn parse_echo_escapes(s: &str) -> Vec<u8> {
     out
 }
 
-/// Decode a hex string (without 0x prefix) into bytes.
-fn decode_hex(hex: &str) -> anyhow::Result<Vec<u8>> {
-    let hex = hex.trim();
-    anyhow::ensure!(hex.len().is_multiple_of(2), "hex string must have even length");
-    (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| anyhow::anyhow!("invalid hex at offset {i}: {e}"))).collect()
-}
-
 /// Check whether data looks like a binary file (contains null bytes in the first 512 bytes).
 fn is_binary(data: &[u8]) -> bool {
     data.get(..data.len().min(512)).is_some_and(|prefix| prefix.contains(&0))
 }
 
 /// Search one file's contents for a pattern, printing matching lines.
-async fn grep_file<O: ShellOps>(ops: &O, fh: &ShellHandle, path: &str, pattern: &str, case_insensitive: bool, show_line_numbers: bool) {
-    let Ok(data) = ops.read_file(fh).await else { return };
+async fn grep_file<O: ShellOps>(ops: &O, fh: &ShellHandle, size_hint: u64, path: &str, pattern: &str, case_insensitive: bool, show_line_numbers: bool) {
+    let Ok(data) = ops.read_file(fh, size_hint).await else { return };
     if is_binary(&data) {
         return;
     }
@@ -2163,7 +2174,8 @@ fn grep_walk<'a, O: ShellOps>(ops: &'a O, handle: ShellHandle, base_path: String
             let is_file = entry.info.as_ref().is_some_and(|a| a.file_type == ShellFileType::Regular);
             if is_file && let Some(ref fh) = entry.handle {
                 pb.inc(1);
-                grep_file(ops, fh, &full_path, pattern, case_insensitive, show_line_numbers).await;
+                let size = entry.info.as_ref().map_or(0, |a| a.size);
+                grep_file(ops, fh, size, &full_path, pattern, case_insensitive, show_line_numbers).await;
             }
             if is_dir
                 && recursive

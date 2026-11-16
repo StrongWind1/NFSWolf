@@ -1171,6 +1171,13 @@ impl AttrRequest {
         Self { words: vec![1 << 24, 0] }
     }
 
+    /// Request the server's transfer limits: maxread (attr 30) and maxwrite
+    /// (attr 31), word 0 bits 30 and 31 (RFC 7530 S5.8.2.16-17).
+    #[must_use]
+    pub fn transfer_limits() -> Self {
+        Self { words: vec![(1 << 30) | (1 << 31), 0] }
+    }
+
     /// Request the standard set of file attributes for shell display.
     ///
     /// Includes type, change, size, fsid, fileid (word 0) and mode,
@@ -1182,9 +1189,9 @@ impl AttrRequest {
         let w0: u32 = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 8) | (1 << 20);
         // Word 1: mode(bit 1, attr 33) | numlinks(bit 3, attr 35) |
         //   owner(bit 4, attr 36) | owner_group(bit 5, attr 37) |
-        //   time_access(bit 15, attr 47) | time_metadata(bit 19, attr 51) |
-        //   time_modify(bit 20, attr 52)
-        let w1: u32 = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 15) | (1 << 19) | (1 << 20);
+        //   time_access(bit 15, attr 47) | time_metadata(bit 20, attr 52) |
+        //   time_modify(bit 21, attr 53)
+        let w1: u32 = (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 15) | (1 << 20) | (1 << 21);
         Self { words: vec![w0, w1] }
     }
 
@@ -2311,10 +2318,19 @@ pub struct Fattr4Decoded {
     pub lease_time: Option<u32>,
     /// NFSv4 ACL entries (attr 12, word 0 bit 12, RFC 7530 S5.11).
     pub acl: Option<Vec<NfsAce4>>,
+    /// File handle (attr 19, word 0 bit 19, RFC 7530 S5.8.1.20).
+    ///
+    /// Requested per entry in READDIR so a listing carries each entry's handle
+    /// and no LOOKUP is needed to reach it.
+    pub filehandle: Option<Vec<u8>>,
     /// File ID / inode number (attr 20, word 0 bit 20, RFC 7530 S5.8.1.21).
     pub fileid: Option<u64>,
     /// Filesystem locations for referral resolution (attr 24, word 0 bit 24, RFC 7530 S5.8.1.25).
     pub fs_locations: Option<Fs4Locations>,
+    /// Largest READ the server will honour, in bytes (attr 30, word 0 bit 30, RFC 7530 S5.8.2.16).
+    pub maxread: Option<u64>,
+    /// Largest WRITE the server will honour, in bytes (attr 31, word 0 bit 31, RFC 7530 S5.8.2.17).
+    pub maxwrite: Option<u64>,
     /// POSIX mode bits (attr 33, word 1 bit 1, RFC 7530 S5.8.2.8).
     pub mode: Option<u32>,
     /// Hard link count (attr 35, word 1 bit 3, RFC 7530 S5.8.2.10).
@@ -2349,8 +2365,11 @@ impl Fattr4Decoded {
             && self.fsid.is_none()
             && self.lease_time.is_none()
             && self.acl.is_none()
+            && self.filehandle.is_none()
             && self.fileid.is_none()
             && self.fs_locations.is_none()
+            && self.maxread.is_none()
+            && self.maxwrite.is_none()
             && self.mode.is_none()
             && self.numlinks.is_none()
             && self.owner.is_none()
@@ -2556,11 +2575,7 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
                     return out;
                 }
             },
-            19 => {
-                // filehandle: opaque<> -- variable length, skip past it.
-                // We only need the offset advancement; the data is discarded.
-                let _fh = read_opaque!();
-            },
+            19 => out.filehandle = Some(read_opaque!()),
             20 => out.fileid = Some(read_u64!()),
             21..=23 => {
                 // files_avail(21), files_free(22), files_total(23): u64 each
@@ -2617,87 +2632,24 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
                     return out;
                 }
             },
-            30 | 31 => {
-                // maxread(30), maxwrite(31): u64
-                off += 8;
-                if off > attrvals.len() {
-                    return out;
-                }
-            },
+            30 => out.maxread = Some(read_u64!()),
+            31 => out.maxwrite = Some(read_u64!()),
             _ => unreachable!(),
         }
     }
 
-    // Word 1 known bits:
-    //   0 (mimetype, attr 32): string -- variable
-    //   1 (mode, attr 33): u32
-    //   2 (no_trunc, attr 34): bool(u32)
-    //   3 (numlinks, attr 35): u32
-    //   4 (owner, attr 36): string
-    //   5 (owner_group, attr 37): string
-    //   6 (quota_avail_hard, attr 38): u64
-    //   7 (quota_avail_soft, attr 39): u64
-    //   8 (quota_used, attr 40): u64
-    //   9 (rawdev, attr 41): specdata4 = u32+u32 = 8 bytes
-    //  10 (space_avail, attr 42): u64
-    //  11 (space_free, attr 43): u64
-    //  12 (space_total, attr 44): u64
-    //  13 (space_used, attr 45): u64
-    //  14 (system, attr 46): bool(u32)
-    //  15 (time_access, attr 47): nfstime4 = i64+u32 = 12 bytes
-    //  16 (rdattr_error, attr 48): u32 -- wait, that's not right.
-    //      Actually: attr 48 = time_backup, attr 49 = time_create.
-    //      Let me re-check the RFC 7530 attribute numbering.
-    //
-    // Per RFC 7530 Table 4 (S5.4):
-    //   32 = mimetype         (string)
-    //   33 = mode             (u32)
-    //   34 = no_trunc         (bool/u32)
-    //   35 = numlinks         (u32)
-    //   36 = owner            (string)
-    //   37 = owner_group      (string)
-    //   38 = quota_avail_hard (u64)
-    //   39 = quota_avail_soft (u64)
-    //   40 = quota_used       (u64)
-    //   41 = rawdev           (specdata4 = 2*u32 = 8 bytes)
-    //   42 = space_avail      (u64)
-    //   43 = space_free       (u64)
-    //   44 = space_total      (u64)
-    //   45 = space_used       (u64)
-    //   46 = system           (bool/u32)
-    //   47 = time_access      (nfstime4 = 12 bytes)
-    //   48 = time_backup      (nfstime4 = 12 bytes)
-    //   49 = time_create      (nfstime4 = 12 bytes)
-    //   50 = time_delta       (nfstime4 = 12 bytes)
-    //   51 = time_metadata    (nfstime4 = 12 bytes)  -- NOT 52!
-    //   52 = time_modify      (nfstime4 = 12 bytes)  -- NOT 53!
-    //   53 = mounted_on_fileid (u64)
-    //
-    // Wait -- the task description says time_metadata=52, time_modify=53. Let me
-    // double-check RFC 7530.  From RFC 7530 Table 4:
-    //   51 = time_metadata (word 1 bit 19)
-    //   52 = time_modify   (word 1 bit 20)
-    //   53 = mounted_on_fileid (word 1 bit 21)
-    //
-    // Actually, let me recount: 32 + bit_position = attr_number. So:
-    //   word 1, bit 0  -> attr 32 (mimetype)
-    //   word 1, bit 1  -> attr 33 (mode)
-    //   ...
-    //   word 1, bit 15 -> attr 47 (time_access)
-    //   word 1, bit 16 -> attr 48 (time_backup)
-    //   word 1, bit 17 -> attr 49 (time_create)
-    //   word 1, bit 18 -> attr 50 (time_delta)
-    //   word 1, bit 19 -> attr 51 (time_metadata)
-    //   word 1, bit 20 -> attr 52 (time_modify)
-    //   word 1, bit 21 -> attr 53 (mounted_on_fileid)
-    //
-    // The task said:
-    //   Bit 15 (time_access, attr 47) -- correct
-    //   Bit 16 (rdattr_error, attr 48) -- WRONG, rdattr_error is attr 11 (word 0 bit 11)
-    //   Bit 20 (time_metadata, attr 52) -- wrong, that's time_modify
-    //   Bit 21 (time_modify, attr 53) -- wrong, that's mounted_on_fileid
-    //
-    // I'll use the correct RFC 7530 numbering.
+    // Word 1: bit N is attribute 32 + N (RFC 7530 sec. 5.6, Tables 3 and 4).
+    //   0 mimetype(32) string      1 mode(33) u32           2 no_trunc(34) bool
+    //   3 numlinks(35) u32         4 owner(36) string       5 owner_group(37) string
+    //   6 quota_avail_hard(38) u64 7 quota_avail_soft(39)   8 quota_used(40) u64
+    //   9 rawdev(41) specdata4    10 space_avail(42) u64   11 space_free(43) u64
+    //  12 space_total(44) u64     13 space_used(45) u64    14 system(46) bool
+    //  15 time_access(47)         16 time_access_set(48)   17 time_backup(49)
+    //  18 time_create(50)         19 time_delta(51)        20 time_metadata(52)
+    //  21 time_modify(53)         22 time_modify_set(54)   23 mounted_on_fileid(55) u64
+    // Times are nfstime4 (12 bytes). The two *_set attributes are settime4, a
+    // union, and write-only: a server should never return them, but they are
+    // sized correctly in case one does.
     let w1 = bitmap_words.get(1).copied().unwrap_or(0);
     for bit in 0..32u32 {
         if w1 & (1 << bit) == 0 {
@@ -2751,17 +2703,28 @@ fn decode_fattr4(bitmap_words: &[u32], attrvals: &[u8]) -> Fattr4Decoded {
                 }
             },
             15 => out.time_access = Some(read_nfstime4!()),
-            16..=18 => {
-                // time_backup(48), time_create(49), time_delta(50): nfstime4 = 12 bytes
+            16 | 22 => {
+                // time_access_set (48), time_modify_set (54): settime4 is a
+                // u32 discriminant, then an nfstime4 only for
+                // SET_TO_CLIENT_TIME4 (1).
+                if read_u32!() == 1 {
+                    off += 12;
+                    if off > attrvals.len() {
+                        return out;
+                    }
+                }
+            },
+            17..=19 => {
+                // time_backup (49), time_create (50), time_delta (51): nfstime4 = 12 bytes
                 off += 12;
                 if off > attrvals.len() {
                     return out;
                 }
             },
-            19 => out.time_metadata = Some(read_nfstime4!()),
-            20 => out.time_modify = Some(read_nfstime4!()),
-            21 => {
-                // mounted_on_fileid (attr 53): u64
+            20 => out.time_metadata = Some(read_nfstime4!()),
+            21 => out.time_modify = Some(read_nfstime4!()),
+            23 => {
+                // mounted_on_fileid (attr 55): u64
                 off += 8;
                 if off > attrvals.len() {
                     return out;
@@ -3058,6 +3021,22 @@ pub struct CompoundRes {
     pub results: Vec<ResOp>,
 }
 
+impl CompoundRes {
+    /// Whether the seqid-bearing op at `op_index` advanced its state-owner's
+    /// sequence on the server (RFC 7530 sec. 9.1.7).
+    ///
+    /// False when the op never ran -- an earlier op in the COMPOUND failed, so
+    /// the server stopped before reaching it -- and when it returned one of
+    /// the errors that leave the sequence unchanged
+    /// ([`Nfs4Status::leaves_seqid_unchanged`]). A client that advanced its own
+    /// counter in either case would be one ahead, and every later request
+    /// for that owner would be refused with `NFS4ERR_BAD_SEQID`.
+    #[must_use]
+    pub fn seqid_consumed(&self, op_index: usize) -> bool {
+        self.results.get(op_index).is_some_and(|op| !Nfs4Status::from_u32(op.status).leaves_seqid_unchanged())
+    }
+}
+
 impl Unpack for CompoundRes {
     fn unpack(input: &mut impl Read) -> onc_xdr::Result<(Self, usize)> {
         let (status, n0) = u32::unpack(input)?;
@@ -3130,7 +3109,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
         // bitmap and decodes all attributes nfswolf understands.
         OP_GETATTR => {
             let (bitmap_count, mut n) = u32::unpack(input)?;
-            let mut bitmap_words = Vec::with_capacity(bitmap_count as usize);
+            let mut bitmap_words = onc_xdr::vec_with_capacity(bitmap_count as usize);
             for _ in 0..bitmap_count {
                 let (w, wn) = u32::unpack(input)?;
                 bitmap_words.push(w);
@@ -3207,7 +3186,7 @@ fn decode_op_result_data(op_code: u32, input: &mut impl Read) -> onc_xdr::Result
                 // Read per-entry fattr4: bitmap words + attrvals opaque.
                 let (bitmap_count, bn) = u32::unpack(input)?;
                 n += bn;
-                let mut entry_bitmap = Vec::with_capacity(bitmap_count as usize);
+                let mut entry_bitmap = onc_xdr::vec_with_capacity(bitmap_count as usize);
                 for _ in 0..bitmap_count {
                     let (w, wn) = u32::unpack(input)?;
                     entry_bitmap.push(w);
@@ -3870,6 +3849,17 @@ impl Nfs4Status {
     #[must_use]
     pub const fn is_stale_clientid(self) -> bool {
         matches!(self, Self::StaleClientid)
+    }
+
+    /// True for the errors after which a state-owner's sequence id does not
+    /// advance (RFC 7530 sec. 9.1.7).
+    ///
+    /// After any other result -- success or failure -- of CLOSE, LOCK, LOCKU,
+    /// OPEN, OPEN_CONFIRM or OPEN_DOWNGRADE, the server expects the next
+    /// seqid. After these, it still expects the same one.
+    #[must_use]
+    pub const fn leaves_seqid_unchanged(self) -> bool {
+        matches!(self, Self::StaleClientid | Self::StaleStateid | Self::BadStateid | Self::BadSeqid | Self::BadXdr | Self::Resource | Self::NoFilehandle | Self::Moved)
     }
 
     /// True when all state for this client has expired.
@@ -6799,7 +6789,7 @@ mod tests {
         12345u64.pack(&mut attrvals).unwrap(); // fileid
 
         // Word 1 attributes in bit order: mode(1), numlinks(3), owner(4),
-        //   owner_group(5), time_access(15), time_metadata(19), time_modify(20).
+        //   owner_group(5), time_access(15), time_metadata(20), time_modify(21).
         0o755u32.pack(&mut attrvals).unwrap(); // mode
         2u32.pack(&mut attrvals).unwrap(); // numlinks
         onc_xdr::pack_string("root", &mut attrvals).unwrap(); // owner
@@ -6860,15 +6850,16 @@ mod tests {
         assert_ne!(w0 & (1 << 4), 0, "size bit");
         assert_ne!(w0 & (1 << 8), 0, "fsid bit");
         assert_ne!(w0 & (1 << 20), 0, "fileid bit");
-        // Word 1: bits 1, 3, 4, 5, 15, 19, 20
+        // Word 1: bits 1, 3, 4, 5, 15, 20, 21 (attrs 33, 35, 36, 37, 47, 52, 53)
         let w1 = ar.words[1];
         assert_ne!(w1 & (1 << 1), 0, "mode bit");
         assert_ne!(w1 & (1 << 3), 0, "numlinks bit");
         assert_ne!(w1 & (1 << 4), 0, "owner bit");
         assert_ne!(w1 & (1 << 5), 0, "owner_group bit");
         assert_ne!(w1 & (1 << 15), 0, "time_access bit");
-        assert_ne!(w1 & (1 << 19), 0, "time_metadata bit");
-        assert_ne!(w1 & (1 << 20), 0, "time_modify bit");
+        assert_ne!(w1 & (1 << 20), 0, "time_metadata bit");
+        assert_ne!(w1 & (1 << 21), 0, "time_modify bit");
+        assert_eq!(w1 & (1 << 19), 0, "time_delta (attr 51) is not wanted");
     }
 
     #[test]
@@ -7573,5 +7564,127 @@ mod tests {
         assert_eq!(entry.cookie, 0);
         assert!(entry.fh.is_none());
         assert!(entry.info.is_none());
+    }
+
+    /// maxread and maxwrite are attributes 30 and 31, both uint64.
+    #[test]
+    fn decode_fattr4_transfer_limits() {
+        let ar = AttrRequest::transfer_limits();
+        let mut attrvals = Vec::new();
+        1_048_576u64.pack(&mut attrvals).unwrap();
+        524_288u64.pack(&mut attrvals).unwrap();
+        let decoded = decode_fattr4(&ar.words, &attrvals);
+        assert_eq!(decoded.maxread, Some(1_048_576));
+        assert_eq!(decoded.maxwrite, Some(524_288));
+        assert!(!decoded.is_empty());
+    }
+
+    // --- Sequence-id bookkeeping (RFC 7530 sec. 9.1.7) ---
+
+    fn res_with(ops: &[(u32, u32)]) -> CompoundRes {
+        let status = ops.last().map_or(0, |&(_, st)| st);
+        CompoundRes { status, tag: String::new(), results: ops.iter().map(|&(op_code, status)| ResOp { op_code, status, data: ResOpData::None }).collect() }
+    }
+
+    #[test]
+    fn seqid_consumed_by_ok_and_ordinary_errors() {
+        assert!(res_with(&[(OP_PUTFH, 0), (OP_OPEN, 0)]).seqid_consumed(1));
+        // NFS4ERR_ACCESS still advances the sequence.
+        assert!(res_with(&[(OP_PUTFH, 0), (OP_OPEN, 13)]).seqid_consumed(1));
+    }
+
+    #[test]
+    fn seqid_not_consumed_when_the_op_never_ran() {
+        // PUTFH failed with NFS4ERR_STALE, so OPEN was never evaluated.
+        assert!(!res_with(&[(OP_PUTFH, 70)]).seqid_consumed(1));
+    }
+
+    #[test]
+    fn seqid_not_consumed_by_the_listed_errors() {
+        for status in [10022, 10023, 10025, 10026, 10036, 10018, 10020, 10019] {
+            assert!(Nfs4Status::from_u32(status).leaves_seqid_unchanged(), "status {status}");
+            assert!(!res_with(&[(OP_PUTFH, 0), (OP_CLOSE, status)]).seqid_consumed(1), "status {status}");
+        }
+    }
+
+    // --- Absolute attribute numbers (RFC 7530 sec. 5.6) ---
+    //
+    // The tests above build their bitmap from `AttrRequest::shell_attrs()`, so
+    // a request and a decoder that agree with each other but not with the RFC
+    // pass them. These pin the bit positions to the attribute numbers.
+
+    /// Word 1 bits 19..=23 are time_delta (51), time_metadata (52),
+    /// time_modify (53), time_modify_set (54) and mounted_on_fileid (55).
+    #[test]
+    fn decode_fattr4_word1_time_bits_match_rfc_numbering() {
+        let w1: u32 = (1 << 19) | (1 << 20) | (1 << 21) | (1 << 23);
+        let mut attrvals = Vec::new();
+        1i64.pack(&mut attrvals).unwrap(); // time_delta (51): 1 s granularity
+        0u32.pack(&mut attrvals).unwrap();
+        1_700_000_100i64.pack(&mut attrvals).unwrap(); // time_metadata (52)
+        5u32.pack(&mut attrvals).unwrap();
+        1_700_000_200i64.pack(&mut attrvals).unwrap(); // time_modify (53)
+        6u32.pack(&mut attrvals).unwrap();
+        77u64.pack(&mut attrvals).unwrap(); // mounted_on_fileid (55)
+        7u32.pack(&mut attrvals).unwrap(); // trailing garbage must not be read as anything
+
+        let decoded = decode_fattr4(&[0, w1], &attrvals);
+        assert_eq!(decoded.time_metadata, Some((1_700_000_100, 5)), "ctime is attr 52, not time_delta");
+        assert_eq!(decoded.time_modify, Some((1_700_000_200, 6)), "mtime is attr 53");
+    }
+
+    /// settime4 carries an nfstime4 only for SET_TO_CLIENT_TIME4.
+    #[test]
+    fn decode_fattr4_skips_settime4_by_discriminant() {
+        let w1: u32 = (1 << 16) | (1 << 21) | (1 << 22);
+        let mut attrvals = Vec::new();
+        1u32.pack(&mut attrvals).unwrap(); // time_access_set: SET_TO_CLIENT_TIME4
+        9i64.pack(&mut attrvals).unwrap();
+        0u32.pack(&mut attrvals).unwrap();
+        1_700_000_200i64.pack(&mut attrvals).unwrap(); // time_modify
+        0u32.pack(&mut attrvals).unwrap();
+        0u32.pack(&mut attrvals).unwrap(); // time_modify_set: SET_TO_SERVER_TIME4, no time
+        let decoded = decode_fattr4(&[0, w1], &attrvals);
+        assert_eq!(decoded.time_modify, Some((1_700_000_200, 0)));
+    }
+
+    /// Attribute 19 is the object's file handle, which READDIR asks for so a
+    /// listing needs no LOOKUP per entry.
+    #[test]
+    fn decode_fattr4_keeps_filehandle() {
+        let w0: u32 = (1 << 19) | (1 << 20);
+        let mut attrvals = Vec::new();
+        pack_opaque(&[0xAB, 0xCD, 0xEF], &mut attrvals).unwrap();
+        42u64.pack(&mut attrvals).unwrap(); // fileid, after the padded handle
+        let decoded = decode_fattr4(&[w0], &attrvals);
+        assert_eq!(decoded.filehandle.as_deref(), Some(&[0xAB, 0xCD, 0xEF][..]));
+        assert_eq!(decoded.fileid, Some(42));
+        assert!(!decoded.is_empty());
+    }
+
+    // --- Forged element counts must not size an allocation ---
+    //
+    // A count of u32::MAX words asks for 16 GiB up front. On a machine that
+    // cannot reserve that much the allocator aborts the process, so these
+    // decoders must cap the reservation and fail on the missing words instead.
+    // On a large machine the reservation succeeds lazily either way, which is
+    // why the assertion is only that decoding fails cleanly.
+
+    #[test]
+    fn getattr_forged_bitmap_count_fails_cleanly() {
+        let wire = [0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x01];
+        assert!(decode_op_result_data(OP_GETATTR, &mut std::io::Cursor::new(&wire)).is_err());
+    }
+
+    #[test]
+    fn readdir_forged_entry_bitmap_count_fails_cleanly() {
+        let mut wire = vec![0u8; 8]; // cookieverf
+        wire.extend_from_slice(&1u32.to_be_bytes()); // value_follows
+        wire.extend_from_slice(&7u64.to_be_bytes()); // cookie
+        wire.extend_from_slice(&1u32.to_be_bytes()); // name length
+        wire.extend_from_slice(&[b'a', 0, 0, 0]); // name + pad
+        wire.extend_from_slice(&u32::MAX.to_be_bytes()); // forged bitmap count
+        wire.extend_from_slice(&0u32.to_be_bytes()); // one word, then EOF
+        assert!(decode_op_result_data(OP_READDIR, &mut std::io::Cursor::new(&wire)).is_err());
     }
 }

@@ -1,7 +1,9 @@
 [toolchain]
-# Track the latest stable Rust. The supported floor (MSRV) is declared by
-# `rust-version` in Cargo.toml and verified by the `msrv` job in
-# .github/workflows/ci.yml.
+# Pinned to an exact release so every developer and CI job lints with the same
+# compiler. The pin currently equals the MSRV (`rust-version` in Cargo.toml);
+# the `msrv` job in .github/workflows/ci.yml keeps verifying that floor once
+# the pin moves ahead of it. Every lint named in Cargo.toml's lint tables must
+# exist in this release, or rustc warns about an unknown lint on every target.
 channel = "1.95.0"
 # Use the `default` profile so we don't pull miri / rustc-codegen-cranelift
 # which are not always published alongside every stable point release and

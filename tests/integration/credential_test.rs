@@ -9,34 +9,8 @@
 //! These are integration tests (not in-crate unit tests) because they test the
 //! public contract of the ladder across the combinations that real-world NFS
 //! operations hit, including the interplay between observed identities and
+
 //! mode-bit pruning that the unit tests in credential.rs cover individually.
-#![allow(
-    unused_crate_dependencies,
-    unused_qualifications,
-    missing_docs,
-    missing_debug_implementations,
-    unused_import_braces,
-    unused_lifetimes,
-    single_use_lifetimes,
-    trivial_casts,
-    trivial_numeric_casts,
-    elided_lifetimes_in_paths,
-    explicit_outlives_requirements,
-    variant_size_differences,
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::cargo,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "integration test  --  all lints suppressed per project policy"
-)]
 
 // The credential module is pub(crate), so we reimplement the ladder logic here
 // for integration-level testing. This validates the documented contract without

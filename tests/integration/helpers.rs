@@ -1,8 +1,8 @@
 //! Shared test infrastructure for integration tests.
 //!
-//! Start a MemFs NFS server on an ephemeral port, connect clients.
-//! Imported by each test file via `#[path = "helpers.rs"] mod helpers;`.
-#![allow(dead_code, unreachable_pub, reason = "shared test helper included via #[path]")]
+//! Start a MemFs NFS server on an ephemeral port, connect clients. Every test
+//! module shares this one copy, so a helper nothing calls any more is reported
+//! as dead code.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

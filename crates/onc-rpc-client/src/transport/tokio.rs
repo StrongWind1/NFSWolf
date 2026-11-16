@@ -38,11 +38,20 @@ where
     async fn async_write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         tokio::io::AsyncWriteExt::write(&mut self.0, buf).await
     }
+
+    async fn async_flush(&mut self) -> std::io::Result<()> {
+        tokio::io::AsyncWriteExt::flush(&mut self.0).await
+    }
 }
 
 /// Connector for Tokio
 ///
-/// Connects to a host and port using Tokio's [`TcpStream`].
+/// Connects to a host and port using Tokio's [`TcpStream`], with Nagle's
+/// algorithm disabled (`TCP_NODELAY`). RPC is request/response: with Nagle on,
+/// the final partial segment of a large request waits for the peer to
+/// acknowledge the segments before it, which the peer's delayed ACK can hold
+/// back by tens of milliseconds. The Linux kernel's own RPC client sets the
+/// option for the same reason.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TokioConnector;
 
@@ -51,6 +60,7 @@ impl Connector for TokioConnector {
 
     async fn connect(&self, addr: SocketAddr) -> std::io::Result<Self::Connection> {
         let stream = TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
         Ok(TokioIo::new(stream))
     }
 
@@ -59,6 +69,7 @@ impl Connector for TokioConnector {
         socket.bind(local_addr)?;
 
         let stream = socket.connect(addr).await?;
+        stream.set_nodelay(true)?;
         Ok(TokioIo::new(stream))
     }
 }

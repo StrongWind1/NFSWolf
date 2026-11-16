@@ -176,7 +176,7 @@ impl<T: RpcTransport> Nfs3Client<T> {
     /// Failures are traced with the procedure name before propagating. The
     /// error type belongs to the transport and cannot carry protocol context,
     /// but "which procedure" is the first question anyone asks of an RPC
-    /// failure -- `FragmentedReply` on a READDIRPLUS and on a GETATTR mean very
+    /// failure -- `NotFullyParsed` on a READDIRPLUS and on a GETATTR mean very
     /// different things.
     async fn call<C, R>(&self, proc: NFS_PROGRAM, args: &C) -> Result<R, T::Error>
     where

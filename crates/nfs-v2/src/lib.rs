@@ -22,13 +22,15 @@ mod client;
 pub mod raw;
 pub mod wire;
 
-pub use client::{Nfs2Client, Nfs2Error};
+pub use client::{Nfs2Client, Nfs2Error, READ_FILE_MAX_BYTES};
 pub use raw::Nfs2RawClient;
 pub use wire::{NFS_PROGRAM as PROGRAM, NFS_VERSION as VERSION, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr, Nfs2Stat};
 
-/// Re-export the MOUNT client from `nfswolf-mount` for backward compatibility.
+/// The MOUNT client, re-exported from `nfs-mount` under its old name.
 ///
-/// `MountV1Client<T>` is `MountClient<T>` configured for MOUNT v1.
-/// Callers that used `nfs_v2::MountV1Client` can keep that path;
-/// new code should use `nfs_mount::MountClient` directly.
+/// Only the name is kept: this is [`nfs_mount::MountClient`], so construct it
+/// with `MountClient::v1(transport)` (or `new(transport, MountVersion::V1)`)
+/// and expect [`nfs_mount::MountedHandle`] from `mnt`. The client that used to
+/// live here, with its own constructor and return types, is gone. New code
+/// should name `nfs_mount::MountClient` directly.
 pub type MountV1Client<T> = nfs_mount::MountClient<T>;

@@ -4,7 +4,6 @@
 //! NFS3ERR_BADHANDLE (10001)  --  this oracle enables targeted handle
 //! brute-force (F-2.2, RFC 1813 S2.6).
 
-// Toolkit API  --  not all items are used in currently-implemented phases.
 use core::fmt;
 
 use crate::wire::nfsstat3;

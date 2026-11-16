@@ -8,33 +8,7 @@
 //! - AUTH_SYS-only detection (F-1.1): MemFs advertises no Kerberos.
 //! - File handle fingerprint: root handle is non-empty with recognizable format.
 //! - No false-positive escape: MemFs handles are synthetic and escape fails gracefully.
-#![allow(
-    unused_crate_dependencies,
-    unused_qualifications,
-    missing_docs,
-    missing_debug_implementations,
-    unused_import_braces,
-    unused_lifetimes,
-    single_use_lifetimes,
-    trivial_casts,
-    trivial_numeric_casts,
-    elided_lifetimes_in_paths,
-    explicit_outlives_requirements,
-    variant_size_differences,
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::cargo,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "integration test  --  all lints suppressed per project policy"
-)]
+
 use onc_rpc_client::transport::DirectTransport;
 use std::time::Duration;
 
@@ -44,9 +18,7 @@ use onc_rpc_client::transport::tokio::TokioIo;
 use onc_xdr::Opaque;
 use tokio::net::TcpStream;
 
-#[path = "helpers.rs"]
-mod helpers;
-use helpers::{mount_client, portmap_client, start_server};
+use crate::helpers::{mount_client, portmap_client, start_server};
 
 // --- Wildcard ACL detection ---
 

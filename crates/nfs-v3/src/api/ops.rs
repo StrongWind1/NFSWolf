@@ -20,7 +20,7 @@ use crate::error::Nfs3Error;
 use crate::raw::Nfs3Client;
 use crate::wire::{
     ACCESS3args, COMMIT3args, CREATE3args, FSINFO3args, FSSTAT3args, GETATTR3args, LINK3args, LOOKUP3args, MKDIR3args, Nfs3Option, Nfs3Result, PATHCONF3args, READ3args, READDIRPLUS3args, READLINK3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args, cookieverf3,
-    createhow3, diropargs3, filename3, nfspath3, nfsstat3, post_op_attr, sattr3, stable_how, symlinkdata3,
+    createhow3, diropargs3, filename3, nfspath3, post_op_attr, sattr3, stable_how, symlinkdata3,
 };
 
 /// An NFSv3 operation did not succeed.
@@ -108,6 +108,12 @@ pub struct WriteAck {
     pub count: u32,
     /// How durably the server committed them.
     pub committed: stable_how,
+    /// The server's write verifier (RFC 1813 sec. 3.3.7).
+    ///
+    /// An `UNSTABLE` write is only safe once a later COMMIT returns the same
+    /// value; a different one means the server restarted and may have lost
+    /// the data, which must then be written again.
+    pub verifier: [u8; 8],
 }
 
 /// One page of a directory listing.
@@ -126,7 +132,20 @@ pub struct DirPage {
     pub cookieverf: cookieverf3,
 }
 
+/// A result a caller-supplied cap may have cut short.
+#[derive(Debug, Clone)]
+pub struct Capped<T> {
+    /// What was collected; never more than the cap.
+    pub value: T,
+    /// Whether the server had more to give when the cap was reached.
+    pub truncated: bool,
+}
+
 /// Convert a wire result into a domain result, flattening both failure shapes.
+///
+/// `from_nfsstat3` returns `None` only for `NFS3_OK`, which cannot appear in
+/// the error arm of a wire result; mapping it to a server fault keeps the
+/// conversion total without a panic on a malformed reply.
 fn flatten<T, U, E>(res: Result<Nfs3Result<T, U>, E>) -> Result<T, Nfs3Fault<E>> {
     match res {
         Ok(Nfs3Result::Ok(ok)) => Ok(ok),
@@ -197,10 +216,12 @@ impl<T: RpcTransport> Nfs3Client<T> {
     }
 
     /// Write `data` at `offset`.
-    pub async fn write_at(&self, fh: &FileHandle, offset: u64, data: &[u8], stable: stable_how) -> Result<WriteAck, Nfs3Fault<T::Error>> {
+    ///
+    /// `stable` takes either the wire `stable_how` or a [`WriteStable`](super::WriteStable).
+    pub async fn write_at(&self, fh: &FileHandle, offset: u64, data: &[u8], stable: impl Into<stable_how>) -> Result<WriteAck, Nfs3Fault<T::Error>> {
         let count = u32::try_from(data.len()).unwrap_or(u32::MAX);
-        let ok = flatten(self.write(&WRITE3args { file: fh.to_nfs_fh3(), offset, count, stable, data: Opaque::borrowed(data) }).await)?;
-        Ok(WriteAck { count: ok.count, committed: ok.committed })
+        let ok = flatten(self.write(&WRITE3args { file: fh.to_nfs_fh3(), offset, count, stable: stable.into(), data: Opaque::borrowed(data) }).await)?;
+        Ok(WriteAck { count: ok.count, committed: ok.committed, verifier: ok.verf.0 })
     }
 
     /// Create a regular file.
@@ -258,10 +279,12 @@ impl<T: RpcTransport> Nfs3Client<T> {
         Ok(())
     }
 
-    /// Retrieve the server's write verifier without flushing any data.
+    /// Flush the whole file to stable storage and return the server's write
+    /// verifier.
     ///
-    /// Sends a zero-count COMMIT (RFC 1813 S3.3.21) which is a no-op on the
-    /// data path but returns the current `writeverf3`. If the verifier changes
+    /// Sends COMMIT with offset 0 and count 0, which RFC 1813 S3.3.21 defines
+    /// as "flush from offset to the end of file". The `writeverf3` it returns
+    /// is what `UNSTABLE` writes are checked against, and if it changes
     /// between two probes the server rebooted (or its volatile cache was
     /// discarded), which is the reboot oracle.
     pub async fn commit_verifier(&self, fh: &FileHandle) -> Result<[u8; 8], Nfs3Fault<T::Error>> {
@@ -323,8 +346,16 @@ impl<T: RpcTransport> Nfs3Client<T> {
     /// Read a directory to completion, paging as needed.
     ///
     /// `max_entries` bounds the result: the server chooses both the page size
-    /// and the end-of-file flag, so an unbounded loop is at its mercy.
+    /// and the end-of-file flag, so an unbounded loop is at its mercy. A
+    /// listing cut at the cap is returned without saying so; use
+    /// [`list_dir_capped`](Self::list_dir_capped) to find out.
     pub async fn list_dir(&self, dir: &FileHandle, max_entries: usize) -> Result<Vec<DirEntryPlus>, Nfs3Fault<T::Error>> {
+        Ok(self.list_dir_capped(dir, max_entries).await?.value)
+    }
+
+    /// [`list_dir`](Self::list_dir), also reporting whether the cap cut the
+    /// listing short.
+    pub async fn list_dir_capped(&self, dir: &FileHandle, max_entries: usize) -> Result<Capped<Vec<DirEntryPlus>>, Nfs3Fault<T::Error>> {
         let mut out = Vec::new();
         let mut cookie = 0_u64;
         let mut verf = cookieverf3::default();
@@ -336,8 +367,10 @@ impl<T: RpcTransport> Nfs3Client<T> {
             cookie = page.cookie;
             out.extend(page.entries);
             if done || out.len() >= max_entries {
+                // Entries were dropped, or the server had pages left to send.
+                let truncated = out.len() > max_entries || !done;
                 out.truncate(max_entries);
-                return Ok(out);
+                return Ok(Capped { value: out, truncated });
             }
         }
     }
@@ -346,22 +379,40 @@ impl<T: RpcTransport> Nfs3Client<T> {
     ///
     /// The server controls both the reported size and whether each chunk is
     /// non-empty, so neither can be the sole loop bound -- `max_bytes` is a
-    /// hard cap so a hostile server cannot drive an unbounded allocation.
+    /// hard cap so a hostile server cannot drive an unbounded allocation. A
+    /// file cut at the cap is returned without saying so; use
+    /// [`read_all_capped`](Self::read_all_capped) to find out.
     pub async fn read_all(&self, fh: &FileHandle, max_bytes: usize) -> Result<Vec<u8>, Nfs3Fault<T::Error>> {
+        Ok(self.read_all_capped(fh, max_bytes).await?.value)
+    }
+
+    /// [`read_all`](Self::read_all), also reporting whether the cap cut the
+    /// file short.
+    ///
+    /// When the data reaches the cap exactly without the server signalling
+    /// end-of-file, one more single-byte READ settles whether anything follows.
+    pub async fn read_all_capped(&self, fh: &FileHandle, max_bytes: usize) -> Result<Capped<Vec<u8>>, Nfs3Fault<T::Error>> {
         let mut out = Vec::new();
         let mut offset = 0_u64;
         loop {
             let want = u32::try_from(max_bytes.saturating_sub(out.len()).min(READ_CHUNK)).unwrap_or(u32::MAX);
             if want == 0 {
-                return Ok(out);
+                // At the cap with no end-of-file seen yet: probe past it.
+                let truncated = !self.read_at(fh, offset, 1).await?.data.is_empty();
+                return Ok(Capped { value: out, truncated });
             }
             let chunk = self.read_at(fh, offset, want).await?;
             let got = chunk.data.len();
             out.extend_from_slice(&chunk.data);
             // A zero-length reply with eof unset would otherwise spin forever.
-            if chunk.eof || got == 0 || out.len() >= max_bytes {
+            if chunk.eof || got == 0 {
+                let truncated = out.len() > max_bytes;
                 out.truncate(max_bytes);
-                return Ok(out);
+                return Ok(Capped { value: out, truncated });
+            }
+            if out.len() > max_bytes {
+                out.truncate(max_bytes);
+                return Ok(Capped { value: out, truncated: true });
             }
             offset = offset.saturating_add(got as u64);
         }
@@ -395,22 +446,14 @@ const MAXCOUNT_HINT: u32 = 65536;
 
 /// Bytes requested per `READ` in [`Nfs3Client::read_all`].
 ///
-/// 64 KiB is the usual `rtpref` on Linux servers; larger requests are commonly
-/// truncated anyway and risk the multi-fragment replies this client rejects.
+/// 64 KiB is the usual `rtpref` on Linux servers; a server answers a larger
+/// request with a short read anyway, so asking for more buys nothing.
 const READ_CHUNK: usize = 64 * 1024;
-
-/// Statuses that mean "this status could not be decoded", used by [`flatten`].
-///
-/// `from_nfsstat3` returns `None` only for `NFS3_OK`, which cannot appear in
-/// the error arm of a wire result. Mapping it to a server fault keeps the
-/// conversion total without a panic on a malformed reply.
-const _: () = {
-    assert!(matches!(nfsstat3::NFS3_OK, nfsstat3::NFS3_OK));
-};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::nfsstat3;
 
     /// A fault carrying a permission denial must be distinguishable from a
     /// transport failure -- the whole point of keeping the two variants apart.

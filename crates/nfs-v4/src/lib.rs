@@ -26,7 +26,7 @@ pub mod session;
 pub mod state;
 pub mod wire;
 
-pub use client::{Nfs4Client, Nfs4Error};
+pub use client::{Nfs4Client, Nfs4Error, READ_FILE_MAX_BYTES};
 pub use session::Nfs4Session;
 pub use state::{LockRange, LockState, OpenState};
 pub use wire::NfsImplId4;

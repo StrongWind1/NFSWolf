@@ -4,21 +4,14 @@
 //! This module provides nfswolf-friendly wrappers with hex encoding,
 //! display formatting, and domain methods.
 
-// Struct fields and enum variants are wire-protocol values; individual
-// field docs would be redundant with the module-level RFC citations.
-// Toolkit API  --  not all items are used in currently-implemented phases.
 mod ops;
 
-pub use ops::{DirPage, Nfs3Fault, ReadChunk, WriteAck};
+pub use ops::{Capped, DirPage, Nfs3Fault, ReadChunk, WriteAck};
 
-use crate::wire::{fattr3, ftype3, nfs_fh3};
+use crate::wire::{fattr3, ftype3, nfs_fh3, stable_how};
 use onc_xdr::Opaque;
 
 /// Error returned when a hex string is not valid (odd length or non-hex chars).
-///
-/// Replaces `hex::FromHexError` -- the hex crate was the only dependency that
-/// used this type.  Both encode and decode are trivially implementable with
-/// stdlib, so the crate is not needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HexError;
 
@@ -30,7 +23,37 @@ impl std::fmt::Display for HexError {
 
 impl std::error::Error for HexError {}
 
-/// Opaque file handle  --  identifies a file/directory on the server.
+/// Decode a hex string into bytes.
+///
+/// Accepts upper and lower case, surrounding ASCII whitespace, and an
+/// optional `0x` or `0X` prefix. Everything else between the prefix and the
+/// end must be pairs of `[0-9a-fA-F]`: a sign, an embedded space or any
+/// non-ASCII character is rejected rather than skipped or substituted. An
+/// empty string decodes to no bytes, but a prefix with no digits after it is
+/// rejected as a truncated value.
+///
+/// Works on bytes, never on `char` indices, so a multi-byte character in the
+/// input is an error rather than a slicing panic.
+pub fn decode_hex(s: &str) -> Result<Vec<u8>, HexError> {
+    const fn nibble(c: u8) -> Result<u8, HexError> {
+        match c {
+            b'0'..=b'9' => Ok(c - b'0'),
+            b'a'..=b'f' => Ok(c - b'a' + 10),
+            b'A'..=b'F' => Ok(c - b'A' + 10),
+            _ => Err(HexError),
+        }
+    }
+    let s = s.trim_ascii();
+    let (digits, prefixed) = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(rest) => (rest.as_bytes(), true),
+        None => (s.as_bytes(), false),
+    };
+    if !digits.len().is_multiple_of(2) || (prefixed && digits.is_empty()) {
+        return Err(HexError);
+    }
+    digits.chunks_exact(2).map(|pair| if let [hi, lo] = *pair { Ok((nibble(hi)? << 4) | nibble(lo)?) } else { Err(HexError) }).collect()
+}
+
 /// An opaque NFSv3 file handle -- at most 64 bytes (RFC 1813 sec. 2.3.1).
 ///
 /// The bytes are meaningful only to the server, but they are also a bearer
@@ -63,14 +86,9 @@ impl FileHandle {
         })
     }
 
-    /// Decode a lowercase or uppercase hex string (optional 0x prefix) into a handle.
+    /// Decode a hex string into a handle; see [`decode_hex`] for the syntax.
     pub fn from_hex(s: &str) -> Result<Self, HexError> {
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        if !s.len().is_multiple_of(2) {
-            return Err(HexError);
-        }
-        let bytes = (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2).ok_or(HexError)?, 16).map_err(|_| HexError)).collect::<Result<Vec<u8>, HexError>>()?;
-        Ok(Self(bytes))
+        decode_hex(s).map(Self)
     }
 
     /// Length in bytes.
@@ -117,6 +135,8 @@ pub enum FileType {
     Socket = 6,
     /// Named pipe.
     Fifo = 7,
+    /// A type the protocol does not define, with the raw value the server sent.
+    Unknown(u32),
 }
 
 impl FileType {
@@ -131,6 +151,7 @@ impl FileType {
             ftype3::NF3LNK => Self::Symlink,
             ftype3::NF3SOCK => Self::Socket,
             ftype3::NF3FIFO => Self::Fifo,
+            ftype3::Unknown(v) => Self::Unknown(v),
         }
     }
 }
@@ -221,6 +242,10 @@ pub struct DirEntryPlus {
 }
 
 /// Directory entry from READDIR.
+///
+/// No method of this crate produces one: the domain API lists directories
+/// with READDIRPLUS ([`DirEntryPlus`]).
+#[deprecated(note = "no method returns this type; directory listings use DirEntryPlus")]
 #[derive(Debug, Clone)]
 pub struct DirEntry {
     /// Server-assigned inode number.
@@ -309,7 +334,7 @@ pub mod access {
     }
 }
 
-/// Write stability levels.
+/// Write stability levels, accepted by [`write_at`](crate::Nfs3Client::write_at).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u32)]
@@ -322,7 +347,22 @@ pub enum WriteStable {
     FileSync = 2,
 }
 
+impl From<WriteStable> for stable_how {
+    fn from(s: WriteStable) -> Self {
+        match s {
+            WriteStable::Unstable => Self::UNSTABLE,
+            WriteStable::DataSync => Self::DATA_SYNC,
+            WriteStable::FileSync => Self::FILE_SYNC,
+        }
+    }
+}
+
 /// Create mode for CREATE operation.
+///
+/// Nothing in this crate accepts it: [`create_file`](crate::Nfs3Client::create_file)
+/// always creates `UNCHECKED`, and an `EXCLUSIVE` create needs a verifier this
+/// enum cannot carry. Build a `createhow3` and call the raw `create` instead.
+#[deprecated(note = "no method accepts this type; pass a createhow3 to the raw create() instead")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u32)]
@@ -354,6 +394,25 @@ mod tests {
         let hex = fh.to_hex();
         let fh2 = FileHandle::from_hex(&hex).expect("hex decode must succeed");
         assert_eq!(fh, fh2);
+    }
+
+    #[test]
+    fn decode_hex_accepts_prefix_case_and_whitespace() {
+        assert_eq!(decode_hex("0a0B"), Ok(vec![0x0a, 0x0b]));
+        assert_eq!(decode_hex("0xdeadBEEF"), Ok(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(decode_hex("0XFF"), Ok(vec![0xff]));
+        assert_eq!(decode_hex("  0102\n"), Ok(vec![0x01, 0x02]));
+        assert_eq!(decode_hex(""), Ok(vec![]));
+    }
+
+    #[test]
+    fn decode_hex_rejects_malformed_input() {
+        // Odd length, non-hex digits, signs that from_str_radix would accept,
+        // embedded whitespace, and a multi-byte character whose byte length is
+        // even (the input that used to panic on a char-boundary slice).
+        for bad in ["abc", "zz", "+1+2+3+4", "-1", "01 02", "a\u{e9}1", "0102a\u{e9}1", "0x", "0x0"] {
+            assert_eq!(decode_hex(bad), Err(HexError), "{bad:?} must be rejected");
+        }
     }
 
     #[test]

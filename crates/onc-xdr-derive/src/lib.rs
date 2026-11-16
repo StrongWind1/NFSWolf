@@ -43,6 +43,35 @@
 //! }
 //! ```
 //!
+//! A unit variant of such an enum may give its discriminant the normal Rust
+//! way (`NAME = N`, which needs `#[repr(u32)]`) instead of `#[xdr(N)]`.
+//!
+//! # Open enums
+//!
+//! A value received from a peer is not limited to the variants a spec lists:
+//! servers return status codes, flavors and types that a later RFC added or
+//! that are vendor-specific. A closed enum turns every such value into a
+//! decode error for the whole message. Marking one `u32` tuple variant
+//! `#[xdr(other)]` makes the enum open -- an unlisted discriminant decodes
+//! into that variant carrying the raw value, and packs back unchanged:
+//!
+//! ```ignore
+//! #[derive(XdrCodec, Clone, Copy)]
+//! #[repr(u32)]
+//! enum auth_stat {
+//!     AUTH_OK = 0,
+//!     AUTH_BADCRED = 1,
+//!     #[xdr(other)]
+//!     Unknown(u32),
+//! }
+//! ```
+//!
+//! # Hygiene
+//!
+//! Local bindings in the expanded code use mixed-site hygiene, so a struct
+//! field may be named `input`, `out` or anything else without colliding with
+//! them.
+//!
 //! [RFC 4506]: https://www.rfc-editor.org/rfc/rfc4506
 //! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
 
@@ -55,61 +84,146 @@ and is worth doing, but these panics cannot reach production code"
 )]
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{Attribute, Data, DataEnum, DeriveInput, Expr, Fields, FieldsNamed, FieldsUnnamed, Ident, Index, Lit, Meta, Variant, parse_macro_input};
+use syn::{Data, DataEnum, DeriveInput, Expr, Fields, FieldsNamed, FieldsUnnamed, Ident, Index, Lit, Meta, Variant, parse_macro_input};
 
-/// Reads the discriminant out of a `#[xdr(N)]` attribute.
+/// Identifiers for the bindings the expanded code declares.
 ///
-/// Only data-carrying enum variants need this; simple enums get their
-/// discriminant from `as u32` instead.
-fn parse_xdr_value(attrs: &[Attribute]) -> Option<u32> {
-    for attr in attrs {
-        if attr.path().is_ident("xdr")
-            && let Meta::List(meta_list) = &attr.meta
-            && let Ok(Expr::Lit(syn::ExprLit { lit: Lit::Int(lit_int), .. })) = meta_list.parse_args::<Expr>()
-            && let Ok(value) = lit_int.base10_parse::<u32>()
-        {
-            return Some(value);
+/// They carry [`Span::mixed_site`], so they live in the macro's own hygiene
+/// context: a user's field named `input` or `total_read` gets a binding of
+/// its own instead of shadowing the decoder's.
+struct Locals {
+    input: Ident,
+    out: Ident,
+    total_read: Ident,
+    total_write: Ident,
+    total_size: Ident,
+    read_bytes: Ident,
+    bytes_read: Ident,
+    tag: Ident,
+    val: Ident,
+    val_bytes: Ident,
+    result: Ident,
+    len: Ident,
+}
+
+impl Locals {
+    fn new() -> Self {
+        let local = |name: &str| Ident::new(name, Span::mixed_site());
+        Self {
+            input: local("input"),
+            out: local("out"),
+            total_read: local("total_read"),
+            total_write: local("total_write"),
+            total_size: local("total_size"),
+            read_bytes: local("read_bytes"),
+            bytes_read: local("bytes_read"),
+            tag: local("tag"),
+            val: local("val"),
+            val_bytes: local("val_bytes"),
+            result: local("result"),
+            len: local("len"),
         }
     }
-    None
+
+    /// Binding for the `i`th field of a tuple struct while it is decoded.
+    fn field(i: usize) -> Ident {
+        Ident::new(&format!("field_{i}"), Span::mixed_site())
+    }
+}
+
+/// What a variant's `#[xdr(...)]` attribute says.
+enum XdrAttr {
+    /// `#[xdr(N)]` -- the variant's discriminant.
+    Value(u32),
+    /// `#[xdr(other)]` -- the catch-all arm of an open enum.
+    Other,
+}
+
+/// Reads a variant's `#[xdr(...)]` attribute, if it has one.
+///
+/// # Panics
+///
+/// When the attribute is present but is neither an integer literal that fits
+/// in a `u32` nor `other`. Treating that as absent would report a missing
+/// attribute on a variant that has one.
+fn parse_xdr_attr(variant: &Variant) -> Option<XdrAttr> {
+    let attr = variant.attrs.iter().find(|a| a.path().is_ident("xdr"))?;
+    let malformed = || -> ! { panic!("Malformed #[xdr(...)] attribute on variant '{}': expected an integer literal that fits in u32, or `other`", variant.ident) };
+    let Meta::List(meta_list) = &attr.meta else { malformed() };
+    match meta_list.parse_args::<Expr>() {
+        Ok(Expr::Lit(syn::ExprLit { lit: Lit::Int(lit_int), .. })) => lit_int.base10_parse::<u32>().map_or_else(|_| malformed(), |v| Some(XdrAttr::Value(v))),
+        Ok(Expr::Path(path)) if path.path.is_ident("other") => Some(XdrAttr::Other),
+        _ => malformed(),
+    }
+}
+
+/// The wire discriminant of a non-catch-all variant of a data-carrying enum.
+///
+/// Taken from `#[xdr(N)]`, or failing that from an explicit `= N`.
+///
+/// # Panics
+///
+/// When the variant has neither, or both and they disagree.
+fn variant_tag(variant: &Variant) -> u32 {
+    let ident = &variant.ident;
+    let explicit = variant.discriminant.as_ref().map(|(_, expr)| match expr {
+        Expr::Lit(syn::ExprLit { lit: Lit::Int(lit_int), .. }) => lit_int.base10_parse::<u32>().unwrap_or_else(|_| panic!("Discriminant of variant '{ident}' must fit in u32")),
+        _ => panic!("Discriminant of variant '{ident}' must be an integer literal"),
+    });
+    match (parse_xdr_attr(variant), explicit) {
+        (Some(XdrAttr::Value(v)), None) | (None, Some(v)) => v,
+        (Some(XdrAttr::Value(v)), Some(d)) if v == d => v,
+        (Some(XdrAttr::Value(_)), Some(_)) => panic!("Variant '{ident}' has an #[xdr(N)] attribute and a discriminant that disagree"),
+        (Some(XdrAttr::Other), _) => unreachable!("catch-all variants are handled before their tag is asked for"),
+        (None, None) => panic!("Complex enum variant '{ident}' must have #[xdr(value)] attribute"),
+    }
+}
+
+/// Whether a variant is the `#[xdr(other)]` catch-all.
+fn is_catch_all(variant: &Variant) -> bool {
+    matches!(parse_xdr_attr(variant), Some(XdrAttr::Other))
 }
 
 /// Emits per-field pack/unpack fragments for a braced struct.
 struct NamedFieldsGenerator<'a> {
     fields: &'a FieldsNamed,
+    locals: &'a Locals,
 }
 
 impl<'a> NamedFieldsGenerator<'a> {
-    const fn new(fields: &'a FieldsNamed) -> Self {
-        Self { fields }
+    const fn new(fields: &'a FieldsNamed, locals: &'a Locals) -> Self {
+        Self { fields, locals }
     }
 
     fn pack_fields(&self) -> impl Iterator<Item = TokenStream2> + '_ {
-        self.fields.named.iter().map(|f| {
+        let Locals { out, total_write, .. } = self.locals;
+        self.fields.named.iter().map(move |f| {
             let name = &f.ident;
             quote! {
-                total_write += self.#name.pack(out)?;
+                #total_write += self.#name.pack(#out)?;
             }
         })
     }
 
     fn packed_size_fields(&self) -> impl Iterator<Item = TokenStream2> + '_ {
-        self.fields.named.iter().map(|f| {
+        let total_size = &self.locals.total_size;
+        self.fields.named.iter().map(move |f| {
             let name = &f.ident;
             quote! {
-                total_size += ::onc_xdr::Pack::packed_size(&self.#name);
+                #total_size += ::onc_xdr::Pack::packed_size(&self.#name);
             }
         })
     }
 
     fn unpack_fields(&self) -> impl Iterator<Item = TokenStream2> + '_ {
-        self.fields.named.iter().map(|f| {
+        let Locals { input, total_read, read_bytes, .. } = self.locals;
+        self.fields.named.iter().map(move |f| {
             let name = &f.ident;
             quote! {
-                let (#name, read_bytes) = ::onc_xdr::Unpack::unpack(input)?;
-                total_read += read_bytes;
+                let (#name, #read_bytes) = ::onc_xdr::Unpack::unpack(#input)?;
+                #total_read += #read_bytes;
             }
         })
     }
@@ -125,44 +239,48 @@ impl<'a> NamedFieldsGenerator<'a> {
 /// Emits per-field pack/unpack fragments for a tuple struct.
 struct UnnamedFieldsGenerator<'a> {
     fields: &'a FieldsUnnamed,
+    locals: &'a Locals,
 }
 
 impl<'a> UnnamedFieldsGenerator<'a> {
-    const fn new(fields: &'a FieldsUnnamed) -> Self {
-        Self { fields }
+    const fn new(fields: &'a FieldsUnnamed, locals: &'a Locals) -> Self {
+        Self { fields, locals }
     }
 
     fn pack_fields(&self) -> impl Iterator<Item = TokenStream2> + '_ {
-        self.fields.unnamed.iter().enumerate().map(|(i, _)| {
+        let Locals { out, total_write, .. } = self.locals;
+        self.fields.unnamed.iter().enumerate().map(move |(i, _)| {
             let index = Index::from(i);
             quote! {
-                total_write += self.#index.pack(out)?;
+                #total_write += self.#index.pack(#out)?;
             }
         })
     }
 
     fn packed_size_fields(&self) -> impl Iterator<Item = TokenStream2> + '_ {
-        self.fields.unnamed.iter().enumerate().map(|(i, _)| {
+        let total_size = &self.locals.total_size;
+        self.fields.unnamed.iter().enumerate().map(move |(i, _)| {
             let index = Index::from(i);
             quote! {
-                total_size += ::onc_xdr::Pack::packed_size(&self.#index);
+                #total_size += ::onc_xdr::Pack::packed_size(&self.#index);
             }
         })
     }
 
     fn unpack_fields(&self) -> impl Iterator<Item = TokenStream2> + '_ {
-        self.fields.unnamed.iter().enumerate().map(|(i, _)| {
-            let var_name = Ident::new(&format!("field_{i}"), proc_macro2::Span::call_site());
+        let Locals { input, total_read, read_bytes, .. } = self.locals;
+        self.fields.unnamed.iter().enumerate().map(move |(i, _)| {
+            let var_name = Locals::field(i);
             quote! {
-                let (#var_name, read_bytes) = ::onc_xdr::Unpack::unpack(input)?;
-                total_read += read_bytes;
+                let (#var_name, #read_bytes) = ::onc_xdr::Unpack::unpack(#input)?;
+                #total_read += #read_bytes;
             }
         })
     }
 
     fn struct_construction_fields(&self) -> impl Iterator<Item = TokenStream2> + '_ {
         (0..self.fields.unnamed.len()).map(|i| {
-            let var_name = Ident::new(&format!("field_{i}"), proc_macro2::Span::call_site());
+            let var_name = Locals::field(i);
             quote! { #var_name }
         })
     }
@@ -174,10 +292,12 @@ impl<'a> UnnamedFieldsGenerator<'a> {
 /// so there is no discriminant to write (RFC 4506 sec. 4.14).
 fn generate_struct_impl(name: &Ident, generics: &syn::Generics, fields: &Fields) -> TokenStream2 {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let locals = Locals::new();
+    let Locals { input, out, total_read, total_write, total_size, .. } = &locals;
 
     match fields {
         Fields::Named(named_fields) => {
-            let generator = NamedFieldsGenerator::new(named_fields);
+            let generator = NamedFieldsGenerator::new(named_fields, &locals);
             let pack_fields = generator.pack_fields();
             let packed_size_fields = generator.packed_size_fields();
             let unpack_fields = generator.unpack_fields();
@@ -187,31 +307,31 @@ fn generate_struct_impl(name: &Ident, generics: &syn::Generics, fields: &Fields)
                 impl #impl_generics ::onc_xdr::Pack for #name #ty_generics
                 #where_clause {
                     fn packed_size(&self) -> usize {
-                        let mut total_size = 0;
+                        let mut #total_size = 0;
                         #(#packed_size_fields)*
-                        total_size
+                        #total_size
                     }
 
-                    fn pack(&self, out: &mut impl std::io::Write) -> ::onc_xdr::Result<usize> {
+                    fn pack(&self, #out: &mut impl std::io::Write) -> ::onc_xdr::Result<usize> {
                         use ::onc_xdr::Pack;
-                        let mut total_write = 0;
+                        let mut #total_write = 0;
                         #(#pack_fields)*
-                        Ok(total_write)
+                        Ok(#total_write)
                     }
                 }
                 impl #impl_generics ::onc_xdr::Unpack for #name #ty_generics
                 #where_clause {
-                    fn unpack(input: &mut impl std::io::Read) -> ::onc_xdr::Result<(Self, usize)> {
+                    fn unpack(#input: &mut impl std::io::Read) -> ::onc_xdr::Result<(Self, usize)> {
                         use ::onc_xdr::Unpack;
-                        let mut total_read = 0;
+                        let mut #total_read = 0;
                         #(#unpack_fields)*
-                        Ok((Self { #(#struct_fields)* }, total_read))
+                        Ok((Self { #(#struct_fields)* }, #total_read))
                     }
                 }
             }
         },
         Fields::Unnamed(unnamed_fields) => {
-            let generator = UnnamedFieldsGenerator::new(unnamed_fields);
+            let generator = UnnamedFieldsGenerator::new(unnamed_fields, &locals);
             let pack_fields = generator.pack_fields();
             let packed_size_fields = generator.packed_size_fields();
             let unpack_fields = generator.unpack_fields();
@@ -221,25 +341,25 @@ fn generate_struct_impl(name: &Ident, generics: &syn::Generics, fields: &Fields)
                 impl #impl_generics ::onc_xdr::Pack for #name #ty_generics
                 #where_clause {
                     fn packed_size(&self) -> usize {
-                        let mut total_size = 0;
+                        let mut #total_size = 0;
                         #(#packed_size_fields)*
-                        total_size
+                        #total_size
                     }
 
-                    fn pack(&self, out: &mut impl std::io::Write) -> ::onc_xdr::Result<usize> {
+                    fn pack(&self, #out: &mut impl std::io::Write) -> ::onc_xdr::Result<usize> {
                         use ::onc_xdr::Pack;
-                        let mut total_write = 0;
+                        let mut #total_write = 0;
                         #(#pack_fields)*
-                        Ok(total_write)
+                        Ok(#total_write)
                     }
                 }
                 impl #impl_generics ::onc_xdr::Unpack for #name #ty_generics
                 #where_clause {
-                    fn unpack(input: &mut impl std::io::Read) -> ::onc_xdr::Result<(Self, usize)> {
+                    fn unpack(#input: &mut impl std::io::Read) -> ::onc_xdr::Result<(Self, usize)> {
                         use ::onc_xdr::Unpack;
-                        let mut total_read = 0;
+                        let mut #total_read = 0;
                         #(#unpack_fields)*
-                        Ok((Self(#(#struct_fields),*), total_read))
+                        Ok((Self(#(#struct_fields),*), #total_read))
                     }
                 }
             }
@@ -280,24 +400,29 @@ fn validate_complex_enum_variant(variant: &Variant) -> Result<(), String> {
 }
 
 /// Emits the pack arm for one variant of a data-carrying enum.
-fn generate_complex_enum_pack_variant(variant: &Variant) -> TokenStream2 {
+fn generate_complex_enum_pack_variant(variant: &Variant, locals: &Locals) -> TokenStream2 {
     let ident = &variant.ident;
-    let xdr_value = parse_xdr_value(&variant.attrs).unwrap_or_else(|| {
-        panic!("Complex enum variant '{ident}' must have #[xdr(value)] attribute");
-    });
+    let Locals { out, val, len, .. } = locals;
+    if is_catch_all(variant) {
+        // The catch-all carries the raw discriminant it was decoded from.
+        return quote! {
+            Self::#ident(#val) => #val.pack(#out),
+        };
+    }
+    let xdr_value = variant_tag(variant);
 
     match &variant.fields {
         Fields::Unit => {
             quote! {
-                Self::#ident => #xdr_value.pack(out),
+                Self::#ident => #xdr_value.pack(#out),
             }
         },
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             quote! {
-                Self::#ident(val) => {
-                    let mut len = #xdr_value.pack(out)?;
-                    len += val.pack(out)?;
-                    Ok(len)
+                Self::#ident(#val) => {
+                    let mut #len = #xdr_value.pack(#out)?;
+                    #len += #val.pack(#out)?;
+                    Ok(#len)
                 },
             }
         },
@@ -309,8 +434,14 @@ fn generate_complex_enum_pack_variant(variant: &Variant) -> TokenStream2 {
 ///
 /// The constant 4 is the discriminant, which XDR always encodes as a 4-byte
 /// big-endian integer regardless of how few values the union has.
-fn generate_complex_enum_packed_size_variant(variant: &Variant) -> TokenStream2 {
+fn generate_complex_enum_packed_size_variant(variant: &Variant, locals: &Locals) -> TokenStream2 {
     let ident = &variant.ident;
+    let val = &locals.val;
+    if is_catch_all(variant) {
+        return quote! {
+            Self::#ident(_) => 4,
+        };
+    }
 
     match &variant.fields {
         Fields::Unit => {
@@ -320,19 +451,18 @@ fn generate_complex_enum_packed_size_variant(variant: &Variant) -> TokenStream2 
         },
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             quote! {
-                Self::#ident(val) => 4 + val.packed_size(),
+                Self::#ident(#val) => 4 + #val.packed_size(),
             }
         },
         _ => panic!("Invalid complex enum variant: {ident}"),
     }
 }
 
-/// Emits the unpack arm for one variant of a data-carrying enum.
-fn generate_complex_enum_unpack_variant(variant: &Variant) -> TokenStream2 {
+/// Emits the unpack arm for one non-catch-all variant of a data-carrying enum.
+fn generate_complex_enum_unpack_variant(variant: &Variant, locals: &Locals) -> TokenStream2 {
     let ident = &variant.ident;
-    let xdr_value = parse_xdr_value(&variant.attrs).unwrap_or_else(|| {
-        panic!("Complex enum variant '{ident}' must have #[xdr(value)] attribute");
-    });
+    let Locals { input, bytes_read, val, val_bytes, .. } = locals;
+    let xdr_value = variant_tag(variant);
 
     match &variant.fields {
         Fields::Unit => {
@@ -343,9 +473,9 @@ fn generate_complex_enum_unpack_variant(variant: &Variant) -> TokenStream2 {
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             quote! {
                 #xdr_value => {
-                    let (val, val_bytes) = ::onc_xdr::Unpack::unpack(input)?;
-                    bytes_read += val_bytes;
-                    Ok(Self::#ident(val))
+                    let (#val, #val_bytes) = ::onc_xdr::Unpack::unpack(#input)?;
+                    #bytes_read += #val_bytes;
+                    Ok(Self::#ident(#val))
                 },
             }
         },
@@ -359,11 +489,13 @@ fn generate_complex_enum_unpack_variant(variant: &Variant) -> TokenStream2 {
 /// the variant's `as u32` value.
 fn generate_simple_enum_impl(name: &Ident, generics: &syn::Generics, data: &DataEnum) -> TokenStream2 {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let locals = Locals::new();
+    let Locals { input, out, tag, bytes_read, result, .. } = &locals;
 
     let pack_variants = data.variants.iter().map(|v| {
         let ident = &v.ident;
         quote! {
-            Self::#ident => (*self as u32).pack(out),
+            Self::#ident => (*self as u32).pack(#out),
         }
     });
 
@@ -381,7 +513,7 @@ fn generate_simple_enum_impl(name: &Ident, generics: &syn::Generics, data: &Data
                 4
             }
 
-            fn pack(&self, out: &mut impl std::io::Write) -> ::onc_xdr::Result<usize> {
+            fn pack(&self, #out: &mut impl std::io::Write) -> ::onc_xdr::Result<usize> {
                 use ::onc_xdr::Pack;
                 match self {
                     #(#pack_variants)*
@@ -390,13 +522,14 @@ fn generate_simple_enum_impl(name: &Ident, generics: &syn::Generics, data: &Data
         }
         impl #impl_generics ::onc_xdr::Unpack for #name #ty_generics
         #where_clause {
-            fn unpack(input: &mut impl std::io::Read) -> ::onc_xdr::Result<(Self, usize)> {
-                let (tag, bytes_read) = u32::unpack(input)?;
-                let result = match tag {
+            fn unpack(#input: &mut impl std::io::Read) -> ::onc_xdr::Result<(Self, usize)> {
+                use ::onc_xdr::Unpack;
+                let (#tag, #bytes_read) = u32::unpack(#input)?;
+                let #result = match #tag {
                     #(#unpack_variants)*
-                    _ => Err(::onc_xdr::Error::InvalidEnumValue(tag)),
+                    _ => Err(::onc_xdr::Error::InvalidEnumValue(#tag)),
                 };
-                result.map(|value| (value, bytes_read))
+                #result.map(|value| (value, #bytes_read))
             }
         }
     }
@@ -405,9 +538,12 @@ fn generate_simple_enum_impl(name: &Ident, generics: &syn::Generics, data: &Data
 /// Generates `Pack`/`Unpack` for an enum with data-carrying variants.
 ///
 /// These map onto an XDR discriminated union: the 4-byte discriminant from
-/// `#[xdr(N)]`, followed by the arm's payload.
+/// `#[xdr(N)]` (or `= N`), followed by the arm's payload. An `#[xdr(other)]`
+/// variant receives any discriminant no other arm claims.
 fn generate_complex_enum_impl(name: &Ident, generics: &syn::Generics, data: &DataEnum) -> TokenStream2 {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let locals = Locals::new();
+    let Locals { input, out, tag, bytes_read, result, .. } = &locals;
 
     // Fail at expansion time rather than emitting code that cannot compile.
     for variant in &data.variants {
@@ -415,10 +551,27 @@ fn generate_complex_enum_impl(name: &Ident, generics: &syn::Generics, data: &Dat
             panic!("{}", err);
         }
     }
+    let mut catch_alls = data.variants.iter().filter(|v| is_catch_all(v));
+    let catch_all = catch_alls.next();
+    if let Some(extra) = catch_alls.next() {
+        panic!("Only one variant may be #[xdr(other)]; '{}' is a second", extra.ident);
+    }
+    if let Some(v) = catch_all
+        && !matches!(&v.fields, Fields::Unnamed(fields) if fields.unnamed.len() == 1)
+    {
+        panic!("The #[xdr(other)] variant '{}' must have exactly one unnamed u32 field", v.ident);
+    }
 
-    let pack_variants = data.variants.iter().map(generate_complex_enum_pack_variant);
-    let packed_size_variants = data.variants.iter().map(generate_complex_enum_packed_size_variant);
-    let unpack_variants = data.variants.iter().map(generate_complex_enum_unpack_variant);
+    let pack_variants = data.variants.iter().map(|v| generate_complex_enum_pack_variant(v, &locals));
+    let packed_size_variants = data.variants.iter().map(|v| generate_complex_enum_packed_size_variant(v, &locals));
+    let unpack_variants = data.variants.iter().filter(|v| !is_catch_all(v)).map(|v| generate_complex_enum_unpack_variant(v, &locals));
+    let fallback = catch_all.map_or_else(
+        || quote! { _ => Err(::onc_xdr::Error::InvalidEnumValue(#tag)), },
+        |v| {
+            let ident = &v.ident;
+            quote! { _ => Ok(Self::#ident(#tag)), }
+        },
+    );
 
     quote! {
         impl #impl_generics ::onc_xdr::Pack for #name #ty_generics
@@ -429,7 +582,7 @@ fn generate_complex_enum_impl(name: &Ident, generics: &syn::Generics, data: &Dat
                 }
             }
 
-            fn pack(&self, out: &mut impl std::io::Write) -> ::onc_xdr::Result<usize> {
+            fn pack(&self, #out: &mut impl std::io::Write) -> ::onc_xdr::Result<usize> {
                 use ::onc_xdr::Pack;
                 match self {
                     #(#pack_variants)*
@@ -438,14 +591,14 @@ fn generate_complex_enum_impl(name: &Ident, generics: &syn::Generics, data: &Dat
         }
         impl #impl_generics ::onc_xdr::Unpack for #name #ty_generics
         #where_clause {
-            fn unpack(input: &mut impl std::io::Read) -> ::onc_xdr::Result<(Self, usize)> {
+            fn unpack(#input: &mut impl std::io::Read) -> ::onc_xdr::Result<(Self, usize)> {
                 use ::onc_xdr::Unpack;
-                let (tag, mut bytes_read) = u32::unpack(input)?;
-                let result = match tag {
+                let (#tag, mut #bytes_read) = u32::unpack(#input)?;
+                let #result = match #tag {
                     #(#unpack_variants)*
-                    _ => Err(::onc_xdr::Error::InvalidEnumValue(tag)),
+                    #fallback
                 };
-                result.map(|value| (value, bytes_read))
+                #result.map(|value| (value, #bytes_read))
             }
         }
     }
@@ -467,7 +620,8 @@ fn generate_enum_impl(name: &Ident, generics: &syn::Generics, data: &DataEnum) -
 ///
 /// Panics at macro-expansion time when the type cannot be expressed in XDR:
 /// on unions, on a data-carrying enum variant with more than one field or with
-/// named fields, or on a data-carrying variant missing its `#[xdr(N)]` tag.
+/// named fields, on a data-carrying enum variant missing its discriminant, on
+/// a malformed `#[xdr(...)]` attribute, or on more than one `#[xdr(other)]`.
 #[proc_macro_derive(XdrCodec, attributes(xdr))]
 pub fn derive_xdr_codec(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

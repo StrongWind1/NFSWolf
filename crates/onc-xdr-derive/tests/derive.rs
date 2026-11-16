@@ -154,3 +154,55 @@ fn invalid_discriminant_unpack() {
     let result = TwoVariants::unpack(&mut buf.as_slice());
     assert!(result.is_err());
 }
+
+/// An `#[xdr(other)]` arm makes the enum open: listed values decode to their
+/// variants, anything else decodes to the catch-all and packs back unchanged.
+#[test]
+fn open_enum_keeps_unlisted_values() {
+    use onc_xdr::{Pack, Unpack};
+
+    #[derive(onc_xdr::XdrCodec, Debug, PartialEq, Clone, Copy)]
+    #[repr(u32)]
+    enum Status {
+        Ok = 0,
+        Denied = 13,
+        #[xdr(other)]
+        Unknown(u32),
+    }
+
+    for (wire, expected) in [(0u32, Status::Ok), (13, Status::Denied), (30, Status::Unknown(30)), (u32::MAX, Status::Unknown(u32::MAX))] {
+        let bytes = wire.to_be_bytes();
+        let (decoded, read) = Status::unpack(&mut bytes.as_slice()).expect("an open enum accepts every value");
+        assert_eq!(read, 4);
+        assert_eq!(decoded, expected);
+
+        let mut buf = Vec::new();
+        assert_eq!(decoded.pack(&mut buf).expect("pack failed"), 4);
+        assert_eq!(decoded.packed_size(), 4);
+        assert_eq!(buf, bytes, "value {wire} must survive a round trip");
+    }
+}
+
+/// The expansion's locals must not collide with field names a protocol might use.
+#[test]
+fn field_names_do_not_shadow_generated_locals() {
+    use onc_xdr::{Pack, Unpack};
+
+    #[derive(onc_xdr::XdrCodec, Debug, PartialEq)]
+    struct Awkward {
+        input: u32,
+        out: u32,
+        total_read: u32,
+        read_bytes: u32,
+        total_write: u32,
+        total_size: u32,
+    }
+
+    let original = Awkward { input: 1, out: 2, total_read: 3, read_bytes: 4, total_write: 5, total_size: 6 };
+    let mut buf = Vec::new();
+    assert_eq!(original.pack(&mut buf).expect("pack failed"), 24);
+    assert_eq!(original.packed_size(), 24);
+    let (decoded, read) = Awkward::unpack(&mut buf.as_slice()).expect("unpack failed");
+    assert_eq!(read, 24);
+    assert_eq!(decoded, original);
+}

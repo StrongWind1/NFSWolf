@@ -3,33 +3,7 @@
 //! Covers the procedures and invariants not exercised by scan_test.rs:
 //! READDIRPLUS, AUTH_SYS stamp uniqueness, circuit breaker discrimination
 //! (transient vs permission errors), and connection health checks.
-#![allow(
-    unused_crate_dependencies,
-    unused_qualifications,
-    missing_docs,
-    missing_debug_implementations,
-    unused_import_braces,
-    unused_lifetimes,
-    single_use_lifetimes,
-    trivial_casts,
-    trivial_numeric_casts,
-    elided_lifetimes_in_paths,
-    explicit_outlives_requirements,
-    variant_size_differences,
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::cargo,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "integration test  --  all lints suppressed per project policy"
-)]
+
 use std::time::Duration;
 
 use nfs_v3::wire::mount::dirpath;
@@ -40,9 +14,7 @@ use nfs_v3::wire::{
 use nfs3_server::memfs::MemFsConfig;
 use onc_xdr::Opaque;
 
-#[path = "helpers.rs"]
-mod helpers;
-use helpers::{mount_client, nfs3_client, start_server};
+use crate::helpers::{mount_client, nfs3_client, start_server};
 
 // --- READDIRPLUS tests ---
 
@@ -908,4 +880,55 @@ async fn file_handle_works_across_separate_connections() {
         Nfs3Result::Err((stat, _)) => panic!("READ on second connection: {stat:?}"),
         _ => unreachable!(),
     }
+}
+
+// --- Capped domain listings and reads ---
+
+/// `list_dir_capped` must say whether the cap cut the listing, so a caller can
+/// tell a complete directory from a truncated one.
+#[tokio::test]
+async fn list_dir_capped_reports_truncation() {
+    let mut config = MemFsConfig::default();
+    for name in ["/a", "/b", "/c"] {
+        config.add_file(name, b"x");
+    }
+    let (_srv, port) = start_server(config).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mnt = mount_client(port).await.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let root = nfs_v3::FileHandle::from_bytes(mnt.fhandle.0.as_ref());
+    let nfs = nfs3_client(port).await;
+
+    let all = nfs.list_dir_capped(&root, 100).await.expect("listing");
+    assert!(!all.truncated, "a listing under the cap is complete");
+    let names: Vec<&str> = all.value.iter().map(|e| e.name.as_str()).filter(|n| !n.starts_with('.')).collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+
+    let cut = nfs.list_dir_capped(&root, 2).await.expect("listing");
+    assert!(cut.truncated, "a listing over the cap is reported as cut");
+    assert_eq!(cut.value.len(), 2);
+
+    let exact = nfs.list_dir_capped(&root, all.value.len()).await.expect("listing");
+    assert!(!exact.truncated, "a cap equal to the directory size loses nothing");
+}
+
+/// `read_all_capped` must tell a file that ends at the cap from one that
+/// continues past it.
+#[tokio::test]
+async fn read_all_capped_reports_truncation() {
+    let mut config = MemFsConfig::default();
+    config.add_file("/ten.bin", &[7u8; 10]);
+    let (_srv, port) = start_server(config).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mnt = mount_client(port).await.v3_mnt(dirpath(Opaque::borrowed(b"/"))).await.expect("MOUNT must succeed");
+    let root = nfs_v3::FileHandle::from_bytes(mnt.fhandle.0.as_ref());
+    let nfs = nfs3_client(port).await;
+    let (fh, _) = nfs.resolve(&root, "ten.bin").await.expect("LOOKUP");
+
+    let whole = nfs.read_all_capped(&fh, 10).await.expect("read");
+    assert_eq!(whole.value.len(), 10);
+    assert!(!whole.truncated, "a file exactly at the cap is complete");
+
+    let cut = nfs.read_all_capped(&fh, 4).await.expect("read");
+    assert_eq!(cut.value, vec![7u8; 4]);
+    assert!(cut.truncated, "a file past the cap is reported as cut");
 }

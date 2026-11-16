@@ -1,0 +1,7 @@
+error: proc-macro derive panicked
+ --> tests/ui/malformed_xdr_attr.rs:5:10
+  |
+5 | #[derive(XdrCodec)]
+  |          ^^^^^^^^
+  |
+  = help: message: Malformed #[xdr(...)] attribute on variant 'Variant': expected an integer literal that fits in u32, or `other`

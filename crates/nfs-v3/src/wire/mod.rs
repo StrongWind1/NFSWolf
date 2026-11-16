@@ -7,7 +7,7 @@
 //!
 //! [RFC 1813]: https://www.rfc-editor.org/rfc/rfc1813
 
-/// Re-export mount wire types from `nfswolf-mount` for backward compatibility.
+/// MOUNT wire types, re-exported from `nfs-mount` under their old path.
 ///
 /// Callers that used `nfs_v3::wire::mount::*` can keep that path; new
 /// code should use `nfs_mount::wire::*` directly.

@@ -57,10 +57,13 @@ pub enum RpcError {
     ProcUnavail,
     /// The server could not decode the procedure arguments.
     GarbageArgs,
-    /// The server sent a fragmented reply that could not be reassembled.
+    /// The reply's record-marking fragments could not be reassembled because
+    /// their declared total exceeds the client's reply size limit.
     ///
     /// Multi-fragment replies are reassembled automatically (RFC 5531 sec 11).
-    /// This error is retained for edge cases where reassembly fails.
+    /// This error is returned when the next fragment header would take the
+    /// reply past the limit. That fragment's body is never read, so it is
+    /// still in the socket and the connection is out of step with the stream.
     FragmentedReply,
     /// An unspecified server-side system error occurred.
     SystemErr,
@@ -85,7 +88,7 @@ impl fmt::Display for RpcError {
             },
             Self::ProcUnavail => write!(f, "Procedure unavailable"),
             Self::GarbageArgs => write!(f, "Garbage arguments"),
-            Self::FragmentedReply => write!(f, "Fragmented replies are not supported"),
+            Self::FragmentedReply => write!(f, "RPC reply exceeds the size limit; fragments could not be reassembled"),
             Self::SystemErr => write!(f, "System error"),
         }
     }
@@ -144,8 +147,8 @@ impl RpcError {
     /// Returns `false` for the three errors that leave the stream unusable:
     ///
     /// * [`Io`](Self::Io) -- the transport is dead.
-    /// * [`FragmentedReply`](Self::FragmentedReply) -- unread fragment data is
-    ///   still in the socket.
+    /// * [`FragmentedReply`](Self::FragmentedReply) -- an oversized reply was
+    ///   rejected from its fragment header, so its body is still in the socket.
     /// * [`UnexpectedXid`](Self::UnexpectedXid) -- the reply belonged to an
     ///   earlier call, so the stream is off by one reply and every subsequent
     ///   read returns the wrong one. Reusing such a connection wedges it
@@ -154,9 +157,10 @@ impl RpcError {
     ///
     /// All other errors -- including [`Xdr`](Self::Xdr),
     /// [`WrongLength`](Self::WrongLength), and
-    /// [`NotFullyParsed`](Self::NotFullyParsed) -- are produced while operating
-    /// on in-memory buffers after the full fragment has already been consumed
-    /// from the wire, so the transport remains at a clean message boundary.
+    /// [`NotFullyParsed`](Self::NotFullyParsed) -- are produced either before
+    /// anything is written (an unencodable request) or while operating on
+    /// in-memory buffers after the whole reply has been consumed from the wire,
+    /// so the transport remains at a clean message boundary.
     #[must_use]
     pub const fn is_connection_reusable(&self) -> bool {
         !matches!(self, Self::Io(_) | Self::FragmentedReply | Self::UnexpectedXid)

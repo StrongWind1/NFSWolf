@@ -619,5 +619,5 @@ fn bytes_to_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Re-use the MOUNT v1 MNT response from nfswolf-mount.
+/// Re-use the MOUNT v1 MNT response from nfs-mount.
 use nfs_mount::wire::FhStatus;

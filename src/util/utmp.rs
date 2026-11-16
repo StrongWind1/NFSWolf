@@ -16,6 +16,13 @@
 //! - glibc `<bits/lastlog.h>` (struct lastlog definition)
 //!
 //! struct utmpx is 384 bytes; struct lastlog is 292 bytes.
+//!
+//! The files come off the remote server, so their integers are in the
+//! server's byte order, not this machine's. They are decoded as little-endian:
+//! every architecture listed above stores them that way, and stating the
+//! format keeps the result independent of the host running the tool.
+//! `ut_addr_v6` is the exception -- it holds the address in network order and
+//! is read byte by byte.
 
 /// Length of the tty device name field (`ut_line` / `ll_line`).
 /// Per glibc `<bits/utmp.h>`: `#define UT_LINESIZE 32`.
@@ -130,30 +137,37 @@ impl UtmpRecord {
         // Field offsets from glibc `struct utmpx` layout. The implicit 2-byte
         // padding between ut_type and ut_pid is required by ABI alignment of
         // pid_t (a 4-byte int).
-        let ut_type = i16::from_ne_bytes(read_arr::<2>(bytes, 0)?);
-        let pid = i32::from_ne_bytes(read_arr::<4>(bytes, 4)?);
+        let ut_type = i16::from_le_bytes(read_arr::<2>(bytes, 0)?);
+        let pid = i32::from_le_bytes(read_arr::<4>(bytes, 4)?);
         let line = read_cstr_at(bytes, 8, UT_LINESIZE)?;
         let id = read_arr::<4>(bytes, 40)?;
         let user = read_cstr_at(bytes, 44, UT_NAMESIZE)?;
         let host = read_cstr_at(bytes, 76, UT_HOSTSIZE)?;
-        let e_termination = i16::from_ne_bytes(read_arr::<2>(bytes, 332)?);
-        let e_exit = i16::from_ne_bytes(read_arr::<2>(bytes, 334)?);
-        let session = i32::from_ne_bytes(read_arr::<4>(bytes, 336)?);
-        let timestamp_secs = i32::from_ne_bytes(read_arr::<4>(bytes, 340)?);
-        let timestamp_micros = i32::from_ne_bytes(read_arr::<4>(bytes, 344)?);
+        let e_termination = i16::from_le_bytes(read_arr::<2>(bytes, 332)?);
+        let e_exit = i16::from_le_bytes(read_arr::<2>(bytes, 334)?);
+        let session = i32::from_le_bytes(read_arr::<4>(bytes, 336)?);
+        let timestamp_secs = i32::from_le_bytes(read_arr::<4>(bytes, 340)?);
+        let timestamp_micros = i32::from_le_bytes(read_arr::<4>(bytes, 344)?);
         let addr_v6 = read_arr::<16>(bytes, 348)?;
         Some(Self { ut_type: UtType::from_raw(ut_type), pid, line, _id: id, user, host, _e_termination: e_termination, _e_exit: e_exit, _session: session, tv_sec: timestamp_secs, _tv_usec: timestamp_micros, addr_v6 })
     }
 
-    /// True when `ut_addr_v6` decodes as an IPv4-mapped or plain-IPv4 address.
-    /// Mirrors the heuristic in util-linux `last.c::dns_lookup()` (lines 311-329).
-    #[must_use]
-    pub(crate) fn addr_is_ipv4(&self) -> bool {
-        let a = self.addr_u32_le();
-        // IPv4-in-IPv6 mapped: ::ffff:x.x.x.x -> first 8 bytes 0, then 0xffff in network order.
-        let mapped = a[0] == 0 && a[1] == 0 && a[2] == u32::from_be(0x0000_ffff);
-        // Plain IPv4 stored in the first 4 bytes with the rest zero.
-        mapped || (a[1] == 0 && a[2] == 0 && a[3] == 0)
+    /// The IPv4 address in `ut_addr_v6`, if it holds one.
+    ///
+    /// Mirrors the heuristic in util-linux `last.c::dns_lookup()` (lines
+    /// 311-329).
+    ///
+    /// Two layouts, both in network byte order: IPv4-mapped (`::ffff:a.b.c.d`,
+    /// the octets in bytes 12..16) and plain IPv4 (the octets in bytes 0..4,
+    /// the rest zero).
+    fn ipv4_octets(&self) -> Option<[u8; 4]> {
+        let (head, tail) = self.addr_v6.split_at(12);
+        let mapped = head.get(..10).is_some_and(|z| z.iter().all(|b| *b == 0)) && head.get(10..) == Some(&[0xff, 0xff][..]);
+        if mapped {
+            return tail.try_into().ok();
+        }
+        let (first, rest) = self.addr_v6.split_at(4);
+        if rest.iter().all(|b| *b == 0) { first.try_into().ok() } else { None }
     }
 
     /// Render `ut_addr_v6` as a numeric address string. Empty string when zero.
@@ -164,12 +178,7 @@ impl UtmpRecord {
         if self.addr_v6.iter().all(|b| *b == 0) {
             return String::new();
         }
-        let a = self.addr_u32_le();
-        if self.addr_is_ipv4() {
-            // For an IPv4-mapped address the v4 octets live in a[3]; for plain v4 they live in a[0].
-            let mapped = a[0] == 0 && a[1] == 0 && a[2] == u32::from_be(0x0000_ffff);
-            let raw = if mapped { a[3] } else { a[0] };
-            let octets = raw.to_le_bytes();
+        if let Some(octets) = self.ipv4_octets() {
             return octets.iter().enumerate().fold(String::new(), |mut acc, (i, byte)| {
                 if i > 0 {
                     acc.push('.');
@@ -189,14 +198,6 @@ impl UtmpRecord {
             let _ = write!(s, "{group:x}");
         }
         s
-    }
-
-    fn addr_u32_le(&self) -> [u32; 4] {
-        let mut out = [0u32; 4];
-        for (slot, chunk) in out.iter_mut().zip(self.addr_v6.as_chunks::<4>().0) {
-            *slot = u32::from_ne_bytes(*chunk);
-        }
-        out
     }
 }
 
@@ -232,7 +233,7 @@ pub(crate) fn parse_lastlog(bytes: &[u8]) -> Vec<LastlogRecord> {
         .iter()
         .enumerate()
         .filter_map(|(uid, chunk)| {
-            let ll_time = i32::from_ne_bytes(read_arr::<4>(chunk, 0)?);
+            let ll_time = i32::from_le_bytes(read_arr::<4>(chunk, 0)?);
             let ll_line = read_cstr_at(chunk, 4, UT_LINESIZE)?;
             let ll_host = read_cstr_at(chunk, 4 + UT_LINESIZE, UT_HOSTSIZE)?;
             Some(LastlogRecord { uid: u32::try_from(uid).unwrap_or(u32::MAX), ll_time, ll_line, ll_host })
@@ -290,15 +291,15 @@ mod tests {
 
     fn make_utmp(ut_type: i16, pid: i32, line: &str, user: &str, host: &str, tv_sec: i32) -> [u8; UTMP_RECORD_SIZE] {
         let mut buf = [0u8; UTMP_RECORD_SIZE];
-        buf[0..2].copy_from_slice(&ut_type.to_ne_bytes());
-        buf[4..8].copy_from_slice(&pid.to_ne_bytes());
+        buf[0..2].copy_from_slice(&ut_type.to_le_bytes());
+        buf[4..8].copy_from_slice(&pid.to_le_bytes());
         let lb = line.as_bytes();
         buf[8..8 + lb.len().min(UT_LINESIZE)].copy_from_slice(&lb[..lb.len().min(UT_LINESIZE)]);
         let ub = user.as_bytes();
         buf[44..44 + ub.len().min(UT_NAMESIZE)].copy_from_slice(&ub[..ub.len().min(UT_NAMESIZE)]);
         let hb = host.as_bytes();
         buf[76..76 + hb.len().min(UT_HOSTSIZE)].copy_from_slice(&hb[..hb.len().min(UT_HOSTSIZE)]);
-        buf[340..344].copy_from_slice(&tv_sec.to_ne_bytes());
+        buf[340..344].copy_from_slice(&tv_sec.to_le_bytes());
         buf
     }
 
@@ -348,10 +349,10 @@ mod tests {
     fn parses_lastlog_indexed_by_uid() {
         // Three slots: uid 0 unset, uid 1 set, uid 2 set.
         let mut buf = vec![0u8; LASTLOG_RECORD_SIZE * 3];
-        buf[292..296].copy_from_slice(&1_700_000_000_i32.to_ne_bytes());
+        buf[292..296].copy_from_slice(&1_700_000_000_i32.to_le_bytes());
         buf[296..296 + 5].copy_from_slice(b"pts/1");
         buf[(296 + UT_LINESIZE)..(296 + UT_LINESIZE + 9)].copy_from_slice(b"10.0.0.10");
-        buf[584..588].copy_from_slice(&1_700_000_500_i32.to_ne_bytes());
+        buf[584..588].copy_from_slice(&1_700_000_500_i32.to_le_bytes());
         buf[588..588 + 5].copy_from_slice(b"pts/2");
 
         let recs = parse_lastlog(&buf);
@@ -387,5 +388,37 @@ mod tests {
         rec.addr_v6[2] = 0;
         rec.addr_v6[3] = 5;
         assert_eq!(rec.addr_string(), "10.0.0.5");
+    }
+
+    #[test]
+    fn ipv4_mapped_address_renders_dotted() {
+        let mut rec = UtmpRecord::from_bytes(&make_utmp(7, 1, "pts/0", "u", "h", 1)).expect("parses");
+        rec.addr_v6[10] = 0xff;
+        rec.addr_v6[11] = 0xff;
+        rec.addr_v6[12..16].copy_from_slice(&[192, 0, 2, 20]);
+        assert!(rec.ipv4_octets().is_some());
+        assert_eq!(rec.addr_string(), "192.0.2.20");
+    }
+
+    #[test]
+    fn ipv6_address_renders_groups() {
+        let mut rec = UtmpRecord::from_bytes(&make_utmp(7, 1, "pts/0", "u", "h", 1)).expect("parses");
+        rec.addr_v6[0] = 0x20;
+        rec.addr_v6[1] = 0x01;
+        rec.addr_v6[15] = 1;
+        assert!(rec.ipv4_octets().is_none());
+        assert_eq!(rec.addr_string(), "2001:0:0:0:0:0:0:1");
+    }
+
+    /// Integers are little-endian on disk whatever the host's byte order.
+    #[test]
+    fn integers_are_read_little_endian() {
+        let mut buf = [0u8; UTMP_RECORD_SIZE];
+        buf[0..2].copy_from_slice(&[7, 0]); // USER_PROCESS
+        buf[4..8].copy_from_slice(&[0x39, 0x30, 0, 0]); // pid 12345
+        buf[340..344].copy_from_slice(&[0x00, 0xF1, 0x53, 0x65]); // 1_700_000_000
+        let rec = UtmpRecord::from_bytes(&buf).expect("parses");
+        assert_eq!(rec.pid, 12345);
+        assert_eq!(rec.tv_sec, 1_700_000_000);
     }
 }

@@ -99,7 +99,7 @@ impl PooledTransport {
     /// Check out one connection, honouring the breaker and the stealth delay.
     pub(crate) async fn checkout(&self) -> anyhow::Result<PooledConnection> {
         let addr = self.pool_key.host;
-        self.circuit.check_or_wait(addr)?;
+        self.circuit.check(addr)?;
         self.stealth.wait().await;
         match self.pool.checkout_for(self.pool_key.clone(), self.credential.clone(), self.reconnect, self.direct_nfs_port).await {
             Ok(conn) => Ok(conn),
@@ -158,17 +158,18 @@ impl PooledTransport {
     /// The two judgements here are the reason this logic lives in one place.
     ///
     /// **Which errors poison the connection.** `is_connection_reusable()`
-    /// answers that: the non-reusable set is `{Io, FragmentedReply}`. Either
-    /// leaves the socket unusable -- dead, or stopped mid-fragment -- so it must
-    /// be discarded rather than requeued.
+    /// answers that: the non-reusable set is `{Io, FragmentedReply,
+    /// UnexpectedXid}`. Each leaves the socket unusable -- dead, stopped before
+    /// an oversized reply's body, or one reply out of step -- so it must be
+    /// discarded rather than requeued.
     ///
-    /// **Which errors trip the breaker.** Only `Io`. `FragmentedReply` is a
-    /// deterministic RFC 1831 record-marking condition that a large `READ` or
-    /// `READDIRPLUS` reply can provoke from a perfectly healthy server. Counting
-    /// it would let one oversized reply wedge every subsequent small `GETATTR`
-    /// to that host. Reusable protocol errors -- auth rejection, program or
-    /// procedure mismatch, garbage args, XDR faults -- leave the transport
-    /// intact and are denials rather than outages.
+    /// **Which errors trip the breaker.** Only `Io`. `FragmentedReply` means
+    /// the server sent a reply larger than the client's limit; that is a fault
+    /// in one reply, not evidence the host is down, and counting it would let
+    /// a single oversized reply wedge every subsequent small `GETATTR` to that
+    /// host. Reusable protocol errors -- auth rejection, program or procedure
+    /// mismatch, garbage args, XDR faults -- leave the transport intact and are
+    /// denials rather than outages.
     ///
     /// NFS status errors such as `NFS3ERR_ACCES` never reach here as errors at
     /// all: they arrive inside a successful RPC reply, so they land in the `Ok`

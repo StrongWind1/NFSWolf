@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::proto::auth::Credential;
 use crate::proto::conn::{NfsConnection, ReconnectStrategy};
@@ -37,7 +39,13 @@ pub(crate) struct PoolKey {
 struct PoolInner {
     /// Per-key idle queues. The inner `Mutex<VecDeque>` is wrapped in `Arc` so a
     /// checkout can clone the queue handle out of the DashMap and drop the
-    /// DashMap shard guard BEFORE awaiting the async mutex (see `try_pop`).
+    /// DashMap shard guard before locking the queue (see `try_pop`).
+    ///
+    /// A blocking `std` mutex, not an async one: it is only ever held for a
+    /// push or a pop, never across an `.await`, and `checkin` runs from a
+    /// synchronous `Drop` where an async mutex could only be `try_lock`ed --
+    /// which, under concurrent transfers, lost races and closed connections
+    /// that then had to be reopened, MOUNT included.
     pools: DashMap<PoolKey, Arc<Mutex<VecDeque<NfsConnection>>>>,
     max_per_key: usize,
     max_total: usize,
@@ -70,7 +78,23 @@ impl ConnectionPool {
     /// Create a new pool with the given limits.
     #[must_use]
     pub(crate) fn new(max_per_key: usize, max_total: usize, stale_threshold: Duration) -> Self {
-        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key, max_total, admission: Arc::new(Semaphore::new(max_total)), stale_threshold, proxy: None }) }
+        Self::build(max_per_key, max_total, stale_threshold, None)
+    }
+
+    fn build(max_per_key: usize, max_total: usize, stale_threshold: Duration, proxy: Option<String>) -> Self {
+        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key, max_total, admission: Arc::new(Semaphore::new(max_total)), stale_threshold, proxy }) }
+    }
+
+    /// Default limits, except that up to `idle_per_key` idle connections are
+    /// kept per (host, export, identity), and an optional SOCKS5 proxy.
+    ///
+    /// The shell keeps several READs or WRITEs in flight per transfer, each on
+    /// its own connection; with fewer idle slots than that, the surplus would
+    /// be closed when handed back and reopened -- MOUNT included -- by the next
+    /// transfer.
+    #[must_use]
+    pub(crate) fn for_parallel_transfers(idle_per_key: usize, proxy: Option<String>) -> Self {
+        Self::build(idle_per_key.max(4), 256, Duration::from_secs(5), proxy)
     }
 
     /// Create with sensible defaults for interactive scanning.
@@ -84,7 +108,7 @@ impl ConnectionPool {
     /// `proxy` should be `"host:port"` or `"socks5://host:port"`.
     #[must_use]
     pub(crate) fn with_proxy(proxy: String) -> Self {
-        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key: 4, max_total: 256, admission: Arc::new(Semaphore::new(256)), stale_threshold: Duration::from_secs(5), proxy: Some(proxy) }) }
+        Self::build(4, 256, Duration::from_secs(5), Some(proxy))
     }
 
     /// Check out a connection for `key`, creating one if necessary.
@@ -109,33 +133,28 @@ impl ConnectionPool {
 
     /// Return a connection to the idle queue (LIFO).
     ///
-    /// Poisoned connections are discarded rather than re-queued.
+    /// Poisoned connections are discarded rather than re-queued, and so are
+    /// connections whose last call never completed because its future was
+    /// dropped: their stream position and credential are both unknown.
     pub(crate) fn checkin(&self, key: PoolKey, conn: NfsConnection) {
         // The admission permit is released by `PooledConnection`'s drop, which runs
         // after this call (explicit Drop body first, then fields), so the slot is
         // freed and the next waiter woken only once the connection is back in the
         // idle queue. No manual counter/notify is needed here.
-        if conn.health.poisoned {
-            tracing::debug!(host = %key.host, "pool: poisoned connection discarded");
+        if !conn.health.is_reusable() {
+            tracing::debug!(host = %key.host, poisoned = conn.health.poisoned, cancelled_mid_call = conn.health.in_flight, "pool: connection discarded");
             return;
         }
 
         // Clone the queue handle out and drop the DashMap entry guard before
-        // touching the inner mutex, so the shard write lock is never held across
-        // the (non-blocking) try_lock either.
+        // touching the inner mutex, so the shard write lock is never held while
+        // the queue is locked.
         let queue = {
             let entry = self.inner.pools.entry(key).or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())));
             Arc::clone(&entry)
         };
-        // try_lock instead of blocking_lock: checkin runs from sync Drop,
-        // which may execute inside the tokio runtime (e.g. when an async task
-        // drops a PooledConnection). blocking_lock panics in that context.
-        // On contention the connection is simply discarded -- a new one will be
-        // created on the next checkout, and the semaphore permit released by
-        // our Drop ensures the slot is freed regardless.
-        if let Ok(mut q) = queue.try_lock()
-            && q.len() < self.inner.max_per_key
-        {
+        let mut q = lock_queue(&queue);
+        if q.len() < self.inner.max_per_key {
             q.push_back(conn);
         }
     }
@@ -172,23 +191,19 @@ impl ConnectionPool {
     /// Pop one idle connection, running a health check if it is stale.
     async fn try_pop(&self, key: &PoolKey) -> Option<NfsConnection> {
         // Clone the per-key queue handle out of the DashMap and drop the DashMap
-        // read guard BEFORE awaiting the async mutex. A DashMap `Ref` is a shard
-        // RwLock read guard; holding it across `.lock().await` is the documented
-        // tokio "lock held across await" footgun -- a concurrent `checkin` taking
-        // the same shard's write lock (via `entry`) can stall a worker thread, and
-        // under same-key checkout/checkin contention the runtime can wedge.
-        // `clippy::await_holding_lock` does not see DashMap guards, so this must be
-        // enforced structurally. The `get` Ref is confined to the block below, so
-        // it is dropped before `queue.lock().await`.
+        // read guard before locking the queue. A DashMap `Ref` is a shard RwLock
+        // read guard; holding it while taking another lock, or across the health
+        // check's `.await` below, lets a concurrent `checkin` taking the same
+        // shard's write lock (via `entry`) stall a worker thread. The `get` Ref is
+        // confined to the block below, so it is dropped first.
         let queue = {
             let entry = self.inner.pools.get(key)?;
             Arc::clone(&entry)
         };
 
-        let mut conn = {
-            let mut q = queue.lock().await;
-            q.pop_back()?
-        };
+        // The guard is a temporary of this statement, released before the
+        // health check awaits.
+        let mut conn = lock_queue(&queue).pop_back()?;
 
         if conn.is_stale(self.inner.stale_threshold) && !conn.health_check().await {
             // Connection is dead  --  discard and signal caller to create a new one.
@@ -196,6 +211,14 @@ impl ConnectionPool {
         }
         Some(conn)
     }
+}
+
+/// Lock an idle queue, recovering it if a thread panicked while holding it.
+///
+/// Every critical section is a single `push_back` or `pop_back`, so a poisoned
+/// queue is still consistent.
+fn lock_queue(queue: &Mutex<VecDeque<NfsConnection>>) -> MutexGuard<'_, VecDeque<NfsConnection>> {
+    queue.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Re-stamp `conn` with `credential` so the AUTH_SYS identity actually used on
