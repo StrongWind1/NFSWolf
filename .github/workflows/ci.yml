@@ -428,15 +428,21 @@ jobs:
           path: |
             ~/.cargo/bin/cargo-machete
             ~/.cargo/registry/index/
-          key: ubuntu-cargo-machete-v1
+          key: ubuntu-cargo-machete-v2
 
       - name: Install cargo-machete
         # --locked installs exactly what the tool's published Cargo.lock
-        # resolves to, which is deterministic across CI runs.
+        # resolves to, which is deterministic across CI runs. The tool is
+        # built with the latest stable toolchain instead of the pinned
+        # project toolchain: current cargo-machete releases use std APIs
+        # newer than rust-toolchain.toml's pin and do not compile on it.
+        # Only the tool build uses stable; `cargo machete` below still runs
+        # under the pinned toolchain.
         run: |
           set -euo pipefail
           if ! command -v cargo-machete > /dev/null 2>&1; then
-            cargo install cargo-machete --locked
+            rustup toolchain install stable --profile minimal
+            cargo +stable install cargo-machete --locked
           fi
 
       - name: cargo machete
