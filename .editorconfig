@@ -33,6 +33,10 @@ indent_size = unset
 indent_style = space
 indent_size = 2
 
+[*.js]
+indent_style = space
+indent_size = 2
+
 # Make uses tabs for recipes but spaces for continuation and variable lines.
 # Generic indent checkers can't distinguish the two, so indent is unset.
 [Makefile]
