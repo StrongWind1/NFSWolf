@@ -49,7 +49,7 @@ let res = nfs.getattr(&nfs_v3::wire::GETATTR3args { object: root }).await?;
 ### Client and error types
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `Nfs3Client<T>` | Client with one method per NFSv3 procedure (22 total) |
 | `MountClient<T>` | Re-export of `nfs_mount::MountClient` for backward compatibility |
 | `Nfs3Error` | Classified status codes with oracle and permission predicates |
@@ -59,7 +59,7 @@ let res = nfs.getattr(&nfs_v3::wire::GETATTR3args { object: root }).await?;
 ### Domain types (`api` module)
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `FileHandle` | Opaque file handle with hex encode/decode and equality |
 | `FileAttrs` | Domain-level file attributes (type, mode, size, uid, gid, times) |
 | `FileType` | File type enum (regular, directory, symlink, block/char, fifo, socket) |
@@ -77,7 +77,7 @@ let res = nfs.getattr(&nfs_v3::wire::GETATTR3args { object: root }).await?;
 ### Wire types (`wire` module)
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `nfs_fh3` | Raw file handle |
 | `fattr3` / `nfsstat3` / `ftype3` | Core wire types |
 | `Nfs3Result<T, E>` / `Nfs3Option<T>` | Generic result and optional types |
@@ -101,7 +101,7 @@ Two protocol properties are load-bearing for security work:
 `Nfs3Error` classifies every status code for automated decision-making:
 
 | Predicate | Purpose |
-|---|---|
+| --- | --- |
 | `is_transient()` | I/O, JUKEBOX, SERVERFAULT -- should trip a circuit breaker |
 | `is_permission_denied()` | PERM, ACCES -- expected during identity probing, must not trip breaker |
 | `is_handle_oracle_hit()` | STALE (70) -- right format, wrong inode/generation |
@@ -111,7 +111,7 @@ The STALE/BADHANDLE distinction ([RFC 1813] sec. 2.6) enables targeted handle br
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client

@@ -51,7 +51,7 @@ struct MyArgs {
 ## API reference
 
 | Type / Trait | Description |
-|------|-------------|
+| ------ | ------------- |
 | `Pack` | Trait for encoding a value into XDR bytes |
 | `Unpack` | Trait for decoding a value from XDR bytes |
 | `XdrCodec` | Re-exported derive macro from `onc-xdr-derive` |
@@ -77,7 +77,7 @@ Implements the full XDR encoding specified in [RFC 4506]: integers (`u32`, `u64`
 Every length and count on the wire is chosen by the peer. A four-byte header claiming 4 GiB costs the sender nothing but would cost the receiver the allocation (CWE-789 / CWE-770). The hardened alternatives in the `util` module are used throughout the protocol stack:
 
 | Instead of | Use |
-|---|---|
+| --- | --- |
 | `Vec::with_capacity(len)` then `read_exact` | `read_bytes(input, len)` |
 | `Vec::with_capacity(count)` for an array | `vec_with_capacity(count)` |
 
@@ -85,7 +85,7 @@ Both reserve at most `PREALLOC_CAP` (1 MiB) regardless of what was declared and 
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr              <-- this crate
        +-- onc-rpc-client

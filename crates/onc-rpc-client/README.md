@@ -49,7 +49,7 @@ let result: MyRes = transport.call_as(auth, 100_003, 3, 1, &args).await?;
 ### Core types
 
 | Type / Trait | Description |
-|------|-------------|
+| ------ | ------------- |
 | `RpcTransport` | Trait for issuing RPC calls -- the seam between protocol and policy |
 | `DirectTransport<IO>` | Policy-free `RpcTransport` over a single connection |
 | `RpcClient<IO>` | Low-level ONC RPC v2 client with public credential field |
@@ -60,7 +60,7 @@ let result: MyRes = transport.call_as(auth, 100_003, 3, 1, &args).await?;
 ### Wire types
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `opaque_auth` | Wire-level credential encoding |
 | `auth_flavor` | Wire enum: `AUTH_NULL`, `AUTH_UNIX`, `AUTH_SHORT`, `AUTH_DES`, `RPCSEC_GSS` (6), `AUTH_TLS` (7, RFC 9289) |
 | `auth_unix` | AUTH_SYS credential body (stamp, machinename, uid, gid, gids) |
@@ -73,7 +73,7 @@ let result: MyRes = transport.call_as(auth, 100_003, 3, 1, &args).await?;
 ### Transport layer
 
 | Type / Function | Description |
-|------|-------------|
+| ------ | ------------- |
 | `AsyncRead` / `AsyncWrite` | Runtime-agnostic async I/O traits |
 | `Connector` | Trait for establishing TCP connections |
 | `TokioIo<T>` | Adapter bridging tokio streams to `AsyncRead`/`AsyncWrite` |
@@ -96,7 +96,7 @@ The transport layer provides async I/O traits (`AsyncRead`/`AsyncWrite`), a toki
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client  <-- this crate

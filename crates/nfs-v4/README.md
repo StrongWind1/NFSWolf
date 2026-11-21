@@ -59,7 +59,7 @@ nfs.close_file(&session, &open).await?;
 ### Client and session types
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `Nfs4Client<T>` | Full NFSv4.0 client: 45 public methods covering stateless reads, stateful OPEN/CLOSE/LOCK, session management, crash recovery, and delegation return |
 | `Nfs4Error<E>` | Error type with `is_transient()`, `is_permission_denied()`, `is_stale()`, `is_grace()`, `is_stale_clientid()`, `is_expired()` classification predicates |
 | `Nfs4Session` | Client session state: clientid, confirm verifier, open owner, seqid tracking, lease time, renewal detection |
@@ -69,7 +69,7 @@ nfs.close_file(&session, &open).await?;
 ### COMPOUND builder and wire types
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `CompoundBuilder` | Chainable builder with a method for every NFSv4.0 operation: `putrootfh()`, `putpubfh()`, `putfh()`, `lookup()`, `lookupp()`, `getfh()`, `getattr()`, `readdir()`, `readlink()`, `read()`, `write()`, `create()`, `remove()`, `rename()`, `link()`, `open()`, `open_confirm()`, `open_downgrade()`, `close()`, `lock()`, `lockt()`, `locku()`, `release_lockowner()`, `delegpurge()`, `delegreturn()`, `setattr()`, `commit()`, `access()`, `nverify()`, `verify()`, `savefh()`, `restorefh()`, `openattr()`, `secinfo()`, `setclientid()`, `setclientid_confirm()`, `renew()`, `illegal()`, plus v4.1/v4.2 extensions |
 | `CompoundArgs` / `CompoundRes` | Wire-level COMPOUND request and response |
 | `ArgOp` | Enum of all 37 NFSv4.0 operations (ops 3-39) plus ILLEGAL (10044) |
@@ -79,7 +79,7 @@ nfs.close_file(&session, &open).await?;
 ### Domain types
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `Nfs4FileInfo` | Domain-level file attributes (type, mode, size, uid, gid, times, nlink) |
 | `Nfs4DirEntry` | Directory entry with name and `Nfs4FileInfo` |
 | `Nfs4FileType` | File type enum (Regular, Directory, Symlink, BlockDev, CharDev, Fifo, Socket) |
@@ -88,7 +88,7 @@ nfs.close_file(&session, &open).await?;
 ### Attribute, state, and security types
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `AttrRequest` | Bitmask for requesting specific file attributes |
 | `Fattr4` / `Fattr4Decoded` | Wire-level and decoded file attributes |
 | `Stateid4` | State ID for OPEN/LOCK/READ/WRITE operations |
@@ -104,7 +104,7 @@ nfs.close_file(&session, &open).await?;
 ### Constants
 
 | Constant | Description |
-|------|-------------|
+| ------ | ------------- |
 | `PROGRAM` | NFS program number (100003) |
 | `VERSION` | NFSv4 version (4) |
 | `NFS4_PROC_COMPOUND` | COMPOUND procedure number (1) |
@@ -131,7 +131,7 @@ nfs.close_file(&session, &open).await?;
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client

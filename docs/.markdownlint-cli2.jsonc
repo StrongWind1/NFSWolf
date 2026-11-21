@@ -23,6 +23,10 @@
     // index.md files start with metadata/frontmatter, not an h1.
     "MD041": false,
     // MkDocs admonition indentation causes false positives for code spans.
-    "MD038": false
+    "MD038": false,
+    // Code blocks can show literal tab-separated tool output; tabs in prose still fail.
+    "MD010": { "code_blocks": false },
+    // MkDocs builds heading anchors with its own slug rules, not GitHub's; the built site is the check.
+    "MD051": false
   }
 }

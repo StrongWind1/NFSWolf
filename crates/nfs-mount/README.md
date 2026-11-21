@@ -49,7 +49,7 @@ let exports = mount.export().await?;
 ## API reference
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `MountClient<T>` | Unified MOUNT client, generic over `RpcTransport` |
 | `MountVersion` | Version selector: `V1` or `V3` |
 | `MountedHandle` | File handle bytes + auth flavor list from a successful MNT |
@@ -78,7 +78,7 @@ The version-neutral `mnt()` method returns a `MountedHandle` regardless of which
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client

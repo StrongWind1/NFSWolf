@@ -45,7 +45,7 @@ for m in &mappings {
 ## API reference
 
 | Type / Function | Description |
-|------|-------------|
+| ------ | ------------- |
 | `PortmapperClient<IO>` | Portmapper v2 client: `null()`, `getport()`, `dump()` |
 | `RpcbindClient<IO>` | rpcbind v3/v4 client: `getaddr()`, `gettime()`, `getstat()` |
 | `PortmapError` | Error type for portmapper operations |
@@ -77,7 +77,7 @@ The program number table covers portmapper, NFS, mountd, ypserv, ypbind, rquotad
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client

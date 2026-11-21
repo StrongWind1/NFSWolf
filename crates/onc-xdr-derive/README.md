@@ -57,7 +57,7 @@ struct GETATTR3args {
 ## API reference
 
 | Item | Description |
-|------|-------------|
+| ------ | ------------- |
 | `#[derive(XdrCodec)]` | Generates `Pack` and `Unpack` for structs and enums |
 | `#[repr(u32)]` | Required on simple enums so discriminants come from variant values |
 | `#[xdr(N)]` | Sets the discriminant on data-carrying enum variants |
@@ -73,7 +73,7 @@ Types whose wire form breaks these rules -- NFSv2's fixed 32-byte file handles, 
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive             <-- this crate
   +-- onc-xdr
        +-- onc-rpc-client

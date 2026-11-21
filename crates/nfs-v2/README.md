@@ -47,23 +47,23 @@ let data = nfs.read_file(&fh).await?;
 
 ### Client types
 
-| Type | Description |
-|------|-------------|
-| `Nfs2Client<T>` | Domain-level client: 18 procedures + `lookup_path()`, `read_file()` |
-| `Nfs2RawClient<T>` | Wire-level client: raw XDR types in and out, no status checking |
-| `MountV1Client<T>` | Re-export of `nfs_mount::MountClient` configured for MOUNT v1 |
+| Type               | Description                                                         |
+| ------------------ | ------------------------------------------------------------------- |
+| `Nfs2Client<T>`    | Domain-level client: 18 procedures + `lookup_path()`, `read_file()` |
+| `Nfs2RawClient<T>` | Wire-level client: raw XDR types in and out, no status checking     |
+| `MountV1Client<T>` | Re-export of `nfs_mount::MountClient` configured for MOUNT v1       |
 
 ### Error and status types
 
-| Type | Description |
-|------|-------------|
+| Type           | Description                                                              |
+| -------------- | ------------------------------------------------------------------------ |
 | `Nfs2Error<E>` | Error type with `is_permission_denied()`, `is_stale()`, `is_not_found()` |
-| `Nfs2Stat` | NFSv2 status codes (18 variants + `Unknown(u32)`) |
+| `Nfs2Stat`     | NFSv2 status codes (18 variants + `Unknown(u32)`)                        |
 
 ### Wire types
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `Nfs2FileHandle` | Fixed 32-byte file handle (`[u8; 32]`) |
 | `Nfs2FileAttr` | File attributes (type, mode, size, uid, gid, timestamps) |
 | `Nfs2SetAttr` | Attribute values for SETATTR |
@@ -85,7 +85,7 @@ The domain client adds `lookup_path()` for multi-component path resolution and `
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client
