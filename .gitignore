@@ -2,7 +2,6 @@ dist/
 ref/
 site/
 .venv/
-uv.lock
 CLAUDE.md
 .vscode/
 *.pcapng
@@ -224,3 +223,7 @@ System Volume Information/
 
 # Temp directory
 [Tt]emp/
+
+# Built-site checkers (npm ci)
+node_modules/
+__pycache__/
