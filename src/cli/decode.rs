@@ -27,6 +27,15 @@ pub(crate) fn run(args: &DecodeArgs) -> anyhow::Result<()> {
     println!("  {}", hex.cyan());
     println!();
 
+    // OS fingerprint first -- determines how we decode the rest.
+    let fh = FileHandle::from_bytes(&bytes);
+    let os = FileHandleAnalyzer::fingerprint_os(&fh);
+
+    // AWS Storage Gateway S3 File Gateway: custom format, not knfsd.
+    if os == crate::engine::file_handle::OsGuess::AwsStorageGateway {
+        return decode_aws_file_gateway(&bytes);
+    }
+
     // Header (bytes 0-3)
     let version = bytes.first().copied().unwrap_or(0);
     let auth_type = bytes.get(1).copied().unwrap_or(0);
@@ -46,14 +55,31 @@ pub(crate) fn run(args: &DecodeArgs) -> anyhow::Result<()> {
     if let Some(fsid_data) = bytes.get(4..fsid_end) {
         println!("  {}", "Filesystem ID (fsid)".bold().underline());
         decode_fsid(fsid_type, fsid_data);
+        // ZFS hint: if the UUID's high 8 bytes are zero, it's a ZFS 64-bit GUID.
+        if (fsid_type == 6 || fsid_type == 5) && fsid_data.len() >= 16 {
+            let low_nonzero = fsid_data.get(..8).is_some_and(|s| s.iter().any(|&b| b != 0));
+            let high_zero = fsid_data.get(8..16).is_some_and(|s| s.iter().all(|&b| b == 0));
+            if low_nonzero && high_zero {
+                let guid = fsid_data.get(..8).and_then(|s| s.try_into().ok()).map_or(0u64, u64::from_le_bytes);
+                println!("    {}  ZFS dataset GUID = 0x{:016x}", "(note)".dimmed(), guid);
+            }
+        }
         println!();
     }
 
     // fileid section
+    let fs = FileHandleAnalyzer::fingerprint_fs(&fh);
     if bytes.len() > fsid_end && fileid_type != 0 {
         let fileid_data = bytes.get(fsid_end..).unwrap_or(&[]);
         println!("  {}", "File ID (fileid)".bold().underline());
-        decode_fileid(fileid_type, fileid_data);
+        // ZFS uses zfid_short_t: zf_len(u16 LE) + zf_object[6](LE) + zf_gen[4](LE).
+        // This is encoded inside FILEID_INO32_GEN (0x01) but the byte layout is NOT
+        // a plain u32 inode + u32 gen.  Decode it properly when we know it's ZFS.
+        if fs == crate::engine::file_handle::FsType::Zfs && fileid_type == 0x01 && fileid_data.len() >= 12 {
+            decode_zfs_fileid(fileid_data);
+        } else {
+            decode_fileid(fileid_type, fileid_data);
+        }
         println!();
     } else if fileid_type == 0 {
         println!("  {}", "File ID (fileid)".bold().underline());
@@ -62,9 +88,6 @@ pub(crate) fn run(args: &DecodeArgs) -> anyhow::Result<()> {
     }
 
     // OS and FS fingerprint
-    let fh = FileHandle::from_bytes(&bytes);
-    let os = FileHandleAnalyzer::fingerprint_os(&fh);
-    let fs = FileHandleAnalyzer::fingerprint_fs(&fh);
     println!("  {}", "Fingerprint".bold().underline());
     println!("    OS:         {os:?}");
     println!("    Filesystem: {fs:?}");
@@ -72,7 +95,7 @@ pub(crate) fn run(args: &DecodeArgs) -> anyhow::Result<()> {
     // Security assessment
     println!();
     println!("  {}", "Assessment".bold().underline());
-    print_assessment(fsid_type, fileid_type, &bytes);
+    print_assessment(fsid_type, fileid_type, &bytes, fs);
 
     println!();
     Ok(())
@@ -273,7 +296,7 @@ fn btrfs_object_label(id: u64) -> String {
     }
 }
 
-fn print_assessment(fsid_type: u8, fileid_type: u8, bytes: &[u8]) {
+fn print_assessment(fsid_type: u8, fileid_type: u8, bytes: &[u8], fs: crate::engine::file_handle::FsType) {
     match (fsid_type, fileid_type) {
         (7, 1 | 2) => println!("    {} This handle has full export context and real inode data.", "[BEST]".bold().green()),
         (7, 0) => println!("    {} Export root with full context. Can be used to construct escape handles.", "[GOOD]".bold().green()),
@@ -286,9 +309,84 @@ fn print_assessment(fsid_type: u8, fileid_type: u8, bytes: &[u8]) {
         _ => println!("    {} Unknown handle type.", "[?]".bold()),
     }
 
+    // ZFS-specific note: escape via ZFS root object 34
+    if fs == crate::engine::file_handle::FsType::Zfs {
+        println!("    ZFS dataset: escape targets object 34 (root directory) with gen=0.");
+    }
+
     // Cross-protocol note
     if fsid_type != 1 && bytes.len() >= 8 {
         println!("    Handles are cross-protocol: this handle works on NFSv2, v3, and v4");
         println!("    (on servers that support the respective version).");
     }
+}
+
+/// Decode the ZFS `zfid_short_t` layout within a FILEID_INO32_GEN fileid.
+///
+/// ZFS encodes its FID as: zf_len(u16 LE) + zf_object\[6\](LE) + zf_gen\[4\](LE),
+/// totalling 12 bytes.  The standard decode_fileid would interpret the first 4 bytes
+/// as a u32 inode and the next 4 as a generation, losing the real ZFS object number.
+fn decode_zfs_fileid(data: &[u8]) {
+    if data.len() < 12 {
+        println!("    raw          = {}", hex_str(data));
+        return;
+    }
+    let fid_len = data.get(0..2).and_then(|s| s.try_into().ok()).map_or(0u16, u16::from_le_bytes);
+    // zf_object is a 6-byte LE integer (48-bit ZFS object ID)
+    let mut obj_bytes = [0u8; 8];
+    if let Some(src) = data.get(2..8) {
+        obj_bytes[..6].copy_from_slice(src);
+    }
+    let object = u64::from_le_bytes(obj_bytes);
+    let generation = read_le_u32(data, 8).unwrap_or(0);
+    println!("    {} ZFS zfid_short_t", "(layout)".dimmed());
+    println!("    zf_len       = {fid_len}");
+    println!("    zf_object    = {object}{}", if object == 34 { "  (ZFS root directory object)".dimmed().to_string() } else { String::new() });
+    println!("    zf_gen       = {generation}{}", if generation == 0 { "  (wildcard -- ZFS accepts gen=0 for root)".dimmed().to_string() } else { String::new() });
+}
+
+/// Decode an AWS Storage Gateway S3 File Gateway handle.
+///
+/// Format (16 bytes, all observed handles):
+///   byte  0:     0x43 (ASCII 'C', gateway marker)
+///   bytes 1-3:   share index (big-endian u24, observed: 000001, 000002, ...)
+///   bytes 4-7:   version/type field (observed: 0a 01 00 00; tolerates mutation)
+///   bytes 8-11:  zeros (reserved)
+///   bytes 12-15: inode-like field (observed: same value as bytes 1-3 shifted, e.g. 00 01 00 00)
+///
+/// The STALE/BADHANDLE oracle works: a non-existent share index returns STALE,
+/// an invalid format (e.g. all zeros at byte 0) returns BADHANDLE.
+#[expect(clippy::unnecessary_wraps, reason = "signature matches run() return type for early return")]
+fn decode_aws_file_gateway(raw: &[u8]) -> anyhow::Result<()> {
+    println!("  {}", "AWS Storage Gateway S3 File Gateway".bold().underline());
+    println!("    {} Not a Linux knfsd handle. Custom AWS appliance format.", "[FGW]".bold().yellow());
+    println!();
+
+    let idx = u32::from_be_bytes([0, raw.get(1).copied().unwrap_or(0), raw.get(2).copied().unwrap_or(0), raw.get(3).copied().unwrap_or(0)]);
+    let ver_field = raw.get(4..8).map(hex_str).unwrap_or_default();
+    let rsvd = raw.get(8..12).map(hex_str).unwrap_or_default();
+    let ino_equiv = read_le_u32(raw, 12).unwrap_or(0);
+
+    println!("  {}", "Fields".bold().underline());
+    println!("    marker       = 0x43 {}", "(gateway signature)".dimmed());
+    println!("    share_index  = {idx}");
+    println!("    version      = {ver_field} {}", "(tolerates mutation)".dimmed());
+    println!("    reserved     = {rsvd}");
+    println!("    inode_equiv  = {ino_equiv} {}", format!("(matches share_index << 8 = {})", idx * 256).dimmed());
+    println!();
+
+    println!("  {}", "Fingerprint".bold().underline());
+    println!("    OS:         AwsStorageGateway");
+    println!("    Filesystem: S3 (via gateway cache)");
+    println!();
+
+    println!("  {}", "Assessment".bold().underline());
+    println!("    {} Handles are sequential share indices, not forgeable for intra-share files.", "[FGW]".bold().yellow());
+    println!("    The STALE/BADHANDLE oracle works: brute-handle with incrementing share");
+    println!("    index (bytes 1-3 and 13) can enumerate all NFS shares on this gateway.");
+    println!("    NFSv4 LOOKUPP escapes the export boundary and discovers sibling shares.");
+    println!("    Handles are bearer tokens: a handle from one share works without mounting it.");
+    println!();
+
+    Ok(())
 }

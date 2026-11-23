@@ -19,6 +19,8 @@ pub(crate) enum OsGuess {
     /// HP-UX: one-request-per-TCP connection model. Reserved for future TCP behavior fingerprinting.
     #[expect(dead_code, reason = "reserved for future TCP behavior fingerprinting")]
     HpUx,
+    /// AWS Storage Gateway S3 File Gateway: 16-byte handles starting with 0x43.
+    AwsStorageGateway,
     Unknown,
 }
 
@@ -169,6 +171,13 @@ impl FileHandleAnalyzer {
             return OsGuess::Linux;
         }
 
+        // AWS Storage Gateway S3 File Gateway: exactly 16 bytes, byte 0 = 0x43 ('C').
+        // Handle format: [43][00 00 NN][XX XX 00 00][00 00 00 00][00 NN 00 00]
+        // where NN is a sequential share index (observed: 01, 02, ...).
+        if data.len() == 16 && data.first().copied() == Some(0x43) {
+            return OsGuess::AwsStorageGateway;
+        }
+
         // FreeBSD: starts with fsid (8 bytes) that often has high values
         if data.len() >= 20
             && let (Some(&b8), Some(&b9)) = (data.get(8), data.get(9))
@@ -246,6 +255,18 @@ impl FileHandleAnalyzer {
                     32 | 64 | 128 => return FsType::Xfs, // XFS root (varies by inode size)
                     _ => {},                             // ambiguous -- fall through
                 }
+            }
+        }
+
+        // ZFS on Linux stores a 64-bit GUID in the low 8 bytes of the 16-byte UUID
+        // field, leaving the high 8 bytes as zeros.  This pattern is reliable when
+        // the low 8 bytes are non-zero (a real GUID) and no other FS type produces it.
+        if (fsid_type == 6 || fsid_type == 5) && data.len() >= 4 + 16 {
+            let uuid_start = 4;
+            let low_nonzero = data.get(uuid_start..uuid_start + 8).is_some_and(|s| s.iter().any(|&b| b != 0));
+            let high_zero = data.get(uuid_start + 8..uuid_start + 16).is_some_and(|s| s.iter().all(|&b| b == 0));
+            if low_nonzero && high_zero {
+                return FsType::Zfs;
             }
         }
 
@@ -855,6 +876,13 @@ impl FileHandleAnalyzer {
                 } else {
                     (0.0, vec![])
                 }
+            },
+            OsGuess::AwsStorageGateway => {
+                // File Gateway handles are 16 bytes with a sequential share index.
+                // The share index is a small integer (observed: 1, 2, ...).
+                // Entropy is effectively zero: the format is entirely predictable
+                // once you know one handle.
+                (8.0, vec!["share index (1 byte, sequential)".into()])
             },
             OsGuess::HpUx | OsGuess::Unknown => (32.0, vec!["unknown fields".into()]),
         };
@@ -1466,5 +1494,74 @@ mod tests {
         assert_eq!(results.len(), 2, "compound UUID seed must produce 2 FAT variants");
         assert_eq!(results[0].root_handle.as_bytes()[2], 7, "first variant must use fsid_type=7");
         assert_eq!(results[1].root_handle.as_bytes()[2], 6, "second variant must use fsid_type=6");
+    }
+
+    // --- AWS Storage Gateway / ZFS fingerprinting ---
+
+    #[test]
+    fn fingerprint_aws_file_gateway_handle() {
+        // Real handle from an S3 File Gateway: 16 bytes, byte 0 = 0x43.
+        let fh = FileHandle::from_bytes(&[0x43, 0x00, 0x00, 0x01, 0x0a, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::AwsStorageGateway);
+    }
+
+    #[test]
+    fn fingerprint_aws_file_gateway_share2() {
+        let fh = FileHandle::from_bytes(&[0x43, 0x00, 0x00, 0x02, 0x0a, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00]);
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::AwsStorageGateway);
+    }
+
+    #[test]
+    fn aws_gateway_not_linux() {
+        // A File Gateway handle must NOT be fingerprinted as Linux.
+        let fh = FileHandle::from_bytes(&[0x43, 0x00, 0x00, 0x01, 0x0a, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
+        assert_ne!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::Linux);
+        // And escape must produce nothing (not a Linux handle).
+        assert!(FileHandleAnalyzer::construct_root_candidates(&fh).is_empty());
+    }
+
+    #[test]
+    fn aws_gateway_entropy_low() {
+        let fh = FileHandle::from_bytes(&[0x43, 0x00, 0x00, 0x01, 0x0a, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
+        let analysis = FileHandleAnalyzer::estimate_entropy(&fh);
+        assert!(analysis.entropy_bits <= 8.0, "File Gateway handle entropy must be low (sequential index)");
+    }
+
+    #[test]
+    fn fingerprint_zfs_from_uuid_with_trailing_zeros() {
+        // Real FSx OpenZFS export root: fsid_type=6, UUID = 61c94694 00d6acfa 00000000 00000000
+        // The ZFS 64-bit GUID sits in the low 8 bytes; the high 8 are zero.
+        let fh = FileHandle::from_bytes(&[
+            0x01, 0x00, 0x06, 0x00, // Linux knfsd, fsid_type=6, FILEID_ROOT
+            0x61, 0xc9, 0x46, 0x94, 0x00, 0xd6, 0xac, 0xfa, // ZFS GUID (low 8 bytes)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // zeros (high 8 bytes)
+        ]);
+        assert_eq!(FileHandleAnalyzer::fingerprint_fs(&fh), FsType::Zfs);
+    }
+
+    #[test]
+    fn fingerprint_zfs_escape_handle() {
+        // Real FSx OpenZFS escape handle with ZFS zfid_short_t.
+        let fh = FileHandle::from_bytes(&[
+            0x01, 0x00, 0x06, 0x01, // Linux knfsd, fsid_type=6, FILEID_INO32_GEN
+            0xfe, 0xb0, 0xdc, 0x81, 0x00, 0x60, 0x8e, 0x11, // ZFS GUID
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // zeros
+            0x0a, 0x00, // zf_len = 10
+            0x22, 0x00, 0x00, 0x00, 0x00, 0x00, // zf_object = 34
+            0x00, 0x00, 0x00, 0x00, // zf_gen = 0
+        ]);
+        assert_eq!(FileHandleAnalyzer::fingerprint_fs(&fh), FsType::Zfs);
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::Linux);
+    }
+
+    #[test]
+    fn non_zfs_uuid_not_misidentified() {
+        // A normal ext4 or XFS UUID where all 16 bytes are non-zero must NOT be identified as ZFS.
+        let fh = FileHandle::from_bytes(&[
+            0x01, 0x00, 0x06, 0x00, // Linux knfsd, fsid_type=6, FILEID_ROOT
+            0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, // UUID low
+            0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, // UUID high (non-zero)
+        ]);
+        assert_ne!(FileHandleAnalyzer::fingerprint_fs(&fh), FsType::Zfs);
     }
 }
