@@ -10,15 +10,22 @@ The findings in this stage exploit two structural properties: AUTH_SYS trusts wh
 
 | Finding | Name | Severity | nfswolf Subcommand | What It Enables |
 |---------|------|----------|-------------------|----------------|
-| [F-1.1](../identity/F-1.1-uid-gid-spoofing.md) | UID/GID Spoofing | Critical | `shell`, `uid-spray` | Claim any identity; server applies POSIX checks on forged UID/GID |
-| [F-1.3](../identity/F-1.3-auxiliary-group-injection.md) | Auxiliary Group Injection | High | `shell`, `analyze` | Inject target GIDs (e.g., shadow group 42) into AUTH_SYS credentials |
-| [F-1.8](../identity/F-1.8-auth-tooweak-kerberos-enforced.md) | AUTH_TOOWEAK Oracle | High | `analyze` | Definitively reveals whether an export requires Kerberos (MOUNT leaks handle, NFS rejects with AUTH_TOOWEAK) |
+| [F-1.1](../identity/F-1.1-uid-gid-spoofing.md) | UID/GID Spoofing | High | `shell`, `uid-spray` | Claim any identity; server applies POSIX checks on forged UID/GID |
+| [F-1.3](../identity/F-1.3-auxiliary-group-injection.md) | Auxiliary Group Injection | Critical | `shell`, `analyze` | Inject target GIDs (e.g., shadow group 42) into AUTH_SYS credentials |
+| [F-1.8](../identity/F-1.8-auth-tooweak-kerberos-enforced.md) | AUTH_TOOWEAK Oracle | Info | `analyze` | Definitively reveals whether an export requires Kerberos (MOUNT leaks handle, NFS rejects with AUTH_TOOWEAK) |
 | [F-2.1](../access-control/F-2.1-export-escape.md) | Export Escape via Root Handle | Critical | `escape`, `shell escape-root` | Construct filesystem root handle to break out of the exported subdirectory |
 | [F-2.5](../access-control/F-2.5-stale-handle-persistence.md) | Stale Handle After Permission Revocation | Medium | `shell --handle` | Handles remain valid indefinitely after UMNT or export ACL changes, with no revocation mechanism |
 | [F-2.7](../access-control/F-2.7-nfsd-acl-blindness.md) | NFS Daemon ACL Blindness | Critical | `shell --handle` | Port 2049 never verifies the client was authorized to hold its handle |
 | [F-2.9](../access-control/F-2.9-webnfs-public-handle.md) | WebNFS Public Handle | Critical | `analyze` | All-zeros handle grants immediate access without MOUNT |
 | [F-7.1](../config/F-7.1-wildcard-export-policy.md) | Wildcard/Broad Subnet Exports | High | `scan`, `analyze` | Exports available to `*` or large CIDRs; any host on the network qualifies |
 | [F-7.3](../config/F-7.3-nohide-crossmnt-exposure.md) | nohide/crossmnt Sub-Mount Exposure | Medium | `analyze` | `nohide`/`crossmnt` exposes sub-mounted filesystems beyond the parent export |
+| [F-1.6](../identity/F-1.6-nfsv2-downgrade.md) | NFSv2 Downgrade | High | `analyze`, `shell --nfs-version 2` | Reach a `sec=krb5` export through NFSv2 and MOUNT v1, which have no flavor negotiation |
+| [F-1.7](../identity/F-1.7-rpcsec-gss-flavor-downgrade.md) | RPCSEC_GSS Flavor Downgrade | High | `analyze`, `shell` | Choose AUTH_SYS on an export that advertises it alongside Kerberos |
+| [F-3.3](../network/F-3.3-ip-spoofing-host-trust.md) | IP Spoofing Against Host-Based ACLs | High | -- | Spoofed or on-path source addresses satisfy IP-based export ACLs (requires network positioning; not detected) |
+| [F-2.2](../access-control/F-2.2-file-handle-guessing.md) | File Handle Guessing | Medium | `analyze`, `brute-handle` | The STALE/BADHANDLE oracle turns handle guessing into targeted enumeration, with no MOUNT call |
+| [F-3.6](../network/F-3.6-mixed-secinfo-zones.md) | Mixed Security Zones (Per-Path SECINFO) | Medium | `analyze` | A subdirectory that accepts AUTH_SYS under a Kerberos-only export root is reachable with forged credentials |
+| [F-7.2](../config/F-7.2-privileged-port-bypass.md) | `insecure` Export Option | Medium | `analyze` | MOUNT and NFS calls from unprivileged source ports succeed, so the attacking host needs no root |
+| [F-1.4](../identity/F-1.4-machine-name-spoofing.md) | Machine Name Spoofing | Low | `--hostname` | Sets the AUTH_SYS machine name; poisons server logs but does not satisfy IP-based ACLs |
 
 ---
 
@@ -28,7 +35,7 @@ A typical initial access chain against a default NFS server:
 
 1. **MOUNT the export.** `nfswolf shell target:/export` sends MOUNT MNT, which returns the root file handle. MOUNT checks the client's IP against the export ACL, but wildcard exports (F-7.1) accept any source address. The handle is now a permanent bearer token (F-2.7).
 
-2. **Choose an identity.** The shell defaults to `uid=0, gid=0`, but `root_squash` (the default) maps this to `nobody`. The credential ladder automatically tries the file owner's UID, then observed identities from READDIRPLUS, then common service accounts. Any non-zero UID bypasses root squash entirely (F-1.2).
+2. **Choose an identity.** The shell defaults to `uid=0, gid=0`, but `root_squash` (the default) maps this to `nobody`. The credential ladder automatically tries the file owner's UID, then the caller with the file's group, then root, then common service accounts. Any non-zero UID bypasses root squash entirely (F-1.2).
 
 3. **Read the directory.** READDIRPLUS returns file names, attributes, and handles for every entry in a single call. No per-file access check occurs at the READDIRPLUS level; the server returns handles for files the caller cannot read, trusting per-operation checks later.
 

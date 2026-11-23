@@ -8,7 +8,7 @@ These findings range from low-severity reconnaissance aids to high-severity harv
 
 | Finding | Title | Severity | RFC Basis | Detected by | Write-up |
 |---------|-------|----------|-----------|-------------|----------|
-| F-5.1 | Export List Enumeration | :material-information:{ .medium } Medium | RFC 1094 Appendix A | `scan`, `analyze` | [Detail](F-5.1-export-list-enumeration.md) |
+| F-5.1 | Export List Enumeration | :material-information:{ .medium } Medium | RFC 1094 Appendix A | `scan` | [Detail](F-5.1-export-list-enumeration.md) |
 | F-5.2 | READDIRPLUS File Handle Harvesting | :material-alert:{ .high } High | RFC 1813 sec 3.3.17 | `shell ls`, `mount` | [Detail](F-5.2-readdirplus-handle-harvesting.md) |
 | F-5.3 | NIS Credential Extraction | :material-alert:{ .high } High | Programs 100004/100007 | `scan`, `analyze` | [Detail](F-5.3-nis-credential-extraction.md) |
 | F-5.4 | RPC Service Enumeration | :material-information-outline:{ .low } Low | RFC 1057 Appendix A | `scan` | [Detail](F-5.4-rpc-service-enumeration.md) |
@@ -20,7 +20,7 @@ These findings range from low-severity reconnaissance aids to high-severity harv
 | F-5.10 | Solaris NFS Server Detected (time_delta fingerprint) | :material-information-outline:{ .info } Info | RFC 1813 sec 3.3.20 | `analyze` | [Detail](F-5.10-solaris-time-delta-fingerprint.md) |
 | F-5.11 | Filesystem Lacks Link/Symlink Support | :material-information-outline:{ .info } Info | RFC 1813 sec 3.3.20 | `analyze` | [Detail](F-5.11-filesystem-lacks-link-symlink.md) |
 | F-5.12 | Near Inode Exhaustion (DoS Risk) | :material-information:{ .medium } Medium | RFC 1813 sec 3.3.18 | `analyze` | [Detail](F-5.12-near-inode-exhaustion.md) |
-| F-5.13 | NFSv4 Named Attributes Exposed | :material-information-outline:{ .info } Info | RFC 7530 sec 5.3 | `analyze` | [Detail](F-5.13-nfsv4-named-attributes-exposed.md) |
+| F-5.13 | NFSv4 Named Attributes Exposed | :material-information-outline:{ .low } Low | RFC 7530 sec 5.3 | `analyze` | [Detail](F-5.13-nfsv4-named-attributes-exposed.md) |
 | F-5.14 | POSIX ACL Entries Expose Access | :material-information:{ .medium } Medium | NFS_ACL program 100227 | `analyze` | [Detail](F-5.14-posix-acl-entries.md) |
 | F-5.15 | rquotad Exposes UID Activity | :material-information:{ .medium } Medium | Program 100011 | `analyze` | [Detail](F-5.15-rquotad-uid-oracle.md) |
 | F-5.16 | Silly-Rename Files Detected | :material-information-outline:{ .info } Info | Implementation-specific | `analyze` | [Detail](F-5.16-silly-rename-detected.md) |

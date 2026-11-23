@@ -28,7 +28,7 @@ graph TB
 
     subgraph EXPORT["3. Export Configuration"]
         FS["Separate filesystem per export<br>blocks handle-based escape"]
-        OPTS["nosuid, nodev, ro<br>restrict post-access damage"]
+        OPTS["ro, root_squash<br>restrict post-access damage"]
         ACL["Host ACLs<br>IP/subnet restrictions"]
     end
 
@@ -55,8 +55,8 @@ Every major NFS threat class maps to one or more defensive controls. The table b
 | UID/GID spoofing | [F-1.1](../identity/F-1.1-uid-gid-spoofing.md), [F-1.2](../identity/F-1.2-root-squash-bypass.md) | Kerberos (`sec=krb5`) for cryptographic identity; `all_squash` + `anonuid`/`anongid` as a fallback | [Kerberos](hardening/kerberos.md), [Export options](configure/export-options.md) |
 | Export escape via handle manipulation | [F-2.1](../access-control/F-2.1-export-escape.md), [F-2.4](../access-control/F-2.4-btrfs-subvolume-escape.md) | Dedicate a separate filesystem (partition, LV, or ZFS dataset) to each export -- the kernel cannot traverse filesystem boundaries via handle bytes | [Hardening checklist](hardening/checklist.md), [Export options](configure/export-options.md) |
 | Plaintext wire traffic | [F-3.1](../network/F-3.1-plaintext-wire-protocol.md), [F-3.4](../network/F-3.4-striptls-downgrade.md) | NFS-over-TLS (RFC 9289) or Kerberos with integrity/privacy (`sec=krb5i` / `sec=krb5p`) | [TLS](hardening/tls.md), [Kerberos](hardening/kerberos.md) |
-| No root squash | [F-4.1](../privesc/F-4.1-no-root-squash.md), [F-4.2](../privesc/F-4.2-suid-sgid-escalation.md) | `root_squash` (default), `nosuid`, `nodev` on every export | [Export options](configure/export-options.md), [Hardening checklist](hardening/checklist.md) |
-| SUID/device escalation | [F-4.2](../privesc/F-4.2-suid-sgid-escalation.md), [F-4.3](../privesc/F-4.3-device-node-creation.md) | `nosuid` and `nodev` export flags; client-side mount options | [Export options](configure/export-options.md) |
+| No root squash | [F-4.1](../privesc/F-4.1-no-root-squash.md), [F-4.2](../privesc/F-4.2-suid-sgid-escalation.md) | `root_squash` (default) on every export; `nosuid`, `nodev` on every client mount | [Export options](configure/export-options.md), [Hardening checklist](hardening/checklist.md) |
+| SUID/device escalation | [F-4.2](../privesc/F-4.2-suid-sgid-escalation.md), [F-4.3](../privesc/F-4.3-device-node-creation.md) | `nosuid` and `nodev` client mount options (knfsd has no such export options); `root_squash` or `ro` on the server | [Export options](configure/export-options.md) |
 | Export list enumeration | [F-5.1](../info-disclosure/F-5.1-export-list-enumeration.md), [F-5.4](../info-disclosure/F-5.4-rpc-service-enumeration.md) | Firewall portmapper (111/tcp, 111/udp); restrict MOUNT service access; use NFSv4-only (no portmapper needed) | [Firewall](configure/firewall.md) |
 | Portmapper amplification | [F-3.2](../network/F-3.2-portmapper-amplification.md) | Block UDP/111 at the perimeter; disable rpcbind UDP listener | [Firewall](configure/firewall.md), [Kernel parameters](configure/kernel-params.md) |
 | NFSv2 downgrade | [F-1.6](../identity/F-1.6-nfsv2-downgrade.md) | Disable NFSv2 and v3 on the server; run NFSv4-only | [Kernel parameters](configure/kernel-params.md) |
@@ -71,7 +71,7 @@ Every major NFS threat class maps to one or more defensive controls. The table b
 | [Client setup](install/client.md) | Client-side packages, mount options, and autofs configuration |
 | **Configure** | |
 | [Exports syntax](configure/exports-syntax.md) | `/etc/exports` format, option precedence, and common pitfalls |
-| [Export options](configure/export-options.md) | Every export option with security implications: `ro`, `root_squash`, `all_squash`, `sec=`, `nosuid`, `nodev`, `crossmnt` |
+| [Export options](configure/export-options.md) | Every export option with security implications: `ro`, `root_squash`, `all_squash`, `sec=`, `crossmnt` |
 | [Firewall rules](configure/firewall.md) | iptables/nftables rules for portmapper, MOUNT, NFS, and lockd |
 | [Kernel parameters](configure/kernel-params.md) | NFS server sysctl and module parameters: version disable, thread count, grace period |
 | **Harden** | |
@@ -83,7 +83,7 @@ Every major NFS threat class maps to one or more defensive controls. The table b
 | [What does not work](what-does-not-work.md) | Controls that sound useful but do not actually prevent attacks: IP ACLs alone, `secure` flag, `subtree_check` |
 
 !!! tip "Use nfswolf to validate your defenses"
-    After hardening, run `nfswolf analyze` against your server to verify the changes took effect. The analyzer checks for every misconfiguration listed in the threat table above and reports what remains exposed. See the [analyze subcommand](../../usage/analyze.md) page for details.
+    After hardening, run `nfswolf analyze` against your server to verify the changes took effect. The analyzer checks most of the conditions in the threat table above and reports what remains exposed. SUID/device escalation and export-list enumeration are not analyzer findings; exercise them with the shell (`suid-scan`, `mknod`) and `scan`. See the [analyze subcommand](../../usage/analyze.md) page for details.
 
 ??? note "Why not just use NFSv4 with Kerberos?"
     Kerberos with `sec=krb5p` eliminates the identity spoofing and plaintext wire problems entirely -- it is the single most impactful defense. But it does not address export escape (a file handle problem, not an auth problem), does not prevent SUID/device attacks on writable exports, requires a working KDC infrastructure, and breaks many legacy workflows. The defense-in-depth approach documented here assumes Kerberos may not be available everywhere and layers additional controls accordingly.

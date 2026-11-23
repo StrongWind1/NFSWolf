@@ -26,15 +26,16 @@ The checklist below is ordered by impact. Completing the Critical tier eliminate
 After applying hardening controls, verify them with nfswolf:
 
 ```bash
-# Full security audit -- identifies every remaining weakness
+# Full security audit -- reports every remaining weakness it detects,
+# including F-1.8 (AUTH_TOOWEAK) when Kerberos is enforced on NFS operations
 nfswolf analyze target
 
 # Verify escape is blocked (should fail on separate-filesystem exports)
 nfswolf escape target:/export
 
-# Confirm Kerberos enforcement (should report AUTH_TOOWEAK)
+# Check what is exposed: RPC services, exports, auth flavors per export
 nfswolf scan target
 ```
 
 !!! tip "Test from an attacker's perspective"
-    The most reliable way to validate NFS hardening is to attack your own server. Run `nfswolf analyze` from an untrusted network segment -- every finding it reports is a gap in your defenses.
+    The most reliable way to validate NFS hardening is to attack your own server. Run `nfswolf analyze` from an untrusted network segment -- every Critical, High, Medium, or Low finding it reports is a gap in your defenses. Some Info findings are positive indicators: F-1.8 confirms Kerberos enforcement and F-3.8 confirms TLS is available.

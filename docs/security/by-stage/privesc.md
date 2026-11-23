@@ -17,7 +17,9 @@ The core enabler is `no_root_squash`: when the server does not remap `uid=0`, th
 | [F-4.4](../privesc/F-4.4-symlink-escape.md) | Crontab/Symlink Injection | High | `shell symlink` | Plant symlinks or crontab entries that execute attacker-controlled code |
 | [F-1.5](../identity/F-1.5-credential-replay.md) | Credential Replay from Wire | High | -- | Captured AUTH_SYS credentials are replayable indefinitely (no nonce, timestamp, or sequence number) |
 | [F-4.6](../privesc/F-4.6-unrestricted-chown.md) | Unrestricted chown | High | `analyze` | When PATHCONF `chown_restricted=false`, any user can chown files to root |
-| [F-4.5](../privesc/F-4.5-selinux-label-bypass.md) | SELinux/MAC Label Bypass | Medium | -- | NFS root receives `CAP_MAC_OVERRIDE`, bypassing SELinux/AppArmor entirely |
+| [F-4.5](../privesc/F-4.5-selinux-label-bypass.md) | SELinux/MAC Label Bypass | Info | `analyze` | NFS root receives `CAP_MAC_OVERRIDE`, bypassing SELinux/AppArmor entirely; `analyze` reports when the export root exposes a SELinux label |
+| [F-7.5](../config/F-7.5-squash-misconfiguration.md) | all_squash with anonuid=0 | Critical | `analyze` | Every client UID is mapped to root, so any credential writes as uid 0 |
+| [F-7.4](../config/F-7.4-missing-nosuid-nodev.md) | Missing nosuid/nodev on Client Mount | High | -- | Clients that mount without `nosuid`/`nodev` honor planted SUID binaries and device nodes (client-side; not server-observable) |
 
 ---
 
@@ -57,8 +59,7 @@ nfswolf's credential ladder (`engine::credential::credential_ladder()`) automate
 1. **File owner UID** -- extracted from the file's attributes. The owner always has access (RFC 1813 Section 4.4).
 2. **Caller UID with the file's GID** -- matches group permission bits.
 3. **Root (uid=0)** -- works when `no_root_squash` is active.
-4. **Observed identities** -- UIDs/GIDs harvested from READDIRPLUS directory listings, ranked by frequency.
-5. **Common service accounts** -- well-known UIDs (www-data, nobody, mysql, postgres) tried only when mode bits show no "other" access.
+4. **Common service accounts** -- well-known UIDs (www-data, nobody, mysql, postgres), skipped when the mode bits show no "other" access, since then no such identity can be permitted.
 
 The ladder runs automatically in the shell, FUSE mount, and escape subcommands. It never brute-forces; blind UID spraying is the `uid-spray` subcommand, kept separate from the evidence-driven ladder.
 

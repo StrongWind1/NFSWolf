@@ -11,20 +11,29 @@ NFS reconnaissance is uniquely productive because the protocol's sideband servic
 | Finding | Name | Severity | nfswolf Subcommand | What It Reveals |
 |---------|------|----------|-------------------|----------------|
 | [F-5.4](../info-disclosure/F-5.4-rpc-service-enumeration.md) | RPC Service Enumeration | Low | `scan` | Full RPC program/version/port map via PMAPPROC_DUMP |
-| [F-5.1](../info-disclosure/F-5.1-export-list-enumeration.md) | Export List Enumeration | Medium | `scan`, `analyze` | Every export path and its host-based ACL via MNTPROC_EXPORT |
+| [F-5.1](../info-disclosure/F-5.1-export-list-enumeration.md) | Export List Enumeration | Medium | `scan` | Every export path and its host-based ACL via MNTPROC_EXPORT |
 | [F-5.2](../info-disclosure/F-5.2-readdirplus-handle-harvesting.md) | READDIRPLUS File Handle Harvesting | High | `shell ls`, `shell find` | Handles, UIDs, GIDs, sizes, and timestamps for every file in a directory via a single call |
-| F-5.15 | rquotad UID Oracle | Medium | `analyze` | Active UIDs on the server via GETQUOTA, plus filesystem block size |
-| F-5.14 | POSIX ACL Enumeration | Medium | `analyze` | Named USER/GROUP ACL entries invisible to mode-bit analysis |
-| [F-5.7](../info-disclosure/F-5.7-case-insensitive-fs.md) | PATHCONF Filesystem Fingerprint | Low | `analyze` | Case sensitivity, chown restriction, symlink/link support (PATHCONF) |
+| [F-5.15](../info-disclosure/F-5.15-rquotad-uid-oracle.md) | rquotad UID Oracle | Medium | `analyze` | Active UIDs on the server via GETQUOTA, plus filesystem block size |
+| [F-5.14](../info-disclosure/F-5.14-posix-acl-entries.md) | POSIX ACL Enumeration | Medium | `analyze` | Named USER/GROUP ACL entries invisible to mode-bit analysis |
+| [F-5.7](../info-disclosure/F-5.7-case-insensitive-fs.md) | Case-Insensitive Filesystem | Low | `analyze` | PATHCONF `case_insensitive=true` fingerprints Windows NFS / NTFS |
+| [F-5.11](../info-disclosure/F-5.11-filesystem-lacks-link-symlink.md) | Filesystem Lacks Link/Symlink Support | Info | `analyze` | FSINFO properties without FSF3_LINK or FSF3_SYMLINK rule out symlink and hardlink attacks |
 | [F-5.8](../info-disclosure/F-5.8-auth-none-metadata-leak.md) | Export Root Attributes Leaked via AUTH_NONE | Low | `analyze` | Export root uid, gid, mode, size, and timestamps leaked to unauthenticated clients |
 | [F-5.9](../info-disclosure/F-5.9-read-if-exec-content-disclosure.md) | Execute-Only File Content Disclosure | Low | `analyze` | Files with mode 0111 (execute-only) are readable via the READ_IF_EXEC fallback |
 | [F-5.10](../info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Solaris NFS Server Detected (time_delta) | Info | `analyze` | FSINFO time_delta of {0, 1000} ns fingerprints Solaris NFS servers |
 | [F-5.5](../info-disclosure/F-5.5-nfsv4-pseudo-fs-leakage.md) | NFSv4 Pseudo-Filesystem Structure Leakage | Low | `scan` | Export directory structure visible via PUTROOTFH + READDIR without MOUNT |
 | [F-5.3](../info-disclosure/F-5.3-nis-credential-extraction.md) | NIS Domain Detection | High | `scan`, `analyze` | NIS programs (100004/100007) in portmapper indicate credential stores |
 | [F-5.6](../info-disclosure/F-5.6-metadata-on-access-denial.md) | Metadata Disclosed on Access Denial | Low | `analyze` | uid, gid, mode, and size leaked in post_op_attr on NFS3ERR_ACCES/PERM responses |
-| [F-1.8](../identity/F-1.8-auth-tooweak-kerberos-enforced.md) | AUTH_TOOWEAK Oracle | High | `analyze` | Definitively reveals whether an export requires Kerberos |
-| [F-3.9](../network/F-3.9-auth-short-session-credentials.md) | AUTH_SHORT Token Detection | Info | `analyze` | Detects servers issuing opaque session tokens in reply verifiers |
-| [F-3.7](../network/F-3.7-auth-dh-obsolete.md) | RDMA / AUTH_DH Detection | Medium | `scan` | RDMA transport availability; AUTH_DH (broken crypto) advertisement |
+| [F-1.8](../identity/F-1.8-auth-tooweak-kerberos-enforced.md) | AUTH_TOOWEAK Oracle | Info | `analyze` | Definitively reveals whether an export requires Kerberos |
+| [F-3.9](../network/F-3.9-auth-short-session-credentials.md) | AUTH_SHORT Advertised | Low | `analyze` | AUTH_SHORT (flavor 2) in the MOUNT or SECINFO flavor list points to a server that issues replayable session tokens |
+| [F-3.7](../network/F-3.7-auth-dh-obsolete.md) | AUTH_DH Advertised | Medium | `analyze` | AUTH_DH (flavor 3, 192-bit DH + 56-bit DES) in the MOUNT or SECINFO flavor list |
+| [F-3.2](../network/F-3.2-portmapper-amplification.md) | Portmapper UDP Amplification | Medium | `analyze` | DUMP reply size relative to the request; the portmapper can be used as a DDoS reflector |
+| [F-3.5](../network/F-3.5-pnfs-metadata-server-detected.md) | pNFS Metadata Server Detected | Info | `analyze` | NFSv4.1 EXCHANGE_ID flags and GETDEVICELIST expose the pNFS data-server topology |
+| [F-3.8](../network/F-3.8-rpc-with-tls.md) | RPC-with-TLS Supported | Info | `analyze` | The server accepts the AUTH_TLS NULL probe; TLS is available but AUTH_SYS inside it is still forgeable |
+| [F-5.12](../info-disclosure/F-5.12-near-inode-exhaustion.md) | Near Inode Exhaustion | Medium | `analyze` | FSSTAT shows fewer than 1000 free inodes; write access can deny file creation |
+| [F-5.13](../info-disclosure/F-5.13-nfsv4-named-attributes-exposed.md) | NFSv4 Named Attributes Exposed | Low | `analyze` | OPENATTR + READDIR lists xattr names on the export root, revealing ACL, SELinux, and capability use |
+| [F-5.16](../info-disclosure/F-5.16-silly-rename-detected.md) | Silly-Rename Files Detected | Info | `analyze` | `.nfs*` files in the export root mark files that are open but unlinked on some client |
+| [F-5.17](../info-disclosure/F-5.17-write-verifier-changed.md) | Write Verifier Changed | Medium | `analyze` | Two zero-count COMMITs with different `writeverf3` values reveal a server reboot |
+| [F-7.7](../config/F-7.7-freebsd-truncated-subnet.md) | FreeBSD-Style Truncated Subnet | Info | `analyze` | 2-3 octet dotted ACL entries in MOUNT EXPORT fingerprint a FreeBSD NFS server |
 
 ---
 
@@ -38,7 +47,7 @@ NFS reconnaissance spans four protocol layers, each contributing different intel
 
 **NFSv4 pseudo-filesystem.** For servers running NFSv4, the pseudo-FS exposes the structure of all exports from a single PUTROOTFH + READDIR sequence. This reveals export names even when the MOUNT daemon is firewalled or absent. The pseudo-root may disclose exports that are IP-restricted at the MOUNT level, because NFSv4 does not use MOUNT for namespace resolution.
 
-**Sideband RPC services.** rquotad (100011) confirms active UIDs through quota queries -- non-zero block/file counts prove a UID has disk activity. NFS_ACL (100227) returns POSIX ACL entries that reveal UIDs and GIDs granted access beyond what mode bits show. PATHCONF reports filesystem properties: case sensitivity (Windows NFS indicator), chown restriction, and link/symlink support.
+**Sideband RPC services.** rquotad (100011) confirms active UIDs through quota queries -- non-zero block/file counts prove a UID has disk activity. NFS_ACL (100227) returns POSIX ACL entries that reveal UIDs and GIDs granted access beyond what mode bits show. PATHCONF reports case sensitivity (Windows NFS indicator, F-5.7) and chown restriction (F-4.6, covered under [privilege escalation](privesc.md)); FSINFO reports link/symlink support (F-5.11).
 
 ---
 
@@ -51,7 +60,7 @@ Reconnaissance output directly parameterizes every subsequent stage:
 - **Filesystem type** from handle structure fingerprinting (`decode` subcommand, `FileHandleAnalyzer`) selects the correct escape constructor for [lateral movement](lateral.md). An ext4 export needs inode 2; BTRFS needs subvolume 5 + objectid 256; ZFS needs a different root encoding entirely.
 - **AUTH_TOOWEAK** from F-1.8 tells the attacker which exports are hardened (Kerberos-only) and which are soft targets (AUTH_SYS). No point running the credential ladder against a `sec=krb5`-only export.
 - **NIS detection** from F-5.3 opens a parallel attack path: if ypserv is co-hosted, `ypcat passwd.byname` dumps password hashes without authentication -- before NFS is even touched.
-- **MOUNT DUMP** from F-5.2 reveals legitimate client IPs, which feed IP-based ACL bypass attempts and source-address selection.
+- **MOUNT DUMP** (collected by `scan` alongside the F-5.1 export list) reveals legitimate client IPs, which feed IP-based ACL bypass attempts and source-address selection.
 
 !!! tip "nfswolf workflow"
     Run `nfswolf scan <target>` first to collect the full RPC topology, export list, mount clients, and NFSv4 pseudo-FS structure. Then run `nfswolf analyze <target>` for per-export deep inspection: PATHCONF, FSSTAT, POSIX ACLs, rquotad probing, AUTH_TOOWEAK detection, and handle fingerprinting. The scanner is breadth-first (what services exist); the analyzer is depth-first (what each export reveals).

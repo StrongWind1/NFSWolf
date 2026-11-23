@@ -13,9 +13,11 @@ NFS makes exfiltration straightforward because the protocol provides direct READ
 | [F-2.1](../access-control/F-2.1-export-escape.md) + [F-1.1](../identity/F-1.1-uid-gid-spoofing.md) | Escape + UID Spoofing | Critical | `escape`, `shell` | Escape to filesystem root, then spoof uid to read any file on the partition |
 | [F-2.8](../access-control/F-2.8-sibling-export-lateral-access.md) | Sibling Export Lateral Access | Critical | `escape`, `shell` | After escape-root, LOOKUP into IP-restricted sibling exports on the same filesystem |
 | [F-5.2](../info-disclosure/F-5.2-readdirplus-handle-harvesting.md) | READDIRPLUS Metadata Harvesting | High | `shell ls`, `shell find` | Single READDIRPLUS call returns handles, UIDs, GIDs, sizes, and timestamps for every file in a directory |
-| [F-3.1](../network/F-3.1-plaintext-wire-protocol.md) | Plaintext Wire Protocol | High | `analyze` | All file contents traverse the network in cleartext -- passive sniffing extracts data without active exploitation |
+| [F-3.1](../network/F-3.1-plaintext-wire-protocol.md) | Plaintext Wire Protocol | Info | `analyze` | All file contents traverse the network in cleartext -- passive sniffing extracts data without active exploitation |
 | [F-5.6](../info-disclosure/F-5.6-metadata-on-access-denial.md) | Metadata Disclosed on Access Denial | Low | `analyze` | Even when READ is denied, post_op_attr leaks uid, gid, mode, and file size |
 | [F-5.8](../info-disclosure/F-5.8-auth-none-metadata-leak.md) | AUTH_NONE Metadata Leak | Low | `analyze` | GETATTR with AUTH_NONE reveals export root attributes to any unauthenticated client |
+| [F-3.4](../network/F-3.4-striptls-downgrade.md) | STRIPTLS Downgrade | High | `analyze` | An on-path attacker strips the AUTH_TLS upgrade, keeping traffic in cleartext for passive capture |
+| [F-7.6](../config/F-7.6-no-audit-logging.md) | No Audit Logging | Medium | -- | knfsd file operations bypass auditd, so reads leave no audit trail (not remotely detectable) |
 | [F-5.9](../info-disclosure/F-5.9-read-if-exec-content-disclosure.md) | Execute-Only File Content Disclosure | Low | `analyze` | Files with mode 0111 (execute-only) are readable via NFS READ_IF_EXEC fallback |
 
 ---

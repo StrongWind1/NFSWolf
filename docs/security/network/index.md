@@ -6,15 +6,15 @@ NFS was designed for trusted local networks. The protocol has no built-in encryp
 
 | ID | Finding | Severity | RFC Basis | Detection |
 |----|---------|----------|-----------|-----------|
-| [F-3.1](F-3.1-plaintext-wire-protocol.md) | Plaintext Traffic Interception | High | RFC 1813 sec. 8, RFC 1094 sec. 3.4 | `analyze` (no RPCSEC_GSS detection) |
-| [F-3.2](F-3.2-portmapper-amplification.md) | Portmapper UDP Amplification (DDoS) | Medium | RFC 1057 Appendix A | `scan` (UDP DUMP amplification factor) |
-| [F-3.3](F-3.3-ip-spoofing-host-trust.md) | IP Spoofing Against Host-Based ACLs | High | RFC 2623 sec. 2.6, RFC 7530 sec. 19 | `analyze` (host-based ACL detection) |
-| [F-3.4](F-3.4-striptls-downgrade.md) | STRIPTLS Downgrade (RFC 9289) | High | RFC 9289 sec. 6.1.1 | `analyze` (AUTH_TLS probe) |
+| [F-3.1](F-3.1-plaintext-wire-protocol.md) | Plaintext Traffic Interception | Info | RFC 1813 sec. 8, RFC 1094 sec. 3.4 | `analyze` (no RPCSEC_GSS detection) |
+| [F-3.2](F-3.2-portmapper-amplification.md) | Portmapper UDP Amplification (DDoS) | Medium | RFC 1057 Appendix A | `analyze` (DUMP amplification factor) |
+| [F-3.3](F-3.3-ip-spoofing-host-trust.md) | IP Spoofing Against Host-Based ACLs | High | RFC 2623 sec. 2.6, RFC 7530 sec. 19 | Not detected (requires network positioning) |
+| [F-3.4](F-3.4-striptls-downgrade.md) | STRIPTLS Downgrade (RFC 9289) | High | RFC 9289 sec. 6.1.1 | `analyze` (SECINFO: AUTH_SYS without Kerberos) |
 | [F-3.5](F-3.5-pnfs-metadata-server-detected.md) | pNFS Metadata Server Detected | Info | RFC 5661 sec. 18.35 | `analyze` (NFSv4.1 EXCHANGE_ID + GETDEVICELIST) |
 | [F-3.6](F-3.6-mixed-secinfo-zones.md) | Mixed Security Zones via Per-Path SECINFO | Medium | RFC 7530 sec. 19 | `analyze` (NFSv4 SECINFO per-path probing) |
 | [F-3.7](F-3.7-auth-dh-obsolete.md) | AUTH_DH Advertised (Cryptographically Broken) | Medium | RFC 5531 sec. 14, RFC 2695 | `analyze` (flavor 3 in MOUNT/SECINFO) |
 | [F-3.8](F-3.8-rpc-with-tls.md) | RPC-with-TLS Supported (RFC 9289) | Info | RFC 9289 sec. 4.1, sec. 6.3 | `analyze` (AUTH_TLS NULL probe) |
-| [F-3.9](F-3.9-auth-short-session-credentials.md) | AUTH_SHORT Session Credentials | Info | RFC 5531 sec. 14, RFC 1057 sec. 9.3 | `analyze` (flavor 2 in MOUNT/SECINFO) |
+| [F-3.9](F-3.9-auth-short-session-credentials.md) | AUTH_SHORT Session Credentials | Low | RFC 5531 sec. 14, RFC 1057 sec. 9.3 | `analyze` (flavor 2 in MOUNT/SECINFO) |
 
 ## Findings
 
@@ -24,18 +24,18 @@ NFS version 3 "defers to the authentication provisions of the supporting RPC pro
 
 ### F-3.2: Portmapper UDP Amplification (DDoS)
 
-The portmapper has no authentication on any operation (RFC 1057 Appendix A). A 68-byte DUMP request over UDP returns all registered services in a response typically 7--28 times larger. Because UDP source addresses are trivially spoofable, an attacker can direct amplified traffic at an arbitrary victim. nfswolf's scanner measures the exact amplification factor for both TCP and UDP.
+The portmapper has no authentication on any operation (RFC 1057 Appendix A). A 68-byte DUMP request over UDP returns all registered services in a response typically 7--28 times larger. Because UDP source addresses are trivially spoofable, an attacker can direct amplified traffic at an arbitrary victim. `analyze` estimates the amplification factor from the size of the DUMP listing and reports F-3.2 at 10x or more.
 
 ### F-3.3: IP Spoofing Against Host-Based ACLs
 
-NFS "has historically used a model where, from an authentication perspective, the client was the entire machine, or at least the source IP address of the machine" (RFC 7530 sec. 19). Export ACLs that restrict access to specific IPs or hostnames rely on source-address verification. With UDP transport, IP addresses are trivially spoofable. Even TCP requires only SYN sequence prediction or on-path positioning. nfswolf's analyzer reports whether an export uses IP-based restrictions without Kerberos enforcement; active spoofing is out of scope.
+NFS "has historically used a model where, from an authentication perspective, the client was the entire machine, or at least the source IP address of the machine" (RFC 7530 sec. 19). Export ACLs that restrict access to specific IPs or hostnames rely on source-address verification. With UDP transport, IP addresses are trivially spoofable. Even TCP requires only SYN sequence prediction or on-path positioning. `analyze` does not report this finding: whether spoofing works depends on network position, which a remote probe cannot measure. The export ACLs it collects (F-7.1, F-7.7) show which exports rely on source addresses, and active spoofing is out of scope.
 
 ### F-3.4: STRIPTLS Downgrade (RFC 9289)
 
 !!! warning
     The AUTH_TLS probe occurs in cleartext. An on-path attacker can alter the handshake to make it appear as though TLS is not available (RFC 9289 sec. 6.1.1).
 
-RPC-with-TLS (RFC 9289) upgrades an existing RPC connection via a STARTTLS-style handshake. Because the initial probe is unencrypted, an active network attacker can strip the TLS negotiation, forcing the connection to remain in plaintext. Without DANE/TLSA records or mutual TLS certificate pinning, the client has no way to detect the downgrade. nfswolf's analyzer sends the AUTH_TLS NULL probe and checks whether the server supports TLS upgrade.
+RPC-with-TLS (RFC 9289) upgrades an existing RPC connection via a STARTTLS-style handshake. Because the initial probe is unencrypted, an active network attacker can strip the TLS negotiation, forcing the connection to remain in plaintext. Without DANE/TLSA records or mutual TLS certificate pinning, the client has no way to detect the downgrade. `analyze` reports F-3.4 when NFSv4 SECINFO shows AUTH_SYS with no Kerberos flavor, so nothing forces a cryptographic mechanism; its AUTH_TLS NULL probe reports TLS availability separately as F-3.8. nfswolf performs no TLSA lookups.
 
 ### F-3.5: pNFS Metadata Server Detected
 
@@ -55,17 +55,18 @@ This is an informational finding. When the server accepts the AUTH_TLS NULL prob
 
 ### F-3.9: AUTH_SHORT Session Credentials
 
-AUTH_SHORT (flavor 2) allows servers to return abbreviated session tokens as reply verifiers, which clients then use for subsequent requests instead of full AUTH_SYS credentials. Linux knfsd defines `RPC_AUTH_SHORT=2` but never issues or accepts AUTH_SHORT credentials -- the `authtab[2]` slot is NULL. This finding is informational and relevant only for non-Linux NFS implementations (Solaris, NetApp, FreeBSD) that may use AUTH_SHORT session tokens.
+AUTH_SHORT (flavor 2) allows servers to return abbreviated session tokens as reply verifiers, which clients then use for subsequent requests instead of full AUTH_SYS credentials. Linux knfsd defines `RPC_AUTH_SHORT=2` but never issues or accepts AUTH_SHORT credentials -- the `authtab[2]` slot is NULL. This finding is rated Low and relevant only for non-Linux NFS implementations (Solaris, NetApp, FreeBSD) that may use AUTH_SHORT session tokens.
 
 ## Severity distribution
 
 | Severity | Count | Findings |
 |----------|-------|----------|
-| High | 3 | F-3.1, F-3.3, F-3.4 |
+| High | 2 | F-3.3, F-3.4 |
 | Medium | 3 | F-3.2, F-3.6, F-3.7 |
-| Info | 3 | F-3.5, F-3.8, F-3.9 |
+| Low | 1 | F-3.9 |
+| Info | 3 | F-3.1, F-3.5, F-3.8 |
 
-The three High findings represent fundamental protocol weaknesses (no encryption, IP-based trust, TLS stripping) that are structural to NFS as deployed. The three Medium findings cover amplification, SECINFO zone mismatches, and broken auth. The three Info findings are topology disclosure (pNFS), positive indicators (TLS support), or implementation details (AUTH_SHORT).
+The two High findings represent fundamental protocol weaknesses (IP-based trust, TLS stripping) that are structural to NFS as deployed. The three Medium findings cover amplification, SECINFO zone mismatches, and broken auth. The Low finding (AUTH_SHORT) only matters on non-Linux servers that issue replayable session tokens. The three Info findings are the plaintext-transport condition that enables other attacks (F-3.1), topology disclosure (pNFS), and a positive indicator (TLS support).
 
 ## Relationship to other categories
 

@@ -218,15 +218,14 @@ As of 2026, NFS-over-TLS is supported by Linux kernel 5.19+ (kTLS) and nfs-utils
 
 ## Detection with nfswolf
 
-nfswolf probes for TLS support during scanning:
+nfswolf probes for TLS support during analysis:
 
 ```bash
-nfswolf scan nfs-server.example.com
-# Reports: "RPC-with-TLS supported" if the AUTH_TLS probe succeeds
-# Reports finding F-3.8 if TLS is supported but AUTH_SYS is still accepted inside the tunnel
+nfswolf analyze nfs-server.example.com
+# Reports finding F-3.8 ("RPC-with-TLS supported") if the AUTH_TLS probe is accepted
 ```
 
-The scanner sends an AUTH_TLS NULL call and checks for the STARTTLS verifier in the reply. It does not complete the TLS handshake; it only detects whether TLS is available. The F-3.8 finding fires as informational to remind administrators that TLS alone does not prevent UID spoofing.
+The analyzer sends a NULL call to the NFS program with an AUTH_TLS credential and the STARTTLS verifier, and reports F-3.8 if the server accepts it. It does not complete the TLS handshake; it only detects whether TLS is available. F-3.8 is an Info finding: it reminds administrators that AUTH_SYS inside the tunnel is still forgeable, so TLS alone does not prevent UID spoofing. `nfswolf scan` does not probe for TLS.
 
 ## Related pages
 

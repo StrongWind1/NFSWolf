@@ -12,17 +12,17 @@ The twelve findings in this category exploit the bearer-token property of file h
 | ID | Finding | Severity | RFC Basis | Detection |
 |----|---------|----------|-----------|-----------|
 | [F-2.1](F-2.1-export-escape.md) | Export Escape via Filesystem Root Handle | **Critical** | RFC 1813 sec. 3.3.3, RFC 1094 sec. 2.3.3 | `escape`, `analyze`, `shell escape-root` |
-| [F-2.2](F-2.2-file-handle-guessing.md) | File Handle Guessing / Brute Force | High | RFC 1094 sec. 2.3.3, RFC 2623 sec. 2.6 | `analyze` (entropy), `brute-handle` |
+| [F-2.2](F-2.2-file-handle-guessing.md) | File Handle Guessing / Brute Force | Medium | RFC 1094 sec. 2.3.3, RFC 2623 sec. 2.6 | `analyze` (entropy), `brute-handle` |
 | [F-2.3](F-2.3-windows-handle-signing.md) | Windows File Handle Signing Disabled | **Critical** | Implementation-specific | `analyze` (handle signing check) |
-| [F-2.4](F-2.4-btrfs-subvolume-escape.md) | BTRFS Subvolume Handle Construction | High | RFC 1094 sec. 2.3.3 | `escape` (subvol probing) |
+| [F-2.4](F-2.4-btrfs-subvolume-escape.md) | BTRFS Subvolume Handle Construction | High | RFC 1094 sec. 2.3.3 | `analyze` (subvol probe), `escape` (subvol probing) |
 | [F-2.5](F-2.5-stale-handle-persistence.md) | Stale Handle After Permission Revocation | Medium | RFC 1094 sec. 1.3, Appendix A | `shell --handle`, `mount --handle` |
 | [F-2.6](F-2.6-bind-mount-escape.md) | Bind Mount Export Escape | High | RFC 1094 sec. 2.3.3 | `escape` (fsid-based handle) |
 | [F-2.7](F-2.7-nfsd-acl-blindness.md) | NFS Daemon Export ACL Blindness | **Critical** | RFC 2623 sec. 2.6, RFC 1094 sec. 2.3.3 | `shell --handle` (port 2049, no MOUNT) |
 | [F-2.8](F-2.8-sibling-export-lateral-access.md) | Sibling Export Lateral Access | **Critical** | RFC 1813 sec. 3.3.3, RFC 2623 sec. 2.6 | `escape` + `shell` (cd to peer export) |
 | [F-2.9](F-2.9-webnfs-public-handle.md) | WebNFS Public File Handle (MOUNT Bypass) | **Critical** | RFC 2054 sec. 5, RFC 2224 sec. 9 | `analyze` (zero-handle probe) |
 | [F-2.10](F-2.10-sign-fh-root-exemption.md) | SIGN_FH Root Handle Exemption | Medium | Implementation-specific (Linux) | `shell --handle` (constructed root) |
-| [F-2.11](F-2.11-nfsv4-lookupp-export-escape.md) | NFSv4 LOOKUPP Export Escape | **Critical** | RFC 7530 sec. 16.14, sec. 7.3 | `escape-root` (v4), `cd ..` |
-| [F-2.12](F-2.12-nfsv4-lookupp-cross-export-lateral.md) | NFSv4 LOOKUPP Cross-Export Lateral Access | High | RFC 7530 sec. 7.3, sec. 16.14 | `cd ..` + `cd <sibling>`, `exports` cmd |
+| [F-2.11](F-2.11-nfsv4-lookupp-export-escape.md) | NFSv4 LOOKUPP Export Escape | **Critical** | RFC 7530 sec. 16.14, sec. 7.3 | `analyze` (LOOKUPP probe), `escape-root` (v4), `cd ..` |
+| [F-2.12](F-2.12-nfsv4-lookupp-cross-export-lateral.md) | NFSv4 LOOKUPP Cross-Export Lateral Access | High | RFC 7530 sec. 7.3, sec. 16.14 | `analyze` (LOOKUPP + sibling LOOKUP), `cd ..` + `cd <sibling>`, `exports` cmd |
 
 ## Findings
 
@@ -79,7 +79,7 @@ WebNFS (RFC 2054/2055/2224) defines a well-known public file handle (all zeros) 
 
 ### F-2.10: SIGN_FH Root Handle Exemption (FILEID_ROOT MAC Bypass)
 
-Linux knfsd's handle signing (`NFSEXP_SIGN_FH`) appends a SipHash-2-4 MAC to non-root file handles. Root handles (`fileid_type=0`) are explicitly exempt: `nfsd_set_fh_dentry()` skips all MAC verification for FILEID_ROOT and returns the export root dentry directly. An attacker who knows the export's fsid (discoverable via GETATTR or MOUNT) can construct a valid root handle with no MAC. From the root, standard LOOKUP returns legitimately signed child handles.
+Linux knfsd's handle signing (`NFSEXP_SIGN_FH`) appends an 8-byte SipHash-2-4 MAC to non-root file handles. Root handles (`fileid_type=0`) are explicitly exempt: `nfsd_set_fh_dentry()` skips all MAC verification for FILEID_ROOT and returns the export root dentry directly. An attacker who knows the export's fsid (discoverable via GETATTR or MOUNT) can construct a valid root handle with no MAC. From the root, standard LOOKUP returns legitimately signed child handles.
 
 ### F-2.11: NFSv4 LOOKUPP Export Escape
 
