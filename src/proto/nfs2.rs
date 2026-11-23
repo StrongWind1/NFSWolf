@@ -1,6 +1,6 @@
 //! NFSv2 for nfswolf: the library client, bound to the pooled transport.
 //!
-//! Mirror of `proto::nfs3` for NFSv2. `nfswolf-nfs2` owns the protocol;
+//! Mirror of `proto::nfs3` for NFSv2. `nfs-v2` owns the protocol;
 //! `PooledTransport` owns the policy. This module is the seam between them.
 
 /// An NFSv2 client issuing calls through nfswolf's pooled transport.

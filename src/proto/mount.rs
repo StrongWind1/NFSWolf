@@ -1,7 +1,7 @@
 //! MOUNT protocol client  --  wraps `nfs_v3::MountClient`
 //! (RFC 1813 Appendix I).
 //!
-//! `nfswolf-nfs3` provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
+//! `nfs-mount` provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
 //! This module adds:
 //! - Auth flavor extraction from MNT response (F-1.1)
 //! - Export ACL parsing (wildcards, subnets) (F-7.1)

@@ -1,6 +1,6 @@
 //! NFSv3 for nfswolf: the library client, bound to the pooled transport.
 //!
-//! `nfswolf-nfs3` owns the protocol; `PooledTransport` owns the policy. This
+//! `nfs-v3` owns the protocol; `PooledTransport` owns the policy. This
 //! module is only the seam between them, which is why it is a type alias rather
 //! than a wrapper: the 22 procedure methods that used to live here each
 //! repeated the same six lines of pool checkout, breaker check, and timeout

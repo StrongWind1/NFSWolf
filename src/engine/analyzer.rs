@@ -1,7 +1,8 @@
 //! Security analysis engine.
 //!
-//! Performs deep security checks against a single NFS server,
-//! detecting all 23 documented vulnerability classes.
+//! Performs deep security checks against a single NFS server. It emits
+//! 43 of the 62 findings documented under `docs/security/`; the rest are
+//! DoS (out of scope) or need manual testing.
 //!
 //! File access tests are generic  --  the caller specifies which paths
 //! to test and which UIDs/GIDs to try. Shadow GID defaults (42, 15)
@@ -9,7 +10,7 @@
 //! the check logic.
 
 // Struct fields and enum variants are domain result types  --  individual docs
-// would repeat the field name. See finding IDs in docs/FINDINGS.md.
+// would repeat the field name. Finding IDs are documented under docs/security/.
 // Toolkit API  --  not all items are used in currently-implemented phases.
 use serde::{Deserialize, Serialize};
 
@@ -1486,7 +1487,7 @@ async fn check_btrfs_escape(nfs3: &Nfs3Client, export_fh: &FileHandle, export_pa
     }
 }
 
-/// Detect nohide/crossmnt sub-mount exposure (F-7.3, opt-in).
+/// Detect nohide/crossmnt sub-mount exposure (F-7.3).
 ///
 /// Performs READDIRPLUS on the export root and then FSSTAT on any directory
 /// entry whose file handle resolves. A different fsid indicates a sub-mount
@@ -1555,7 +1556,7 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
             // canonical symlink-escape target is a root-owned, world-writable, sticky dir
             // (/tmp, /var/tmp): any client can drop a symlink there no matter who owns it,
             // and AUTH_SYS lets the attacker assume any UID anyway. The F-4.4 precondition
-            // is simply "writable directory" (docs/FINDINGS.md F-4.4); owner UID is
+            // is simply "writable directory" (F-4.4, docs/security/privesc/); owner UID is
             // evidence, not a gate.
             let is_dir = attrs.file_type == nfs_v3::FileType::Directory;
             let world_writable = (attrs.mode & 0o002) != 0;
@@ -1584,7 +1585,7 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
     }
 }
 
-/// Probe for no_root_squash by creating a test file as uid=0 (F-4.1, opt-in).
+/// Probe for no_root_squash by creating a test file as uid=0 (F-4.1).
 ///
 /// Creates a temporary file with AUTH_SYS uid=0 credentials. If the resulting
 /// file is owned by root (GETATTR uid=0), uid=0 was NOT remapped. Per RFC 1813

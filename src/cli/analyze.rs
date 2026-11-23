@@ -1,9 +1,8 @@
 //! Deep security analysis of NFS servers.
 //!
 //! Every analysis runs the full check matrix -- there are no opt-in flags
-//! for individual checks. Some of those checks are mildly intrusive (squash
-//! probes write a test file, no_root_squash detection creates a directory);
-//! all of them clean up after themselves.
+//! for individual checks. Some of those checks are mildly intrusive (the
+//! squash and no_root_squash probes create a test file and remove it again).
 //!
 //! Output split: human-readable to stdout by default; pass `--json` to emit
 //! machine-readable JSON instead (to stdout, or to a file with `--json FILE`).
@@ -43,7 +42,7 @@ use crate::util::stealth::StealthConfig;
 ///   nfswolf analyze 192.168.1.10
 ///   nfswolf analyze -f hosts.txt
 ///   nfswolf analyze 10.0.0.1 --test-read /etc/shadow --test-read-gids 0,42
-///   nfswolf analyze --json target > results.json && \
+///   nfswolf analyze target --json > results.json && \
 ///     nfswolf convert -i results.json --format html -o report.html
 #[derive(Parser)]
 pub(crate) struct AnalyzeArgs {
