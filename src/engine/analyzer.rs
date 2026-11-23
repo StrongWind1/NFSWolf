@@ -345,19 +345,26 @@ impl Analyzer {
         // Start with the EXCHANGE_ID result; fall back to null-filename probe
         // if the server doesn't support v4.1.
         let mut impl_fingerprint: Option<String> = exchange_id_fp;
+        // The null-filename probe is also what identifies Linux knfsd for
+        // F-5.9, so it runs even when EXCHANGE_ID already named the server:
+        // Linux knfsd returns no impl_id, and its EXCHANGE_ID fingerprint never
+        // says "Linux knfsd".
+        let mut null_filename_fp: Option<String> = None;
         for entry in &exports {
             let ea = self.analyze_export(config, addr, entry, &mut findings).await;
             // Run the null-filename fingerprint probe once, on the first
-            // export that mounted successfully (non-empty handle), but only
-            // when EXCHANGE_ID did not already provide a fingerprint.
-            if impl_fingerprint.is_none()
+            // export that mounted successfully (non-empty handle).
+            if null_filename_fp.is_none()
                 && !ea.file_handle.is_empty()
                 && let Ok(fh) = FileHandle::from_hex(&ea.file_handle)
             {
                 let probe_client = self.build_export_client(addr, entry);
-                impl_fingerprint = Some(check_null_filename_fingerprint(&probe_client, &fh).await);
+                null_filename_fp = Some(check_null_filename_fingerprint(&probe_client, &fh).await);
             }
             export_analyses.push(ea);
+        }
+        if impl_fingerprint.is_none() {
+            impl_fingerprint.clone_from(&null_filename_fp);
         }
 
         // F-3.1 (Plaintext Traffic Interception): host-level transport-confidentiality
@@ -369,7 +376,7 @@ impl Analyzer {
         // MAY_EXEC when READ is denied on a regular file (C702 sec. 12.3.3). Files
         // with mode 0111 (execute-only) are therefore readable via NFS by anyone
         // with execute permission. Emit once per host when Linux knfsd is detected.
-        check_execute_implies_read(impl_fingerprint.as_deref(), &mut findings);
+        check_execute_implies_read(null_filename_fp.as_deref(), &mut findings);
 
         // OS guess from first valid handle.
         let os_guess = export_analyses.iter().find_map(|ea| if ea.file_handle.is_empty() { None } else { FileHandle::from_hex(&ea.file_handle).ok() });
