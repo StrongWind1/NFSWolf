@@ -28,19 +28,32 @@ NFSv2 is long obsolete and still enabled on plenty of servers, which is exactly 
 
 ## Usage
 
-```rust
-use nfs_v2::{Nfs2Client, MountV1Client};
-use nfs_mount::MountVersion;
-use onc_rpc_client::DirectTransport;
+```rust,no_run
+use nfs_mount::MountClient;
+use nfs_mount::wire::dirpath;
+use nfs_v2::{Nfs2Client, Nfs2FileHandle};
+use onc_rpc_client::rpc::opaque_auth;
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_rpc_client::{AuthSys, DirectTransport};
+use onc_xdr::Opaque;
+use tokio::net::TcpStream;
 
-let stream = tokio::net::TcpStream::connect("server:mount_port").await?;
-let mount = MountV1Client::new(DirectTransport::new(stream), MountVersion::V1);
-let handle = mount.mnt(nfs_mount::wire::dirpath(onc_xdr::Opaque::borrowed(b"/export"))).await?;
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let cred = AuthSys::root("client").to_opaque_auth(1);
 
-let stream = tokio::net::TcpStream::connect("server:nfs_port").await?;
-let nfs = Nfs2Client::new(DirectTransport::new(stream));
-let (fh, attrs) = nfs.lookup(&handle.bytes.try_into().unwrap(), "etc").await?;
-let data = nfs.read_file(&fh).await?;
+    // MOUNT v1 hands out the fixed 32-byte handle NFSv2 uses.
+    let stream = TcpStream::connect("192.0.2.10:20048").await?;
+    let mount = MountClient::v1(DirectTransport::with_auth(TokioIo::new(stream), cred.clone(), opaque_auth::default()));
+    let mounted = mount.mnt(dirpath(Opaque::borrowed(b"/export"))).await?;
+    let root = Nfs2FileHandle::from_bytes(&mounted.bytes);
+
+    let stream = TcpStream::connect("192.0.2.10:2049").await?;
+    let nfs = Nfs2Client::new(DirectTransport::with_auth(TokioIo::new(stream), cred, opaque_auth::default()));
+    let (fh, attrs) = nfs.lookup_path(&root, "etc/passwd").await?;
+    let data = nfs.read_file(&fh).await?;
+    println!("{} bytes, owner uid {}", data.len(), attrs.uid);
+    Ok(())
+}
 ```
 
 ## API reference
@@ -51,7 +64,7 @@ let data = nfs.read_file(&fh).await?;
 |------|-------------|
 | `Nfs2Client<T>` | Domain-level client: 18 procedures + `lookup_path()`, `read_file()` |
 | `Nfs2RawClient<T>` | Wire-level client: raw XDR types in and out, no status checking |
-| `MountV1Client<T>` | Re-export of `nfs_mount::MountClient` configured for MOUNT v1 |
+| `MountV1Client<T>` | Type alias for `nfs_mount::MountClient`, kept so old paths compile; construct it with `MountClient::v1(transport)`. New code should name `nfs_mount::MountClient` directly |
 
 ### Error and status types
 
@@ -64,12 +77,12 @@ let data = nfs.read_file(&fh).await?;
 
 | Type | Description |
 |------|-------------|
-| `Nfs2FileHandle` | Fixed 32-byte file handle (`[u8; 32]`) |
+| `Nfs2FileHandle` | Fixed 32-byte file handle (`[u8; 32]`); `Nfs2FileHandle::from_bytes()` builds one from a MOUNT v1 reply |
 | `Nfs2FileAttr` | File attributes (type, mode, size, uid, gid, timestamps) |
 | `Nfs2SetAttr` | Attribute values for SETATTR |
-| `FType` | File type enum (9 variants) |
+| `wire::FType` | File type enum (9 variants + `Unknown(u32)`) |
 | `PROGRAM` / `VERSION` | NFS program number (100003) and version (2) |
-| `FHSIZE` | File handle size constant (32) |
+| `wire::FHSIZE` | File handle size constant (32) |
 
 ## Protocol coverage
 
@@ -85,7 +98,7 @@ The domain client adds `lookup_path()` for multi-component path resolution and `
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client

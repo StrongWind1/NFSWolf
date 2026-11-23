@@ -40,3 +40,7 @@ pub use wire::{ChangeInfo4, LockOwner4, NfsAce4, NfsFtype4, OpenOwner4, Stateid4
 pub use wire::{CreateType4, Fattr4, Locker4, OpenClaim4, OpenFlag4};
 // Phase 3b: response-only types.
 pub use wire::{OpenDelegation4, SpaceLimit4};
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

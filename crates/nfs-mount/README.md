@@ -28,22 +28,33 @@ MOUNT is the sideband service that turns a directory path into the root file han
 
 ## Usage
 
-```rust
-use nfs_mount::{MountClient, MountVersion, MountedHandle};
+```rust,no_run
 use nfs_mount::wire::dirpath;
-use onc_rpc_client::DirectTransport;
+use nfs_mount::{MountClient, MountedHandle};
+use onc_rpc_client::rpc::opaque_auth;
+use onc_rpc_client::transport::net::Connector;
+use onc_rpc_client::transport::tokio::TokioConnector;
+use onc_rpc_client::{AuthSys, DirectTransport};
 use onc_xdr::Opaque;
 
-let stream = tokio::net::TcpStream::connect("server:mountport").await?;
-let transport = DirectTransport::new(stream);
-let mount = MountClient::v3(transport);
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    // mountd's port comes from the portmapper (see onc-rpcbind); 20048 is the Linux default.
+    // TokioConnector returns a TokioIo<TcpStream>, the I/O type DirectTransport expects.
+    let io = TokioConnector.connect("192.0.2.10:20048".parse()?).await?;
+    // A sec=sys mountd expects an AUTH_SYS credential on MNT.
+    let cred = AuthSys::root("client").to_opaque_auth(1);
+    let mount = MountClient::v3(DirectTransport::with_auth(io, cred, opaque_auth::default()));
 
-// Get the root handle and auth flavors for an export.
-let handle: MountedHandle = mount.mnt(dirpath(Opaque::borrowed(b"/export"))).await?;
-println!("handle: {} bytes, auth_sys: {}", handle.bytes.len(), handle.accepts_auth_sys());
+    // Get the root handle and auth flavors for an export.
+    let handle: MountedHandle = mount.mnt(dirpath(Opaque::borrowed(b"/export"))).await?;
+    println!("handle: {} bytes, auth_sys: {}", handle.bytes.len(), handle.accepts_auth_sys());
 
-// List all exports.
-let exports = mount.export().await?;
+    // List all exports.
+    for export in mount.export().await?.into_inner() {
+        println!("{}", String::from_utf8_lossy(&export.ex_dir.0));
+    }
+    Ok(())
+}
 ```
 
 ## API reference
@@ -65,11 +76,11 @@ let exports = mount.export().await?;
 
 ## Protocol coverage
 
-**MOUNT v1** ([RFC 1094] appendix A): `NULL`, `MNT`, `DUMP`, `UMNT`, `UMNTALL`, `EXPORT`. The client exposes `null()`, `v1_mnt()`, `export()`, `umnt()`.
+**MOUNT v1** ([RFC 1094] appendix A): `NULL`, `MNT`, `DUMP`, `UMNT`, `UMNTALL`, `EXPORT`. The client exposes `null()`, `v1_mnt()`, `export()`, `umnt()`, `dump()`, `umntall()`.
 
 **MOUNT v3** ([RFC 1813] appendix I): `NULL`, `MNT`, `DUMP`, `UMNT`, `UMNTALL`, `EXPORT`. The client exposes `null()`, `v3_mnt()`, `export()`, `umnt()`, `dump()`, `umntall()`.
 
-The version-neutral `mnt()` method returns a `MountedHandle` regardless of which version is configured. MOUNT v1 errors (raw UNIX errno values) are mapped to `mountstat3` for uniform error handling.
+`null()`, `export()`, `umnt()`, `dump()` and `umntall()` are version-neutral: they go out under whichever version the client was constructed with, since the wire format is the same in v1 and v3. The version-neutral `mnt()` method returns a `MountedHandle` regardless of which version is configured. MOUNT v1 errors (raw UNIX errno values) are mapped to `mountstat3` for uniform error handling.
 
 ## Safety and hardening
 
@@ -78,7 +89,7 @@ The version-neutral `mnt()` method returns a `MountedHandle` regardless of which
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client

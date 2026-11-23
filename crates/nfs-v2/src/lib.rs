@@ -34,3 +34,7 @@ pub use wire::{NFS_PROGRAM as PROGRAM, NFS_VERSION as VERSION, Nfs2FileAttr, Nfs
 /// live here, with its own constructor and return types, is gone. New code
 /// should name `nfs_mount::MountClient` directly.
 pub type MountV1Client<T> = nfs_mount::MountClient<T>;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

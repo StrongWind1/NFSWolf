@@ -14,3 +14,7 @@ pub mod wire;
 
 pub use client::{MountClient, MountVersion, MountedHandle};
 pub use error::MountError;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

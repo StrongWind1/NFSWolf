@@ -46,3 +46,7 @@ pub use auth::{AuthDesCred, AuthDesVerf, AuthFlavor, AuthSys};
 pub use error::RpcError;
 pub use rpc::RpcClient;
 pub use transport::{DirectTransport, RpcTransport};
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

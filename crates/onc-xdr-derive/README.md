@@ -28,7 +28,7 @@ Derive macro that generates XDR ([RFC 4506]) `Pack` and `Unpack` implementations
 ## Usage
 
 ```rust
-use onc_xdr::{Pack, Unpack, XdrCodec};
+use onc_xdr::{Opaque, Pack, Unpack, XdrCodec};
 
 // Simple enum -- discriminant from `as u32`.
 #[derive(XdrCodec, Clone, Copy)]
@@ -36,6 +36,13 @@ use onc_xdr::{Pack, Unpack, XdrCodec};
 enum ftype3 {
     NF3REG = 1,
     NF3DIR = 2,
+}
+
+// Struct -- fields pack in declaration order, no tag. (A trimmed-down fattr3.)
+#[derive(XdrCodec)]
+struct fattr3 {
+    type_: ftype3,
+    mode: u32,
 }
 
 // Data-carrying enum (discriminated union) -- explicit #[xdr(N)].
@@ -47,11 +54,25 @@ enum post_op_attr {
     None,
 }
 
-// Struct -- fields pack in declaration order, no tag.
+#[derive(XdrCodec)]
+struct nfs_fh3 {
+    data: Opaque<'static>,
+}
+
 #[derive(XdrCodec)]
 struct GETATTR3args {
     object: nfs_fh3,
 }
+
+let attr = post_op_attr::Some(fattr3 { type_: ftype3::NF3DIR, mode: 0o755 });
+let mut buf = Vec::new();
+attr.pack(&mut buf).unwrap();
+assert_eq!(buf, [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0x01, 0xed]);
+let (decoded, _) = post_op_attr::unpack(&mut buf.as_slice()).unwrap();
+assert!(matches!(decoded, post_op_attr::Some(fattr3 { type_: ftype3::NF3DIR, mode: 0o755 })));
+
+let args = GETATTR3args { object: nfs_fh3 { data: Opaque::borrowed(&[0xab; 8]) } };
+assert_eq!(args.packed_size(), 4 + 8);
 ```
 
 ## API reference
@@ -73,7 +94,7 @@ Types whose wire form breaks these rules -- NFSv2's fixed 32-byte file handles, 
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive             <-- this crate
   +-- onc-xdr
        +-- onc-rpc-client

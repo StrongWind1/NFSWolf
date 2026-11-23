@@ -24,34 +24,48 @@
 
 Part of the [NFSWolf](https://github.com/StrongWind1/NFSWolf) protocol stack.
 
-NFSv4 is a different shape from v2 and v3. Rather than one RPC per operation, the client batches operations into a single `COMPOUND` call that the server executes in order against a "current file handle" the operations mutate as they go, so `PUTROOTFH; LOOKUP "etc"; GETFH` is one round trip. MOUNT is gone -- the server exports a single pseudo-filesystem tree reached from `PUTROOTFH`. This crate provides a complete NFSv4.0 implementation: all 37 operation codes are typed and serializable, the `Nfs4Client` exposes 45 public methods covering stateless reads, stateful OPEN/CLOSE/LOCK workflows, session management, crash recovery, and delegation return. Domain types (`Nfs4FileInfo`, `Nfs4DirEntry`, `Nfs4FileType`) provide ergonomic access to file attributes and directory listings. Generic over `onc_rpc_client::RpcTransport`, so it carries no connection policy of its own. 248 tests.
+NFSv4 is a different shape from v2 and v3. Rather than one RPC per operation, the client batches operations into a single `COMPOUND` call that the server executes in order against a "current file handle" the operations mutate as they go, so `PUTROOTFH; LOOKUP "etc"; GETFH` is one round trip. MOUNT is gone -- the server exports a single pseudo-filesystem tree reached from `PUTROOTFH`. This crate provides a complete NFSv4.0 implementation: all 37 operation codes are typed and serializable, and `Nfs4Client` covers stateless reads, stateful OPEN/CLOSE/LOCK workflows, session management, crash recovery, and delegation return. Domain types (`Nfs4FileInfo`, `Nfs4DirEntry`, `Nfs4FileType`) provide ergonomic access to file attributes and directory listings. Generic over `onc_rpc_client::RpcTransport`, so it carries no connection policy of its own.
 
 ## Usage
 
-```rust
-use nfs_v4::{Nfs4Client, CompoundBuilder, ArgOp, AttrRequest, ResOpData};
+```rust,no_run
+use nfs_v4::{ArgOp, Nfs4Client};
 use onc_rpc_client::DirectTransport;
+use onc_rpc_client::transport::tokio::TokioIo;
+use tokio::net::TcpStream;
 
-let stream = tokio::net::TcpStream::connect("server:2049").await?;
-let nfs = Nfs4Client::new(DirectTransport::new(stream));
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let stream = TcpStream::connect("192.0.2.10:2049").await?;
+    let nfs = Nfs4Client::new(DirectTransport::new(TokioIo::new(stream)));
 
-// Walk to /etc and get its file handle in one round trip.
-let fh = nfs.lookup_fh(&["etc"]).await?;
+    // Walk to /etc and get its file handle in one round trip.
+    let dir_fh = nfs.lookup_fh(&["etc"]).await?;
 
-// List directory entries with full attributes.
-let entries = nfs.readdir_plus(&fh).await?;
-for e in &entries {
-    println!("{} {:o} uid={}", e.name, e.info.mode, e.info.uid);
+    // List directory entries with full attributes. Every attribute is optional:
+    // a server returns only what it supports.
+    for e in nfs.readdir_plus(&dir_fh).await? {
+        let mode = e.info.as_ref().and_then(|i| i.mode).unwrap_or(0);
+        let owner = e.info.as_ref().and_then(|i| i.owner.as_deref()).unwrap_or("?");
+        println!("{} {mode:o} owner={owner}", e.name);
+    }
+
+    // Read a file chunk using the anonymous stateid.
+    let file_fh = nfs.lookup_fh(&["etc", "hostname"]).await?;
+    let (data, eof) = nfs.read_chunk(&file_fh, 0, 65536).await?;
+    println!("{} bytes, eof={eof}", data.len());
+
+    // Stateful workflow: establish a client identity, then open/read/close.
+    let session = nfs.establish("my-client", "0.0.0.0").await?;
+    let (open, _info) = nfs.open_read(&session, &dir_fh, "passwd").await?;
+    let (data, _eof) = nfs.read_via_open(&open, 0, 65536).await?;
+    println!("{} bytes", data.len());
+    nfs.close_file(&session, &open).await?;
+
+    // Or send a raw COMPOUND.
+    let res = nfs.compound(vec![ArgOp::Putrootfh, ArgOp::Lookup("etc".into()), ArgOp::Getfh]).await?;
+    println!("COMPOUND status {}, {} results", res.status, res.results.len());
+    Ok(())
 }
-
-// Read a file chunk using the anonymous stateid.
-let (data, eof) = nfs.read_chunk(&file_fh, 0, 65536).await?;
-
-// Stateful workflow: establish session, open/read/close.
-let session = nfs.establish("my-client", "0.0.0.0").await?;
-let (open, info) = nfs.open_read(&session, &dir_fh, "passwd").await?;
-let (data, eof) = nfs.read_via_open(&open, 0, 65536).await?;
-nfs.close_file(&session, &open).await?;
 ```
 
 ## API reference
@@ -60,7 +74,7 @@ nfs.close_file(&session, &open).await?;
 
 | Type | Description |
 |------|-------------|
-| `Nfs4Client<T>` | Full NFSv4.0 client: 45 public methods covering stateless reads, stateful OPEN/CLOSE/LOCK, session management, crash recovery, and delegation return |
+| `Nfs4Client<T>` | Full NFSv4.0 client covering stateless reads, stateful OPEN/CLOSE/LOCK, session management, crash recovery, and delegation return |
 | `Nfs4Error<E>` | Error type with `is_transient()`, `is_permission_denied()`, `is_stale()`, `is_grace()`, `is_stale_clientid()`, `is_expired()` classification predicates |
 | `Nfs4Session` | Client session state: clientid, confirm verifier, open owner, seqid tracking, lease time, renewal detection |
 | `OpenState` | State from a successful OPEN: stateid + file handle |
@@ -80,9 +94,9 @@ nfs.close_file(&session, &open).await?;
 
 | Type | Description |
 |------|-------------|
-| `Nfs4FileInfo` | Domain-level file attributes (type, mode, size, uid, gid, times, nlink) |
-| `Nfs4DirEntry` | Directory entry with name and `Nfs4FileInfo` |
-| `Nfs4FileType` | File type enum (Regular, Directory, Symlink, BlockDev, CharDev, Fifo, Socket) |
+| `Nfs4FileInfo` | Domain-level file attributes, each an `Option` (type, size, mode, `owner` / `owner_group` strings, link count, fileid, fsid, change, times) |
+| `Nfs4DirEntry` | Directory entry: name, cookie, optional file handle, optional `Nfs4FileInfo` |
+| `Nfs4FileType` | File type enum (Regular, Directory, Symlink, BlockDev, CharDev, Socket, Fifo, NamedAttr, AttrDir) |
 | `ChangeInfo4` | Change info (before/after change IDs, atomicity flag) |
 
 ### Attribute, state, and security types
@@ -131,7 +145,7 @@ nfs.close_file(&session, &open).await?;
 
 ## Crate position
 
-```
+```text
 onc-xdr-derive
   +-- onc-xdr
        +-- onc-rpc-client

@@ -108,6 +108,8 @@ test-matrix:
 	$(CARGO) test --workspace --all-targets --no-default-features
 	@echo "==> test-matrix: --features fuse"
 	$(CARGO) test --all-targets --features fuse
+	@echo "==> test-matrix: doctests (crate README examples)"
+	$(CARGO) test --workspace --doc --all-features
 
 # -- Dependency auditing --------------------------------------------------------
 

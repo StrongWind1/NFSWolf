@@ -49,3 +49,7 @@ pub use self::void::Void;
 
 /// Result of an XDR encode or decode operation.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

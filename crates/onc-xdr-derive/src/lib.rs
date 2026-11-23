@@ -644,3 +644,7 @@ mod _dev_dep_anchors {
     use onc_xdr as _;
     use trybuild as _;
 }
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
