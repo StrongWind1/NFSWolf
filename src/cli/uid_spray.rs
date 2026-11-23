@@ -115,7 +115,7 @@ pub(crate) async fn run(args: UidSprayArgs, globals: &GlobalOpts) -> anyhow::Res
     }
 
     let addr = parse_addr_with_port(&host, globals.nfs_port)?;
-    let (_, circuit, client) = make_client_with_hostname(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+    let (_, circuit, client) = make_client_with_hostname(addr, &export, 0, 0, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), globals.nfs_port, &globals.hostname);
 
     // Mount to get the root handle, then walk to the target path.
     // lookup_path reuses the same pool-backed client the sprayer will use --

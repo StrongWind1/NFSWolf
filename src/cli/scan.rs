@@ -22,7 +22,11 @@ use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
 use crate::engine::escape::AnnotatedTreeTop;
 use crate::engine::scan_types::{HostResult, NfsPortInfo};
 use crate::engine::scanner::{ScanConfig, ScanOutput, Scanner};
+use crate::proto::auth::{AuthSys, Credential};
 use crate::util::stealth::StealthConfig;
+
+/// Per-probe timeout when `--timeout` is not given.
+const DEFAULT_PROBE_TIMEOUT_MS: u64 = 3000;
 
 /// Discover NFS servers on a network.
 ///
@@ -124,9 +128,23 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
     if let Some(p) = globals.nfs_port {
         probe_ports.push(p);
     }
-    let config = ScanConfig { concurrency: args.concurrency, timeout: Duration::from_millis(globals.timeout), scan_udp: args.scan_udp, nfs_ports: probe_ports, mount_port: globals.mount_port, rpc_port: globals.rpc_port, skip_rpc: globals.skip_rpc, skip_mountd: globals.skip_mountd };
+    let timeout_ms = globals.timeout_ms_or(DEFAULT_PROBE_TIMEOUT_MS);
+    let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
+    let credential = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
+    let config = ScanConfig {
+        concurrency: args.concurrency,
+        timeout: Duration::from_millis(timeout_ms),
+        scan_udp: args.scan_udp,
+        nfs_ports: probe_ports,
+        mount_port: globals.mount_port,
+        rpc_port: globals.rpc_port,
+        skip_rpc: globals.skip_rpc,
+        skip_mountd: globals.skip_mountd,
+        credential,
+        privileged_port: globals.privileged_port,
+    };
 
-    tracing::info!(concurrency = args.concurrency, timeout_ms = globals.timeout, udp = args.scan_udp, "scan configuration");
+    tracing::info!(concurrency = args.concurrency, timeout_ms, udp = args.scan_udp, "scan configuration");
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let mut scanner = Scanner::new(config, stealth);
@@ -245,7 +263,7 @@ async fn run_auto_escape(results: &[HostResult], globals: &GlobalOpts, concurren
             // completes the TCP handshake but never answers an RPC would hang this
             // escape task -- and the join loop waits for every task, stalling the
             // whole scan. Bound the full escape per host (scales with --timeout).
-            let per_host = Duration::from_millis(g.timeout.saturating_mul(10).max(15_000));
+            let per_host = Duration::from_millis(g.timeout_ms_or(DEFAULT_PROBE_TIMEOUT_MS).saturating_mul(10).max(15_000));
             let outcome = match tokio::time::timeout(per_host, escape::run_fast(&host, &export, &g)).await {
                 Ok(Ok(att)) => Ok(att),
                 Ok(Err(e)) => Err(e.to_string()),

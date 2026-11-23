@@ -48,6 +48,56 @@ pub(crate) enum ReconnectStrategy {
     Persistent,
 }
 
+/// Network options that every connection nfswolf opens has to honour.
+///
+/// Built once from the global CLI flags and carried by the connection pool,
+/// the MOUNT client, and the portmapper client, so a pooled connection that
+/// re-mounts on its own uses the same ports, proxy and source-port policy as
+/// the subcommand that created it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConnectOpts {
+    /// SOCKS5 proxy for every TCP connection (`--proxy`).
+    pub proxy: Option<String>,
+    /// Portmapper/rpcbind port; `None` means 111 (`--rpc-port`).
+    pub rpc_port: Option<u16>,
+    /// Never contact the portmapper (`--skip-rpc`).
+    pub skip_rpc: bool,
+    /// Fixed mountd port; `None` resolves it through the portmapper (`--mount-port`).
+    pub mount_port: Option<u16>,
+    /// Fixed NFS port; `None` resolves it through the portmapper, falling
+    /// back to 2049 (`--nfs-port`).
+    pub nfs_port: Option<u16>,
+    /// MOUNT must come from a source port below 1024, with no ephemeral
+    /// fallback (`--privileged-port`).
+    pub privileged_port: bool,
+}
+
+impl ConnectOpts {
+    /// A portmapper client on the configured port, tunnelled through the proxy.
+    ///
+    /// Callers check `skip_rpc` themselves: the client is cheap to build and
+    /// opens no connection until a query is made.
+    #[must_use]
+    pub(crate) fn portmap(&self) -> crate::proto::portmap::PortmapClient {
+        let pm = crate::proto::portmap::PortmapClient::new(self.rpc_port.unwrap_or(onc_rpcbind::PMAP_PORT));
+        match &self.proxy {
+            Some(p) => pm.with_proxy(p.clone()),
+            None => pm,
+        }
+    }
+
+    /// A MOUNT client honouring the mountd port, portmapper, proxy and
+    /// privileged-port options. It mounts anonymously until a credential is set.
+    #[must_use]
+    pub(crate) fn mount_client(&self) -> crate::proto::mount::NfsMountClient {
+        let mut mc = self.mount_port.map_or_else(crate::proto::mount::NfsMountClient::new, crate::proto::mount::NfsMountClient::with_port).with_portmapper(self.rpc_port, self.skip_rpc);
+        if let Some(ref p) = self.proxy {
+            mc = mc.with_proxy(p.clone());
+        }
+        if self.privileged_port { mc.require_privileged() } else { mc }
+    }
+}
+
 /// Health state of a pooled connection.
 #[derive(Debug)]
 pub(crate) struct ConnectionHealth {
@@ -115,35 +165,35 @@ impl std::fmt::Debug for NfsConnection {
 impl NfsConnection {
     /// Establish a connection to `addr` and mount `export`.
     ///
-    /// Resolves the NFS port through the portmapper, performs the MOUNT
-    /// exchange to obtain the export's root handle and advertised auth flavors,
-    /// then opens the RPC session subsequent calls ride on.
+    /// Performs the MOUNT exchange to obtain the export's root handle and
+    /// advertised auth flavors, resolves the NFS port (`opts.nfs_port`, else
+    /// the portmapper, else 2049), then opens the RPC session subsequent calls
+    /// ride on.
     ///
     /// Binds a privileged local port where possible: many servers enforce the
     /// `secure` export option and refuse calls from ports above 1023. A proxy
     /// controls its own outbound port, so that step is skipped when tunnelling.
-    pub(crate) async fn connect(addr: SocketAddr, export: &str, credential: Credential, reconnect: ReconnectStrategy, proxy: Option<&str>) -> anyhow::Result<Self> {
+    pub(crate) async fn connect(addr: SocketAddr, export: &str, credential: Credential, reconnect: ReconnectStrategy, opts: &ConnectOpts) -> anyhow::Result<Self> {
         tracing::debug!(%addr, export, "NFS connection establishing (MOUNT path)");
-        let mut mount = crate::proto::mount::NfsMountClient::default().with_credential(credential.clone());
-        let mut portmap = crate::proto::portmap::PortmapClient::default_port();
-        if let Some(p) = proxy {
-            mount = mount.with_proxy(p.to_owned());
-            portmap = portmap.with_proxy(p.to_owned());
-        }
+        let mount = opts.mount_client().with_credential(credential.clone());
         let mounted = mount.mount(addr, export).await.with_context(|| format!("mount {export} on {addr}"))?;
-        // A filtered portmapper is common and not a reason to give up, but
-        // falling back silently means a server running nfsd off 2049 produces a
-        // bare connect error with the real cause discarded. Say so.
-        let nfs_port = match portmap.query_port(addr, NFS_PROGRAM, NFS_VERSION_3).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::info!(%addr, err = %e, port = NFS_DEFAULT_PORT, "portmapper did not answer for NFSv3; assuming the conventional port");
-                NFS_DEFAULT_PORT
+        let nfs_port = match opts.nfs_port {
+            Some(p) => p,
+            None if opts.skip_rpc => NFS_DEFAULT_PORT,
+            // A filtered portmapper is common and not a reason to give up, but
+            // falling back silently means a server running nfsd off 2049 produces a
+            // bare connect error with the real cause discarded. Say so.
+            None => match opts.portmap().query_port(addr, NFS_PROGRAM, NFS_VERSION_3).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::info!(%addr, err = %e, port = NFS_DEFAULT_PORT, "portmapper did not answer for NFSv3; assuming the conventional port");
+                    NFS_DEFAULT_PORT
+                },
             },
         };
         let nfs_addr = SocketAddr::new(addr.ip(), nfs_port);
 
-        let io = Self::open(nfs_addr, proxy).await.with_context(|| format!("NFS connect to {nfs_addr}"))?;
+        let io = Self::open(nfs_addr, opts.proxy.as_deref()).await.with_context(|| format!("NFS connect to {nfs_addr}"))?;
         let rpc = RpcClient::new_with_auth(io, credential.to_opaque_auth(), onc_rpc_client::rpc::opaque_auth::default());
 
         Ok(Self { rpc, root: Some(mounted.handle.as_bytes().to_vec()), _auth_flavors: mounted.auth_flavors, addr, export: export.to_owned(), credential, _reconnect: reconnect, health: ConnectionHealth::new() })

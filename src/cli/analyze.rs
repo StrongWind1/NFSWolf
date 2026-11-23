@@ -24,7 +24,6 @@ use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::ReconnectStrategy;
 use crate::proto::nfs3::Nfs3Client;
 use crate::proto::pool::{ConnectionPool, PoolKey};
-use crate::proto::portmap::PortmapClient;
 use crate::proto::transport::PooledTransport;
 use crate::util::stealth::StealthConfig;
 
@@ -74,12 +73,8 @@ pub(crate) struct AnalyzeArgs {
     #[arg(long = "test-read-uids", value_delimiter = ',', help_heading = H_BEHAVIOR)]
     pub test_read_uids: Vec<u32>,
 
-    /// NFSv4 directory tree depth for overview
-    #[arg(long, default_value = "2", value_name = "N", help_heading = H_BEHAVIOR)]
-    pub v4_depth: u32,
-
     /// Emit machine-readable JSON instead of human-readable output. With no value
-    /// it goes to stdout (`nfswolf analyze --json target > results.json`); with a
+    /// it goes to stdout (`nfswolf analyze target --json > results.json`); with a
     /// path it is written to that file, matching `scan --json <FILE>`.
     #[arg(long, value_name = "FILE", num_args = 0..=1, help_heading = H_OUTPUT)]
     #[expect(clippy::option_option, reason = "clap optional-value flag: None = absent, Some(None) = --json (stdout), Some(Some(path)) = --json FILE")]
@@ -213,10 +208,7 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
     // `2001:db8::1:2049` is unparseable, `[2001:db8::1]:2049` is not.
     let host_for_config = if ip.is_ipv6() { format!("[{ip}]") } else { ip.to_string() };
 
-    let pool = Arc::new(match &globals.proxy {
-        Some(p) => ConnectionPool::with_proxy(p.clone()),
-        None => ConnectionPool::default_config(),
-    });
+    let pool = Arc::new(ConnectionPool::with_opts(globals.connect_opts()));
     let circuit = Arc::new(CircuitBreaker::default_config());
     let cred = Credential::Sys(AuthSys::new(globals.uid, globals.gid, &globals.hostname));
     let pool_key = PoolKey { host: addr, export: "/".to_owned(), uid: globals.uid, gid: globals.gid };
@@ -224,15 +216,13 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
     let nfs3 = Arc::new(Nfs3Client::new(PooledTransport::new(Arc::clone(&pool), pool_key, Arc::clone(&circuit), stealth, cred, ReconnectStrategy::Persistent)));
 
     let mount_client = crate::cli::probe::make_mount_client(globals);
-    let portmap_client = match &globals.proxy {
-        Some(p) => PortmapClient::default_port().with_proxy(p.clone()),
-        None => PortmapClient::default_port(),
-    };
-    let mut analyzer = Analyzer::new(nfs3, mount_client, portmap_client, pool, circuit, globals.hostname.clone(), globals.aux_gids.clone()).with_stealth(StealthConfig::new(globals.delay, globals.jitter));
-    if let Some(ref p) = globals.proxy {
-        analyzer = analyzer.with_proxy(p.clone());
-    }
-    let config = AnalyzeConfig { host: host_for_config, port: 2049, test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
+    let portmap_client = globals.connect_opts().portmap();
+    let analyzer = Analyzer::new(nfs3, mount_client, portmap_client, pool, circuit, globals.hostname.clone(), globals.aux_gids.clone())
+        .with_stealth(StealthConfig::new(globals.delay, globals.jitter))
+        .with_net(globals.connect_opts())
+        .with_skip_mountd(globals.skip_mountd)
+        .with_timeout(globals.timeout.map(std::time::Duration::from_millis));
+    let config = AnalyzeConfig { host: host_for_config, port: globals.nfs_port.unwrap_or(2049), test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
     tracing::info!(%host, "running security checks");
     analyzer.analyze(&config).await
 }

@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::proto::auth::Credential;
-use crate::proto::conn::{NfsConnection, ReconnectStrategy};
+use crate::proto::conn::{ConnectOpts, NfsConnection, ReconnectStrategy};
 
 /// Key identifying a unique (host, export, uid, gid) connection group.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -55,8 +55,9 @@ struct PoolInner {
     /// `PooledConnection` is dropped, since the permit is released on drop.
     admission: Arc<Semaphore>,
     stale_threshold: Duration,
-    /// Optional SOCKS5 proxy for all new connections created by this pool.
-    proxy: Option<String>,
+    /// Network options (proxy, ports, portmapper, source-port policy) for
+    /// every new connection this pool creates.
+    opts: ConnectOpts,
 }
 
 /// Per-(host, export, uid, gid) connection pool with health eviction.
@@ -75,40 +76,27 @@ impl std::fmt::Debug for PoolInner {
 }
 
 impl ConnectionPool {
-    /// Create a new pool with the given limits.
-    #[must_use]
-    pub(crate) fn new(max_per_key: usize, max_total: usize, stale_threshold: Duration) -> Self {
-        Self::build(max_per_key, max_total, stale_threshold, None)
-    }
-
-    fn build(max_per_key: usize, max_total: usize, stale_threshold: Duration, proxy: Option<String>) -> Self {
-        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key, max_total, admission: Arc::new(Semaphore::new(max_total)), stale_threshold, proxy }) }
+    fn build(max_per_key: usize, max_total: usize, stale_threshold: Duration, opts: ConnectOpts) -> Self {
+        Self { inner: Arc::new(PoolInner { pools: DashMap::new(), max_per_key, max_total, admission: Arc::new(Semaphore::new(max_total)), stale_threshold, opts }) }
     }
 
     /// Default limits, except that up to `idle_per_key` idle connections are
-    /// kept per (host, export, identity), and an optional SOCKS5 proxy.
+    /// kept per (host, export, identity), with the given network options.
     ///
     /// The shell keeps several READs or WRITEs in flight per transfer, each on
     /// its own connection; with fewer idle slots than that, the surplus would
     /// be closed when handed back and reopened -- MOUNT included -- by the next
     /// transfer.
     #[must_use]
-    pub(crate) fn for_parallel_transfers(idle_per_key: usize, proxy: Option<String>) -> Self {
-        Self::build(idle_per_key.max(4), 256, Duration::from_secs(5), proxy)
+    pub(crate) fn for_parallel_transfers(idle_per_key: usize, opts: ConnectOpts) -> Self {
+        Self::build(idle_per_key.max(4), 256, Duration::from_secs(5), opts)
     }
 
-    /// Create with sensible defaults for interactive scanning.
+    /// Create with default limits and the given network options for every
+    /// connection (proxy, mountd/NFS/portmapper ports, privileged source port).
     #[must_use]
-    pub(crate) fn default_config() -> Self {
-        Self::new(4, 256, Duration::from_secs(5))
-    }
-
-    /// Create with default limits and a SOCKS5 proxy for all connections.
-    ///
-    /// `proxy` should be `"host:port"` or `"socks5://host:port"`.
-    #[must_use]
-    pub(crate) fn with_proxy(proxy: String) -> Self {
-        Self::build(4, 256, Duration::from_secs(5), Some(proxy))
+    pub(crate) fn with_opts(opts: ConnectOpts) -> Self {
+        Self::build(4, 256, Duration::from_secs(5), opts)
     }
 
     /// Check out a connection for `key`, creating one if necessary.
@@ -127,7 +115,7 @@ impl ConnectionPool {
         }
 
         tracing::debug!(host = %key.host, export = %key.export, uid = key.uid, "pool: new connection");
-        let conn = NfsConnection::connect(key.host, &key.export, credential, reconnect, self.inner.proxy.as_deref()).await?;
+        let conn = NfsConnection::connect(key.host, &key.export, credential, reconnect, &self.inner.opts).await?;
         Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit })
     }
 
@@ -184,7 +172,7 @@ impl ConnectionPool {
             return Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit });
         }
 
-        let conn = NfsConnection::connect_direct(key.host, nfs_port, credential, reconnect, self.inner.proxy.as_deref()).await?;
+        let conn = NfsConnection::connect_direct(key.host, nfs_port, credential, reconnect, self.inner.opts.proxy.as_deref()).await?;
         Ok(PooledConnection { conn: Some(conn), pool: self.clone(), key, _permit: permit })
     }
 

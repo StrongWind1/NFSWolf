@@ -543,7 +543,7 @@ mod wire_tests {
 
     /// The shell's own NFSv2 backend, bound to `addr` without MOUNT.
     fn ops(addr: SocketAddr) -> V2Ops {
-        let pool = Arc::new(ConnectionPool::for_parallel_transfers(transfer::MAX_PIPELINE_DEPTH, None));
+        let pool = Arc::new(ConnectionPool::for_parallel_transfers(transfer::MAX_PIPELINE_DEPTH, crate::proto::conn::ConnectOpts::default()));
         let key = PoolKey { host: addr, export: "/".to_owned(), uid: 0, gid: 0 };
         let transport = PooledTransport::new_direct(pool, key, Arc::new(CircuitBreaker::default_config()), StealthConfig::new(0, 0), Credential::Sys(AuthSys::new(0, 0, "test")), ReconnectStrategy::Persistent, addr.port());
         V2Ops::new(Arc::new(nfs_v2::Nfs2Client::new(transport)))

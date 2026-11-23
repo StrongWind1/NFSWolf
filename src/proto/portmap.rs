@@ -76,12 +76,6 @@ impl PortmapClient {
         Self { port, proxy: None }
     }
 
-    /// Create with the standard portmapper port (111).
-    #[must_use]
-    pub(crate) const fn default_port() -> Self {
-        Self::new(portmap::PMAP_PORT)
-    }
-
     /// Attach a SOCKS5 proxy to this client.
     #[must_use]
     pub(crate) fn with_proxy(mut self, proxy: String) -> Self {

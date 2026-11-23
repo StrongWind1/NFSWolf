@@ -113,7 +113,7 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
 
     // --- Mask mode: OS-agnostic nibble brute force ---
     if let Some(ref mask) = args.mask {
-        let (_, _, client) = make_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+        let (_, _, client) = make_client_with_hostname(addr, "/", 0, 0, &[], stealth, &globals.connect_opts(), globals.nfs_port, &globals.hostname);
         let found = sweep_mask(&client, mask, args.max_attempts, &host, globals.quiet).await?;
         if !found && !globals.quiet {
             eprintln!("{}", crate::output::status_warn("No valid handle found. Try marking different nibbles or widening --max-attempts."));
@@ -174,7 +174,7 @@ pub(crate) async fn run(args: BruteHandleArgs, globals: &GlobalOpts) -> anyhow::
 
     let found = match nfs_ver {
         NfsVersion::V3 => {
-            let (_, _, client) = make_client_with_hostname(addr, &pool_export, 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+            let (_, _, client) = make_client_with_hostname(addr, &pool_export, 0, 0, &[], stealth.clone(), &globals.connect_opts(), globals.nfs_port, &globals.hostname);
             let result = if matches!(fs, FsType::Btrfs) {
                 sweep_btrfs(&client, &seed, args.max_attempts, &host, globals.quiet).await
             } else {
@@ -437,7 +437,7 @@ async fn sweep_inodes_v2(addr: std::net::SocketAddr, seed: &FileHandle, max_atte
     use nfs_v2::wire::Nfs2FileHandle;
 
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
-    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth, globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth, &globals.connect_opts(), globals.nfs_port, &globals.hostname);
 
     let mut found_root = false;
     let mut extra_hits: Vec<(u64, u32, String)> = Vec::new();
