@@ -1191,7 +1191,11 @@ impl<O: ShellOps> NfsShell<O> {
 
     /// Print current AUTH_SYS identity.
     fn cmd_whoami(&self) {
-        println!("uid={}  gid={}  hostname={}", self.ops.uid(), self.ops.gid(), self.ops.machinename());
+        // The groups are part of the identity: knfsd grants group access
+        // through any of them, and root_squash keeps every non-zero one.
+        let id = self.ops.identity();
+        let groups: Vec<String> = id.groups.iter().map(u32::to_string).collect();
+        println!("uid={}  gid={}  groups={}  hostname={}", id.uid, id.gid, groups.join(","), self.ops.machinename());
     }
 
     /// Switch both UID and GID at once (impersonate uid:gid).

@@ -6,11 +6,10 @@ use nfs_v3::Nfs3Fault;
 use nfs_v3::wire::{MKNOD3args, Nfs3Option, Nfs3Result, devicedata3, diropargs3, filename3, mknoddata3, sattr3, set_atime, set_mtime, specdata3, stable_how};
 use onc_xdr::Opaque;
 
-use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs3::types::{DirEntryPlus, FileAttrs, FileHandle, FileType};
 use crate::proto::nfs3::{Nfs3Client, PooledNfs3 as _};
 
-use super::ops::{CredCache, IoSizes, ReadReply, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, WriteReply, try_with_escalation};
+use super::ops::{CredCache, Identity, IoSizes, ObservedIdentities, ReadReply, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, WriteReply, observe_entries, try_with_escalation};
 
 /// NFSv3 backend wrapping a pooled `Nfs3Client` with credential escalation.
 pub(crate) struct V3Ops {
@@ -28,8 +27,9 @@ impl V3Ops {
         Self { nfs3, cred_cache: CredCache::new(), io_sizes: std::sync::OnceLock::new() }
     }
 
-    fn make_v3(&self, uid: u32, gid: u32) -> Nfs3Client {
-        self.nfs3.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.nfs3.machinename())), uid, gid)
+    /// The pooled client re-keyed to `id` (UID, primary GID, supplementary groups).
+    fn make_v3(&self, id: &Identity) -> Nfs3Client {
+        self.nfs3.with_credential(id.credential(self.nfs3.machinename()), id.uid, id.gid)
     }
 }
 
@@ -93,21 +93,50 @@ fn fault_to_anyhow<E: std::fmt::Display>(e: Nfs3Fault<E>) -> anyhow::Error {
 
 impl ShellOps for V3Ops {
     async fn lookup(&self, dir: &ShellHandle, name: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
-        let (fh, attrs_opt) = self.nfs3.resolve(&to_v3_fh(dir), name).await.map_err(fault_to_anyhow)?;
-        let attrs = match attrs_opt {
-            Some(a) => a,
-            None => self.nfs3.attrs(&fh).await.map_err(fault_to_anyhow)?,
-        };
+        // LOOKUP needs search permission on `dir`, so a directory the caller
+        // cannot enter is retried through the ladder like any other refusal.
+        let dir3 = to_v3_fh(dir);
+        let (fh, attrs) = try_with_escalation(
+            &self.identity(),
+            &self.cred_cache,
+            dir,
+            getattr_owner(&self.nfs3, &dir3),
+            is_nfs_acces,
+            |id| {
+                let c = self.make_v3(&id);
+                let dir = dir3.clone();
+                let name = name.to_owned();
+                async move {
+                    let (fh, attrs_opt) = c.resolve(&dir, &name).await.map_err(fault_to_anyhow)?;
+                    let attrs = match attrs_opt {
+                        Some(a) => a,
+                        None => c.attrs(&fh).await.map_err(fault_to_anyhow)?,
+                    };
+                    Ok((fh, attrs))
+                }
+            },
+            "NFS3ERR_ACCES: lookup denied (exhausted credential ladder)",
+        )
+        .await?;
+        self.observed().record([(attrs.uid, attrs.gid)]);
         Ok((from_v3_fh(&fh), v3_info(&attrs)))
     }
 
     async fn lookup_path(&self, start: &ShellHandle, path: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
-        let (fh, attrs_opt) = self.nfs3.walk(&to_v3_fh(start), path).await.map_err(fault_to_anyhow)?;
-        let attrs = match attrs_opt {
-            Some(a) => a,
-            None => self.nfs3.attrs(&fh).await.map_err(fault_to_anyhow)?,
+        // One escalating LOOKUP per component, so every directory on the
+        // path gets the ladder rather than only the last one.
+        let mut cur = start.clone();
+        let mut info = None;
+        for component in path.split('/').filter(|c| !c.is_empty() && *c != ".") {
+            let (fh, attrs) = self.lookup(&cur, component).await?;
+            cur = fh;
+            info = Some(attrs);
+        }
+        let info = match info {
+            Some(i) => i,
+            None => self.getattr(&cur).await?,
         };
-        Ok((from_v3_fh(&fh), v3_info(&attrs)))
+        Ok((cur, info))
     }
 
     async fn getattr(&self, fh: &ShellHandle) -> anyhow::Result<ShellFileInfo> {
@@ -117,35 +146,35 @@ impl ShellOps for V3Ops {
 
     async fn list_dir(&self, dir: &ShellHandle) -> anyhow::Result<Vec<ShellEntry>> {
         let fh3 = to_v3_fh(dir);
-        let nfs3 = &self.nfs3;
         let entries = try_with_escalation(
-            (nfs3.uid(), nfs3.gid()),
+            &self.identity(),
             &self.cred_cache,
             dir,
-            getattr_owner(nfs3, &fh3),
+            getattr_owner(&self.nfs3, &fh3),
             is_nfs_acces,
-            |uid, gid| {
-                let c = self.make_v3(uid, gid);
+            |id| {
+                let c = self.make_v3(&id);
                 let fh = fh3.clone();
                 async move { list_dir_v3(&c, &fh).await }
             },
             "NFS3ERR_ACCES: cannot list directory (exhausted credential ladder)",
         )
         .await?;
-        Ok(to_shell_entries(entries))
+        let entries = to_shell_entries(entries);
+        observe_entries(self.observed(), &entries);
+        Ok(entries)
     }
 
     async fn read_at(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<ReadReply> {
         let fh3 = to_v3_fh(fh);
-        let nfs3 = &self.nfs3;
         try_with_escalation(
-            (nfs3.uid(), nfs3.gid()),
+            &self.identity(),
             &self.cred_cache,
             fh,
-            getattr_owner(nfs3, &fh3),
+            getattr_owner(&self.nfs3, &fh3),
             is_nfs_acces,
-            |uid, gid| {
-                let c = self.make_v3(uid, gid);
+            |id| {
+                let c = self.make_v3(&id);
                 let fh = fh3.clone();
                 async move { read_at_v3(&c, &fh, offset, count).await }
             },
@@ -265,9 +294,17 @@ impl ShellOps for V3Ops {
         self.nfs3.machinename()
     }
 
+    fn identity(&self) -> Identity {
+        Identity::new(self.nfs3.uid(), self.nfs3.gid(), &self.nfs3.groups())
+    }
+
+    fn observed(&self) -> &ObservedIdentities {
+        &self.cred_cache.observed
+    }
+
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
-        let cred = Credential::Sys(AuthSys::new(uid, gid, hostname));
-        self.nfs3 = Arc::new(self.nfs3.with_credential(cred, uid, gid));
+        let id = self.identity().switched(uid, gid);
+        self.nfs3 = Arc::new(self.nfs3.with_credential(id.credential(hostname), uid, gid));
         self.cred_cache.flush();
         Ok(())
     }
@@ -320,9 +357,10 @@ impl ShellOps for V3Ops {
         self.nfs3.commit_range(&to_v3_fh(fh), 0, 0).await.map_err(fault_to_anyhow)
     }
 
-    fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self {
-        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
-        Self::new(Arc::new(self.nfs3.with_credential(cred, uid, gid)))
+    fn with_credential(&self, id: &Identity, hostname: &str) -> Self {
+        let mut ops = Self::new(Arc::new(self.nfs3.with_credential(id.credential(hostname), id.uid, id.gid)));
+        ops.cred_cache = self.cred_cache.sharing_observations();
+        ops
     }
 }
 

