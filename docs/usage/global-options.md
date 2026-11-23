@@ -1,6 +1,6 @@
 # Global Options
 
-Every NFSWolf subcommand inherits these flags. They control the identity presented to the NFS server, network transport, stealth timing, and output formatting. Set them before the subcommand name or after it -- clap treats them as global either way.
+Every NFSWolf subcommand inherits these flags. They control the identity presented to the NFS server, network transport, stealth timing, and output formatting. Set them before the subcommand name or after it -- clap treats them as global either way. The AUTH_SHORT and AUTH_DH flags documented under [Shell-only credential flags](#shell-only-credential-flags) are the exception: they belong to `shell` alone.
 
 ```bash
 nfswolf --uid 0 --delay 500 shell 10.0.0.1:/srv
@@ -37,7 +37,7 @@ nfswolf shell 10.0.0.1:/srv -u 0 -g 42
 
 ### `--aux-gids <G1,G2,...>`
 
-Auxiliary GIDs added to the AUTH_SYS credential, comma-separated. Capped at 16 per RFC 1057 S9.2. These are checked for group-permission bits on every file access.
+Auxiliary GIDs added to the AUTH_SYS credential, comma-separated. Capped at 16 per RFC 1057 S9.2. These are checked for group-permission bits on every file access. They are sent with every credential nfswolf builds: the initial one, every rung of the credential ladder, and the identity after a shell `uid`, `gid` or `su`. Linux `root_squash` remaps only uid 0 and gid 0, so `--uid 0 --aux-gids 522` still grants group 522 access.
 
 ```bash
 # Add the shadow group (42 on Debian, 15 on SUSE) to read /etc/shadow
@@ -57,18 +57,22 @@ Client hostname injected into the AUTH_SYS `machinename` field. Default: `localh
 nfswolf shell 10.0.0.1:/srv --hostname prod-web-01
 ```
 
-### `--short-token <HEX>` { #short-token }
+### Shell-only credential flags
 
-Replay an AUTH_SHORT opaque token as the RPC credential instead of AUTH_SYS. Some non-Linux NFS servers (Solaris, NetApp ONTAP) issue AUTH_SHORT tokens in reply verifiers; capturing and replaying one bypasses normal credential checks. Per-subcommand flag on `shell`.
+These two replace the AUTH_SYS credential with a different flavor. They are options of the `shell` subcommand, not global flags: no other subcommand accepts them, and they must come after `shell` on the command line.
+
+#### `--short-token <HEX>` { #short-token }
+
+`shell` only. Replay an AUTH_SHORT opaque token as the RPC credential instead of AUTH_SYS. Some non-Linux NFS servers (Solaris, NetApp ONTAP) issue AUTH_SHORT tokens in reply verifiers; capturing and replaying one bypasses normal credential checks. The token applies to the whole session on NFSv2, v3, and v4.
 
 ```bash
 # Replay a captured AUTH_SHORT token
 nfswolf shell 10.0.0.1:/srv --short-token 0a1b2c3d4e5f
 ```
 
-### `--auth-dh-netname <NAME>` and `--auth-dh-pubkey <HEX>` { #auth-dh }
+#### `--auth-dh-netname <NAME>` and `--auth-dh-pubkey <HEX>` { #auth-dh }
 
-Enable AUTH_DH (Diffie-Hellman) authentication using 192-bit DH + 56-bit DES (RFC 1057 S9.3). Only useful against Solaris/Illumos servers that still support AUTH_DH. Requires the `auth-dh` Cargo feature. Both flags must be provided together.
+`shell` only. Enable AUTH_DH (Diffie-Hellman) authentication using 192-bit DH + 56-bit DES (RFC 1057 S9.3). Only useful against Solaris/Illumos servers that still support AUTH_DH. Requires the `auth-dh` Cargo feature. Both flags must be provided together.
 
 ```bash
 # AUTH_DH session against a Solaris server
@@ -81,19 +85,27 @@ nfswolf shell 10.0.0.1:/srv \
 
 ### `--timeout <MS>` / `-t <MS>`
 
-RPC connection and call timeout in milliseconds. Default: `3000` (3 seconds). Increase for high-latency targets or when running through a proxy.
+Probe timeout in milliseconds. When the flag is omitted, each subcommand uses its own default:
+
+| Subcommand | What the timeout bounds | Default |
+|------------|-------------------------|---------|
+| `scan` | Each port and RPC probe | 3000 ms |
+| `analyze` | Each probe | 5000 ms |
+| `shell`, `mount` | NFS version auto-detection (skipped when `--nfs-version` is given) | 2000 ms |
+
+An explicit `--timeout` replaces all of these defaults. It does not change established NFS sessions: once a shell, mount, or pooled connection is up, every call keeps a fixed 30-second deadline. Increase the timeout for high-latency targets or when running through a proxy.
 
 ```bash
-# 10-second timeout for a remote target
+# 10-second probes for a remote target
 nfswolf scan 10.0.0.0/24 --timeout 10000
 
-# Fast local network
+# Faster version detection on a local network
 nfswolf shell 192.168.1.10:/srv -t 1000
 ```
 
 ### `--nfs-port <PORT>`
 
-Override the NFS service port, skipping portmapper resolution. The default NFS port is 2049, but portmapper may report a different port. Use this when portmapper is firewalled or returns incorrect data.
+Override the NFS service port, skipping the portmapper GETPORT. The default NFS port is 2049, but portmapper may report a different port. Applies to every subcommand that opens an NFS connection, `analyze` included, and to every pooled NFS connection. Use this when portmapper is firewalled or returns incorrect data.
 
 ```bash
 # NFS on a non-standard port
@@ -102,7 +114,7 @@ nfswolf shell 10.0.0.1:/srv --nfs-port 12049
 
 ### `--mount-port <PORT>`
 
-Override the MOUNT daemon port, skipping portmapper resolution. Useful when mountd runs on a non-standard port or portmapper is unavailable.
+Override the MOUNT daemon port, skipping the portmapper GETPORT. Honored by every MOUNT call in every subcommand, including the MOUNT calls made inside pooled connections. Useful when mountd runs on a non-standard port or portmapper is unavailable.
 
 ```bash
 # MOUNT daemon on a known port
@@ -111,7 +123,7 @@ nfswolf analyze 10.0.0.1 --mount-port 20048
 
 ### `--rpc-port <PORT>`
 
-Override the portmapper/rpcbind port. Default: `111`. Rarely needed unless the target runs portmapper on an alternate port.
+Override the portmapper/rpcbind port. Default: `111`. Honored by every portmapper/rpcbind query in every subcommand: `scan` and `analyze` discovery, NFS version detection in `shell` and `mount`, and the MOUNT port lookups that `escape`, `brute-handle`, `uid-spray`, `clean`, `shell`, and `mount` perform. Rarely needed unless the target runs portmapper on an alternate port.
 
 ```bash
 # Portmapper on a non-standard port
@@ -120,7 +132,7 @@ nfswolf scan 10.0.0.1 --rpc-port 1111
 
 ### `--privileged-port`
 
-Bind the source TCP port to a value below 1024. Required by servers that export with the `secure` option (the default on Linux). Needs root or `CAP_NET_BIND_SERVICE`.
+Bind the source TCP port to a value below 1024. Required by servers that export with the `secure` option (the default on Linux). Honored by every MOUNT call in every subcommand (including `scan`), as well as by NFS connections. Needs root or `CAP_NET_BIND_SERVICE`.
 
 ```bash
 # Connect to a server requiring privileged source ports
@@ -147,26 +159,40 @@ nfswolf scan 10.0.0.0/24 --proxy 127.0.0.1:1080
 
 ### `--skip-rpc`
 
-Skip all portmapper/rpcbind probes (DUMP, GETPORT, port 111). Use when portmapper is firewalled and you know the NFS port. Pair with `--nfs-port` to specify the NFS service port directly.
+Never contact the portmapper/rpcbind (no DUMP, no GETPORT, nothing sent to port 111), in any subcommand. Use when portmapper is firewalled or when you want to keep the traffic off it. Without the portmapper to ask:
+
+- NFS uses `--nfs-port`, or 2049.
+- MOUNT uses `--mount-port`, or probes the well-known mountd ports 2049 and 20048 (the same fallback nfswolf uses when the portmapper does not answer).
+- NFS version auto-detection in `shell` and `mount` probes v3 and then v2 with an RPC NULL on the NFS port, then v4.
 
 ```bash
-# Portmapper firewalled, NFS on default port
+# Portmapper firewalled, NFS and mountd on their usual ports
 nfswolf shell 10.0.0.1:/srv --skip-rpc
 
-# Portmapper firewalled, NFS on a custom port
-nfswolf escape 10.0.0.1:/srv --skip-rpc --nfs-port 12049
+# Portmapper firewalled, NFS and mountd on custom ports
+nfswolf escape 10.0.0.1:/srv --skip-rpc --nfs-port 12049 --mount-port 32767
 ```
 
 ### `--skip-mountd`
 
-Skip all MOUNT daemon queries (EXPORT, MNT, DUMP). NFSv4 pseudo-FS discovery still runs. Use when mountd is firewalled or unnecessary (e.g., working with a known handle or NFSv4-only target).
+Skip MOUNT daemon queries (EXPORT, MNT, DUMP) in `scan` and `analyze`. NFSv4 pseudo-FS discovery still runs: `scan` lists the v4 exports, and `analyze` discovers exports through the pseudo-filesystem and runs its NFSv4 per-export checks. Use when mountd is firewalled or should not see the traffic.
 
 ```bash
-# NFSv4 only, no MOUNT needed
-nfswolf shell 10.0.0.1:/srv --skip-mountd --nfs-version 4
+# Discovery without touching mountd
+nfswolf scan 10.0.0.0/24 --skip-mountd
 
-# Already have a handle, skip MOUNT entirely
-nfswolf shell 10.0.0.1 --handle 0100070200... --skip-mountd
+# NFSv4-only audit
+nfswolf analyze 10.0.0.1 --skip-mountd
+```
+
+`--skip-mountd` does not change `shell`, `mount`, or `escape`. To keep those away from MOUNT, give `shell` or `mount` a raw handle with `--handle`, or select NFSv4 with `--nfs-version 4`, which never uses MOUNT. `escape` gathers NFSv4 seed handles by itself, so it still finds seeds when MOUNT does not answer.
+
+```bash
+# Already have a handle: no MOUNT call
+nfswolf shell 10.0.0.1 --handle 0100070200...
+
+# NFSv4: no MOUNT call
+nfswolf shell 10.0.0.1:/srv --nfs-version 4
 ```
 
 ## Stealth
@@ -250,14 +276,14 @@ NO_COLOR=1 nfswolf scan 10.0.0.0/24
 | `--gid` | `-g` | `1000` | Identity | AUTH_SYS GID |
 | `--aux-gids` | | (none) | Identity | Auxiliary GIDs (comma-separated, max 16) |
 | `--hostname` | | `localhost` | Identity | AUTH_SYS machine name |
-| `--timeout` | `-t` | `3000` | Network | RPC timeout in milliseconds |
+| `--timeout` | `-t` | per subcommand | Network | Probe timeout in milliseconds (scan 3000, analyze 5000, shell/mount detection 2000) |
 | `--nfs-port` | | (auto) | Network | Override NFS service port |
 | `--mount-port` | | (auto) | Network | Override MOUNT daemon port |
 | `--rpc-port` | | `111` | Network | Override portmapper port |
 | `--privileged-port` | | off | Network | Bind source port < 1024 |
 | `--proxy` | | (none) | Network | SOCKS5 proxy address |
-| `--skip-rpc` | | off | Behavior | Skip portmapper probes |
-| `--skip-mountd` | | off | Behavior | Skip MOUNT daemon queries |
+| `--skip-rpc` | | off | Behavior | Never contact the portmapper |
+| `--skip-mountd` | | off | Behavior | Skip MOUNT queries in scan and analyze |
 | `--delay` | | `0` | Stealth | Inter-RPC delay (ms) |
 | `--jitter` | | `0` | Stealth | Random jitter added to delay (ms) |
 | `--verbose` | `-v` | warn | Output | Log verbosity (stacks to `-vvv`) |

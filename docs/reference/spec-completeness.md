@@ -4,18 +4,18 @@ Coverage of each in-tree protocol crate against its authoritative RFC. All crate
 
 ## Coverage summary
 
-| Crate | RFC | Spec Coverage | Procedures/Ops | Tests | Notes |
-|-------|-----|--------------|----------------|-------|-------|
-| `onc-xdr` | RFC 4506 | **Complete** | All XDR types | 57 | `Pack`, `Unpack`, `Opaque`, `List`, `BoundedList`, `Void`, padding, length-hardened readers |
-| `onc-xdr-derive` | RFC 4506 | **Complete** | `#[derive(XdrCodec)]` | 7 | Generates `Pack`/`Unpack` for structs and enums |
-| `onc-rpc-client` | RFC 5531 | **Complete** | RPC v2 message types, AUTH_SYS, AUTH_DH | 54 | `RpcTransport` seam, `DirectTransport`, `AuthSys`, `AuthDhSession` (feature-gated), all 19 auth flavors, all 19 auth status codes |
-| `onc-rpcbind` | RFC 1057 / RFC 1833 | **Complete** | Portmapper v2 (DUMP, GETPORT, SET, UNSET, NULL) + rpcbind v3/v4 (GETTIME, GETSTAT) | 18 | Full IANA RPC program numbers registry (1251 entries) |
-| `nfs-mount` | RFC 1094 App A / RFC 1813 App I | **Complete** | v1: NULL, MNT, UMNT, DUMP, EXPORT; v3: NULL, MNT, UMNT, UMNTALL, DUMP, EXPORT | 14 | Shared by `nfs-v2` and `nfs-v3` |
-| `nfs-v2` | RFC 1094 | **Complete** | All 18 procedures | 36 | Fixed 32-byte handles, domain API |
-| `nfs-v3` | RFC 1813 | **Complete** | All 22 procedures | 39 | Domain types (`FileHandle`, `FileAttrs`, `FileType`, `DirEntryPlus`), `Nfs3Error` with classification predicates |
-| `nfs-v4` | RFC 7530 | **Complete** | All 37 ops typed with response decoders | 248 | 66 named `Nfs4Status` codes, stateful infrastructure (SETCLIENTID, OPEN/CLOSE/LOCK), session lifecycle, 45 public client methods |
+| Crate | RFC | Spec Coverage | Procedures/Ops | Notes |
+|-------|-----|--------------|----------------|-------|
+| `onc-xdr` | RFC 4506 | **Complete** | All XDR types | `Pack`, `Unpack`, `Opaque`, `List`, `BoundedList`, `Void`, padding, length-hardened readers |
+| `onc-xdr-derive` | RFC 4506 | **Complete** | `#[derive(XdrCodec)]` | Generates `Pack`/`Unpack` for structs and enums |
+| `onc-rpc-client` | RFC 5531 | **Complete** | RPC v2 message types, AUTH_SYS, AUTH_DH | `RpcTransport` seam, `DirectTransport`, `AuthSys`, `AuthDhSession` (feature-gated), six named auth flavors plus `Unknown(u32)`, all 19 auth status codes |
+| `onc-rpcbind` | RFC 1057 / RFC 1833 | **Complete** | Portmapper v2 (all 6: NULL, SET, UNSET, GETPORT, DUMP, CALLIT) + rpcbind v3 (all 8) and v4 (BCAST, GETVERSADDR, INDIRECT, GETADDRLIST, GETSTAT) | Full IANA RPC program numbers registry (1251 entries) |
+| `nfs-mount` | RFC 1094 App A / RFC 1813 App I | **Complete** | v1 and v3: NULL, MNT, UMNT, UMNTALL, DUMP, EXPORT | Shared by `nfs-v2` and `nfs-v3` |
+| `nfs-v2` | RFC 1094 | **Complete** | All 18 procedures | Fixed 32-byte handles, domain API |
+| `nfs-v3` | RFC 1813 | **Complete** | All 22 procedures | Domain types (`FileHandle`, `FileAttrs`, `FileType`, `DirEntryPlus`), `Nfs3Error` with classification predicates |
+| `nfs-v4` | RFC 7530 | **Complete** | All 37 ops typed with response decoders | 66 named `Nfs4Status` codes, stateful infrastructure (SETCLIENTID, OPEN/CLOSE/LOCK), session lifecycle, 40 public `Nfs4Client` methods |
 
-**Total: 473 tests across 8 crates.**
+Every crate carries its own unit tests, and `make check-all` runs them with the rest of the workspace. Per-crate counts are not listed here because they change with nearly every release.
 
 ## Per-crate detail
 
@@ -37,7 +37,7 @@ All XDR data types from RFC 4506 are implemented:
 - [x] RPC v2 message format (call + reply)
 - [x] AUTH_NONE, AUTH_SYS (sec. 14), AUTH_SHORT
 - [x] AUTH_DH / AUTH_DES (RFC 2695, behind `auth-dh` feature)
-- [x] All 19 IANA-registered auth flavors
+- [x] `auth_flavor` wire enum: AUTH_NULL, AUTH_UNIX, AUTH_SHORT, AUTH_DES, RPCSEC_GSS (6), AUTH_TLS (7), plus `Unknown(u32)` so an unlisted flavor still decodes (the IANA flavor-name table used for display lives in the nfswolf binary, `flavor_name` in `src/proto/auth.rs`)
 - [x] All 19 IANA-registered auth status codes
 - [x] RPCSEC_GSS v3 status codes 15-18 (RFC 7861)
 - [x] `RpcTransport` trait (the policy seam)
@@ -46,16 +46,14 @@ All XDR data types from RFC 4506 are implemented:
 
 ### onc-rpcbind (RFC 1057 / RFC 1833)
 
-- [x] Portmapper v2: NULL, SET, UNSET, GETPORT, DUMP
-- [x] rpcbind v3: GETTIME
-- [x] rpcbind v4: GETSTAT
+- [x] Portmapper v2: NULL, SET, UNSET, GETPORT, DUMP, CALLIT
+- [x] rpcbind v3: SET, UNSET, GETADDR, DUMP, CALLIT, GETTIME, UADDR2TADDR, TADDR2UADDR
+- [x] rpcbind v4: BCAST, GETVERSADDR, INDIRECT, GETADDRLIST, GETSTAT
 - [x] Full IANA RPC program number registry (1251 entries)
-- [ ] rpcbind v3: GETADDR, DUMP (not needed by nfswolf)
-- [ ] CALLIT / INDIRECT (removed as out of scope)
 
 ### nfs-mount (RFC 1094 Appendix A / RFC 1813 Appendix I)
 
-- [x] MOUNT v1: NULL, MNT, UMNT, DUMP, EXPORT
+- [x] MOUNT v1: NULL, MNT, UMNT, UMNTALL, DUMP, EXPORT
 - [x] MOUNT v3: NULL, MNT, UMNT, UMNTALL, DUMP, EXPORT
 - [x] Auth flavor extraction from MNT response
 - [x] Export list with group parsing
@@ -98,7 +96,7 @@ Stateful infrastructure:
 - [x] Crash recovery primitives
 
 !!! note "NFSv4.1 and v4.2"
-    EXCHANGE_ID (op 42, v4.1) is wired for vendor/OS fingerprinting. Other v4.1/v4.2 operations are feature-gated for recon use only. Full v4.1 session support (SEQUENCE, CREATE_SESSION, DESTROY_SESSION) is not implemented.
+    Four v4.1 operations are always part of `ArgOp`, with no Cargo feature gating them: EXCHANGE_ID (op 42), GETDEVICEINFO (47), GETDEVICELIST (48) and SECINFO_NO_NAME (52). The v4.2 `sec_label` attribute (80) is requestable through `AttrRequest`. They exist for recon; the analyzer uses EXCHANGE_ID for vendor/OS fingerprinting. Full v4.1 session support (SEQUENCE, CREATE_SESSION, DESTROY_SESSION) is not implemented.
 
 ## What is not covered
 
@@ -108,4 +106,3 @@ Stateful infrastructure:
 | NSM (program 100024) | Removed in v0.2.0 | Paired with NLM removal |
 | NFSv4.1 sessions | Not planned | SEQUENCE/CREATE_SESSION/DESTROY_SESSION; nfswolf targets v4.0 |
 | RPCSEC_GSS wire format | Not implemented | Kerberos ticket encoding; nfswolf uses AUTH_SYS for offensive operations |
-| rpcbind CALLIT | Not implemented | Indirect RPC calls; not needed for security testing |

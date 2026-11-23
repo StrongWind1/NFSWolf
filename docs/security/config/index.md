@@ -7,10 +7,10 @@ Server misconfiguration findings. These are not protocol vulnerabilities; the NF
 | Finding | Title | Severity | RFC Basis | Detected by | Write-up |
 |---------|-------|----------|-----------|-------------|----------|
 | F-7.1 | Wildcard/Broad Subnet Exports | :material-alert:{ .high } High | RFC 2623 sec 2.6 | `scan`, `analyze` | [Detail](F-7.1-wildcard-export-policy.md) |
-| F-7.2 | `insecure` Export Option | :material-information:{ .medium } Medium | RFC 2623 sec 2.1 | Detection gap | [Detail](F-7.2-privileged-port-bypass.md) |
+| F-7.2 | `insecure` Export Option | :material-information:{ .medium } Medium | RFC 2623 sec 2.1 | `analyze` (MNT from unprivileged port) | [Detail](F-7.2-privileged-port-bypass.md) |
 | F-7.3 | `nohide`/`crossmnt` Sub-Mount Exposure | :material-information:{ .medium } Medium | RFC 1813 sec 3.3.3 | `analyze` | [Detail](F-7.3-nohide-crossmnt-exposure.md) |
 | F-7.4 | Missing `nosuid`/`nodev` on Client Mount | :material-alert:{ .high } High | RFC 1094 sec 2.3.5 | Not detectable | [Detail](F-7.4-missing-nosuid-nodev.md) |
-| F-7.5 | `all_squash` with `anonuid=0` | :material-alert-circle:{ .critical } Critical | RFC 1813 sec 4.4 | `analyze` | [Detail](F-7.5-squash-misconfiguration.md) |
+| F-7.5 | `all_squash` with `anonuid=0` | :material-alert-circle:{ .critical } Critical | RFC 1813 sec 4.4 | `analyze --allow-write` | [Detail](F-7.5-squash-misconfiguration.md) |
 | F-7.6 | Absence of Audit Logging | :material-information:{ .medium } Medium | Implementation-specific | Not detectable | [Detail](F-7.6-no-audit-logging.md) |
 | F-7.7 | FreeBSD-Style Truncated Subnet in Export ACL | :material-information-outline:{ .info } Info | Implementation-specific | `analyze` | [Detail](F-7.7-freebsd-truncated-subnet.md) |
 
@@ -39,8 +39,7 @@ By default, Linux knfsd requires NFS clients to connect from a privileged source
 
 RFC 2623 sec 2.1 acknowledges that privileged-port checking is "at best an inconvenience" because any root user can bind a low port. The real consequence of `insecure` is lowering the barrier from "attacker needs root somewhere" to "attacker needs any user account."
 
-!!! note "Detection gap"
-    The previous `analyze` probe for this finding was removed because it was tautological: MNTPROC_EXPORT itself is not source-port gated, so the probe always reported `insecure` even on secure servers. A sound test requires attempting MNT from an unprivileged source port, which is not yet implemented.
+**Detection**: `nfswolf analyze` sends a MOUNT v3 MNT for each export from source port 1024. If mountd accepts it, the `insecure` option is active and the analyzer reports F-7.2 at Medium; a rejection means `secure` is enforced. The probe is skipped when `--proxy` is set, because the proxy chooses the outbound source port.
 
 ---
 
@@ -50,7 +49,7 @@ RFC 1813 sec 3.3.3 states "A server will not allow a LOOKUP operation to cross a
 
 For example, if `/export` is exported with `crossmnt` and `/export/secrets` is a separate filesystem mounted inside it, a client mounting `/export` automatically sees the contents of `/export/secrets` without a separate MOUNT request, bypassing any ACL that might restrict who can mount `/export/secrets` directly.
 
-**Detection**: `nfswolf analyze` performs LOOKUP traversal from the export root to detect crossmnt behavior (the server allows traversal across filesystem boundaries).
+**Detection**: `nfswolf analyze` lists the export root with READDIRPLUS and compares each entry's fsid (from GETATTR) with the export root's. An entry on a different fsid is a sub-mount the server lets clients cross into, so `nohide` or `crossmnt` is active.
 
 ---
 
@@ -73,7 +72,7 @@ This is a documented gap in nfswolf's detection capability. The `nosuid` and `no
 
 The administrator's intent with `all_squash` is usually to restrict access by mapping all clients to a low-privilege account. Setting `anonuid=0` inverts this completely. Every file read, write, and attribute change operates with full root authority.
 
-**Detection**: `nfswolf analyze` performs a squash probe: it creates a test file with a non-root UID and checks whether the resulting ownership is root. If `all_squash` is active and `anonuid=0`, the file is owned by root regardless of the client's claimed UID.
+**Detection**: `nfswolf analyze --allow-write` performs a squash probe: it creates a test file with a non-root UID and checks whether the resulting ownership is root. Without `--allow-write`, `analyze` does not write and does not test this. If `all_squash` is active and `anonuid=0`, the file is owned by root regardless of the client's claimed UID.
 
 ---
 
@@ -101,8 +100,8 @@ Not all configuration weaknesses are remotely detectable. The following table su
 | Finding | Remotely detectable? | Why / why not |
 |---------|---------------------|---------------|
 | F-7.1 | Yes | MNTPROC_EXPORT returns the ACL |
-| F-7.2 | Partially | Requires MNT from unprivileged port (not yet implemented) |
-| F-7.3 | Yes | LOOKUP traversal crosses filesystem boundaries |
+| F-7.2 | Yes | MNT from an unprivileged source port succeeds only when `insecure` is set |
+| F-7.3 | Yes | Export root entries report a different fsid than the export root |
 | F-7.4 | No | Client-side mount option, not exposed by any server protocol |
 | F-7.5 | Yes | Squash probe (create file, check ownership) |
 | F-7.6 | No | Kernel architecture limitation, not a protocol attribute |

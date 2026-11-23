@@ -1,7 +1,7 @@
 //! MOUNT protocol client  --  wraps `nfs_v3::MountClient`
 //! (RFC 1813 Appendix I).
 //!
-//! `nfswolf-nfs3` provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
+//! `nfs-mount` provides MNT (get root handle), UMNT, UMNTALL, DUMP, EXPORT.
 //! This module adds:
 //! - Auth flavor extraction from MNT response (F-1.1)
 //! - Export ACL parsing (wildcards, subnets) (F-7.1)
@@ -78,6 +78,11 @@ pub(crate) struct NfsMountClient {
     privileged_required: bool,
     /// Optional SOCKS5 proxy for all TCP connections.
     proxy: Option<String>,
+    /// Portmapper/rpcbind port used to resolve mountd; `None` means 111 (`--rpc-port`).
+    rpc_port: Option<u16>,
+    /// Never contact the portmapper (`--skip-rpc`): mountd comes from
+    /// `mount_port` or the well-known fallback ports.
+    skip_rpc: bool,
     /// Credential presented on MNT.
     ///
     /// Not decorative: a mountd configured `sec=sys` answers `MNT3ERR_ACCES`
@@ -91,13 +96,13 @@ impl NfsMountClient {
     /// Create a mount client that resolves the mount port via portmapper.
     #[must_use]
     pub(crate) const fn new() -> Self {
-        Self { mount_port: None, privileged_required: false, proxy: None, credential: Credential::None }
+        Self { mount_port: None, privileged_required: false, proxy: None, rpc_port: None, skip_rpc: false, credential: Credential::None }
     }
 
     /// Create a mount client with a fixed mount port (bypasses portmapper).
     #[must_use]
     pub(crate) const fn with_port(port: u16) -> Self {
-        Self { mount_port: Some(port), privileged_required: false, proxy: None, credential: Credential::None }
+        Self { mount_port: Some(port), privileged_required: false, proxy: None, rpc_port: None, skip_rpc: false, credential: Credential::None }
     }
 
     /// Force this client to bind a privileged source port (<1024) only.
@@ -120,6 +125,58 @@ impl NfsMountClient {
         self
     }
 
+    /// Resolve mountd through the portmapper on `rpc_port` (`None` = 111),
+    /// or, when `skip_rpc` is set, never contact the portmapper at all.
+    #[must_use]
+    pub(crate) const fn with_portmapper(mut self, rpc_port: Option<u16>, skip_rpc: bool) -> Self {
+        self.rpc_port = rpc_port;
+        self.skip_rpc = skip_rpc;
+        self
+    }
+
+    /// Portmapper client on the configured port, through the proxy if one is set.
+    fn portmap(&self) -> crate::proto::portmap::PortmapClient {
+        let pm = crate::proto::portmap::PortmapClient::new(self.rpc_port.unwrap_or(onc_rpcbind::PMAP_PORT));
+        match &self.proxy {
+            Some(p) => pm.with_proxy(p.clone()),
+            None => pm,
+        }
+    }
+
+    /// Resolve the mountd port for MOUNT `version`.
+    ///
+    /// A fixed `--mount-port` wins. With the portmapper skipped, the
+    /// well-known mountd ports are probed instead; otherwise the portmapper
+    /// is asked (PMAPPROC_GETPORT, RFC 1057 Appendix A).
+    async fn mount_port_for(&self, addr: SocketAddr, version: u32) -> anyhow::Result<u16> {
+        if let Some(p) = self.mount_port {
+            return Ok(p);
+        }
+        if self.skip_rpc {
+            return self.probe_mountd_fallback(addr).await.context("portmapper skipped (--skip-rpc) and mountd not found on the fallback ports (2049, 20048) -- use --mount-port to specify it");
+        }
+        // MOUNT is RPC program 100005 (RFC 1813 Appendix I).
+        self.portmap().query_port(addr, 100_005, version).await
+    }
+
+    /// Open a TCP connection to mountd at `mount_addr`.
+    ///
+    /// Through the SOCKS5 proxy when one is set (the proxy picks the source
+    /// port, so privileged binding is moot). Otherwise from a privileged
+    /// source port, falling back to an ephemeral one unless
+    /// `privileged_required` is set.
+    async fn open_mountd(&self, mount_addr: SocketAddr) -> anyhow::Result<crate::proto::conn::NfsIo> {
+        if let Some(ref p) = self.proxy {
+            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
+            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd at {mount_addr} via {p}"))?;
+            Ok(onc_rpc_client::transport::tokio::TokioIo::new(stream))
+        } else if self.privileged_required {
+            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} (privileged-only)"))
+        } else {
+            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))
+        }
+    }
+
     /// Mount via PMAPPROC_CALLIT relay (RFC 1057 Appendix A, proc 5).
     ///
     /// Relays the MNT request through the portmapper so mountd sees the
@@ -127,7 +184,9 @@ impl NfsMountClient {
     /// on systems where localhost is allowed or where CALLIT forwarding is
     /// not restricted. Tries v3 MNT first, falls back to v1.
     pub(crate) async fn mount_via_callit(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
-        let pm = if let Some(ref p) = self.proxy { crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()) } else { crate::proto::portmap::PortmapClient::default_port() };
+        // CALLIT is a portmapper procedure; there is no way to relay without it.
+        anyhow::ensure!(!self.skip_rpc, "CALLIT relay needs the portmapper, which --skip-rpc disables");
+        let pm = self.portmap();
         match pm.callit_mount(addr, export).await {
             Ok(r) => Ok(r),
             Err(e) => {
@@ -158,7 +217,7 @@ impl NfsMountClient {
             Err(e) => {
                 if downcast_mnt_acces(&e) {
                     tracing::info!(%addr, %export, "MNT returned ACCES from ephemeral source port; retrying with privileged-only");
-                    let priv_client = Self { mount_port: self.mount_port, privileged_required: true, proxy: self.proxy.clone(), credential: self.credential.clone() };
+                    let priv_client = Self { privileged_required: true, ..self.clone() };
                     priv_client.mount_once(addr, export).await.with_context(|| format!("MNT {export} (privileged retry)"))
                 } else {
                     Err(e)
@@ -190,7 +249,7 @@ impl NfsMountClient {
             Err(e) => {
                 if downcast_mnt_acces(&e) {
                     tracing::info!(%addr, %export, "MNT v1 returned ACCES; retrying with privileged-only");
-                    let priv_client = Self { mount_port: self.mount_port, privileged_required: true, proxy: self.proxy.clone(), credential: self.credential.clone() };
+                    let priv_client = Self { privileged_required: true, ..self.clone() };
                     priv_client.mount_v1_once(addr, export).await.with_context(|| format!("MNT v1 {export} (privileged retry)"))
                 } else {
                     Err(e)
@@ -204,24 +263,9 @@ impl NfsMountClient {
         use onc_rpc_client::rpc::RpcClient;
 
         tracing::debug!(%addr, export, "MOUNT v1 MNT");
-        let portmap = match &self.proxy {
-            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-            None => crate::proto::portmap::PortmapClient::default_port(),
-        };
-        let port = match self.mount_port {
-            Some(p) => p,
-            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1")?,
-        };
+        let port = self.mount_port_for(addr, 1).await.with_context(|| "GETPORT for MOUNT v1")?;
         let mount_addr = SocketAddr::new(addr.ip(), port);
-        let io = if let Some(ref p) = self.proxy {
-            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            onc_rpc_client::transport::tokio::TokioIo::new(stream)
-        } else if self.privileged_required {
-            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
-        } else {
-            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
-        };
+        let io = self.open_mountd(mount_addr).await?;
         let opaque = self.credential.to_opaque_auth();
         let mut rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
 
@@ -244,14 +288,7 @@ impl NfsMountClient {
     /// controls the outbound source port.
     pub(crate) async fn mount_unprivileged(&self, addr: SocketAddr, export: &str) -> anyhow::Result<MountResult> {
         tracing::debug!(%addr, export, "MOUNT insecure-port probe");
-        let portmap = match &self.proxy {
-            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-            None => crate::proto::portmap::PortmapClient::default_port(),
-        };
-        let port = match self.mount_port {
-            Some(p) => p,
-            None => portmap.query_port(addr, 100_005, 3).await.with_context(|| "GETPORT for MOUNT v3 (insecure probe)")?,
-        };
+        let port = self.mount_port_for(addr, 3).await.with_context(|| "GETPORT for MOUNT v3 (insecure probe)")?;
         let mount_addr = SocketAddr::new(addr.ip(), port);
         let io = connect_unprivileged(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} from unprivileged port"))?;
         let client = MountClient::v3(DirectTransport::with_auth(io, self.credential.to_opaque_auth(), onc_rpc_client::rpc::opaque_auth::default()));
@@ -279,24 +316,9 @@ impl NfsMountClient {
         use onc_rpc_client::rpc::RpcClient;
 
         tracing::debug!(%addr, export, "MOUNT v1 UMNT");
-        let portmap = match &self.proxy {
-            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-            None => crate::proto::portmap::PortmapClient::default_port(),
-        };
-        let port = match self.mount_port {
-            Some(p) => p,
-            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1 UMNT")?,
-        };
+        let port = self.mount_port_for(addr, 1).await.with_context(|| "GETPORT for MOUNT v1 UMNT")?;
         let mount_addr = SocketAddr::new(addr.ip(), port);
-        let io = if let Some(ref p) = self.proxy {
-            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            onc_rpc_client::transport::tokio::TokioIo::new(stream)
-        } else if self.privileged_required {
-            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
-        } else {
-            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
-        };
+        let io = self.open_mountd(mount_addr).await?;
         let opaque = self.credential.to_opaque_auth();
         let mut rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
 
@@ -328,24 +350,9 @@ impl NfsMountClient {
         use onc_rpc_client::rpc::RpcClient;
 
         tracing::debug!(%addr, "MOUNT v1 UMNTALL");
-        let portmap = match &self.proxy {
-            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-            None => crate::proto::portmap::PortmapClient::default_port(),
-        };
-        let port = match self.mount_port {
-            Some(p) => p,
-            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1 UMNTALL")?,
-        };
+        let port = self.mount_port_for(addr, 1).await.with_context(|| "GETPORT for MOUNT v1 UMNTALL")?;
         let mount_addr = SocketAddr::new(addr.ip(), port);
-        let io = if let Some(ref p) = self.proxy {
-            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            onc_rpc_client::transport::tokio::TokioIo::new(stream)
-        } else if self.privileged_required {
-            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
-        } else {
-            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
-        };
+        let io = self.open_mountd(mount_addr).await?;
         let opaque = self.credential.to_opaque_auth();
         let mut rpc = RpcClient::new_with_auth(io, opaque, onc_rpc_client::rpc::opaque_auth::default());
 
@@ -383,27 +390,12 @@ impl NfsMountClient {
         use onc_xdr::Void;
 
         tracing::debug!(%addr, "MOUNT v1 EXPORT");
-        let portmap = match &self.proxy {
-            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-            None => crate::proto::portmap::PortmapClient::default_port(),
-        };
-        let port = match self.mount_port {
-            Some(p) => p,
-            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1")?,
-        };
+        let port = self.mount_port_for(addr, 1).await.with_context(|| "GETPORT for MOUNT v1")?;
         let mount_addr = SocketAddr::new(addr.ip(), port);
         // Honour the secure-port logic the rest of NfsMountClient uses: privileged
         // source port (<1024) first, no fallback when `privileged_required` is set;
         // the proxy controls its own outbound port so it bypasses privileged binding.
-        let io = if let Some(ref p) = self.proxy {
-            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            onc_rpc_client::transport::tokio::TokioIo::new(stream)
-        } else if self.privileged_required {
-            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
-        } else {
-            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
-        };
+        let io = self.open_mountd(mount_addr).await?;
         // RPC call: program=100005, version=1, proc=5 (EXPORT), args=Void
         let mut rpc = RpcClient::new(io);
         let result: exports<'_, '_> = rpc.call(100_005, 1, 5, &Void).await.context("MOUNT v1 EXPORT")?;
@@ -432,24 +424,9 @@ impl NfsMountClient {
         use onc_xdr::Void;
 
         tracing::debug!(%addr, "MOUNT v1 DUMP");
-        let portmap = match &self.proxy {
-            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-            None => crate::proto::portmap::PortmapClient::default_port(),
-        };
-        let port = match self.mount_port {
-            Some(p) => p,
-            None => portmap.query_port(addr, 100_005, 1).await.with_context(|| "GETPORT for MOUNT v1")?,
-        };
+        let port = self.mount_port_for(addr, 1).await.with_context(|| "GETPORT for MOUNT v1")?;
         let mount_addr = SocketAddr::new(addr.ip(), port);
-        let io = if let Some(ref p) = self.proxy {
-            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd v1 at {mount_addr}"))?;
-            onc_rpc_client::transport::tokio::TokioIo::new(stream)
-        } else if self.privileged_required {
-            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr} (privileged-only)"))?
-        } else {
-            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd v1 at {mount_addr}"))?
-        };
+        let io = self.open_mountd(mount_addr).await?;
         // RPC call: program=100005, version=1, proc=2 (DUMP), args=Void
         let mut rpc = RpcClient::new(io);
         let result: mountlist<'_, '_> = rpc.call(100_005, 1, 2, &Void).await.context("MOUNT v1 DUMP")?;
@@ -468,30 +445,18 @@ impl NfsMountClient {
     /// an ephemeral port if privileged binding fails AND `privileged_required`
     /// is unset (e.g., not running as root).
     async fn connect(&self, addr: SocketAddr) -> anyhow::Result<MountClient<DirectTransport<crate::proto::conn::NfsIo>>> {
-        let portmap = match &self.proxy {
-            Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-            None => crate::proto::portmap::PortmapClient::default_port(),
-        };
-        let port = match self.mount_port {
-            Some(p) => p,
-            None => match portmap.query_port(addr, 100_005, 3).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::info!(%addr, error = %e, "portmapper unavailable, trying mountd on well-known fallback ports");
-                    self.probe_mountd_fallback(addr).await.with_context(|| format!("portmapper unavailable and mountd not found on fallback ports (2049, 20048) -- use --mount-port to specify manually\n  portmapper error: {e}"))?
-                },
+        let port = match self.mount_port_for(addr, 3).await {
+            Ok(p) => p,
+            // Only a portmapper failure lands here: a fixed --mount-port cannot
+            // fail, and a skipped portmapper already went to the fallback ports.
+            Err(e) if self.mount_port.is_none() && !self.skip_rpc => {
+                tracing::info!(%addr, error = %e, "portmapper unavailable, trying mountd on well-known fallback ports");
+                self.probe_mountd_fallback(addr).await.with_context(|| format!("portmapper unavailable and mountd not found on fallback ports (2049, 20048) -- use --mount-port to specify manually\n  portmapper error: {e}"))?
             },
+            Err(e) => return Err(e),
         };
         let mount_addr = SocketAddr::new(addr.ip(), port);
-        let io = if let Some(ref p) = self.proxy {
-            let proxy_addr = crate::proto::conn::parse_proxy_addr(p)?;
-            let stream = crate::proto::conn::socks5_connect(proxy_addr, mount_addr).await.with_context(|| format!("SOCKS5 connect to mountd at {mount_addr} via {p}"))?;
-            onc_rpc_client::transport::tokio::TokioIo::new(stream)
-        } else if self.privileged_required {
-            connect_privileged_only(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr} (privileged-only)"))?
-        } else {
-            connect_privileged_or_fallback(mount_addr).await.with_context(|| format!("connect to mountd at {mount_addr}"))?
-        };
+        let io = self.open_mountd(mount_addr).await?;
         Ok(MountClient::v3(DirectTransport::with_auth(io, self.credential.to_opaque_auth(), onc_rpc_client::rpc::opaque_auth::default())))
     }
 

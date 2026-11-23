@@ -123,6 +123,7 @@ nav:
           - Escape: usage/escape.md
           - Brute-handle: usage/brute-handle.md
           - UID Spray: usage/uid-spray.md
+          - Clean: usage/clean.md
           - Decode: usage/decode.md
           - Convert: usage/convert.md
       - Shell Commands: usage/shell-commands.md

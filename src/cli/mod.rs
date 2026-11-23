@@ -98,33 +98,36 @@ pub(crate) struct Cli {
     #[arg(long, global = true, value_name = "HOST:PORT", help_heading = H_NETWORK)]
     pub proxy: Option<String>,
 
-    /// Connection timeout in milliseconds
-    #[arg(short = 't', long, global = true, default_value = "3000", value_name = "MS", help_heading = H_NETWORK)]
-    pub timeout: u64,
+    /// Probe timeout in milliseconds. Defaults: 3000 for scan probes, 5000 for
+    /// analyze probes, 2000 for shell/mount NFS version detection. Calls on an
+    /// established NFS session keep a fixed 30 s deadline.
+    #[arg(short = 't', long, global = true, value_name = "MS", help_heading = H_NETWORK)]
+    pub timeout: Option<u64>,
 
-    /// Override the NFS port (skip portmapper). Applies to every subcommand
-    /// that opens an NFS connection -- shell, mount, escape, brute-handle,
-    /// uid-spray.
+    /// Override the NFS port (skip portmapper GETPORT). Applies to every
+    /// subcommand that opens an NFS connection.
     #[arg(long, global = true, value_name = "PORT", help_heading = H_NETWORK)]
     pub nfs_port: Option<u16>,
 
-    /// Override the mount-daemon port (skip portmapper). Applies to every
-    /// subcommand that calls MOUNT.
+    /// Override the mount-daemon port (skip portmapper GETPORT). Applies to
+    /// every MOUNT call in every subcommand.
     #[arg(long, global = true, value_name = "PORT", help_heading = H_NETWORK)]
     pub mount_port: Option<u16>,
 
-    /// Override the portmapper/rpcbind port (default 111). Applies to scanner
-    /// service discovery and analyzer portmapper queries.
+    /// Override the portmapper/rpcbind port (default 111). Applies to every
+    /// portmapper query in every subcommand.
     #[arg(long, global = true, value_name = "PORT", help_heading = H_NETWORK)]
     pub rpc_port: Option<u16>,
 
-    /// Skip all portmapper/rpcbind probes (DUMP, GETPORT, port 111). Use when
-    /// portmapper is firewalled and NFS port is known.
+    /// Never contact the portmapper/rpcbind (DUMP, GETPORT, port 111), in any
+    /// subcommand. NFS then uses --nfs-port or 2049; MOUNT uses --mount-port
+    /// or probes the well-known mountd ports 2049 and 20048.
     #[arg(long, global = true, help_heading = H_BEHAVIOR)]
     pub skip_rpc: bool,
 
-    /// Skip all MOUNT daemon queries (EXPORT, MNT, DUMP). NFSv4 pseudo-FS
-    /// discovery still runs.
+    /// Skip MOUNT daemon queries (EXPORT, MNT, DUMP) in scan and analyze.
+    /// NFSv4 pseudo-FS discovery still runs. shell and mount skip MOUNT with
+    /// --handle instead.
     #[arg(long, global = true, help_heading = H_BEHAVIOR)]
     pub skip_mountd: bool,
 
@@ -269,8 +272,8 @@ pub(crate) struct GlobalOpts {
     pub privileged_port: bool,
     /// Optional SOCKS5 proxy address.
     pub proxy: Option<String>,
-    /// Connection timeout in milliseconds.
-    pub timeout: u64,
+    /// Probe timeout in milliseconds; `None` means each subcommand's own default.
+    pub timeout: Option<u64>,
     /// Override NFS port (skip portmapper) when set.
     pub nfs_port: Option<u16>,
     /// Override mount-daemon port (skip portmapper) when set.
@@ -319,6 +322,21 @@ impl Cli {
             verbose: self.verbose,
             quiet: self.quiet,
         }
+    }
+}
+
+impl GlobalOpts {
+    /// Network options for every connection a subcommand opens: proxy,
+    /// mountd/NFS/portmapper ports, `--skip-rpc` and `--privileged-port`.
+    #[must_use]
+    pub(crate) fn connect_opts(&self) -> crate::proto::conn::ConnectOpts {
+        crate::proto::conn::ConnectOpts { proxy: self.proxy.clone(), rpc_port: self.rpc_port, skip_rpc: self.skip_rpc, mount_port: self.mount_port, nfs_port: self.nfs_port, privileged_port: self.privileged_port }
+    }
+
+    /// `--timeout` in milliseconds, or `default_ms` when the flag was not given.
+    #[must_use]
+    pub(crate) fn timeout_ms_or(&self, default_ms: u64) -> u64 {
+        self.timeout.unwrap_or(default_ms)
     }
 }
 

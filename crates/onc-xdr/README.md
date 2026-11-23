@@ -29,16 +29,18 @@ Foundation crate of the protocol stack. It knows nothing about NFS, RPC, or sock
 ## Usage
 
 ```rust
-use onc_xdr::{Pack, Unpack, Opaque, XdrCodec};
+use onc_xdr::{Opaque, Pack, Unpack, XdrCodec};
 
-// Encode an opaque byte string.
+// Encode an opaque byte string: 4-byte length, the bytes, zero padding to a 4-byte boundary.
 let data = Opaque::borrowed(b"hello");
 let mut buf = Vec::new();
 data.pack(&mut buf).unwrap();
+assert_eq!(buf, [0, 0, 0, 5, b'h', b'e', b'l', b'l', b'o', 0, 0, 0]);
 
 // Decode it back.
 let (decoded, bytes_read) = Opaque::unpack(&mut buf.as_slice()).unwrap();
 assert_eq!(decoded.as_ref(), b"hello");
+assert_eq!(bytes_read, 12);
 
 // Derive works on your own types.
 #[derive(XdrCodec)]
@@ -46,6 +48,11 @@ struct MyArgs {
     file_id: u32,
     name: Opaque<'static>,
 }
+
+let mut buf = Vec::new();
+MyArgs { file_id: 7, name: Opaque::borrowed(b"etc") }.pack(&mut buf).unwrap();
+let (args, _) = MyArgs::unpack(&mut buf.as_slice()).unwrap();
+assert_eq!((args.file_id, args.name.as_ref()), (7, &b"etc"[..]));
 ```
 
 ## API reference

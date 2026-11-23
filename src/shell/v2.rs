@@ -4,10 +4,9 @@ use std::sync::Arc;
 
 use nfs_v2::wire::{FHSIZE, FType, Nfs2FileAttr, Nfs2FileHandle, Nfs2SetAttr};
 
-use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs2::{Nfs2Client, PooledNfs2 as _};
 
-use super::ops::{CredCache, IoSizes, ReadReply, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, try_with_escalation};
+use super::ops::{CredCache, Identity, IoSizes, ObservedIdentities, ReadReply, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, observe_entries, try_with_escalation};
 
 /// NFSv2 backend wrapping a `Nfs2Client` over `PooledTransport`.
 pub(crate) struct V2Ops {
@@ -20,8 +19,9 @@ impl V2Ops {
         Self { client, cred_cache: CredCache::new() }
     }
 
-    fn make_v2(&self, uid: u32, gid: u32) -> Nfs2Client {
-        self.client.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.client.machinename())), uid, gid)
+    /// The pooled client re-keyed to `id` (UID, primary GID, supplementary groups).
+    fn make_v2(&self, id: &Identity) -> Nfs2Client {
+        self.client.with_credential(id.credential(self.client.machinename()), id.uid, id.gid)
     }
 
     /// Probe NFSPROC_ROOT (proc 3) -- obsolete MOUNT bypass check.
@@ -94,13 +94,41 @@ fn v2err_to_anyhow<E: std::fmt::Display>(e: nfs_v2::Nfs2Error<E>) -> anyhow::Err
 
 impl ShellOps for V2Ops {
     async fn lookup(&self, dir: &ShellHandle, name: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
-        let (fh, attrs) = self.client.lookup(&to_v2_fh(dir), name).await.map_err(v2err_to_anyhow)?;
+        // LOOKUP needs search permission on `dir`: escalate like any refusal.
+        let v2dir = to_v2_fh(dir);
+        let (fh, attrs) = try_with_escalation(
+            &self.identity(),
+            &self.cred_cache,
+            dir,
+            getattr_owner_v2(&self.client, &v2dir),
+            is_v2_acces,
+            |id| {
+                let c = self.make_v2(&id);
+                let name = name.to_owned();
+                async move { c.lookup(&v2dir, &name).await.map_err(v2err_to_anyhow) }
+            },
+            "NFS2ERR_ACCES: lookup denied (exhausted credential ladder)",
+        )
+        .await?;
+        self.observed().record([(attrs.uid, attrs.gid)]);
         Ok((from_v2_fh(&fh), v2_info(&attrs)))
     }
 
     async fn lookup_path(&self, start: &ShellHandle, path: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
-        let (fh, attrs) = self.client.lookup_path(&to_v2_fh(start), path).await.map_err(v2err_to_anyhow)?;
-        Ok((from_v2_fh(&fh), v2_info(&attrs)))
+        // One escalating LOOKUP per component, so every directory on the
+        // path gets the ladder rather than only the last one.
+        let mut cur = start.clone();
+        let mut info = None;
+        for component in path.split('/').filter(|c| !c.is_empty() && *c != ".") {
+            let (fh, attrs) = self.lookup(&cur, component).await?;
+            cur = fh;
+            info = Some(attrs);
+        }
+        let info = match info {
+            Some(i) => i,
+            None => self.getattr(&cur).await?,
+        };
+        Ok((cur, info))
     }
 
     async fn getattr(&self, fh: &ShellHandle) -> anyhow::Result<ShellFileInfo> {
@@ -110,32 +138,34 @@ impl ShellOps for V2Ops {
 
     async fn list_dir(&self, dir: &ShellHandle) -> anyhow::Result<Vec<ShellEntry>> {
         let v2dir = to_v2_fh(dir);
-        try_with_escalation(
-            (self.client.uid(), self.client.gid()),
+        let entries = try_with_escalation(
+            &self.identity(),
             &self.cred_cache,
             dir,
             getattr_owner_v2(&self.client, &v2dir),
             is_v2_acces,
-            |uid, gid| {
-                let c = self.make_v2(uid, gid);
+            |id| {
+                let c = self.make_v2(&id);
                 let fh = v2dir;
                 async move { list_dir_v2(&c, &fh).await }
             },
             "NFS2ERR_ACCES: cannot list directory (exhausted credential ladder)",
         )
-        .await
+        .await?;
+        observe_entries(self.observed(), &entries);
+        Ok(entries)
     }
 
     async fn read_at(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<ReadReply> {
         let v2fh = to_v2_fh(fh);
         try_with_escalation(
-            (self.client.uid(), self.client.gid()),
+            &self.identity(),
             &self.cred_cache,
             fh,
             getattr_owner_v2(&self.client, &v2fh),
             is_v2_acces,
-            |uid, gid| {
-                let c = self.make_v2(uid, gid);
+            |id| {
+                let c = self.make_v2(&id);
                 let fh = v2fh;
                 async move { read_at_v2(&c, &fh, offset, count).await }
             },
@@ -222,9 +252,17 @@ impl ShellOps for V2Ops {
         self.client.machinename()
     }
 
+    fn identity(&self) -> Identity {
+        Identity::new(self.client.uid(), self.client.gid(), &self.client.groups())
+    }
+
+    fn observed(&self) -> &ObservedIdentities {
+        &self.cred_cache.observed
+    }
+
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
-        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
-        self.client = Arc::new(self.client.with_credential(cred, uid, gid));
+        let id = self.identity().switched(uid, gid);
+        self.client = Arc::new(self.client.with_credential(id.credential(hostname), uid, gid));
         self.cred_cache.flush();
         Ok(())
     }
@@ -268,9 +306,10 @@ impl ShellOps for V2Ops {
         Ok(ShellFsStat { total_bytes: u64::from(fs.blocks).saturating_mul(bsize), free_bytes: u64::from(fs.bfree).saturating_mul(bsize), avail_bytes: u64::from(fs.bavail).saturating_mul(bsize), total_files: 0, free_files: 0, block_size: fs.bsize })
     }
 
-    fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self {
-        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
-        Self::new(Arc::new(self.client.with_credential(cred, uid, gid)))
+    fn with_credential(&self, id: &Identity, hostname: &str) -> Self {
+        let mut ops = Self::new(Arc::new(self.client.with_credential(id.credential(hostname), id.uid, id.gid)));
+        ops.cred_cache = self.cred_cache.sharing_observations();
+        ops
     }
 }
 
@@ -543,7 +582,7 @@ mod wire_tests {
 
     /// The shell's own NFSv2 backend, bound to `addr` without MOUNT.
     fn ops(addr: SocketAddr) -> V2Ops {
-        let pool = Arc::new(ConnectionPool::for_parallel_transfers(transfer::MAX_PIPELINE_DEPTH, None));
+        let pool = Arc::new(ConnectionPool::for_parallel_transfers(transfer::MAX_PIPELINE_DEPTH, crate::proto::conn::ConnectOpts::default()));
         let key = PoolKey { host: addr, export: "/".to_owned(), uid: 0, gid: 0 };
         let transport = PooledTransport::new_direct(pool, key, Arc::new(CircuitBreaker::default_config()), StealthConfig::new(0, 0), Credential::Sys(AuthSys::new(0, 0, "test")), ReconnectStrategy::Persistent, addr.port());
         V2Ops::new(Arc::new(nfs_v2::Nfs2Client::new(transport)))

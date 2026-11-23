@@ -6,11 +6,11 @@ NFSv2 (RFC 1094) is the oldest version of the NFS protocol still encountered in 
 
 | Finding | Name | Severity | NFSv2-Specific Notes |
 |---------|------|----------|----------------------|
-| [F-1.1](../identity/F-1.1-uid-gid-spoofing.md) | UID/GID Spoofing | Critical | Identical to v3. AUTH_SYS is the only authentication mechanism available in v2; there is no flavor negotiation to even offer an alternative. |
+| [F-1.1](../identity/F-1.1-uid-gid-spoofing.md) | UID/GID Spoofing | High | Identical to v3. AUTH_SYS is the only authentication mechanism available in v2; there is no flavor negotiation to even offer an alternative. |
 | [F-1.6](../identity/F-1.6-nfsv2-downgrade.md) | NFSv2 Downgrade | High | The defining v2 finding. A server exporting with `sec=krb5` on v3/v4 can be contacted via v2, which has no security flavor negotiation at all (RFC 2623 Section 2.7). MOUNT v1 leaks the file handle without requiring Kerberos credentials. |
-| [F-2.1](../access-control/F-2.1-export-escape.md) | Export Escape | Critical | File handles are fixed at 32 bytes in v2 (RFC 1094 Section 2.3.3). The shorter handle format simplifies construction: fewer bytes to get right, fewer possible encodings. The `Nfs2EscapeProbe` implementation handles v2-specific escape. |
-| [F-2.2](../access-control/F-2.2-file-handle-guessing.md) | Handle Brute Force | High | Fixed 32-byte handles are significantly easier to brute-force than v3's variable-length (up to 64-byte) handles. The search space is smaller and the format is more predictable on older kernels where v2 was the primary target. |
-| [F-3.1](../network/F-3.1-plaintext-wire-protocol.md) | Plaintext Traffic | High | No TLS, no krb5p, no integrity protection. All data and credentials travel in cleartext. RFC 9289 (NFS-over-TLS) does not apply to v2. |
+| [F-2.1](../access-control/F-2.1-export-escape.md) | Export Escape | Critical | File handles are fixed at 32 bytes in v2 (RFC 1094 Section 2.3.3). The shorter handle format simplifies construction: fewer bytes to get right, fewer possible encodings. The `escape` pipeline confirms each candidate root handle over NFSv2 as well as v3 and v4. |
+| [F-2.2](../access-control/F-2.2-file-handle-guessing.md) | Handle Brute Force | Medium | Fixed 32-byte handles are significantly easier to brute-force than v3's variable-length (up to 64-byte) handles. The search space is smaller and the format is more predictable on older kernels where v2 was the primary target. |
+| [F-3.1](../network/F-3.1-plaintext-wire-protocol.md) | Plaintext Traffic | Info | No TLS, no krb5p, no integrity protection. All data and credentials travel in cleartext. RFC 9289 (NFS-over-TLS) does not apply to v2. |
 | [F-5.8](../info-disclosure/F-5.8-auth-none-metadata-leak.md) | AUTH_NONE Metadata Leak | Low | GETATTR with AUTH_NONE on a valid file handle leaks uid, gid, mode, size, and timestamps. This works on v2 the same way it works on v3 -- the automounter exemption (RFC 2623 Section 2.3.2) applies to both. |
 
 ## Protocol-specific exploitation analysis
@@ -58,15 +58,15 @@ The auto-version detection in `resolve_version` probes v3 first, then v2, then v
 
 ### Servers still running NFSv2
 
-NFSv2 appears most commonly on legacy systems -- embedded devices, older Solaris installations, and Linux servers that have never updated their NFS configuration. The `scan` subcommand checks for program 100003 version 2 in the portmapper DUMP output and reports it as a version downgrade risk (F-1.6). Any server advertising v2 alongside v3 or v4 has a downgrade path that an attacker can exploit without modifying the server configuration.
+NFSv2 appears most commonly on legacy systems -- embedded devices, older Solaris installations, and Linux servers that have never updated their NFS configuration. The `scan` subcommand shows program 100003 version 2 in its version matrix from the portmapper DUMP output, and `analyze` reports it as a version downgrade risk (F-1.6). Any server advertising v2 alongside v3 or v4 has a downgrade path that an attacker can exploit without modifying the server configuration.
 
 Modern Linux distributions (RHEL 8+, Ubuntu 20.04+) disable NFSv2 by default in the kernel NFS server, but older installations and appliances frequently still expose it. The presence of v2 in the portmapper DUMP output is the signal. Even if v2 operations fail due to kernel enforcement, the MOUNT v1 handle leak alone is worth the probe.
 
 ### NFSv2 escape pipeline integration
 
-The escape pipeline in `src/cli/escape.rs` gathers seed handles from MOUNT v1 MNT as one of its five discovery channels. The `Nfs2EscapeProbe` implementation adapts the `find_escape_root()` algorithm for v2's fixed 32-byte handles. When `--fast` mode is used, the pipeline picks the first available protocol version and runs a minimal probe (~10-80 RPCs). In full mode, all three protocol versions are tried in parallel, and any escape found via v2 is deduplicated against v3/v4 results based on the filesystem root inode.
+The escape pipeline in `src/cli/escape.rs` gathers seed handles from MOUNT v1 MNT alongside MOUNT v3 and NFSv4, and walks a v2 `LOOKUP ..` chain upward from every root seed. Each candidate root handle is then probed over NFSv2 (in its fixed 32-byte form) as well as v3 and v4. When `--fast` mode is used, the pipeline tries v3, then v2, then v4, stops at the first version that mounts, and runs a minimal probe (~10-80 RPCs). In full mode, every protocol version is tried, and any escape found via v2 is deduplicated against v3/v4 results.
 
-The `escape --all` flag additionally attempts MOUNT v1 against every discovered export, collecting v2 seed handles even when v3 handles are already available. This catches cases where v2 MOUNT succeeds where v3 MOUNT is denied (the krb5 bypass scenario described in F-1.6).
+Full mode (the default, without `--fast`) attempts MOUNT v1 against every discovered export, collecting v2 seed handles even when v3 handles are already available. This catches cases where v2 MOUNT succeeds where v3 MOUNT is denied (the krb5 bypass scenario described in F-1.6).
 
 ### Findings not applicable to NFSv2
 

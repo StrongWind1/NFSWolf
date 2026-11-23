@@ -178,7 +178,7 @@ Identical to v3 and v4 with `sec=sys`. The attacker forges AUTH_SYS credentials 
 
 ### Export escape
 
-Fixed 32-byte handles are simpler to construct than v3's variable-length handles. Given one handle from an export, the filesystem UUID and export context are known, so the attacker only needs to guess the inode and generation number. Root inodes are predictable (inode 2 for ext4, generation 0 at mkfs time), making the escape deterministic for many filesystem types. The `Nfs2EscapeProbe` implementation handles v2-specific escape across 18 filesystem types. See [F-2.1](../../security/access-control/F-2.1-export-escape.md).
+Fixed 32-byte handles are simpler to construct than v3's variable-length handles. Given one handle from an export, the filesystem UUID and export context are known, so the attacker only needs to guess the inode and generation number. Root inodes are predictable (inode 2 for ext4, generation 0 at mkfs time), making the escape deterministic for many filesystem types. The `escape` pipeline probes candidates over NFSv2 itself (GETATTR, then LOOKUP `..` to confirm), so the same candidate set used for v3 works against a v2-only server. See [F-2.1](../../security/access-control/F-2.1-export-escape.md).
 
 ### Handle brute-force
 
@@ -230,11 +230,11 @@ nfswolf provides full NFSv2 support across the entire attack path.
 
 `--nfs-version 2` enters an NFSv2 shell with all 47 commands via `NfsShell<V2Ops>`. The shell connects through MOUNT v1 MNT to obtain the root handle, then operates over NFSv2 on port 2049. `--handle HEX` bypasses MOUNT entirely for direct handle-based access.
 
-Identity changes (`uid`, `gid`, `hostname`, `impersonate`, `su`) work differently in v2 than in v3/v4: because v2 connections carry a single credential bound at connect time, changing identity requires tearing down the TCP session and reconnecting with new AUTH_SYS credentials + re-MOUNT. `V2Ops` handles this transparently.
+Identity changes (`uid`, `gid`, `hostname`, `impersonate`, `su`) work the same way as on v3: `V2Ops` swaps the AUTH_SYS credential on the pooled client, and calls under the new identity draw connections from the session's shared connection pool, which keys connections by identity. There is no reconnect and no re-MOUNT, since the root handle is a bearer token that stays valid under any credential.
 
 ### Escape
 
-The escape algorithm supports NFSv2 through `Nfs2EscapeProbe`, covering 18 of 19 filesystem types. The `escape` subcommand gathers seed handles from MOUNT v1 and probes candidate escape handles against NFSv2 GETATTR. `--fast` mode also works over v2 when v3 is unavailable.
+The escape pipeline supports NFSv2 directly: the `escape` subcommand gathers seed handles from MOUNT v1 and probes candidate escape handles over NFSv2 (GETATTR, then LOOKUP `..` to confirm the filesystem root). The candidate set is the same one used for v3; see the [escape matrix](../../reference/escape-matrix.md). `--fast` mode also works over v2 when v3 is unavailable.
 
 ### Auto-detection
 
@@ -242,7 +242,7 @@ When `--nfs-version` is omitted, nfswolf probes v3 first, then v2, then v4. If a
 
 ### Credential escalation
 
-Credential escalation via `try_with_escalation()` is shared across v2, v3, and v4. On v2, escalation is implemented by reconnecting: new TCP socket, new AUTH_SYS credentials, re-MOUNT. The credential ladder (`credential_ladder()` / `credential_ladder_with()`) applies the same evidence-driven strategy regardless of version.
+Credential escalation via `try_with_escalation()` is shared across v2, v3, and v4. On v2, as on v3, each rung of the ladder is a credential swap on the pooled client; connections for that identity come from the shared session pool. The credential ladder (`credential_ladder()` / `credential_ladder_with()`) applies the same evidence-driven strategy regardless of version.
 
 ---
 

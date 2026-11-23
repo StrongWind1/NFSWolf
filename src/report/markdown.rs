@@ -24,6 +24,9 @@ pub(crate) fn render(results: &[AnalysisResult], title: &str, out: &mut dyn Writ
             writeln!(out, "- **Server impl:** {}", md_escape_text(fp))?;
         }
         writeln!(out, "- **NFS versions:** {}", result.nfs_versions.join(", "))?;
+        if let Some(summary) = result.write_probes_summary() {
+            writeln!(out, "- **Write probes:** {}", md_escape_text(summary))?;
+        }
         writeln!(out)?;
 
         if result.findings.is_empty() {

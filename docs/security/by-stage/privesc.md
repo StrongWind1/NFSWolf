@@ -10,14 +10,16 @@ The core enabler is `no_root_squash`: when the server does not remap `uid=0`, th
 
 | Finding | Name | Severity | nfswolf Subcommand | What It Enables |
 |---------|------|----------|-------------------|----------------|
-| [F-1.2](../identity/F-1.2-root-squash-bypass.md) | Root Squash Bypass via Non-Root UID | High | `shell uid`, `analyze` | Any non-zero UID is trusted; claim the file owner's UID to get full access |
-| [F-4.1](../privesc/F-4.1-no-root-squash.md) | no_root_squash Exploitation | Critical | `analyze`, `shell uid 0` | uid=0 credentials accepted without remapping -- full root access over NFS |
+| [F-1.2](../identity/F-1.2-root-squash-bypass.md) | Root Squash Bypass via Non-Root UID | High | `shell uid`, `analyze --allow-write` | Any non-zero UID is trusted; claim the file owner's UID to get full access |
+| [F-4.1](../privesc/F-4.1-no-root-squash.md) | no_root_squash Exploitation | Critical | `analyze --allow-write`, `shell uid 0` | uid=0 credentials accepted without remapping -- full root access over NFS |
 | [F-4.2](../privesc/F-4.2-suid-sgid-escalation.md) | SUID/SGID Binary Creation | High | `shell suid-scan` | Create setuid-root binaries over NFS; execute on the client or via cron on the server |
 | [F-4.3](../privesc/F-4.3-device-node-creation.md) | Device Node Creation via MKNOD | High | `shell` | Create character/block device nodes with arbitrary major/minor numbers |
 | [F-4.4](../privesc/F-4.4-symlink-escape.md) | Crontab/Symlink Injection | High | `shell symlink` | Plant symlinks or crontab entries that execute attacker-controlled code |
 | [F-1.5](../identity/F-1.5-credential-replay.md) | Credential Replay from Wire | High | -- | Captured AUTH_SYS credentials are replayable indefinitely (no nonce, timestamp, or sequence number) |
 | [F-4.6](../privesc/F-4.6-unrestricted-chown.md) | Unrestricted chown | High | `analyze` | When PATHCONF `chown_restricted=false`, any user can chown files to root |
-| [F-4.5](../privesc/F-4.5-selinux-label-bypass.md) | SELinux/MAC Label Bypass | Medium | -- | NFS root receives `CAP_MAC_OVERRIDE`, bypassing SELinux/AppArmor entirely |
+| [F-4.5](../privesc/F-4.5-selinux-label-bypass.md) | SELinux/MAC Label Bypass | Info | `analyze` | NFS root receives `CAP_MAC_OVERRIDE`, bypassing SELinux/AppArmor entirely; `analyze` reports when the export root exposes a SELinux label |
+| [F-7.5](../config/F-7.5-squash-misconfiguration.md) | all_squash with anonuid=0 | Critical | `analyze --allow-write` | Every client UID is mapped to root, so any credential writes as uid 0 |
+| [F-7.4](../config/F-7.4-missing-nosuid-nodev.md) | Missing nosuid/nodev on Client Mount | High | -- | Clients that mount without `nosuid`/`nodev` honor planted SUID binaries and device nodes (client-side; not server-observable) |
 
 ---
 
@@ -54,11 +56,14 @@ When PATHCONF reports `chown_restricted=false` (F-4.6), any user can change file
 
 nfswolf's credential ladder (`engine::credential::credential_ladder()`) automates privilege escalation at the authentication layer. When a file operation fails with `NFS3ERR_ACCES` or `NFS3ERR_PERM`, the ladder tries UIDs in order of likelihood:
 
-1. **File owner UID** -- extracted from the file's attributes. The owner always has access (RFC 1813 Section 4.4).
-2. **Caller UID with the file's GID** -- matches group permission bits.
-3. **Root (uid=0)** -- works when `no_root_squash` is active.
-4. **Observed identities** -- UIDs/GIDs harvested from READDIRPLUS directory listings, ranked by frequency.
-5. **Common service accounts** -- well-known UIDs (www-data, nobody, mysql, postgres) tried only when mode bits show no "other" access.
+1. **The caller with more groups** -- the operator's own UID and GID, claiming the file's group and the groups seen owning files.
+2. **File owner UID** -- extracted from the file's attributes. The owner always has access (RFC 1813 Section 4.4).
+3. **Caller UID with the file's GID** -- matches group permission bits, even on a server that ignores supplementary groups (`--manage-gids`).
+4. **Root (uid=0)** -- works when `no_root_squash` is active.
+5. **Observed owners** -- the most common owners seen in READDIRPLUS listings and LOOKUP replies (up to 8).
+6. **Common service accounts** -- well-known UIDs (www-data, nobody, mysql, postgres).
+
+Rungs 5 and 6 are skipped when the mode bits show no "other" access, since then no such identity can be permitted. Every rung claims up to 16 supplementary groups (the file's group, the operator's `--gid`/`--aux-gids`, the observed groups), so group access is tried with every UID rather than only with the right pairing; `root_squash` remaps only uid 0 and gid 0 and keeps those groups.
 
 The ladder runs automatically in the shell, FUSE mount, and escape subcommands. It never brute-forces; blind UID spraying is the `uid-spray` subcommand, kept separate from the evidence-driven ladder.
 

@@ -404,66 +404,95 @@ pub(crate) enum ShellDeviceType {
 
 use std::sync::Mutex;
 
-use crate::engine::credential::credential_ladder_with;
+use crate::engine::credential::identity_ladder;
+pub(crate) use crate::engine::credential::{Identity, ObservedIdentities};
 
-/// Caches the winning (uid, gid) for each file handle so the escalation
-/// ladder is only walked once per file. Shared across V2Ops, V3Ops, V4Ops.
+/// Caches the winning identity for each file handle so the escalation
+/// ladder is only walked once per file, and counts the identities seen
+/// owning files so the ladder can try them. Shared across V2Ops, V3Ops, V4Ops.
 pub(crate) struct CredCache {
-    map: Mutex<std::collections::HashMap<Vec<u8>, (u32, u32)>>,
+    map: Mutex<std::collections::HashMap<Vec<u8>, Identity>>,
+    /// Owners and groups seen in listings and lookups (READDIRPLUS, LOOKUP).
+    /// Survives an identity switch, and is shared with the clones
+    /// `ShellOps::with_credential` makes: who owns the files does not change.
+    pub(crate) observed: std::sync::Arc<ObservedIdentities>,
 }
 
 impl CredCache {
     pub(crate) fn new() -> Self {
-        Self { map: Mutex::new(std::collections::HashMap::new()) }
+        Self { map: Mutex::new(std::collections::HashMap::new()), observed: std::sync::Arc::default() }
+    }
+
+    /// An empty cache that shares this one's observations, for a backend
+    /// clone carrying a different identity.
+    pub(crate) fn sharing_observations(&self) -> Self {
+        Self { map: Mutex::new(std::collections::HashMap::new()), observed: std::sync::Arc::clone(&self.observed) }
     }
 
     pub(crate) fn flush(&self) {
         self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
-    pub(crate) fn get(&self, fh: &[u8]) -> Option<(u32, u32)> {
-        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(fh).copied()
+    pub(crate) fn get(&self, fh: &[u8]) -> Option<Identity> {
+        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(fh).cloned()
     }
 
-    pub(crate) fn insert(&self, fh: &[u8], uid: u32, gid: u32) {
+    pub(crate) fn insert(&self, fh: &[u8], id: Identity) {
         let mut lock = self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = lock.insert(fh.to_vec(), (uid, gid));
+        drop(lock.insert(fh.to_vec(), id));
     }
 }
 
-/// Run an operation with credential escalation: cached -> base -> ladder.
+/// Record the owner of every listed entry that came with attributes.
+pub(crate) fn observe_entries(observed: &ObservedIdentities, entries: &[ShellEntry]) {
+    observed.record(entries.iter().filter_map(|e| e.info.as_ref()).map(|i| (i.uid, i.gid)));
+}
+
+/// Run an operation with credential escalation: cached -> caller -> ladder.
 ///
-/// `op` is called with `(uid, gid)` -- it must build an ephemeral client with
-/// those credentials and perform the operation. On success, the winning
-/// credential is cached for future calls on the same file handle.
-pub(crate) async fn try_with_escalation<T, F, Fut>(caller: (u32, u32), cache: &CredCache, fh: &ShellHandle, get_owner: impl Future<Output = Option<((u32, u32), u32)>> + Send, is_acces: fn(&anyhow::Error) -> bool, op: F, bail_msg: &str) -> anyhow::Result<T>
+/// `op` is called with an [`Identity`] -- it must build an ephemeral client
+/// carrying that identity (UID, primary GID and supplementary groups) and
+/// perform the operation. The caller's own identity is tried as given, so
+/// `--aux-gids` reaches the server; the ladder rungs after it claim the
+/// file's group and the observed groups too (see `engine::credential`). On
+/// success the winning identity is cached for later calls on the same handle.
+pub(crate) async fn try_with_escalation<T, F, Fut>(caller: &Identity, cache: &CredCache, fh: &ShellHandle, get_owner: impl Future<Output = Option<((u32, u32), u32)>> + Send, is_acces: fn(&anyhow::Error) -> bool, op: F, bail_msg: &str) -> anyhow::Result<T>
 where
-    F: Fn(u32, u32) -> Fut,
+    F: Fn(Identity) -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
-    // 1. Try cached credential.
-    if let Some((uid, gid)) = cache.get(fh.as_bytes()) {
-        match op(uid, gid).await {
+    let mut tried: Vec<Identity> = Vec::with_capacity(2);
+
+    // 1. Try the cached identity.
+    if let Some(id) = cache.get(fh.as_bytes()) {
+        tried.push(id.clone());
+        match op(id).await {
             Ok(v) => return Ok(v),
             Err(e) if !is_acces(&e) => return Err(e),
             Err(_) => {},
         }
     }
 
-    // 2. Try base credential.
-    match op(caller.0, caller.1).await {
-        Ok(v) => return Ok(v),
-        Err(e) if !is_acces(&e) => return Err(e),
-        Err(_) => {},
+    // 2. Try the caller's identity.
+    if !tried.contains(caller) {
+        tried.push(caller.clone());
+        match op(caller.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(e) if !is_acces(&e) => return Err(e),
+            Err(_) => {},
+        }
     }
 
     // 3. Walk the credential ladder.
     let facts = get_owner.await;
-    for (uid, gid) in credential_ladder_with(caller, facts.map(|f| f.0), facts.map(|f| f.1), &[]) {
-        match op(uid, gid).await {
+    for id in identity_ladder(caller, facts.map(|f| f.0), facts.map(|f| f.1), &cache.observed) {
+        if tried.contains(&id) {
+            continue;
+        }
+        match op(id.clone()).await {
             Ok(v) => {
-                tracing::debug!(uid, gid, "credential escalation succeeded");
-                cache.insert(fh.as_bytes(), uid, gid);
+                tracing::debug!(uid = id.uid, gid = id.gid, groups = ?id.groups, "credential escalation succeeded");
+                cache.insert(fh.as_bytes(), id);
                 return Ok(v);
             },
             Err(e) if !is_acces(&e) => return Err(e),
@@ -575,11 +604,19 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
     fn gid(&self) -> u32;
     fn machinename(&self) -> &str;
 
+    /// The full AUTH_SYS identity calls go out under: UID, primary GID and the
+    /// supplementary groups from `--gid`/`--aux-gids`.
+    fn identity(&self) -> Identity;
+
+    /// Owners and groups seen so far on this session, for the ladder.
+    fn observed(&self) -> &ObservedIdentities;
+
     /// Switch the AUTH_SYS identity for subsequent calls.
     ///
-    /// Both V2Ops and V3Ops swap the credential on the pooled transport --
-    /// zero network round trips. File handles are bearer tokens (RFC 1094
-    /// S2.3.3), so they stay valid across identity changes.
+    /// Every backend swaps the credential on the pooled transport -- zero
+    /// network round trips -- and keeps the operator's supplementary groups.
+    /// File handles are bearer tokens (RFC 1094 S2.3.3), so they stay valid
+    /// across identity changes.
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()>;
 
     // -- Capabilities --
@@ -635,12 +672,12 @@ pub(crate) trait ShellOps: Send + Sync + 'static {
         async { Ok(()) }
     }
 
-    /// Build an ephemeral ops instance with different AUTH_SYS credentials.
+    /// Build an ephemeral ops instance carrying a different AUTH_SYS identity.
     ///
     /// The returned instance shares the underlying connection pool but
     /// carries its own credential. Used by the FUSE credential ladder.
     #[cfg_attr(not(feature = "fuse"), expect(dead_code, reason = "used by the FUSE adapter"))]
-    fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self
+    fn with_credential(&self, id: &Identity, hostname: &str) -> Self
     where
         Self: Sized;
 }
@@ -697,6 +734,43 @@ mod tests {
         let h = ShellHandle(vec![]);
         assert_eq!(h.to_hex(), "");
         assert!(h.as_bytes().is_empty());
+    }
+
+    /// `--aux-gids` must reach the server on the very first attempt: the
+    /// reported failure was uid 0 with group 522 under root_squash, where only
+    /// the group grants access.
+    #[tokio::test]
+    async fn escalation_sends_the_operators_groups() {
+        let cache = CredCache::new();
+        let caller = Identity::new(0, 0, &[522]);
+        let tried = Mutex::new(Vec::new());
+        let got = try_with_escalation(
+            &caller,
+            &cache,
+            &ShellHandle(vec![1]),
+            async { Some(((1001, 522), 0o640)) },
+            |_| true,
+            |id| {
+                tried.lock().unwrap().push(id.clone());
+                async move { if id.groups.contains(&522) { Ok(id.uid) } else { anyhow::bail!("NFS3ERR_ACCES") } }
+            },
+            "exhausted",
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, 0);
+        assert_eq!(tried.lock().unwrap().len(), 1, "the caller's own identity, groups included, works first time");
+    }
+
+    /// An owner-only file: the ladder must reach the owner's UID, and the
+    /// winner is cached for the next call on that handle.
+    #[tokio::test]
+    async fn escalation_finds_the_owner_and_caches_it() {
+        let cache = CredCache::new();
+        let fh = ShellHandle(vec![2]);
+        let op = async |id: Identity| if id.uid == 1001 { Ok(()) } else { anyhow::bail!("NFS3ERR_ACCES") };
+        try_with_escalation(&Identity::new(0, 0, &[]), &cache, &fh, async { Some(((1001, 1001), 0o600)) }, |_| true, op, "exhausted").await.unwrap();
+        assert_eq!(cache.get(fh.as_bytes()).map(|id| id.uid), Some(1001));
     }
 
     #[test]

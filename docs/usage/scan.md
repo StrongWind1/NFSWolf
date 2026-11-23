@@ -52,16 +52,16 @@ These are set on the `nfswolf` command itself, before the `scan` subcommand. See
 
 | Flag | Effect on scan |
 |------|---------------|
-| `--rpc-port <PORT>` | Override the portmapper/rpcbind port (default 111). |
-| `--skip-rpc` | Skip all portmapper/rpcbind probes. Use when port 111 is firewalled and the NFS port is known. |
-| `--skip-mountd` | Skip all MOUNT daemon queries. NFSv4 pseudo-FS discovery still runs. |
+| `--rpc-port <PORT>` | Override the portmapper/rpcbind port (default 111) for every portmapper and rpcbind query. |
+| `--skip-rpc` | Never contact the portmapper (no DUMP, no GETPORT, no probe of the RPC port). NFS is probed on 2049, `--nfs-port`, and `--probe-port`; mountd is found through `--mount-port` or by probing 2049 and 20048. |
+| `--skip-mountd` | Skip all MOUNT daemon queries (EXPORT, MNT, DUMP). NFSv4 pseudo-FS discovery still runs. |
 | `--nfs-port <PORT>` | Override the NFS port. Also added to the probe set for scan. |
-| `--mount-port <PORT>` | Override the mount-daemon port. |
+| `--mount-port <PORT>` | Override the mount-daemon port for every MOUNT call. |
 | `--proxy <HOST:PORT>` | Route all TCP connections through a SOCKS5 proxy. |
-| `-t`, `--timeout <MS>` | Connection timeout per probe (default 3000ms). |
+| `-t`, `--timeout <MS>` | Timeout per probe (default 3000 ms for scan). |
 | `--delay <MS>` / `--jitter <MS>` | Stealth pacing between RPC calls. |
-| `-u`, `--uid <UID>` / `-g`, `--gid <GID>` | AUTH_SYS credentials used for version probes and MOUNT. |
-| `--privileged-port` | Bind from a source port below 1024 (required by servers with the `secure` export option). |
+| `-u`, `--uid <UID>` / `-g`, `--gid <GID>` | AUTH_SYS identity presented on MOUNT MNT calls, together with `--hostname` and `--aux-gids`. |
+| `--privileged-port` | Bind MOUNT calls from a source port below 1024 (required by servers with the `secure` export option). |
 | `-q`, `--quiet` | Suppress status lines; only emit the results table. |
 
 ## How it works
@@ -108,13 +108,13 @@ All port probes run in parallel via `tokio::join!`. The scanner checks:
 
 ### Phase 2 -- service discovery
 
-If the RPC port is reachable (and `--skip-rpc` is not set), the scanner runs a portmapper DUMP to enumerate all registered RPC programs and a GETPORT to locate NFS and mountd. It then assembles the full set of NFS ports (portmapper-discovered + 2049 fallback + `--probe-port`) and runs direct version probes on each: NULL calls for v2 and v3, a COMPOUND call for v4.
+If the RPC port is reachable (and `--skip-rpc` is not set), the scanner runs a portmapper DUMP to enumerate all registered RPC programs and a GETPORT to locate NFS and mountd. It then assembles the full set of NFS ports (portmapper-discovered + 2049 fallback + `--probe-port`) and runs direct version probes on each: NULL calls for v2 and v3, a COMPOUND call for v4. The mountd port comes from `--mount-port` when given, otherwise from the portmapper; when the portmapper is skipped or does not answer, the scanner probes the well-known mountd ports 2049 and 20048.
 
 ### Phase 3 -- data collection
 
 With versions and ports confirmed, the scanner collects:
 
-- **Export lists** via MOUNT v1/v3 EXPORT (unless `--skip-mountd`), including ACL entries, auth flavors, and root file handles from MNT.
+- **Export lists** via MOUNT v1/v3 EXPORT (unless `--skip-mountd`), including ACL entries, auth flavors, and root file handles from MNT. The MNT calls present the global AUTH_SYS identity (`-u`, `-g`, `--hostname`, `--aux-gids`) and honor `--privileged-port`.
 - **NFSv4 pseudo-FS** via READDIR on the root filehandle (always, when v4 is confirmed).
 - **Connected clients** via MOUNT DUMP (who is currently mounted where).
 - **RDMA transport** detection via rpcbind GETADDR and a port 20049 probe.
@@ -140,11 +140,11 @@ The default output is a summary table to stdout plus per-host detail sections. C
 
 10.129.40.115
   RPC services:
-    100000  portmapper    v2,4      111/tcp+udp
-    100003  nfs           v3,4      2049/tcp
-    100005  mountd        v1,3      43217/tcp+udp
-    100021  nlockmgr      v1,3,4    33189/tcp+udp  ! Lock manager: lock-DoS and state leaks
-    100227  nfs_acl        v3       2049/tcp        ! POSIX ACL enumeration
+    100000  portmapper    v2,4     111/tcp+udp
+    100003  nfs           v3,4     2049/tcp
+    100005  mountd        v1,3     43217/tcp+udp
+    100021  nlockmgr      v1,3,4   33189/tcp+udp  ! lock manipulation, holder enumeration, grace-period DoS (AUTH_SYS)
+    100227  nfs_acl       v3       2049/tcp  ! POSIX ACLs may grant access beyond mode bits (AUTH_SYS)
   Exports (v3, v4):
     /srv/data                           *                       [AUTH_SYS]  fh=01000700030001...
     /srv/backups                        10.129.40.0/24          [AUTH_SYS]  fh=01000700050001...
@@ -153,9 +153,9 @@ The default output is a summary table to stdout plus per-host detail sections. C
 
 nas.local (10.129.40.120)
   RPC services:
-    100000  portmapper    v2        111/tcp
-    100003  nfs           v3        2049/tcp
-    100005  mountd        v1,3      38901/tcp
+    100000  portmapper    v2       111/tcp
+    100003  nfs           v3       2049/tcp
+    100005  mountd        v1,3     38901/tcp
   Exports (v3):
     /mnt/share                          *                       [AUTH_SYS]  fh=01000100070001...
 
@@ -273,6 +273,8 @@ nfswolf scan 10.0.0.0/24 --auto-escape --json scan.json --csv scan.csv
 ```bash
 nfswolf scan -f targets.txt --privileged-port -u 0 -g 0
 ```
+
+The MOUNT MNT calls go out from a source port below 1024, which servers using the `secure` export option require, and carry uid 0 / gid 0 in the AUTH_SYS credential.
 
 ## Interrupt handling
 

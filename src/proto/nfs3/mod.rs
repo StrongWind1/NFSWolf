@@ -1,6 +1,6 @@
 //! NFSv3 for nfswolf: the library client, bound to the pooled transport.
 //!
-//! `nfswolf-nfs3` owns the protocol; `PooledTransport` owns the policy. This
+//! `nfs-v3` owns the protocol; `PooledTransport` owns the policy. This
 //! module is only the seam between them, which is why it is a type alias rather
 //! than a wrapper: the 22 procedure methods that used to live here each
 //! repeated the same six lines of pool checkout, breaker check, and timeout
@@ -35,6 +35,9 @@ pub(crate) trait PooledNfs3 {
     fn gid(&self) -> u32;
     /// Hostname presented in the AUTH_SYS credential.
     fn machinename(&self) -> &str;
+    /// Groups in the AUTH_SYS credential, primary GID first (`--gid` plus
+    /// `--aux-gids`); empty for any other credential flavor.
+    fn groups(&self) -> Vec<u32>;
     /// Same connection settings, different identity.
     ///
     /// `uid` and `gid` also select the pool key, so the returned client draws
@@ -63,6 +66,13 @@ impl PooledNfs3 for Nfs3Client {
             // distinctive artifact in the server's logs, and inconsistent with
             // the default `fuse.rs` uses for the same purpose.
             crate::proto::auth::Credential::None | crate::proto::auth::Credential::Short(_) | crate::proto::auth::Credential::Raw(_) => DEFAULT_MACHINENAME,
+        }
+    }
+
+    fn groups(&self) -> Vec<u32> {
+        match self.transport().credential() {
+            crate::proto::auth::Credential::Sys(a) => a.gids.clone(),
+            crate::proto::auth::Credential::None | crate::proto::auth::Credential::Short(_) | crate::proto::auth::Credential::Raw(_) => Vec::new(),
         }
     }
 

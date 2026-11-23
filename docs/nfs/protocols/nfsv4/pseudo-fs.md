@@ -156,10 +156,11 @@ nfswolf interacts with the pseudo-FS in several contexts:
 
 | Component | How it uses the pseudo-FS |
 |-----------|--------------------------|
-| Scanner (`probe_nfs4()`) | `COMPOUND([PUTROOTFH])` to detect v4 support |
+| Scanner (`probe_nfs_versions_tcp()`) | `COMPOUND([PUTROOTFH])` to detect v4 support |
 | Scanner (data collection) | READDIR on pseudo-root to enumerate exports |
 | Shell (`V4Ops`) | PUTROOTFH + LOOKUP chain for path resolution |
 | Shell (`exports` command) | LOOKUPP traversal for sibling export discovery (F-2.12) |
-| Escape engine (`Nfs4EscapeProbe`) | PUTROOTFH + LOOKUP to acquire seed handles |
+| `escape` subcommand | PUTROOTFH + LOOKUP to acquire seed handles, LOOKUPP to walk upward |
+| Analyzer v4 fallback (`AnalyzerV4EscapeProbe`) | PUTROOTFH + LOOKUP to reach the export, then `find_escape_root()` over NFSv4 |
 | Analyzer | SECINFO per export path for auth flavor probing |
 | Pseudo-root detection | fsid check against `39c6b5c1-3f24-4f4e-977c-7fe6546b8a25` |

@@ -4,6 +4,8 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ## [Unreleased]
 
+The next release is 2.0.0: the breaking `nfs-v4` and `nfs-v3` library API changes listed under Changed need a major version.
+
 ### Performance
 
 - **Shell `get`, `put`, `cp` and their `-r` forms are pipelined.** Transfers keep several READs or WRITEs in flight (about 4 MiB worth, 4 to 16 calls, each on its own pooled connection) instead of one at a time, use the server's advertised transfer size (NFSv3 FSINFO, NFSv4 `maxread`/`maxwrite`, clamped to 4 KiB..1 MiB) instead of a fixed 64 KiB, and upload with `UNSTABLE` writes plus one COMMIT, checked against the write verifiers, instead of a `FILE_SYNC` write per chunk. Download hashing and local writes run on their own thread, and recursive transfers move up to 8 files per directory at once. Measured over NFSv3 and NFSv4 against a lab Linux knfsd export on XFS (sub-millisecond RTT): a 192 MiB `put` went from 44 to about 1,100 MiB/s, a `get` from about 220 to 400 MiB/s (limited there by SHA-256 on a CPU without SHA-NI; about 1.7 GiB/s with hashing set aside), a 64 MiB remote `cp` from 1.6 s to 0.1 s, and a 300-file `get -r` / `put -r` from 0.07 / 0.86 s to 0.02 / 0.58 s.
@@ -14,6 +16,9 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ### Fixed
 
+- **`--aux-gids` was dropped as soon as escalation started** -- every credential-ladder rung, the shell's `uid`/`gid`/`su`, and the FUSE ladder rebuilt the AUTH_SYS credential with only the primary GID, so a group granted through `--aux-gids` never reached the server once a first attempt was refused (for example `--uid 0 --aux-gids 522` under `root_squash`). The operator's groups now go with every credential.
+- **Shell lookups did not escalate** -- `cd`, `cat` and every other path walk failed at the first directory the identity could not search, before the read ladder ever ran. LOOKUP now walks the credential ladder per component, like directory listing and READ, on NFSv2, v3 and v4.
+- **`analyze` wrote to the server without `--allow-write`**, against the read-only default every other subcommand follows (see Changed).
 - **`put` over an existing, larger file kept its old tail.** The create step sent only the mode, and UNCHECKED CREATE / OPEN leave an existing file's size alone, so the result was the new data followed by the rest of the old file. `put`, `put -r` and `cp` now create with size 0, which truncates an existing file in the same call.
 - **NFSv2 `put` sent 64 KiB WRITEs**, over the protocol's 8 KiB `NFS_MAXDATA`, and a real server rejects them (`Garbage arguments`), so v2 uploads of more than 8 KiB failed. NFSv2 transfers now use 8 KiB, and offsets beyond NFSv2's 32-bit range are an error instead of silently becoming `u32::MAX`.
 - **The NFSv2 shell used a connection pool of its own** with the default four idle connections instead of the session's pool, unlike the v3 and v4 shells. It now shares the session pool and its credential, which also makes `--short-token` apply to v2 as it does to v3 and v4.
@@ -33,9 +38,19 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - **Circuit breaker** -- the error rate is kept as a running count instead of a scan of the whole window on every call, and the window no longer discards its history during the first minute after boot.
 - **Login records** -- `wtmp`, `btmp` and `lastlog` integers are decoded as little-endian rather than in the host's byte order, and addresses are read byte by byte.
 - **Unknown-lint warnings** -- removed `linker_info` and `duplicate_features` from the lint table; rustc 1.95 knows neither and warned on every target.
+- **Global network flags were ignored outside some subcommands** -- `--rpc-port` is now honored by every portmapper and rpcbind query (`scan`'s own DUMP and GETPORT also connected to 111 regardless). `--mount-port`, `--nfs-port`, `--rpc-port` and `--privileged-port` are now honored by every pooled NFS connection, whose MOUNT and NFS port lookup ignored them. `analyze` now honors `--nfs-port`, `--rpc-port`, `--skip-rpc`, `--skip-mountd` and `--timeout`. Shell and mount version detection honor `--rpc-port`, `--skip-rpc` and `--timeout`.
+- **`analyze` rquota check bypassed `--proxy`** -- the F-5.15 check looked up rquotad with a direct TCP connection to port 111; it now goes through the proxy and honors `--rpc-port` and `--skip-rpc`.
+- **`scan` sent MOUNT MNT with AUTH_NONE**, which a `sec=sys` mountd refuses. It now presents the global AUTH_SYS identity (`-u`/`-g`/`--hostname`/`--aux-gids`) and honors `--privileged-port`.
+- **Shell help hid `verifier` on NFSv4**, where the command works.
+- **F-5.9 never fired on a server that speaks NFSv4.1** -- the execute-implies-read check looked for "Linux knfsd" in the implementation fingerprint, but EXCHANGE_ID takes over that fingerprint whenever the server speaks NFSv4.1, and Linux knfsd sends no implementation ID. The null-filename probe that identifies Linux knfsd now always runs, and F-5.9 keys on it.
+- **`shell --short-token` help** pointed at an analyzer probe that does not exist; it now says where a token comes from (a reply verifier in a packet capture).
+- **Crate README examples did not compile** -- they passed a raw `tokio::net::TcpStream` where the clients take `TokioIo`, and used wrong paths, constructors and field names. Every crate's `README.md` is now compiled as a doctest (`cargo test --doc`, run by `make test-matrix` and CI), so the examples stay correct.
 
 ### Added
 
+- **Observed identities feed the credential ladder** -- the shell and FUSE mount count the owners of every READDIRPLUS entry and LOOKUP reply; the eight most common become ladder rungs, and their groups are claimed on every rung.
+- **`analyze --allow-write`** runs the squash probes; JSON results gain a `write_probes` field, and every report format says whether the probes ran.
+- The shell's `id`/`whoami` prints the supplementary groups sent with the credential.
 - `#[xdr(other)]` on one `u32` tuple variant of an `XdrCodec` enum makes it open: unlisted discriminants decode into that variant and pack back unchanged. Unit variants of data-carrying enums may give their discriminant as `= N`. Locals in the expanded code use mixed-site hygiene, and a malformed `#[xdr(...)]` attribute is reported as malformed rather than missing.
 - `AsyncWrite::async_flush` (default no-op, overridden by `TokioIo`), called after every request so a buffered stream cannot hold a request back.
 - `nfs_v3::decode_hex`, `Capped<T>`, `Nfs3Client::list_dir_capped` and `read_all_capped` (report whether the cap cut the result), and `From<WriteStable> for stable_how` (`write_at` accepts either).
@@ -45,10 +60,14 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ### Changed
 
+- **`analyze` is read-only by default** -- the squash probes, which create and remove a test file as uid 99999 and uid 0 and are the only checks for F-1.2, F-4.1 and F-7.5, run only with `--allow-write`. Without it the report states that those three were not tested.
+- **The credential ladder searches UIDs and GIDs separately** -- every rung after the operator's own identity claims up to 16 supplementary groups: the file's group, the operator's `--gid`/`--aux-gids`, and the groups seen owning files. A new first rung tries the operator's own UID with those groups. Group access no longer depends on pairing the right UID with the right GID, and it survives `root_squash`, which remaps only uid 0 and gid 0 (`nfsd_setuser()`).
 - **Breaking (`nfs-v4`):** `LockState` has a `seqid` field, and `Nfs4Client::unlock` takes `&mut LockState` and no longer takes the session. `Fattr4Decoded` has `filehandle`, `maxread` and `maxwrite` fields.
 - **Breaking (`nfs-v3`):** `WriteAck` has a `verifier` field carrying the WRITE's write verifier. `Nfs3Client::commit_verifier` is documented as what it is: a COMMIT of the whole file.
 - `nfs_v3::FileType` has an `Unknown(u32)` variant.
 - The six integration test binaries are one, `integration`, so the shared helpers are checked for dead code.
+- **`--timeout` has no single default** -- scan probes default to 3000 ms, analyze probes to 5000 ms, and shell and mount version detection to 2000 ms; an explicit value applies to all of them. Established NFS sessions keep their fixed 30 s per-call deadline.
+- **`--skip-rpc` now means no portmapper traffic in any subcommand**: NFS uses `--nfs-port` or 2049, and MOUNT uses `--mount-port` or probes the well-known mountd ports 2049 and 20048.
 
 ### Deprecated
 
@@ -57,6 +76,7 @@ All notable changes to nfswolf are documented in this file. The format follows [
 ### Removed
 
 - Four source files left over from extracting `nfs-mount` that no `mod` declaration included: `nfs-v2/src/mount.rs`, `nfs-v3/src/mount.rs`, `nfs-v3/src/error_mount.rs`, `nfs-v3/src/wire/mount.rs`. Their golden-vector tests moved to `nfs-mount`.
+- **`analyze --v4-depth`**, which was accepted but never used.
 
 ## [1.3.1] - 2026-11-07
 
@@ -89,6 +109,10 @@ All notable changes to nfswolf are documented in this file. The format follows [
 
 ### Added
 
+- **Seven-phase `escape` pipeline** -- the `escape` subcommand was rewritten as gather seeds (MOUNT v3, MOUNT v1, NFSv4 LOOKUP, pseudo-FS walk, upward traversal), construct candidates, probe across versions with credential escalation, dedup/filter, rootfs detection, score/annotate, report. New `--json`, `--read-shadow` and `--all-handles` flags.
+- **`escape --fast`** -- single-export quick escape (about 10-80 RPCs), shared by `scan --auto-escape` and the shell's `escape-root`.
+- **`decode` subcommand** -- offline NFS file handle decoder: every header, fsid and fileid field, OS/filesystem fingerprint and a security assessment, with no network access.
+- **Scanner port probing in parallel** and the `--rpc-port`, `--skip-rpc`, `--skip-mountd` and `--probe-port` flags.
 - **NFSv4-only server support** -- analyzer discovers exports via pseudo-FS fsid walking when MOUNT is unavailable. No portmapper or mountd required.
 - **`escape --all` NFSv4 pseudo-FS seed gathering** -- walks the pseudo-FS, enters every export, LOOKUPs a child to get real filesystem handles (fileid_type > 0), tries all as seeds. Cascade: v3 -> v2 -> v4 probe.
 - **Handle quality annotations** -- each escape result is annotated with plain-English analysis from the handle bytes (e.g., "likely the real filesystem root, best candidate to try first" vs "may only reach the NFSv4 virtual namespace"). Results sorted best-to-worst.
@@ -128,14 +152,6 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - **NFS defense guide** -- `docs/NFS_DEFENSE_GUIDE.md`, a comprehensive hardening guide with live lab test results covering export configuration, auth enforcement, and network-level controls.
 - **Filesystem escape research matrix** -- `docs/research/FILESYSTEM_ESCAPE_MATRIX.md`, 335-line analysis of 23 Linux filesystem types with kernel source references, handle formats, root inodes, and generation check behavior.
 - **Linux kernel NFS breakdown** -- `ref/linux-kernel/BREAKDOWN.md`, 3200-line function-level walkthrough of Linux 7.1.8 knfsd mapping every security-relevant kernel code path to nfswolf findings.
-- **NFSv4 escape via LOOKUPP** -- pseudo-filesystem traversal to the real filesystem root, bypassing export boundaries without MOUNT.
-- **Handle acquisition matrix** -- MOUNT v1/v3 cross-version handle probing with pad/trim variants and per-variant GETATTR validation against both NFSv3 and NFSv2.
-- **SECINFO_NO_NAME fallback** (op 52, RFC 5661) -- probes auth requirements on the pseudo-root when per-name SECINFO fails; WRONGSEC oracle detects per-path Kerberos enforcement.
-- **OS fingerprinting** -- EXCHANGE_ID (op 42, RFC 5661) vendor/version strings decoded in the analyzer for server identification.
-- **pNFS topology** -- GETDEVICEINFO/GETDEVICELIST enumerate pNFS data-server layout devices.
-- **Per-path SECINFO probing** and xattr detection via FATTR4_SEC_LABEL (RFC 7862).
-- **Golden vector tests** for MOUNT and portmapper wire types (round-trip encoding validation).
-- **Protocol crates on crates.io** -- all 8 protocol crates published as standalone libraries.
 
 ### Changed
 
@@ -161,10 +177,18 @@ All notable changes to nfswolf are documented in this file. The format follows [
 - **Unique NFSv4 client names** -- each `V4Ops` instance now generates a unique client name to avoid `NFS4ERR_BAD_SEQID` when multiple v4 sessions coexist.
 - **FUSE errno mapping** -- `ShellError` is now attached to anyhow chains so the FUSE layer can extract the correct errno (EACCES, ENOENT, etc.) instead of returning EIO for every failure.
 
-## [1.0.0] - 2026-08-03
+## [1.0.0] - 2026-08-08
 
 ### Added
 
+- **NFSv4 escape via LOOKUPP** -- pseudo-filesystem traversal to the real filesystem root, bypassing export boundaries without MOUNT.
+- **Handle acquisition matrix** -- MOUNT v1/v3 cross-version handle probing with pad/trim variants and per-variant GETATTR validation against both NFSv3 and NFSv2.
+- **SECINFO_NO_NAME fallback** (op 52, RFC 5661) -- probes auth requirements on the pseudo-root when per-name SECINFO fails; WRONGSEC oracle detects per-path Kerberos enforcement.
+- **OS fingerprinting** -- EXCHANGE_ID (op 42, RFC 5661) vendor/version strings decoded in the analyzer for server identification.
+- **pNFS topology** -- GETDEVICEINFO/GETDEVICELIST enumerate pNFS data-server layout devices.
+- **Per-path SECINFO probing** and xattr detection via FATTR4_SEC_LABEL (RFC 7862).
+- **Golden vector tests** for MOUNT and portmapper wire types (round-trip encoding validation).
+- **Protocol crates on crates.io** -- all 8 protocol crates published as standalone libraries.
 - **Comprehensive auth flavor enumeration** -- the analyzer and scanner now discover and report all authentication types available on every export.
   - SECINFO GSS mechanism decoding: `rpcsec_gss_info` (OID, QOP, service level) is now parsed from NFSv4 SECINFO responses, distinguishing krb5/krb5i/krb5p directly from SECINFO instead of relying on MOUNT pseudo-flavors.
   - Scanner v4 SECINFO probing: NFSv4 pseudo-root entries now show auth flavors via per-entry SECINFO queries.
@@ -277,6 +301,13 @@ All notable changes to nfswolf are documented in this file. The format follows [
 ### Removed
 
 - Dead code that the workspace-wide `unused = "allow"` had been hiding: the unreferenced privilege helper, the pooled NFSv4 client (only the direct client was ever used), `ReconnectStrategy::ResetPerCall`, `PoolStats`, and the `AutoUidResolver`, whose nine steps turned out to be one never implemented, one already shipping as the `uid-spray` subcommand, one genuinely novel idea now folded into the credential ladder, and five duplicating the ladder outright.
+
+## [0.6.0] - 2026-07-02
+
+### Changed
+
+- Standardized the CI/CD workflows, project scaffolding and release tooling.
+- Set the LICENSE copyright owner.
 
 ## [0.5.0] - 2026-06-29
 
@@ -514,13 +545,15 @@ First public release. Covers the full NFS attack path: recon -> enumeration -> a
 - `SHA256SUMS` file with cosign keyless signature (`SHA256SUMS.sig`) for every release
 - SLSA build provenance attestations for every binary via `actions/attest-build-provenance`
 
-[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/StrongWind1/NFSWolf/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/StrongWind1/NFSWolf/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/StrongWind1/NFSWolf/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.8.0...v1.0.0
 [0.8.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.5.0...v0.7.0
+[0.7.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/StrongWind1/NFSWolf/compare/v0.3.0...v0.3.1

@@ -1244,10 +1244,9 @@ impl Unpack for AttrRequest {
 /// A single NFSv4 operation inside a COMPOUND request.
 ///
 /// All 37 NFSv4.0 operations (ops 3-39) plus ILLEGAL (op 10044) are
-/// representable. The hot-path operations are fully typed; the stateful
-/// ops (OPEN, LOCK, CREATE, etc.) carry pre-encoded XDR payloads so
-/// every valid op code can be constructed and serialised without
-/// building out the full union nesting.
+/// representable, each with typed arguments. The NFSv4.1 operations used
+/// for fingerprinting (EXCHANGE_ID, GETDEVICEINFO, GETDEVICELIST,
+/// SECINFO_NO_NAME) carry pre-encoded XDR payloads instead.
 ///
 /// Wire format is: 4-byte op code + op-specific data.
 #[derive(Debug, Clone)]

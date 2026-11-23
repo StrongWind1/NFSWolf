@@ -98,6 +98,15 @@ Blocking port 111 (portmapper) prevents service discovery but does not prevent N
 
 Effective firewall rules must block port 2049 from untrusted networks -- not just the ancillary services.
 
+## subtree_check as the only isolation
+
+With `subtree_check`, knfsd walks from each resolved file up to the export root (`nfsd_acceptable()` in `fs/nfsd/nfsfh.c`), checking execute permission on every parent, and rejects handles that never reach it. That does stop constructed handles from escaping a subdirectory export ([F-2.1](../access-control/F-2.1-export-escape.md), [F-2.6](../access-control/F-2.6-bind-mount-escape.md)), but it is a weak control to rely on:
+
+- It is off by default. `no_subtree_check` is the Linux default, and with it `nfsd_acceptable()` accepts any dentry on the filesystem.
+- It tends to get turned off again. The parent walk runs on every operation and causes spurious `ESTALE` errors when files are renamed or moved while a client holds handles.
+
+A separate filesystem per export is the reliable fix. `subtree_check` is the fallback for when that is impossible, as the F-2.1 and F-2.6 remediation sections describe.
+
 ## Summary
 
 | "Defense" | Why it fails |
@@ -111,5 +120,6 @@ Effective firewall rules must block port 2049 from untrusted networks -- not jus
 | Client-side `nosuid,nodev` | Server cannot control client mount options. Attacker omits them. |
 | Hostname spoofing | knfsd uses TCP source IP, not `machinename`, for ACL decisions. |
 | Blocking port 111 only | NFSv4 needs only port 2049. No MOUNT protocol required. |
+| `subtree_check` alone | Off by default, and often disabled again because it causes `ESTALE` on renames. A fallback, not a substitute for one filesystem per export. |
 
 For defenses that actually work, see the [hardening checklist](hardening/checklist.md).

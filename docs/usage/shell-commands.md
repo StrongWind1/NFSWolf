@@ -19,7 +19,7 @@ Default columns: mode, uid, gid, size, mtime, name. With `-a`: adds inode, nlink
 | Flag | Description |
 |------|-------------|
 | `-a` | Show all columns (inode, nlink, used, rdev, atime, ctime) |
-| `--sort=FIELD` | Sort by `name` (default), `size`, `mtime`, `ctime`, `atime`, `uid`, `gid` |
+| `--sort=FIELD` | Sort by `name` (default), `inode` (or `fileid`), `size`, `uid`, `gid`, `mode` (or `perms`), `mtime` (or `time`), `ctime` (or `change`), `atime` (or `access`). An unrecognised field sorts by name. |
 | `-r`, `--reverse` | Reverse sort order |
 
 When sorting by `ctime` or `atime`, that timestamp replaces `mtime` in the default view.
@@ -254,11 +254,11 @@ AUTH_SYS credentials are client-asserted (RFC 5531 sec. 14). The server trusts w
 
 ### whoami
 
-Print current AUTH_SYS identity: uid, gid, hostname. **Alias:** `id`
+Print current AUTH_SYS identity: uid, gid, the supplementary groups sent with it (`--gid` plus `--aux-gids`), and hostname. **Alias:** `id`
 
 ### uid
 
-Switch UID mid-session. On NFSv3/v4 this swaps credentials in-place. On NFSv2 it triggers a full reconnect.
+Switch UID mid-session. The credential is swapped in place on every NFS version, and the `--aux-gids` groups are kept.
 
 ```
 uid <n>
@@ -369,7 +369,7 @@ lastlog
 
 ### escape-root
 
-Run the fast escape pipeline to break out of the export boundary and reach the filesystem root. Supports 18 of 19 Linux filesystem types. On success, replaces the shell root and current directory with the escaped handle (prompt changes to `/ [escaped]`).
+Run the fast escape pipeline to break out of the export boundary and reach the filesystem root. Constructs root handles for the same 17 filesystem types as the [escape](escape.md#supported-filesystem-types) subcommand (tmpfs resists). On success, replaces the shell root and current directory with the escaped handle (prompt changes to `/ [escaped]`).
 
 ```
 escape-root
@@ -403,13 +403,14 @@ root
 
 ### verifier
 
-Probe the server's write verifier via zero-count COMMIT. The `writeverf3` is an opaque 8-byte value regenerated on reboot (RFC 1813 S3.3.21), enabling reboot detection without write traffic.
+Probe the server's write verifier via COMMIT. The verifier (`writeverf3` on NFSv3, `verifier4` on NFSv4) is an opaque 8-byte value regenerated on reboot (RFC 1813 S3.3.21, RFC 7530 S16.3), enabling reboot detection without write traffic.
 
 ```
 verifier
 ```
 
-!!! info "NFSv3 only"
+!!! info "NFSv3 and NFSv4 only"
+    NFSv2 has no COMMIT procedure, so there is no write verifier to read.
 
 ## Local filesystem
 
@@ -439,8 +440,8 @@ These commands operate on the local (attacker's) machine, not the remote NFS exp
 | `grep` | Yes | Yes | Yes | Content search via READ RPCs |
 | `mknod` | -- | Yes | Yes | NFSv2 has no MKNOD procedure |
 | `root` | Yes | -- | -- | NFSPROC_ROOT is NFSv2 only |
-| `verifier` | -- | Yes | -- | COMMIT writeverf is NFSv3 only |
-| `uid`/`gid`/`su` | Reconnect | In-place | In-place | NFSv2 requires new TCP socket |
+| `verifier` | -- | Yes | Yes | NFSv2 has no COMMIT |
+| `uid`/`gid`/`su` | In-place | In-place | In-place | Credential swap on the shared pool; `--aux-gids` kept |
 
 ## See also
 

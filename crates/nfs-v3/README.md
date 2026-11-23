@@ -28,21 +28,38 @@ A complete NFSv3 client split into two layers. The `wire` module provides the ra
 
 ## Usage
 
-```rust
-use nfs_v3::{Nfs3Client, MountClient, FileHandle, Nfs3Error};
-use nfs_mount::MountVersion;
-use onc_rpc_client::DirectTransport;
+```rust,no_run
+use nfs_mount::MountClient;
+use nfs_mount::wire::dirpath;
+use nfs_v3::wire::{GETATTR3args, Nfs3Result};
+use nfs_v3::{FileAttrs, FileHandle, Nfs3Client, Nfs3Error};
+use onc_rpc_client::rpc::opaque_auth;
+use onc_rpc_client::transport::net::Connector;
+use onc_rpc_client::transport::tokio::TokioConnector;
+use onc_rpc_client::{AuthSys, DirectTransport};
 use onc_xdr::Opaque;
 
-let stream = tokio::net::TcpStream::connect("server:mount_port").await?;
-let mount = MountClient::new(DirectTransport::new(stream), MountVersion::V3);
-let mounted = mount.mnt(nfs_mount::wire::dirpath(Opaque::borrowed(b"/export"))).await?;
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let cred = AuthSys::root("client").to_opaque_auth(1);
 
-let stream = tokio::net::TcpStream::connect("server:nfs_port").await?;
-let nfs = Nfs3Client::new(DirectTransport::new(stream));
-let root = nfs_v3::wire::nfs_fh3(Opaque::owned(mounted.bytes));
-let res = nfs.getattr(&nfs_v3::wire::GETATTR3args { object: root }).await?;
+    // TokioConnector returns a TokioIo<TcpStream>, the I/O type DirectTransport expects.
+    let io = TokioConnector.connect("192.0.2.10:20048".parse()?).await?;
+    let mount = MountClient::v3(DirectTransport::with_auth(io, cred.clone(), opaque_auth::default()));
+    let mounted = mount.mnt(dirpath(Opaque::borrowed(b"/export"))).await?;
+
+    let io = TokioConnector.connect("192.0.2.10:2049".parse()?).await?;
+    let nfs = Nfs3Client::new(DirectTransport::with_auth(io, cred, opaque_auth::default()));
+    let root = FileHandle::from_bytes(&mounted.bytes).to_nfs_fh3();
+    match nfs.getattr(&GETATTR3args { object: root }).await? {
+        Nfs3Result::Ok(ok) => println!("mode {:o}", FileAttrs::from_fattr3(&ok.obj_attributes).mode),
+        Nfs3Result::Err((status, _)) => println!("refused: {:?}", Nfs3Error::from_nfsstat3(status)),
+        _ => {}, // Nfs3Result is #[non_exhaustive]
+    }
+    Ok(())
+}
 ```
+
+The MOUNT client lives in [`nfs-mount`](../nfs-mount). `nfs_v3::MountClient` is a type alias for `nfs_mount::MountClient`, kept so old paths compile.
 
 ## API reference
 
@@ -51,7 +68,7 @@ let res = nfs.getattr(&nfs_v3::wire::GETATTR3args { object: root }).await?;
 | Type | Description |
 | ------ | ------------- |
 | `Nfs3Client<T>` | Client with one method per NFSv3 procedure (22 total) |
-| `MountClient<T>` | Re-export of `nfs_mount::MountClient` for backward compatibility |
+| `MountClient<T>` | Type alias for `nfs_mount::MountClient`, kept so old paths compile; new code should name `nfs_mount::MountClient` |
 | `Nfs3Error` | Classified status codes with oracle and permission predicates |
 | `Nfs3Fault<E>` | Structured fault type for domain-level operations |
 | `MountError` | Re-export of `nfs_mount::MountError` |
@@ -63,14 +80,15 @@ let res = nfs.getattr(&nfs_v3::wire::GETATTR3args { object: root }).await?;
 | `FileHandle` | Opaque file handle with hex encode/decode and equality |
 | `FileAttrs` | Domain-level file attributes (type, mode, size, uid, gid, times) |
 | `FileType` | File type enum (regular, directory, symlink, block/char, fifo, socket) |
-| `DirEntry` / `DirEntryPlus` | Directory listing entries (name + cookie, optionally with attrs/handle) |
+| `DirEntryPlus` | Directory listing entry: fileid, name, cookie, and optional attributes and handle |
+| `DirEntry` | Deprecated: no method returns it |
 | `DirPage` | A page of directory entries from READDIR/READDIRPLUS |
 | `FsInfo` / `FsStat` | Filesystem info and space statistics |
 | `NfsTime` | Seconds + nanoseconds |
 | `ReadChunk` | Result from a READ operation |
 | `WriteAck` | Result from a WRITE operation |
 | `WriteStable` | Write stability level (Unstable, DataSync, FileSync) |
-| `CreateMode` | Create mode (Unchecked, Guarded, Exclusive) |
+| `CreateMode` | Deprecated: no method accepts it; pass a `createhow3` to the raw `create()` |
 | `HexError` | Invalid hex string error |
 | `access` module | Access-bit constants: `READ`, `LOOKUP`, `MODIFY`, `EXTEND`, `DELETE`, `EXECUTE` |
 
@@ -88,7 +106,7 @@ let res = nfs.getattr(&nfs_v3::wire::GETATTR3args { object: root }).await?;
 
 All 22 NFSv3 procedures ([RFC 1813] sec. 3.3): `NULL`, `GETATTR`, `SETATTR`, `LOOKUP`, `ACCESS`, `READLINK`, `READ`, `WRITE`, `CREATE`, `MKDIR`, `SYMLINK`, `MKNOD`, `REMOVE`, `RMDIR`, `RENAME`, `LINK`, `READDIR`, `READDIRPLUS`, `FSSTAT`, `FSINFO`, `PATHCONF`, `COMMIT`.
 
-The `MountClient` re-export provides MOUNT v3 ([RFC 1813] appendix I) for obtaining the root file handle before NFS operations begin.
+MOUNT v3 ([RFC 1813] appendix I), which supplies the root file handle before NFS operations begin, is implemented in `nfs-mount`; the `MountClient` alias and the `wire::mount` module re-export it here.
 
 ## Safety and hardening
 

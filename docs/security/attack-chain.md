@@ -14,7 +14,6 @@ flowchart TD
         F54["F-5.4<br>RPC Service Enumeration"]
         F51["F-5.1<br>Export List Enumeration"]
         F55["F-5.5<br>NFSv4 Pseudo-FS Leakage"]
-        F32["F-3.2<br>Portmapper Amplification"]
         F35["F-3.5<br>pNFS MDS Detected"]
         F515["F-5.15<br>rquotad UID Oracle"]
         F514["F-5.14<br>POSIX ACL Leak"]

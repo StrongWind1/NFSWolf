@@ -57,3 +57,7 @@ pub use nfs_mount::MountError;
 /// live in this crate, with its own constructor and return types, is gone.
 /// New code should name `nfs_mount::MountClient` directly.
 pub type MountClient<T> = nfs_mount::MountClient<T>;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

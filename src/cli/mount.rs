@@ -102,58 +102,10 @@ pub(crate) async fn run(args: MountArgs, globals: &crate::cli::GlobalOpts) -> an
 
 #[cfg(feature = "fuse")]
 async fn resolve_mount_version(args: &MountArgs, host: std::net::IpAddr, globals: &crate::cli::GlobalOpts) -> anyhow::Result<u32> {
-    use std::net::SocketAddr;
-    use std::time::Duration;
-
     if let Some(v) = args.nfs_version {
         return Ok(v);
     }
-
-    if !globals.quiet {
-        eprintln!("{}", crate::output::status_info("No --nfs-version specified, probing server..."));
-    }
-    let probe_timeout = Duration::from_secs(2);
-    let pmap_addr = SocketAddr::new(host, 111);
-    let portmap = match &globals.proxy {
-        Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-        None => crate::proto::portmap::PortmapClient::default_port(),
-    };
-
-    if let Ok(Ok(port)) = tokio::time::timeout(probe_timeout, portmap.query_port(pmap_addr, 100_003, 3)).await
-        && port > 0
-        && crate::cli::shell::verify_nfs_version_tcp(host, port, 3, probe_timeout, globals.proxy.as_deref()).await
-    {
-        if !globals.quiet {
-            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv3 on port {port}")));
-        }
-        return Ok(3);
-    }
-
-    if let Ok(Ok(port)) = tokio::time::timeout(probe_timeout, portmap.query_port(pmap_addr, 100_003, 2)).await
-        && port > 0
-        && crate::cli::shell::verify_nfs_version_tcp(host, port, 2, probe_timeout, globals.proxy.as_deref()).await
-    {
-        if !globals.quiet {
-            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv2 on port {port}")));
-        }
-        return Ok(2);
-    }
-
-    let nfs_port = globals.nfs_port.unwrap_or(2049);
-    let v4_addr = SocketAddr::new(host, nfs_port);
-    if let Ok(Ok(_)) = tokio::time::timeout(probe_timeout, async {
-        let mut client = crate::proto::nfs4::compound::Nfs4DirectClient::connect_proxy(v4_addr, globals.proxy.as_deref()).await?;
-        client.get_root_fh().await
-    })
-    .await
-    {
-        if !globals.quiet {
-            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv4 on port {nfs_port}")));
-        }
-        return Ok(4);
-    }
-
-    anyhow::bail!("Could not detect NFS version on {host}. Specify --nfs-version explicitly (2, 3, or 4).")
+    crate::cli::shell::detect_nfs_version(host, globals).await
 }
 
 // =============================================================================
@@ -198,10 +150,7 @@ async fn connect_v3_mount(args: &MountArgs, target: &crate::cli::target::Target,
         mr.handle
     };
 
-    let pool = Arc::new(match &globals.proxy {
-        Some(p) => ConnectionPool::with_proxy(p.clone()),
-        None => ConnectionPool::default_config(),
-    });
+    let pool = Arc::new(ConnectionPool::with_opts(globals.connect_opts()));
     let circuit = Arc::new(CircuitBreaker::default_config());
     let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);
     let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));
@@ -248,7 +197,7 @@ async fn connect_v2_mount(args: &MountArgs, target: &crate::cli::target::Target,
     let nfs_port = Some(globals.nfs_port.unwrap_or(2049));
     let addr = parse_addr_with_port(&host.to_string(), nfs_port)?;
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
-    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, &export, globals.uid, globals.gid, &globals.aux_gids, stealth, globals.proxy.as_deref(), nfs_port, &globals.hostname);
+    let (_pool, _circuit, client) = make_v2_client_with_hostname(addr, &export, globals.uid, globals.gid, &globals.aux_gids, stealth, &globals.connect_opts(), nfs_port, &globals.hostname);
     let client = Arc::new(client);
 
     let ops = V2Ops::new(client);
@@ -279,10 +228,7 @@ async fn connect_v4_mount(args: &MountArgs, target: &crate::cli::target::Target,
         eprintln!("{}", crate::output::status_info(&format!("Connecting to {host}:{nfs_port} via NFSv4 (no MOUNT)")));
     }
 
-    let pool = Arc::new(match &globals.proxy {
-        Some(p) => ConnectionPool::with_proxy(p.clone()),
-        None => ConnectionPool::default_config(),
-    });
+    let pool = Arc::new(ConnectionPool::with_opts(globals.connect_opts()));
     let circuit = Arc::new(CircuitBreaker::default_config());
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let gids = crate::cli::probe::build_gid_list(globals.gid, &globals.aux_gids);

@@ -1,102 +1,107 @@
 # Filesystem escape matrix
 
-Systematic testing of NFS export escape (constructing the filesystem root file handle from an export handle) across 22 Linux filesystem types. All results from live testing on kernel 6.8.0 (Ubuntu 24.04, knfsd) using nfswolf.
+Systematic testing of NFS export escape (constructing the filesystem root file handle from an export handle) across 18 Linux filesystem types in 22 configurations (four XFS variants and two BTRFS variants are listed separately). All results from live testing on kernel 6.8.0 (Ubuntu 24.04, knfsd) using nfswolf.
 
 !!! info "What is export escape?"
     When an NFS server exports a subdirectory (e.g., `/srv/nfs/shared`), the client receives a file handle scoped to that directory. Export escape constructs a new file handle pointing to the filesystem root (`/`), breaking out of the export boundary. This works because NFS file handles are bearer tokens: any valid handle works regardless of how it was obtained. See [F-2.1](../security/access-control/F-2.1-export-escape.md) for the full finding.
 
 ## Summary table
 
+Every escapable row is automated: `nfswolf escape`, `nfswolf escape --fast` and the `escape-root` shell command (which runs the same fast pipeline) all build the static candidate table, the BTRFS subvolume handles and the filesystem-specific constructors for each seed handle. Only the brute-force inode sweep is limited to the full `escape` run.
+
 | Filesystem | Tier | Escapable | Root Inode | Handle Size | fileid_type | Method | Notes |
 |------------|------|-----------|-----------|-------------|-------------|--------|-------|
 | ext2 | 1 | **Yes** | 2 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | Detected as ext4; shared `ext4_export_ops` |
 | ext3 | 1 | **Yes** | 2 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | Same kernel path as ext2 |
 | ext4 | 1 | **Yes** | 2 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | Primary ext family |
-| XFS v4 | 1 | **Yes** | 128 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | Standard XFS |
-| XFS v5 | 1 | **Yes** | 128 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | Same as v4 |
-| XFS inode64 | 1 | **Yes** | 128 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | isize=512 |
-| XFS ino1024 | 1 | **Yes** | 64 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | isize=1024 changes root inode |
+| XFS v4 | 1 | **Yes** | 128, 64 or 32 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | Root inode depends on inode size and AG layout; all three are probed |
+| XFS v5 | 1 | **Yes** | 128, 64 or 32 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | As above |
+| XFS inode64 | 1 | **Yes** | 128, 64 or 32 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | isize=512 |
+| XFS ino1024 | 1 | **Yes** | 128, 64 or 32 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | isize=1024; a larger inode size lowers the root inode number |
 | JFS | 1 | **Yes** | 2 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | IBM JFS, standard format |
-| SquashFS | 1 | **Yes** | 2 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | Read-only filesystem |
+| SquashFS | 1 | **Yes** | Set by mksquashfs | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | Read-only; the static table probes inodes 2 and 7 |
 | NTFS3 | 1 | **Yes** | 5 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | gen=5 on freshly formatted volumes |
-| BTRFS | 2 | **Yes** | subvol 5 | 40 B | 0x4d (BTRFS) | `escape` only | Custom handle; subvol 5 = FS_TREE |
-| BTRFS (enc) | 2 | **Yes** | subvol 5 | 40 B | 0x4d (BTRFS) | `escape` only | Encrypted, same handle format |
-| f2fs | 3 | **Yes** | 3 | 28 B | 1 (INO32_GEN) | Manual handle | Root is inode 3, not 2 |
-| VFAT | 3 | **Yes** | 1 | 28 B | 1 (INO32_GEN) | Manual handle | Root is inode 1 |
-| ZFS | 4 | **Yes** | 34 | Custom | Custom (zfid) | FS-specific construction | gen=0 bypass for root object |
-| EROFS | 4 | **Yes** | 36 (nid) | Custom | 0x81 (INO64_GEN) | FS-specific construction | Gen ignored (read-only FS) |
-| UDF | 4 | **Yes** | 130 (block) | Custom | 0x51 (FILEID_UDF) | FS-specific construction | gen=0 bypasses validation |
-| ISO 9660 | 4 | **Yes** | PVD block | Custom | 1 (bit-packed) | FS-specific construction | gen=0 accepted (lenient) |
-| bcachefs | 4 | **Yes** | 4096 | 12 B | 0xb1 (custom) | FS-specific construction | gen=0 accepted empirically on kernel 6.8 |
-| ReiserFS | -- | N/A | 2 | -- | -- | Export is FS root | Nothing to escape to |
-| NILFS2 | -- | N/A | 2 | -- | -- | Export is FS root | Nothing to escape to |
-| tmpfs | 5 | **No** | 1 | 12 B | 1 (non-standard) | -- | Random gen per mount |
+| f2fs | 1 | **Yes** | 3 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | `F2FS_ROOT_INO` is 3, not 2 |
+| VFAT | 1 | **Yes** | 1 | 28 B | 1 (INO32_GEN) | `escape` + `escape-root` | FAT root is inode 1 (`MSDOS_ROOT_INO`) in the inode-number handle format (the default, and `nfs=stale_rw`) |
+| BTRFS | 2 | **Yes** | subvol 5 | 40 B | 0x4d (BTRFS) | `escape` + `escape-root` | Custom handle; subvol 5 = FS_TREE |
+| BTRFS (enc) | 2 | **Yes** | subvol 5 | 40 B | 0x4d (BTRFS) | `escape` + `escape-root` | Encrypted, same handle format |
+| ZFS | 3 | **Yes** | object 34 | Custom (12 B fid) | 1 (zfid_short_t payload) | `escape` + `escape-root` | gen=0 bypass for root object |
+| EROFS | 3 | **Yes** | 36 (nid) | Custom (12 B fid) | 0x81 (INO64_GEN) | `escape` + `escape-root` | Gen ignored (read-only FS) |
+| UDF | 3 | **Yes** | 130 (block) | Custom (12 B fid) | 0x51 (FILEID_UDF) | `escape` + `escape-root` | gen=0 bypasses validation; several common root blocks are probed |
+| ISO 9660 | 3 | **Yes** | PVD block | Custom (12 B fid) | 1 (bit-packed) | `escape` + `escape-root` | gen=0 accepted (lenient); root LBAs 18-30 are probed |
+| bcachefs | 3 | **Yes** | 4096 | Custom (16 B fid) | 0xb1 (custom) | `escape` + `escape-root` | gen=0 accepted empirically on kernel 6.8 |
+| ReiserFS | -- | N/A | 2 | -- | -- | Export is FS root | Nothing to escape to; the static table still carries inode 2 gen=1 |
+| NILFS2 | -- | N/A | 2 | -- | -- | Export is FS root | Nothing to escape to; a `FILEID_NILFS` (0x61) root constructor exists |
+| tmpfs | 4 | **No** | 1 | 12 B | 1 (non-standard) | -- | Random gen per mount |
 
 ## Escapability tiers
 
-### Tier 1: escapable out of the box (11 filesystem types)
+### Tier 1: static INO32_GEN candidates (9 filesystem types)
 
-ext2, ext3, ext4, XFS (all variants), JFS, SquashFS, NTFS3. These all use the standard knfsd `FILEID_INO32_GEN` format (fileid_type=1) with a 32-bit inode and 32-bit generation number. The generation number for root inodes is 0 for most filesystems; NTFS3 uses gen=5 (the initial MFT Update Sequence Number on freshly formatted volumes). All values are in the static candidate table, so nfswolf constructs a valid root handle deterministically.
+ext2, ext3, ext4, XFS (all four variants), JFS, SquashFS, NTFS3, f2fs, VFAT. These all use the standard knfsd `FILEID_INO32_GEN` format (fileid_type=1) with a 32-bit inode and 32-bit generation number. The generation number for root inodes is 0 for most filesystems; NTFS3 uses gen=5 (the initial MFT Update Sequence Number on freshly formatted volumes). nfswolf's static candidate table (`INO32_GEN_CANDIDATES` in `src/engine/file_handle.rs`) holds nine (inode, generation) pairs, tried in this order:
+
+| Inode | Generation | Filesystem |
+|-------|-----------|------------|
+| 2 | 0 | ext2, ext3, ext4, JFS |
+| 3 | 0 | f2fs |
+| 1 | 0 | VFAT |
+| 128 | 0 | XFS |
+| 64 | 0 | XFS |
+| 32 | 0 | XFS |
+| 5 | 5 | NTFS3 |
+| 2 | 1 | ReiserFS |
+| 7 | 0 | SquashFS |
+
+When the seed handle carries a generation number of its own, every inode in the table is tried with that generation as well. The probe layer rejects hits that are not directories or that resolve to the export itself, so a table entry that happens to name an ordinary file on another filesystem is harmless.
 
 Both `nfswolf escape` and the `escape-root` shell command work without any special flags.
 
-**Handle structure (28 bytes):**
+**Handle structure (28 bytes, fsid_type=6):**
 
-```
-01 00 06 01  -- version=1, fsid_type=6, fileid_type=1 (INO32_GEN)
-XX XX XX XX XX XX XX XX XX XX XX XX  -- 12-byte fsid (UUID portion)
-XX XX XX XX  -- 4-byte export inode
-02 00 00 00  -- root inode (LE u32: 2 for ext/JFS/SquashFS, 128 for XFS, 5 for NTFS3)
+```text
+01 00 06 01  -- version=1, auth_type=0, fsid_type=6 (UUID16), fileid_type=1 (INO32_GEN)
+XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX  -- 16-byte filesystem UUID
+02 00 00 00  -- root inode (LE u32: 2 for ext/JFS, 3 for f2fs, 1 for VFAT, 128/64/32 for XFS, 5 for NTFS3)
 00 00 00 00  -- generation (0 for most; 5 for NTFS3)
 ```
 
-**Root inodes by filesystem:**
+The fsid portion is copied from the seed handle, so its length follows the seed's fsid_type (4 to 24 bytes); only the fileid portion is replaced.
 
-| Filesystem | Root Inode | Generation |
-|------------|-----------|------------|
-| ext2, ext3, ext4, JFS, SquashFS | 2 | 0 |
-| XFS v4, v5, inode64 | 128 | 0 |
-| XFS ino1024 | 64 | 0 |
-| NTFS3 | 5 | 5 |
+**XFS root inode.** An XFS inode number encodes the allocation group, the AG block and the slot within that block, so the root inode (`sb_rootino`, the first inode of the first inode chunk in AG 0) is the AG block of that chunk shifted left by log2(inodes per block). Doubling the inode size halves the inodes per block and halves the root inode number, and the chunk's AG block depends on the mkfs layout. nfswolf does not try to predict which value a given mkfs produced; it probes 128, 64 and 32. XFS also switches to `FILEID_INO64_GEN` (0x81: 64-bit inode, 32-bit generation) when the filesystem's inode numbers do not all fit in 32 bits; the test images were small enough for type 1. The constructor keeps whichever fileid_type the seed handle carries.
 
-### Tier 2: escapable via `escape` subcommand (BTRFS)
+**SquashFS root inode.** mksquashfs assigns inode numbers when it builds the image, so the root's number varies by image. The static table covers inodes 2 and 7, and the full `escape` sweep covers the rest of the low range.
 
-BTRFS uses a custom handle format (fileid_type=0x4d) with a 256-bit subvolume identifier. The `escape` subcommand probes BTRFS subvol 5 (`FS_TREE_OBJECTID`) and succeeds. The `escape-root` shell command tries ext4/XFS candidates first, and its BTRFS probe ordering differs, so it fails on BTRFS.
+**Brute-force sweep (full `escape` only).** After the table, `escape` without `--fast` tries inodes 1-5 with generations 0-5, then inodes 6 to `--max-root-scan` (default 200) with generation 0. `--fast` and `escape-root` skip this sweep.
 
-**BTRFS root handle (40 bytes):**
+### Tier 2: BTRFS subvolumes
 
+BTRFS uses a custom handle format (fileid_type=0x4d) that names the subvolume tree. nfswolf builds a handle for the root directory (objectid 256) of subvolume 5 (`FS_TREE_OBJECTID`), then of user subvolumes 256 and up: `--btrfs-subvols` of them (default 16) in a full `escape` run, two in `--fast` and `escape-root`. For a compound-UUID seed (fsid_type=7), each handle is also built in the UUID-only fsid_type=6 form.
+
+**BTRFS root handle (40 bytes, fsid_type=6):**
+
+```text
+01 00 06 4d  -- version=1, auth_type=0, fsid_type=6 (UUID16), fileid_type=0x4d (BTRFS)
+XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX  -- 16-byte filesystem UUID
+00 01 00 00 00 00 00 00  -- objectid (LE u64): 256, the subvolume's root directory
+05 00 00 00 00 00 00 00  -- root_objectid (LE u64): subvolume 5
+00 00 00 00  -- generation
 ```
-01 00 06 4d  -- version=1, fsid_type=6, fileid_type=0x4d (BTRFS)
-XX XX XX XX XX XX XX XX XX XX XX XX  -- UUID
-XX XX XX XX  -- export inode
-00 01 00 00 00 00 00 00  -- subvol portion
-05 00 00 00 00 00 00 00 00 00 00 00  -- root tree ref (subvol 5)
-```
 
-### Tier 3: escapable with known root inode (f2fs, VFAT)
+### Tier 3: filesystem-specific handle construction (ZFS, EROFS, UDF, ISO 9660, bcachefs)
 
-These filesystems use the standard `FILEID_INO32_GEN` format, identical to ext4, but have root inodes outside the default scan range. Escape confirmed with manually constructed handles.
-
-| Filesystem | Root Inode | Why Default Scan Misses It |
-|------------|-----------|---------------------------|
-| f2fs | 3 | F2FS_ROOT_INO is 3, not 2 or 128 |
-| VFAT | 1 | FAT root is inode 1; scan starts at 2 |
-
-### Tier 4: escapable with FS-specific handle construction (ZFS, EROFS, UDF, ISO 9660, bcachefs)
-
-These filesystems use custom `encode_fh()` implementations with non-standard handle layouts, but escape is possible because their generation checks are weak or absent for the root object.
+These filesystems use custom `encode_fh()` implementations with non-standard handle layouts, but escape is possible because their generation checks are weak or absent for the root object. nfswolf has a constructor for each and runs them automatically after the BTRFS handles.
 
 | Filesystem | Root ID | FID Layout | Gen Check | Why Escape Works |
 |------------|---------|-----------|-----------|------------------|
-| ZFS | object 34 | `zfid_short_t{len, object, gen}` | Strict, but root bypasses | `zfs_vget()` has explicit gen=0 bypass for root object |
+| ZFS | object 34 | `zfid_short_t{zf_len: u16, zf_object: [u8; 6], zf_gen: [u8; 4]}` under fileid_type 1 | Strict, but root bypasses | `zfs_vget()` has explicit gen=0 bypass for root object |
 | EROFS | nid 36 | `FILEID_INO64_GEN{nid_hi, nid_lo, gen}` | Ignored entirely | Read-only FS; staleness impossible |
-| UDF | block 130 | `FILEID_UDF{block, partref, gen}` | Lenient: `if (gen && gen != ...)` | gen=0 skips the validation check |
-| ISO 9660 | PVD block | Custom bit-packed `{block, offset, gen}` | Lenient | Same gen=0 bypass as UDF |
+| UDF | block 130 | `FILEID_UDF{block, partref, parent_partref, gen}` | Lenient: `if (gen && gen != ...)` | gen=0 skips the validation check; blocks 66, 130, 258, 2, 64, 128, 256 and 512 are probed |
+| ISO 9660 | PVD block | Custom bit-packed `{block, offset, gen}` | Lenient | Same gen=0 bypass as UDF; root LBAs 18-30 are probed |
 | bcachefs | inum 4096 | `{inum: u64, subvol: u32, gen: u32}` | Strict in source, lenient in practice | gen=0 accepted empirically on kernel 6.8 despite strict check in source |
 
-All five confirmed with manual handle construction and live read of files outside the export boundary.
+All five confirmed with live read of files outside the export boundary. The engine also carries a constructor for NILFS2 (`FILEID_NILFS_WITHOUT_PARENT`, inode 2, checkpoint 0), for servers that hand out that format. FAT exports mounted `nfs=nostale_ro` use `FILEID_FAT_WITHOUT_PARENT` (0x71) handles keyed on the directory entry position, which nfswolf does not construct.
 
-### Tier 5: not escapable (tmpfs)
+### Tier 4: not escapable (tmpfs)
 
 tmpfs enforces a strict 32-bit generation check with a random value that rejects gen=0. Without knowing the exact generation value, which is unpredictable, escape requires brute-forcing 2^32 values (~4 billion probes).
 
@@ -110,7 +115,7 @@ The following analysis is based on Linux 6.8.0 kernel source.
 
 ### Standard path (Tier 1 filesystems)
 
-ext2/3/4, XFS, JFS, SquashFS, and NTFS3 all use `generic_encode_ino32_fh` or equivalent, producing `FILEID_INO32_GEN` (type 1) handles. The `generic_fh_to_dentry` path does not enforce generation for root inodes on most filesystems (gen=0 is accepted). NTFS3 enforces a strict gen check, but the root directory (MFT entry 5) has a known initial generation of 5 on freshly formatted volumes, so the handle is constructible without brute-force.
+ext2/3/4, XFS, JFS, SquashFS, NTFS3, f2fs and VFAT all use `generic_encode_ino32_fh` or equivalent, producing `FILEID_INO32_GEN` (type 1) handles. The `generic_fh_to_dentry` path does not enforce generation for root inodes on most filesystems (gen=0 is accepted). NTFS3 enforces a strict gen check, but the root directory (MFT entry 5) has a known initial generation of 5 on freshly formatted volumes, so the handle is constructible without brute-force.
 
 ### tmpfs (`mm/shmem.c`)
 
@@ -138,13 +143,14 @@ Root is MFT entry 5. Generation comes from MFT USN, which is non-zero on formatt
 Custom `zpl_encode_fh` packs `fid_t`:
 
 ```c
-struct zfid_short_t {
-    uint16_t zf_len;      // 10
-    uint16_t zf_pad;
-    uint32_t zf_gen;
-    uint64_t zf_object;   // 34 for root
-};
+typedef struct zfid_short {
+    uint16_t zf_len;          // 10
+    uint8_t  zf_object[6];    // little-endian; 34 for root
+    uint8_t  zf_gen[4];       // little-endian
+} zfid_short_t;
 ```
+
+knfsd reports fileid_type 1 for these handles, so nfswolf writes fileid_type 1 followed by the 12-byte `zfid_short_t` with object 34 and generation 0.
 
 `zfs_zget()` has a gen=0 bypass specifically for the root object, making escape trivial once you know the layout.
 
@@ -153,7 +159,7 @@ struct zfid_short_t {
 Custom fileid types (`FILEID_BCACHEFS_WITHOUT_PARENT` for dirs):
 
 ```c
-struct bcachefs_fid { u32 inum; u32 subvol; u32 gen; };  // 12 bytes
+struct bcachefs_fid { u64 inum; u32 subvol; u32 gen; } __packed;  // 16 bytes
 // root: inum=4096, subvol=1
 ```
 
@@ -241,11 +247,12 @@ nfswolf escape 10.x.x.x --json --all-handles
 
 ## Coverage in nfswolf
 
-The escape engine (`src/engine/escape.rs`) implements the `EscapeProbe` trait with filesystem-specific handle construction for 18 of 19 tested filesystem types. Only tmpfs resists escape entirely.
+The escape engine (`src/engine/escape.rs`, with the constructors in `src/engine/file_handle.rs`) builds root handle candidates for 17 of the 18 filesystem types tested; only tmpfs resists escape entirely. 15 were confirmed by a live escape. ReiserFS and NILFS2 were exported at their filesystem root in the test setup, so there was nothing to escape to.
 
 | Component | Filesystem Coverage |
 |-----------|-------------------|
-| `escape` subcommand | Tier 1 + Tier 2 (automated) |
-| `escape-root` shell command | Tier 1 (automated) |
+| `escape` subcommand | Tiers 1-3, plus the brute-force inode sweep (automated) |
+| `escape --fast` | Tiers 1-3 for one export, no sweep (automated) |
+| `escape-root` shell command | Same as `escape --fast`: it calls the same `run_fast()` pipeline |
 | `FileHandleAnalyzer` | All tiers (fingerprinting + construction) |
-| `find_escape_root()` | 18/19 types via `EscapeProbe` trait |
+| `find_escape_root()` | Tiers 1-3 plus the sweep, via the `EscapeProbe` trait |

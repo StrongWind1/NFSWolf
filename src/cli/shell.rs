@@ -73,9 +73,10 @@ pub(crate) struct ShellArgs {
     pub nfs_version: Option<u32>,
 
     /// AUTH_SHORT session token (hex). Replays a server-issued opaque token
-    /// as the RPC credential instead of AUTH_SYS. Obtain from a packet
-    /// capture or from the analyzer's F-3.9 active probe against non-Linux
-    /// NFS servers (Solaris, NetApp ONTAP).
+    /// as the RPC credential instead of AUTH_SYS. Take it from the reply
+    /// verifier in a packet capture of a client of a server that issues
+    /// AUTH_SHORT (Solaris, NetApp ONTAP); `analyze` flags exports that
+    /// advertise the flavor (F-3.9).
     #[arg(long, value_name = "HEX", help_heading = H_IDENTITY)]
     pub short_token: Option<String>,
 
@@ -125,7 +126,7 @@ impl ShellSetup {
         let hostname = globals.hostname.clone();
 
         // As many idle connections per identity as a transfer keeps in flight.
-        let pool = Arc::new(ConnectionPool::for_parallel_transfers(crate::shell::transfer::MAX_PIPELINE_DEPTH, globals.proxy.clone()));
+        let pool = Arc::new(ConnectionPool::for_parallel_transfers(crate::shell::transfer::MAX_PIPELINE_DEPTH, globals.connect_opts()));
         let circuit = Arc::new(CircuitBreaker::default_config());
         let stealth = StealthConfig::new(globals.delay, globals.jitter);
         let gids = build_gid_list(gid, &globals.aux_gids);
@@ -233,17 +234,7 @@ async fn run_repl<O: crate::shell::ops::ShellOps>(shell: &mut NfsShell<O>, host:
 /// Determine the NFS version to use.
 ///
 /// If the user set `--nfs-version`, return that immediately (no network I/O).
-/// Otherwise, probe the server: try v3 (portmapper GETPORT 100003/3), then
-/// v2 (GETPORT 100003/2), then v4 (direct COMPOUND to port 2049). v3 first
-/// because it is the most common; v2 before v4 because v2 servers tend to
-/// have weaker security (more interesting for a security tool); v4 last as
-/// the fallback when portmapper (111/tcp) is firewalled.
-///
-/// GETPORT alone is not sufficient: some portmappers register all NFS
-/// versions against a single daemon that only speaks a subset (e.g. v2-only
-/// knfsd registered as v2 *and* v3). After GETPORT returns a port, we send
-/// an RPC NULL to that port with the claimed version. A PROG_MISMATCH reply
-/// means the daemon does not actually speak that version.
+/// Otherwise probe the server with [`detect_nfs_version`].
 async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Result<u32> {
     if let Some(v) = args.nfs_version {
         return Ok(v);
@@ -251,48 +242,62 @@ async fn resolve_version(args: &ShellArgs, globals: &GlobalOpts) -> anyhow::Resu
 
     // Parse the target just to extract the host IP.
     let target = crate::cli::target::parse(&args.target, args.export.as_deref(), args.handle.as_deref(), false)?;
-    let host = target.host;
+    detect_nfs_version(target.host, globals).await
+}
 
+/// Per-probe timeout for version detection when `--timeout` is not given.
+const VERSION_PROBE_TIMEOUT_MS: u64 = 2000;
+
+/// Probe `host` for the NFS version to use: v3, then v2, then v4.
+///
+/// v3 first because it is the most common; v2 before v4 because v2 servers
+/// tend to have weaker security (more interesting for a security tool); v4
+/// last as the fallback when the portmapper (111/tcp) is firewalled.
+///
+/// v3 and v2 are located with portmapper GETPORT on `--rpc-port`, unless
+/// `--skip-rpc` or `--nfs-port` says where NFS is. GETPORT alone is not
+/// sufficient: some portmappers register all NFS versions against a single
+/// daemon that only speaks a subset (e.g. v2-only knfsd registered as v2
+/// *and* v3), so every candidate is confirmed with an RPC NULL at the claimed
+/// version. A PROG_MISMATCH reply means the daemon does not speak it. v4 is a
+/// direct COMPOUND on the NFS port. Each probe is bounded by `--timeout`.
+///
+/// Shared by `shell` and `mount`.
+pub(crate) async fn detect_nfs_version(host: std::net::IpAddr, globals: &GlobalOpts) -> anyhow::Result<u32> {
     if !globals.quiet {
         eprintln!("{}", crate::output::status_info("No --nfs-version specified, probing server..."));
     }
 
-    let probe_timeout = Duration::from_secs(2);
-    let pmap_addr = SocketAddr::new(host, 111);
-    let portmap = match &globals.proxy {
-        Some(p) => crate::proto::portmap::PortmapClient::default_port().with_proxy(p.clone()),
-        None => crate::proto::portmap::PortmapClient::default_port(),
-    };
-
-    // Try NFSv3 via portmapper GETPORT, then verify with a TCP NULL call.
-    if let Ok(Ok(port)) = tokio::time::timeout(probe_timeout, portmap.query_port(pmap_addr, 100_003, 3)).await
-        && port > 0
-        && verify_nfs_version_tcp(host, port, 3, probe_timeout, globals.proxy.as_deref()).await
-    {
-        tracing::info!(version = 3u32, port, "NFS version detected");
-        if !globals.quiet {
-            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv3 on port {port}")));
-        }
-        return Ok(3);
-    }
-
-    // Try NFSv2 via portmapper GETPORT, then verify with a TCP NULL call.
-    if let Ok(Ok(port)) = tokio::time::timeout(probe_timeout, portmap.query_port(pmap_addr, 100_003, 2)).await
-        && port > 0
-        && verify_nfs_version_tcp(host, port, 2, probe_timeout, globals.proxy.as_deref()).await
-    {
-        tracing::info!(version = 2u32, port, "NFS version detected");
-        if !globals.quiet {
-            eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv2 on port {port}")));
-        }
-        return Ok(2);
-    }
-
-    // Try NFSv4 via direct COMPOUND to port 2049 (no portmapper needed).
+    let probe_timeout = Duration::from_millis(globals.timeout_ms_or(VERSION_PROBE_TIMEOUT_MS));
     let nfs_port = globals.nfs_port.unwrap_or(2049);
+    let proxy = globals.proxy.as_deref();
+    let portmap = globals.connect_opts().portmap();
+    let pmap_addr = SocketAddr::new(host, globals.rpc_port.unwrap_or(111));
+
+    for version in [3, 2] {
+        let port = if globals.skip_rpc || globals.nfs_port.is_some() {
+            Some(nfs_port)
+        } else {
+            match tokio::time::timeout(probe_timeout, portmap.query_port(pmap_addr, 100_003, version)).await {
+                Ok(Ok(p)) if p > 0 => Some(p),
+                _ => None,
+            }
+        };
+        if let Some(port) = port
+            && verify_nfs_version_tcp(host, port, version, probe_timeout, proxy).await
+        {
+            tracing::info!(version, port, "NFS version detected");
+            if !globals.quiet {
+                eprintln!("{}", crate::output::status_ok(&format!("Detected NFSv{version} on port {port}")));
+            }
+            return Ok(version);
+        }
+    }
+
+    // NFSv4 via direct COMPOUND to the NFS port (no portmapper needed).
     let v4_addr = SocketAddr::new(host, nfs_port);
     if let Ok(Ok(_)) = tokio::time::timeout(probe_timeout, async {
-        let mut client = crate::proto::nfs4::compound::Nfs4DirectClient::connect_proxy(v4_addr, globals.proxy.as_deref()).await?;
+        let mut client = crate::proto::nfs4::compound::Nfs4DirectClient::connect_proxy(v4_addr, proxy).await?;
         client.get_root_fh().await
     })
     .await
@@ -331,8 +336,10 @@ pub(crate) async fn verify_nfs_version_tcp(host: std::net::IpAddr, port: u16, ve
     };
 
     let mut client = RpcClient::new(TokioIo::new(stream));
-    // NULL call: program 100003, proc 0, no args/reply body.
-    matches!(client.call::<Void, Void>(100_003, version, 0, &Void).await, Ok(Void))
+    // NULL call: program 100003, proc 0, no args/reply body (RFC 1813 sec. 3.3.0).
+    // Bounded too: a host that completes the handshake and never answers
+    // would otherwise hang the probe.
+    matches!(tokio::time::timeout(timeout_dur, client.call::<Void, Void>(100_003, version, 0, &Void)).await, Ok(Ok(Void)))
 }
 
 // =============================================================================

@@ -54,7 +54,7 @@ The mountpoint must already exist and be a directory.
 
 ### Version-neutral operation
 
-The FUSE adapter works with NFSv2, NFSv3, and NFSv4 through the same `ShellOps` trait that powers the interactive shell. Version detection follows the same probe sequence as the shell (v3, then v2, then v4) when `--nfs-version` is omitted.
+The FUSE adapter works with NFSv2, NFSv3, and NFSv4 through the same `ShellOps` trait that powers the interactive shell. Version detection follows the same probe sequence as the shell (v3, then v2, then v4) when `--nfs-version` is omitted, with each probe bounded by `--timeout` (default 2000 ms). With `--skip-rpc`, the portmapper is never contacted: v3 and v2 are probed with an RPC NULL on the NFS port, then v4. `--skip-mountd` does not apply to `mount`; use `--handle` or `--nfs-version 4` to keep it away from MOUNT.
 
 ```bash
 # Auto-detect (default)

@@ -71,7 +71,7 @@ These are NFS protocol implementations used as building blocks by other tools or
 | [libnfs](https://github.com/sahlberg/libnfs) | C | v2, v3, v4 | The dominant userspace NFS library. Provides three API tiers: raw async RPC, high-level async VFS, and synchronous POSIX-like operations, with zero-copy reads and writes. Used by niffler (via FFI) and fuse_nfs (via anfs). Not used by nfswolf because the C dependency breaks the static binary goal. |
 | [anfs](https://github.com/skelsec/anfs) | Python | v3 | Asynchronous NFSv3 client from the OctoPwn ecosystem. Provides a command-line application (`anfsclient`) for browsing, downloading, deleting, and creating files over NFS3 with privileged-port support and dynamic UID impersonation per directory. Powers fuse_nfs. |
 | [pynfs](https://github.com/hvs-consulting/pynfs) | Python | v4.0, v4.1 | NFSv4 test framework from linux-nfs.org. The HVS Consulting fork adds NFS enumeration modifications and powers nfs_analyze's v4 checks including SECINFO queries and pseudo-filesystem mapping. |
-| [nfs3-rs](https://github.com/Vaiz/nfs3) | Rust | v3 | Modular multi-crate workspace providing both an async NFSv3 server (with pluggable virtual filesystem traits) and an async client. **Absorbed into nfswolf v0.6.0** -- the XDR, RPC, MOUNT, and NFSv3 code lives in `crates/`. Its `nfs3_server` crate remains a dev-dependency for integration testing. |
+| [nfs3-rs](https://github.com/Vaiz/nfs3) | Rust | v3 | Modular multi-crate workspace providing both an async NFSv3 server (with pluggable virtual filesystem traits) and an async client. **Absorbed into nfswolf v0.7.0** -- the XDR, RPC, MOUNT, and NFSv3 code lives in `crates/`. Its `nfs3_server` crate remains a dev-dependency for integration testing. |
 | [go-nfs](https://github.com/willscott/go-nfs) | Go | v3 | Pure Go NFSv3 server implementation with read-write support. Mutations are stored in memory rather than written back to disk (overlay filesystem model). Pluggable VFS layer. |
 | [go-nfs-client](https://github.com/vmware/go-nfs-client) | Go | v4 | Pure Go NFSv4 client designed primarily for AWS EFS. Deliberately minimal: fully synchronous with context-based cancellation, no locking, no reconnection, no ACLs, no auth methods beyond AUTH_SYS. |
 | [nfs4](https://github.com/bobbobbio/nfs4) | Rust | v4.1 | NFSv4.1 client library and CLI binary. Used as a type reference for NFSv4.1 COMPOUND ops during nfswolf's v4 crate development. Uses serde-xdr (incompatible codec), so nfswolf adapted the types rather than importing. NetAppLabs maintains [a fork](https://github.com/NetAppLabs/nfs4p1-rs). |
@@ -150,7 +150,7 @@ No single tool before nfswolf covered the complete NFS attack path in one binary
 |-------------|-----------------|------------------|
 | Reconnaissance | nmap + RPCScan | Unified scan with portmap amplification, NIS detection, version probing (v2/v3/v4 with PROG_MISMATCH extraction), RDMA detection, TLS/STRIPTLS detection |
 | Analysis | nfs_analyze | Portmap amplification measurement, AUTH_TLS detection, AUTH_NONE metadata leak, AUTH_SHORT replay detection, AUTH_TOOWEAK oracle, PATHCONF analysis, full 62-finding catalog with RFC citations |
-| Export Escape | nfs_analyze (handle construction) + nfscli (LOOKUP `..`) | Single `escape` subcommand covering 18/19 filesystem types (vs. 4 in nfs_analyze), NFSv4 escape path when MOUNT is firewalled, multi-source seed gathering (MOUNT v3, MOUNT v1, NFSv4 LOOKUP, upward traversal), scoring/annotation, `--fast` mode for integration with scan |
+| Export Escape | nfs_analyze (handle construction) + nfscli (LOOKUP `..`) | Single `escape` subcommand covering 17 of the 18 filesystem types tested, only tmpfs resisting (vs. 4 in nfs_analyze), NFSv4 escape path when MOUNT is firewalled, multi-source seed gathering (MOUNT v3, MOUNT v1, NFSv4 LOOKUP, upward traversal), scoring/annotation, `--fast` mode for integration with scan |
 | Interactive Shell | nfscli | Auxiliary GID injection, handle construction escape from within the shell (`escape-root` command), NFSv4 support, sibling export discovery via LOOKUPP, credential escalation caching, tab completion, recursive get/put with progress bars, secrets scan, SUID scan, world-writable scan |
 | FUSE Mount | fuse_nfs | Auto-UID + escape handle + SOCKS proxy + stealth unmount + NFSv2/v3/v4 in one binary, auto-version detection |
 | Secret Harvesting | niffler | Complementary -- nfswolf finds the attack path, niffler scans the accessible files |
@@ -159,7 +159,7 @@ No single tool before nfswolf covered the complete NFS attack path in one binary
 Capabilities unique to nfswolf that no prior tool implemented:
 
 - **18-filesystem escape coverage**: export escape across ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, and ISO9660. Prior tools covered at most 4 filesystem types (ext4, XFS, BTRFS, ZFS).
-- **Evidence-driven credential ladder**: automatic UID/GID escalation based on file ownership, mode bits, and READDIRPLUS-harvested identity ranking, with mode-bit pruning to skip unnecessary attempts. Prior tools either used fixed UID lists or required manual specification.
+- **Evidence-driven credential ladder**: automatic UID/GID escalation based on file ownership, mode bits and the owners seen in directory listings, with every rung claiming up to 16 supplementary groups and mode-bit pruning to skip unnecessary attempts. Prior tools either used fixed UID lists or required manual specification.
 - **Multi-version escape probing**: the escape pipeline gathers seeds from MOUNT v3, MOUNT v1, and NFSv4 LOOKUP, then probes constructed handles across all three NFS versions. This covers scenarios where one version is firewalled or returns different results.
 - **Offline handle decoder**: the `decode` subcommand dissects NFS file handles without any network access, printing every field (header, fsid, fileid) with OS/filesystem fingerprinting and security assessment. No prior tool offered offline handle analysis.
 - **Single static binary**: nfswolf compiles to a single musl-static binary with no runtime dependencies, deployable on jump boxes, containers, and embedded NAS appliances without installing language runtimes or development libraries.
@@ -194,7 +194,7 @@ The NFS security tool ecosystem spans five languages, each with trade-offs:
 
 Newer tools (nfswolf, niffler, EvilNFSClient) all ship as single static binaries -- you drop one file on a target, no runtime to install.
 
-The language choice also affects protocol implementation depth. Python tools tend to use existing libraries (libnfs via FFI, anfs, pynfs) and focus on application logic, while Rust and C tools implement the protocol stack directly. nfswolf owns its entire protocol stack across eight workspace crates, which means protocol-level attacks (handle construction, COMPOUND batching, stateid manipulation) can be implemented without library constraints. This architectural difference explains why nfswolf supports 18 filesystem types for escape while nfs_analyze supports 4 -- nfswolf can construct arbitrary handle formats because it controls the XDR encoding layer.
+The language choice also affects protocol implementation depth. Python tools tend to use existing libraries (libnfs via FFI, anfs, pynfs) and focus on application logic, while Rust and C tools implement the protocol stack directly. nfswolf owns its entire protocol stack across eight workspace crates, which means protocol-level attacks (handle construction, COMPOUND batching, stateid manipulation) can be implemented without library constraints. This architectural difference explains why nfswolf builds escape candidates for 17 filesystem types while nfs_analyze supports 4 -- nfswolf can construct arbitrary handle formats because it controls the XDR encoding layer.
 
 ## Historical timeline
 
@@ -242,7 +242,7 @@ pynfs (Python, NFSv4 test framework)
 
 nfswolf (Rust, owns entire protocol stack)
   |-- no external NFS library dependencies
-  |-- absorbed nfs3-rs codebase in v0.6.0
+  |-- absorbed nfs3-rs codebase in v0.7.0
   |-- adapted nfs4-rs types for v4 crate
 
 nfsshell, nfscli, EvilNFSClient, NFSwalker
@@ -260,7 +260,7 @@ For practitioners deciding which tool to use for a specific task:
 |-------------------|-----|-----|
 | Scan a network range for NFS services | nfswolf `scan` | Deepest enumeration (portmap amplification, NIS, RDMA, version probing, v4 pseudo-FS) |
 | Audit a single server for misconfigurations | nfswolf `analyze` or nfs_analyze | nfswolf has broader finding coverage (62 vs. ~15); nfs_analyze is lighter-weight for quick checks |
-| Break out of an NFS export | nfswolf `escape` | Covers 18 filesystem types vs. 4 in nfs_analyze; multi-version probing; NFSv4 escape path |
+| Break out of an NFS export | nfswolf `escape` | Covers 17 of the 18 filesystem types tested (only tmpfs resists) vs. 4 in nfs_analyze; multi-version probing; NFSv4 escape path |
 | Get an interactive shell on an NFS share | nfswolf `shell` or nfscli | nfswolf has NFSv4, credential caching, built-in escape; nfscli has IPv4 source spoofing |
 | Mount an NFS share with auto-UID | nfswolf `mount` or fuse_nfs | nfswolf has v2/v3/v4, escape handle, SOCKS proxy; fuse_nfs is Python-only, v3-only |
 | Scan for credentials and secrets on NFS | niffler | Purpose-built for credential scanning with rule engine and web dashboard |

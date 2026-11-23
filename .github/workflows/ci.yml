@@ -221,6 +221,14 @@ jobs:
       - name: cargo test ${{ matrix.flags }}
         run: cargo test --all-targets ${{ matrix.flags }}
 
+      # --all-targets leaves out doctests, which is where the crate README
+      # examples are compiled. Once is enough: they do not depend on features.
+      - name: cargo test --doc (crate README examples)
+        if: matrix.label == 'all-features'
+        run: |
+          set -euo pipefail
+          cargo test --workspace --doc --all-features
+
   # ---------------------------------------------------------------------------
   # feature-powerset -- does the code compile for every feature combination?
   # cargo-hack systematically tries every subset of features (the "powerset"),

@@ -43,6 +43,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::engine::scan_types::{HostResult, MountPortInfo, NfsPortInfo, PortReachability, TargetSpec, V4ExportEntry, VersionRange};
+use crate::proto::auth::Credential;
 use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs4::compound::Nfs4DirectClient;
 use crate::proto::nfs4::types::{ArgOp, CompoundArgs, CompoundBuilder, CompoundRes};
@@ -79,11 +80,18 @@ pub(crate) struct ScanConfig {
     pub skip_rpc: bool,
     /// Skip all MOUNT daemon queries (`--skip-mountd`).
     pub skip_mountd: bool,
+    /// Identity presented on MOUNT MNT (`-u`/`-g`/`--hostname`/`--aux-gids`).
+    ///
+    /// A `sec=sys` mountd answers `MNT3ERR_ACCES` to an AUTH_NONE MNT, so an
+    /// anonymous probe misses handles and auth flavors on exports that mount.
+    pub credential: Credential,
+    /// MOUNT only from a source port below 1024 (`--privileged-port`).
+    pub privileged_port: bool,
 }
 
 impl Default for ScanConfig {
     fn default() -> Self {
-        Self { concurrency: 256, timeout: Duration::from_secs(3), scan_udp: false, nfs_ports: vec![], mount_port: None, rpc_port: None, skip_rpc: false, skip_mountd: false }
+        Self { concurrency: 256, timeout: Duration::from_secs(3), scan_udp: false, nfs_ports: vec![], mount_port: None, rpc_port: None, skip_rpc: false, skip_mountd: false, credential: Credential::None, privileged_port: false }
     }
 }
 
@@ -153,6 +161,8 @@ impl Scanner {
                     rpc_port: self.config.rpc_port,
                     skip_rpc: self.config.skip_rpc,
                     skip_mountd: self.config.skip_mountd,
+                    credential: self.config.credential.clone(),
+                    privileged_port: self.config.privileged_port,
                     proxy: self.proxy.clone(),
                     stealth: self.stealth.clone(),
                 };
@@ -242,8 +252,23 @@ struct ScanJob {
     rpc_port: Option<u16>,
     skip_rpc: bool,
     skip_mountd: bool,
+    credential: Credential,
+    privileged_port: bool,
     proxy: Option<String>,
     stealth: StealthConfig,
+}
+
+impl ScanJob {
+    /// A MOUNT client for this host: fixed `port` when known, else resolved
+    /// through the portmapper on `--rpc-port`; always with the operator's
+    /// identity, proxy, and source-port policy.
+    fn mount_client(&self, port: Option<u16>) -> NfsMountClient {
+        let mut mc = port.map_or_else(NfsMountClient::new, NfsMountClient::with_port).with_portmapper(self.rpc_port, self.skip_rpc).with_credential(self.credential.clone());
+        if let Some(ref p) = self.proxy {
+            mc = mc.with_proxy(p.clone());
+        }
+        if self.privileged_port { mc.require_privileged() } else { mc }
+    }
 }
 
 /// Probe a single host. Returns `None` if no NFS version is confirmed.
@@ -329,7 +354,9 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // =======================================================================
 
     // --- Path A: Portmapper DUMP + GETPORT (if RPC reachable AND !skip_rpc) ---
-    let portmap = PortmapClient::default_port();
+    // PortmapClient connects to its own port, not the one in the address it
+    // is handed, so `--rpc-port` has to be set here.
+    let portmap = PortmapClient::new(rpc_port_num);
     let portmap = if let Some(ref p) = job.proxy { portmap.with_proxy(p.clone()) } else { portmap };
 
     // Try TCP DUMP first; fall back to UDP DUMP if TCP is unreachable but UDP is.
@@ -500,7 +527,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
                         is_port_open(SocketAddr::new(ip, port), probe_timeout, job.proxy.as_deref()).await
                     };
                     if port_open {
-                        let mc = if let Some(ref p) = job.proxy { NfsMountClient::with_port(port).with_proxy(p.clone()) } else { NfsMountClient::with_port(port) };
+                        let mc = job.mount_client(Some(port));
                         job.stealth.wait().await;
                         if timeout(probe_timeout, mc.list_exports(portmap_addr)).await.is_ok_and(|r| r.is_ok()) {
                             _ = mountd_ports.insert(port);
@@ -550,19 +577,7 @@ async fn scan_host(target: TargetSpec, job: ScanJob) -> Option<HostResult> {
     // EXPORT and DUMP calls connect directly instead of trying GETPORT
     // through the unreachable TCP portmapper.
     let explicit_mount_port = job.mount_port.or_else(|| if portmap_reachability.has_tcp() { None } else { mountd_ports.iter().next().copied() });
-    let mount_client = match explicit_mount_port {
-        Some(port) => {
-            let mc = NfsMountClient::with_port(port);
-            if let Some(ref p) = job.proxy { mc.with_proxy(p.clone()) } else { mc }
-        },
-        None => {
-            if let Some(ref p) = job.proxy {
-                NfsMountClient::new().with_proxy(p.clone())
-            } else {
-                NfsMountClient::new()
-            }
-        },
-    };
+    let mount_client = job.mount_client(explicit_mount_port);
 
     // =======================================================================
     // Phase 3: Data Collection

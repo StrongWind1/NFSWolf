@@ -4,6 +4,42 @@ All notable changes to nfswolf are documented here. Versions follow [Semantic Ve
 
 ---
 
+## Unreleased
+
+**Pipelined shell transfers, NFSv4 correctness fixes, and network flags honored everywhere. The next release is 2.0.0 because of breaking `nfs-v4` and `nfs-v3` library API changes.**
+
+- Pipeline shell `get`, `put`, `cp` and their `-r` forms: several READs or WRITEs in flight, the server's advertised transfer size, and `UNSTABLE` writes plus one COMMIT checked against the write verifiers
+- Read `cat`, `grep`, `last`, `lastb` and `lastlog` through the same pipelined engine
+- Pipeline NFSv2 transfers at 8 KiB with 16 calls in flight; the NFSv2 shell now shares the session's connection pool and credential
+- Keep up to 16 idle pooled connections per identity; set `TCP_NODELAY` on RPC connections
+- Fix `put` over a larger existing file keeping the old tail (the create step now truncates)
+- Fix NFSv2 `put` sending 64 KiB WRITEs, over the protocol's 8 KiB limit
+- Fix NFSv4 attribute numbering from attribute 51 on, which misreported ctime and mtime
+- Fix process abort on a forged element count in the NFSv4 GETATTR/READDIR and CALLIT MOUNT v3 decoders
+- Fix NFSv4 open-owner and lock-owner seqid handling; the shell re-establishes a session the server refuses with `BAD_SEQID`, `STALE_CLIENTID` or `EXPIRED`
+- Fix NFSv4 whole-file helpers, the SETCLIENTID verifier, and the handles in `readdir_plus`
+- Fix NFSv2 `root()`, oversized RPC reply handling, credential restore on cancelled calls, and hex input parsing
+- Add `Unknown(u32)` to `auth_stat`, `auth_flavor`, `ftype3` and `mountstat3` so unlisted values decode
+- Fix circuit breaker window accounting and little-endian decoding of login records
+- Honor `--rpc-port`, `--mount-port`, `--nfs-port` and `--privileged-port` on every portmapper query and pooled NFS connection; `analyze` honors `--nfs-port`, `--rpc-port`, `--skip-rpc`, `--skip-mountd` and `--timeout`; shell and mount version detection honor `--rpc-port`, `--skip-rpc` and `--timeout`
+- Send the `analyze` rquota lookup through `--proxy`
+- Present the global AUTH_SYS identity on `scan`'s MOUNT MNT instead of AUTH_NONE, and honor `--privileged-port` there
+- Show `verifier` in the shell help on NFSv4
+- Give `--timeout` per-subcommand defaults: scan 3000 ms, analyze 5000 ms, shell/mount version detection 2000 ms
+- Make `--skip-rpc` mean no portmapper traffic in any subcommand (NFS on `--nfs-port` or 2049; MOUNT on `--mount-port` or the well-known ports 2049 and 20048)
+- Remove `analyze --v4-depth`, which was accepted but never used
+- Make `analyze` read-only by default; `--allow-write` runs the squash probes (F-1.2, F-4.1, F-7.5), and every report says whether they ran
+- Send `--aux-gids` with every credential: escalation rungs, shell `uid`/`gid`/`su`, and the FUSE ladder dropped them
+- Escalate shell LOOKUPs per path component, so `cd` and `cat` get through a directory the identity cannot search
+- Search UIDs and GIDs separately in the credential ladder: every rung claims the file's group, the operator's groups and the observed groups (up to 16)
+- Feed the owners seen in READDIRPLUS listings and LOOKUP replies to the ladder; show the supplementary groups in `id`
+- Breaking (`nfs-v4`): `LockState` gains `seqid`, `Nfs4Client::unlock` takes `&mut LockState`, `Fattr4Decoded` gains `filehandle`, `maxread` and `maxwrite`
+- Breaking (`nfs-v3`): `WriteAck` gains `verifier`
+- Add `#[xdr(other)]` open enums, `AsyncWrite::async_flush`, `Nfs4Client::transfer_limits`, capped NFSv3 listing and read helpers, and `TooLarge` errors in `nfs-v2` and `nfs-v4`
+- Deprecate `Nfs4Session::next_seqid`, `nfs_v3::CreateMode` and `nfs_v3::DirEntry`
+- Compile every crate README as a doctest and fix the examples, none of which compiled
+- Remove four orphaned source files left over from the `nfs-mount` extraction
+
 ## v1.3.1 (2026-11-07)
 
 **Mount list cleanup subcommand.**
@@ -103,7 +139,7 @@ All notable changes to nfswolf are documented here. Versions follow [Semantic Ve
 - SECINFO_NO_NAME fallback + WRONGSEC oracle
 - Golden vector tests for MOUNT and portmapper wire types
 - Fix AUTH_TLS STARTTLS verifier encoding (RFC 9289 S4.1)
-- NFSv4.1/v4.2 feature-gated recon operations
+- NFSv4.1/v4.2 recon operations (EXCHANGE_ID, GETDEVICEINFO, GETDEVICELIST, SECINFO_NO_NAME, `sec_label`), always compiled in rather than feature-gated
 - Wire all 37 NFSv4.0 operations with response decoders
 - Rename crates from `nfswolf-*` to vendor-neutral names (`onc-xdr`, `onc-rpc-client`, etc.)
 - Extract portmapper + rpcbind into `onc-rpcbind` crate
@@ -185,6 +221,7 @@ Dependency update and vendor sync.
 **CLI restructure and performance.**
 
 - Remove `attack` umbrella command; promote `escape`, `brute-handle`, `uid-spray` to top-level subcommands
+- Remove `attack lock-dos` and, with it, the NLM (program 100021) and NSM (program 100024) clients and the F-6.1 analyzer check; F-6.x findings are documented as out of scope
 - Parallelize port probes in scanner
 - Handle multi-fragment RPC replies and isolate per-host scan panics
 - Detach `mount` into a daemon so the FUSE handler outlives the launcher

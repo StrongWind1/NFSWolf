@@ -9,14 +9,16 @@ NFSWolf replaces 10+ fragmented NFS security tools with one fast Rust binary. It
 | Phase | Subcommand | What it does |
 |-------|-----------|-------------|
 | Recon | `scan` | Port discovery, service enumeration, export listing, OS/FS fingerprinting |
-| Analysis | `analyze` | 30+ security checks across 62 findings, risk scoring, multi-format reports |
+| Analysis | `analyze` | Detects 43 of the 62 documented findings, with JSON output that `convert` renders to other formats |
 | Escape | `escape` | Export directory escape to reach the full filesystem via file handle manipulation |
-| Shell | `shell` | Interactive NFS shell with 47 commands -- `ls`, `cat`, `get`, `put`, `append`, `grep`, SUID scanning, secrets scanning |
+| Shell | `shell` | Interactive NFS shell with 46 commands -- `ls`, `cat`, `get`, `put`, `append`, `grep`, SUID scanning, secrets scanning |
 | Mount | `mount` | FUSE mount of remote NFS exports as local directories |
 | Brute | `brute-handle` | File handle brute-force using the STALE/BADHANDLE oracle |
 | Spray | `uid-spray` | UID/GID brute-force for access to restricted files |
+| Cleanup | `clean` | Remove your entries from the server's mount list (UMNTALL, then a UMNT loop), or list it with `--list` |
 | Decode | `decode` | Offline file handle decoder with OS/FS fingerprinting |
 | Convert | `convert` | Render analysis results to HTML, Markdown, CSV, or plain text |
+| Completions | `completions` | Generate shell completions for bash, zsh, fish, elvish, or PowerShell |
 
 ## Quick start
 
@@ -39,12 +41,12 @@ nfswolf escape 10.0.0.1:/export
 
 ## Key features
 
-- **Pure Rust, zero C dependencies** — statically links via musl for a single portable binary
+- **Pure Rust protocol stack, no libnfs** — the static musl build has no C dependencies and runs on any Linux, but leaves out `mount`; the default build's `fuse` feature links libfuse3 for `nfswolf mount`
 - **Own protocol stack** — NFSv2, NFSv3, NFSv4, MOUNT v1/v3, portmapper, rpcbind, NFS_ACL, RQUOTA all implemented in-tree. An NFS export is a directory the server shares over the network; NFSWolf targets these exports.
 - **No mount required** — operates entirely in userspace via raw RPC, no kernel NFS client needed
-- **62 documented security findings** — each traced to an RFC (protocol specification) section, with severity, detection method, and exploitation steps
+- **62 documented security findings** — each traced to an RFC (protocol specification) section, with severity, detection method, and exploitation steps; `analyze` detects 43 of them, and the rest are out-of-scope DoS findings or manual tests
 - **Auto-credential escalation** — automatically tries different user IDs in sequence based on file ownership and directory listings
-- **Export escape across 18 filesystem types** — ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, and more
+- **Export escape across 17 filesystem types** — ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, and more
 - **Stealth-aware** — configurable inter-RPC delays with jitter to avoid detection
 
 ## About this site

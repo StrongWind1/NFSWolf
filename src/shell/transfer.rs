@@ -456,6 +456,7 @@ mod tests {
         peak: AtomicUsize,
         commits: AtomicUsize,
         stable_writes: AtomicUsize,
+        observed: crate::shell::ops::ObservedIdentities,
     }
 
     /// Counts a call as in flight for as long as it lives.
@@ -469,7 +470,17 @@ mod tests {
 
     impl FakeOps {
         fn new(behaviour: Behaviour, contents: Vec<u8>) -> Self {
-            Self { behaviour, file: Mutex::new(contents), verifier: Mutex::new([1; 8]), restarted: AtomicBool::new(false), in_flight: AtomicUsize::new(0), peak: AtomicUsize::new(0), commits: AtomicUsize::new(0), stable_writes: AtomicUsize::new(0) }
+            Self {
+                behaviour,
+                file: Mutex::new(contents),
+                verifier: Mutex::new([1; 8]),
+                restarted: AtomicBool::new(false),
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                commits: AtomicUsize::new(0),
+                stable_writes: AtomicUsize::new(0),
+                observed: crate::shell::ops::ObservedIdentities::default(),
+            }
         }
 
         async fn call(&self) -> InFlight<'_> {
@@ -622,6 +633,14 @@ mod tests {
             "test"
         }
 
+        fn identity(&self) -> crate::shell::ops::Identity {
+            crate::shell::ops::Identity::new(0, 0, &[])
+        }
+
+        fn observed(&self) -> &crate::shell::ops::ObservedIdentities {
+            &self.observed
+        }
+
         fn change_identity(&mut self, _uid: u32, _gid: u32, _hostname: &str) -> anyhow::Result<()> {
             Ok(())
         }
@@ -654,7 +673,7 @@ mod tests {
             anyhow::bail!("not used by transfers")
         }
 
-        fn with_credential(&self, _uid: u32, _gid: u32, _hostname: &str) -> Self {
+        fn with_credential(&self, _id: &crate::shell::ops::Identity, _hostname: &str) -> Self {
             Self::new(self.behaviour, self.contents())
         }
     }

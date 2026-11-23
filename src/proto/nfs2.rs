@@ -1,6 +1,6 @@
 //! NFSv2 for nfswolf: the library client, bound to the pooled transport.
 //!
-//! Mirror of `proto::nfs3` for NFSv2. `nfswolf-nfs2` owns the protocol;
+//! Mirror of `proto::nfs3` for NFSv2. `nfs-v2` owns the protocol;
 //! `PooledTransport` owns the policy. This module is the seam between them.
 
 /// An NFSv2 client issuing calls through nfswolf's pooled transport.
@@ -26,6 +26,9 @@ pub(crate) trait PooledNfs2 {
     fn gid(&self) -> u32;
     /// Hostname presented in the AUTH_SYS credential.
     fn machinename(&self) -> &str;
+    /// Groups in the AUTH_SYS credential, primary GID first (`--gid` plus
+    /// `--aux-gids`); empty for any other credential flavor.
+    fn groups(&self) -> Vec<u32>;
     /// Same connection settings, different identity.
     ///
     /// `uid` and `gid` also select the pool key, so the returned client draws
@@ -51,6 +54,13 @@ impl PooledNfs2 for Nfs2Client {
             crate::proto::auth::Credential::Sys(a) => &a.machinename,
             // Same rationale as PooledNfs3: avoid a blank machinename on the wire.
             crate::proto::auth::Credential::None | crate::proto::auth::Credential::Short(_) | crate::proto::auth::Credential::Raw(_) => DEFAULT_MACHINENAME,
+        }
+    }
+
+    fn groups(&self) -> Vec<u32> {
+        match self.transport().credential() {
+            crate::proto::auth::Credential::Sys(a) => a.gids.clone(),
+            crate::proto::auth::Credential::None | crate::proto::auth::Credential::Short(_) | crate::proto::auth::Credential::Raw(_) => Vec::new(),
         }
     }
 

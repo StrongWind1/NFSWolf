@@ -1,7 +1,8 @@
 //! NFS protocol layer  --  policy on top of the protocol crates.
 //!
-//! The `nfswolf-nfs2`, `nfswolf-nfs3`, and `nfswolf-nfs4` crates own the wire
-//! portmapper and holds no policy of its own.  This layer supplies the
+//! The `nfs-v2`, `nfs-v3`, and `nfs-v4` crates own the wire format,
+//! `nfs-mount` owns MOUNT and `onc-rpcbind` owns the portmapper; none of
+//! them holds policy of its own.  This layer supplies the
 //! policy: AUTH_SYS stamp injection, connection pooling, circuit breaking,
 //! auto-UID resolution, SOCKS5 transport, and privileged port binding.
 

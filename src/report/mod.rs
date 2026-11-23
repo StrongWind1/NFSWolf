@@ -86,6 +86,7 @@ mod tests {
             nfs_versions: vec!["NFSv3".to_owned()],
             exports: vec![ExportAnalysis { path: "/export".to_owned(), allowed_hosts: vec!["*".to_owned()], auth_methods: vec!["1".to_owned()], writable: false, no_root_squash: None, escape_possible: false, file_handle: "01020304".to_owned(), file_access_tests: Vec::new(), nfs4_acls: Vec::new() }],
             findings,
+            write_probes: Some(false),
         }
     }
 

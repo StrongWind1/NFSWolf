@@ -12,10 +12,10 @@ use std::sync::Arc;
 use anyhow::Context as _;
 
 use crate::cli::GlobalOpts;
-use crate::engine::credential::credential_ladder_with;
+use crate::engine::credential::{Identity, ObservedIdentities, identity_ladder};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
-use crate::proto::conn::ReconnectStrategy;
+use crate::proto::conn::{ConnectOpts, ReconnectStrategy};
 use crate::proto::mount::NfsMountClient;
 use crate::proto::nfs2::Nfs2Client;
 use crate::proto::nfs3::types::FileHandle;
@@ -24,17 +24,13 @@ use crate::proto::pool::{ConnectionPool, PoolKey};
 use crate::proto::transport::PooledTransport;
 use crate::util::stealth::StealthConfig;
 
-/// Build a MOUNT client honouring the global `--mount-port`,
-/// `--privileged-port`, and `--proxy` flags.
+/// Build a MOUNT client honouring the global `--mount-port`, `--rpc-port`,
+/// `--skip-rpc`, `--privileged-port`, and `--proxy` flags.
 ///
 /// Used by every subcommand that calls `MNT` (escape, shell, mount,
-/// uid-spray, brute-handle) so the same flags propagate everywhere.
+/// uid-spray, brute-handle, clean, analyze) so the same flags propagate everywhere.
 pub(crate) fn make_mount_client(globals: &GlobalOpts) -> NfsMountClient {
-    let mut base = globals.mount_port.map_or_else(NfsMountClient::new, NfsMountClient::with_port);
-    if let Some(ref p) = globals.proxy {
-        base = base.with_proxy(p.clone());
-    }
-    if globals.privileged_port { base.require_privileged() } else { base }
+    globals.connect_opts().mount_client()
 }
 
 /// Parse a host string into a `SocketAddr` using the default NFS port (2049).
@@ -90,11 +86,8 @@ pub(crate) fn parse_addr_with_port(host: &str, nfs_port: Option<u16>) -> anyhow:
 /// host/export/credential combination. Both `make_client_with_hostname` and
 /// `make_v2_client_with_hostname` delegate here so pool/circuit/transport
 /// construction is not duplicated.
-fn make_pooled_transport(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, PooledTransport) {
-    let pool = Arc::new(match proxy {
-        Some(p) => ConnectionPool::with_proxy(p.to_owned()),
-        None => ConnectionPool::default_config(),
-    });
+fn make_pooled_transport(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, opts: &ConnectOpts, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, PooledTransport) {
+    let pool = Arc::new(ConnectionPool::with_opts(opts.clone()));
     let circuit = Arc::new(CircuitBreaker::default_config());
     let gids = build_gid_list(gid, aux_gids);
     let auth = AuthSys::with_groups(uid, gid, &gids, hostname);
@@ -110,17 +103,18 @@ fn make_pooled_transport(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux
 /// Build an `Nfs3Client` for the given host, export, and AUTH_SYS credential,
 /// honouring the operator's spoofed `--hostname` as the AUTH_SYS machinename.
 ///
-/// When `proxy` is `Some`, the connection pool tunnels all TCP through the
-/// SOCKS5 proxy. When `nfs_port` is `Some(p)` (the global `--nfs-port`
-/// override), the client connects directly to NFS port `p`, bypassing
-/// portmapper GETPORT -- needed when TCP/111 is firewalled and the operator
-/// knows the fixed NFS port. `None` resolves the NFS port via portmapper as
-/// before.
+/// The connection pool uses `opts` for every connection it opens (SOCKS5
+/// proxy, mountd and portmapper ports, privileged source port). When
+/// `nfs_port` is `Some(p)` (the global `--nfs-port` override, or a port the
+/// caller already resolved), the client connects directly to NFS port `p`,
+/// bypassing MOUNT and portmapper GETPORT -- needed when TCP/111 is
+/// firewalled and the operator knows the fixed NFS port. `None` mounts the
+/// export and resolves the NFS port as `opts` directs.
 ///
 /// The hostname is the client identity some servers key export ACLs on, and
 /// `auth_unix.machinename` carries it on the wire (F-1.4).
-pub(crate) fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
-    let (pool, circuit, transport) = make_pooled_transport(addr, export, uid, gid, aux_gids, stealth, proxy, nfs_port, hostname);
+pub(crate) fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, opts: &ConnectOpts, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs3Client) {
+    let (pool, circuit, transport) = make_pooled_transport(addr, export, uid, gid, aux_gids, stealth, opts, nfs_port, hostname);
     (pool, circuit, Nfs3Client::new(transport))
 }
 
@@ -130,8 +124,8 @@ pub(crate) fn make_client_with_hostname(addr: SocketAddr, export: &str, uid: u32
 /// Same semantics as [`make_client_with_hostname`] but wraps a `Nfs2Client`
 /// instead of a `Nfs3Client`. The pooled transport is identical -- only the
 /// protocol client type differs.
-pub(crate) fn make_v2_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs2Client) {
-    let (pool, circuit, transport) = make_pooled_transport(addr, export, uid, gid, aux_gids, stealth, proxy, nfs_port, hostname);
+pub(crate) fn make_v2_client_with_hostname(addr: SocketAddr, export: &str, uid: u32, gid: u32, aux_gids: &[u32], stealth: StealthConfig, opts: &ConnectOpts, nfs_port: Option<u16>, hostname: &str) -> (Arc<ConnectionPool>, Arc<CircuitBreaker>, Nfs2Client) {
+    let (pool, circuit, transport) = make_pooled_transport(addr, export, uid, gid, aux_gids, stealth, opts, nfs_port, hostname);
     (pool, circuit, Nfs2Client::new(transport))
 }
 
@@ -165,23 +159,26 @@ pub(crate) async fn lookup_path(client: &Nfs3Client, root: &FileHandle, path: &s
             Ok((fh, _)) => current = fh,
             Err(e) if e.is_permission_denied() => {
                 let facts = get_owner_uid(client, &current).await;
-                let try_uids = credential_ladder_with((client.uid(), client.gid()), facts.map(|f| f.0), facts.map(|f| f.1), &[]);
+                let caller = Identity::new(client.uid(), client.gid(), &client.groups());
+                let try_ids = identity_ladder(&caller, facts.map(|f| f.0), facts.map(|f| f.1), &ObservedIdentities::default());
 
                 let mut resolved = false;
-                for (uid, gid) in &try_uids {
+                for id in &try_ids {
                     // Preserve the client's spoofed machinename across the
                     // escalation ladder (F-1.4) instead of resetting it to a
                     // fixed literal -- so an operator's --hostname survives.
-                    let esc_client = client.with_credential(Credential::Sys(AuthSys::with_groups(*uid, *gid, &[*gid], client.machinename())), *uid, *gid);
+                    // Each rung also claims the operator's and the directory's
+                    // groups (engine::credential).
+                    let esc_client = client.with_credential(id.credential(client.machinename()), id.uid, id.gid);
                     if let Ok((fh, _)) = esc_client.resolve(&current, component).await {
-                        tracing::debug!(component, uid, gid, "LOOKUP succeeded with escalated credential");
+                        tracing::debug!(component, uid = id.uid, gid = id.gid, "LOOKUP succeeded with escalated credential");
                         current = fh;
                         resolved = true;
                         break;
                     }
                 }
                 if !resolved {
-                    anyhow::bail!("LOOKUP {component}: NFS3ERR_ACCES (tried {} credentials)", try_uids.len());
+                    anyhow::bail!("LOOKUP {component}: NFS3ERR_ACCES (tried {} credentials)", try_ids.len());
                 }
             },
             Err(e) => anyhow::bail!("LOOKUP {component}: {e}"),
@@ -235,13 +232,13 @@ impl HandleProbeResult {
 /// each against NFSv3 + NFSv2 GETATTR.
 ///
 /// Blocks 1-4 of the handle matrix plan: acquire -> derive -> deduplicate -> test.
-pub(crate) async fn acquire_and_test_handles(mount: &NfsMountClient, _nfs3: &Nfs3Client, addr: SocketAddr, export: &str, stealth: &StealthConfig, nfs_port: Option<u16>, proxy: Option<&str>, hostname: &str) -> HandleProbeResult {
+pub(crate) async fn acquire_and_test_handles(mount: &NfsMountClient, _nfs3: &Nfs3Client, addr: SocketAddr, export: &str, stealth: &StealthConfig, opts: &ConnectOpts, hostname: &str) -> HandleProbeResult {
     // Build a direct-port NFS client for handle testing. This bypasses the
     // PooledTransport's lazy MOUNT, which would fail when mountd v3 is disabled.
     // The handles come from the explicit MOUNT v1/v3 calls below, not from the
     // transport's connection setup.
-    let direct_port = nfs_port.unwrap_or(2049);
-    let (_, _, probe_nfs3) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), proxy, Some(direct_port), hostname);
+    let direct_port = opts.nfs_port.unwrap_or(2049);
+    let (_, _, probe_nfs3) = make_client_with_hostname(addr, export, 0, 0, &[], stealth.clone(), opts, Some(direct_port), hostname);
 
     // Block 1: acquire from both MOUNT versions.
     stealth.wait().await;
@@ -286,7 +283,7 @@ pub(crate) async fn acquire_and_test_handles(mount: &NfsMountClient, _nfs3: &Nfs
         let v2_fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(variant.handle.as_bytes());
         let v2_handle = FileHandle::from_bytes(&v2_fh.0);
         stealth.wait().await;
-        let v2_ok_flag = test_handle_v2(addr, &v2_handle, stealth, proxy, nfs_port, hostname).await;
+        let v2_ok_flag = test_handle_v2(addr, &v2_handle, stealth, opts, hostname).await;
 
         tested.push(TestedHandle { variant, v3_ok: v3_ok_flag, v3_stale: v3_stale_flag, v2_ok: v2_ok_flag });
     }
@@ -298,8 +295,8 @@ pub(crate) async fn acquire_and_test_handles(mount: &NfsMountClient, _nfs3: &Nfs
 }
 
 /// Test a 32-byte handle with NFSv2 GETATTR. Returns true if the server accepts it.
-async fn test_handle_v2(addr: SocketAddr, handle: &FileHandle, stealth: &StealthConfig, proxy: Option<&str>, nfs_port: Option<u16>, hostname: &str) -> bool {
-    let (_, _, client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), proxy, nfs_port, hostname);
+async fn test_handle_v2(addr: SocketAddr, handle: &FileHandle, stealth: &StealthConfig, opts: &ConnectOpts, hostname: &str) -> bool {
+    let (_, _, client) = make_v2_client_with_hostname(addr, "/", 0, 0, &[], stealth.clone(), opts, opts.nfs_port, hostname);
     let v2_fh = nfs_v2::wire::Nfs2FileHandle::from_bytes(handle.as_bytes());
     match client.getattr(&v2_fh).await {
         Ok(_) => true,

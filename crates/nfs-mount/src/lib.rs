@@ -5,9 +5,8 @@
 //! flavors (v3 only) and exposes the export list.
 //!
 //! This crate owns the wire types, the client, and the error type for both
-//! protocol versions. It depends only on `nfswolf-xdr` and `nfswolf-rpc`;
-//! the NFS version crates (`nfswolf-nfs2`, `nfswolf-nfs3`) depend on it,
-//! not the reverse.
+//! protocol versions. It depends only on `onc-xdr` and `onc-rpc-client`;
+//! the NFS version crates (`nfs-v2`, `nfs-v3`) depend on it, not the reverse.
 
 mod client;
 mod error;
@@ -15,3 +14,7 @@ pub mod wire;
 
 pub use client::{MountClient, MountVersion, MountedHandle};
 pub use error::MountError;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

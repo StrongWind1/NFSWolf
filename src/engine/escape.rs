@@ -53,9 +53,10 @@ pub(crate) enum EscapeRootOutcome {
 
 /// Run the full escape algorithm: known candidates -> BTRFS subvols -> ZFS -> brute-force.
 ///
-/// This is the single entry point for the export-escape primitive. Both
-/// `cli/escape.rs` (subcommand) and `shell/mod.rs` (`escape-root` command)
-/// call this function through their respective `EscapeProbe` implementations.
+/// The analyzer's escape checks call this through their `EscapeProbe`
+/// implementations. The `escape` subcommand and the shell's `escape-root`
+/// command use the seven-phase pipeline in `cli/escape.rs` instead, whose
+/// candidates come from [`construct_candidates`].
 #[expect(clippy::cognitive_complexity, reason = "four-phase escape algorithm with per-phase announce and early-return logic")]
 pub(crate) async fn find_escape_root(probe: &(impl EscapeProbe + ?Sized), export_handle: &[u8], config: &EscapeConfig) -> EscapeRootOutcome {
     let fh = FileHandle::from_bytes(export_handle);

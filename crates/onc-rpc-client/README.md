@@ -28,21 +28,28 @@ Every NFS version rides on ONC RPC. A call names a (program, version, procedure)
 
 ## Usage
 
-```rust
-use onc_rpc_client::{DirectTransport, RpcTransport, AuthSys};
+```rust,no_run
+use onc_rpc_client::transport::tokio::TokioIo;
+use onc_rpc_client::{AuthSys, DirectTransport, RpcTransport};
+use onc_xdr::Void;
 
-// Connect and wrap in a policy-free transport.
-let stream = tokio::net::TcpStream::connect("server:2049").await?;
-let transport = DirectTransport::new(stream);
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    // The transport reads and writes through this crate's AsyncRead/AsyncWrite;
+    // TokioIo adapts a tokio stream to them.
+    let stream = tokio::net::TcpStream::connect("192.0.2.10:2049").await?;
+    let transport = DirectTransport::new(TokioIo::new(stream));
 
-// Issue a raw RPC call (program 100003 = NFS, version 3, proc 0 = NULL).
-let result: onc_xdr::Void = transport.call(100_003, 3, 0, &onc_xdr::Void).await?;
+    // Issue a raw RPC call (program 100003 = NFS, version 3, proc 0 = NULL).
+    let _: Void = transport.call(100_003, 3, 0, &Void).await?;
 
-// Switch identity mid-session for UID spraying.
-let cred = AuthSys::new(1000, 1000, "scanner");
-let auth = cred.to_opaque_auth(1);
-let result: MyRes = transport.call_as(auth, 100_003, 3, 1, &args).await?;
+    // Switch identity for one call; the transport's own credential is restored afterwards.
+    let auth = AuthSys::new(1000, 1000, "scanner").to_opaque_auth(1);
+    let _: Void = transport.call_as(auth, 100_003, 3, 0, &Void).await?;
+    Ok(())
+}
 ```
+
+`TokioConnector` does the connect and the wrapping in one step (and sets `TCP_NODELAY`): `TokioConnector.connect(addr).await?` returns a `TokioIo<TcpStream>`, with the `Connector` trait in scope.
 
 ## API reference
 

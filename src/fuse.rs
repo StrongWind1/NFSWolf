@@ -35,7 +35,7 @@ use fuser::{
     TimeOrNow, WriteFlags,
 };
 
-use crate::engine::credential::credential_ladder_with;
+use crate::engine::credential::{Identity, identity_ladder};
 use crate::shell::ops::{ShellEntry, ShellFileInfo, ShellFileType, ShellHandle, ShellOps, ShellSetAttr, ShellTimeSpec, shell_err_to_errno};
 
 /// Guard: return EACCES if `--allow-write` is not set.
@@ -211,7 +211,7 @@ pub(crate) struct NfsFuse<O: ShellOps> {
     /// When true, WRITE / SETATTR / CREATE / etc. are forwarded; otherwise EACCES.
     allow_write: bool,
     /// Per-inode (uid, gid) override discovered by the ladder.
-    cred_cache: Mutex<HashMap<u64, (u32, u32)>>,
+    cred_cache: Mutex<HashMap<u64, Identity>>,
     /// Per-directory readdir page cache, keyed by directory inode.
     readdir_cache: Mutex<HashMap<u64, Vec<ReaddirEntry>>>,
     /// Tokio runtime handle captured at construction.
@@ -280,19 +280,19 @@ impl<O: ShellOps> NfsFuse<O> {
         self.rt.block_on(fut)
     }
 
-    /// Build an ephemeral ops instance with the given (uid, gid).
-    fn ops_for(&self, uid: u32, gid: u32) -> O {
-        self.ops.with_credential(uid, gid, self.ops.machinename())
+    /// Build an ephemeral ops instance carrying `id`.
+    fn ops_for(&self, id: &Identity) -> O {
+        self.ops.with_credential(id, self.ops.machinename())
     }
 
-    /// Look up the cached `(uid, gid)` for `ino`, if any.
-    fn cached_cred(&self, ino: u64) -> Option<(u32, u32)> {
-        self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&ino).copied()
+    /// Look up the cached identity for `ino`, if any.
+    fn cached_cred(&self, ino: u64) -> Option<Identity> {
+        self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&ino).cloned()
     }
 
-    /// Record `(uid, gid)` as the working credential for `ino`.
-    fn cache_cred(&self, ino: u64, uid: u32, gid: u32) {
-        _ = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(ino, (uid, gid));
+    /// Record `id` as the working identity for `ino`.
+    fn cache_cred(&self, ino: u64, id: Identity) {
+        drop(self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(ino, id));
     }
 
     /// Bump the kernel lookup-reference count for `ino`.
@@ -301,8 +301,7 @@ impl<O: ShellOps> NfsFuse<O> {
     }
 
     /// Build the credential-escalation ladder for `subject_ino`.
-    async fn ladder_for(&self, subject_ino: u64) -> Vec<(u32, u32)> {
-        let caller = (self.ops.uid(), self.ops.gid());
+    async fn ladder_for(&self, subject_ino: u64) -> Vec<Identity> {
         let owner = {
             let fh_opt = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fh_for(subject_ino).cloned();
             match fh_opt {
@@ -310,7 +309,7 @@ impl<O: ShellOps> NfsFuse<O> {
                 None => None,
             }
         };
-        credential_ladder_with(caller, owner.map(|f| f.0), owner.map(|f| f.1), &[])
+        identity_ladder(&self.ops.identity(), owner.map(|f| f.0), owner.map(|f| f.1), self.ops.observed())
     }
 
     /// Retrieve the file handle for inode `ino` from the inode map.
@@ -345,24 +344,24 @@ impl<O: ShellOps> NfsFuse<O> {
         F: Fn(O) -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
-        let default = (self.ops.uid(), self.ops.gid());
-        let mut primary: Vec<(u32, u32)> = Vec::new();
-        if let Some(pair) = self.cached_cred(subject_ino) {
-            primary.push(pair);
+        let default = self.ops.identity();
+        let mut primary: Vec<Identity> = Vec::new();
+        if let Some(id) = self.cached_cred(subject_ino) {
+            primary.push(id);
         }
         if !primary.contains(&default) {
-            primary.push(default);
+            primary.push(default.clone());
         }
 
-        let mut tried: Vec<(u32, u32)> = Vec::new();
+        let mut tried: Vec<Identity> = Vec::new();
         let mut last_err: Option<anyhow::Error> = None;
-        for (u, g) in primary {
-            tried.push((u, g));
-            let ephemeral = self.ops_for(u, g);
+        for id in primary {
+            let ephemeral = self.ops_for(&id);
+            tried.push(id.clone());
             match op(ephemeral).await {
                 Ok(v) => {
-                    if (u, g) != default {
-                        self.cache_cred(subject_ino, u, g);
+                    if id != default {
+                        self.cache_cred(subject_ino, id);
                     }
                     return Ok(v);
                 },
@@ -374,15 +373,15 @@ impl<O: ShellOps> NfsFuse<O> {
         }
 
         // Primary credentials were denied; walk the escalation ladder.
-        for (u, g) in self.ladder_for(subject_ino).await {
-            if tried.contains(&(u, g)) {
+        for id in self.ladder_for(subject_ino).await {
+            if tried.contains(&id) {
                 continue;
             }
-            let ephemeral = self.ops_for(u, g);
+            let ephemeral = self.ops_for(&id);
             match op(ephemeral).await {
                 Ok(v) => {
-                    if (u, g) != default {
-                        self.cache_cred(subject_ino, u, g);
+                    if id != default {
+                        self.cache_cred(subject_ino, id);
                     }
                     return Ok(v);
                 },
@@ -537,7 +536,7 @@ impl<O: ShellOps> Filesystem for NfsFuse<O> {
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
         let removed = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).forget(ino.0, nlookup);
         if removed {
-            _ = self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&ino.0);
+            drop(self.cred_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&ino.0));
             drop(self.readdir_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&ino.0));
         }
     }

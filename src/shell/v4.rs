@@ -13,10 +13,9 @@ use nfs_v4::wire::{ArgOp, AttrRequest, CreateMode4, CreateType4, Fattr4, OpenCla
 use nfs_v4::{Nfs4FileInfo, Nfs4FileType, Nfs4Session, Nfs4Status};
 use onc_xdr::Pack;
 
-use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::nfs4::{Nfs4Client, PooledNfs4 as _};
 
-use super::ops::{CredCache, IoSizes, ReadReply, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, WriteReply, try_with_escalation};
+use super::ops::{CredCache, Identity, IoSizes, ObservedIdentities, ReadReply, ShellDeviceType, ShellEntry, ShellFileInfo, ShellFileType, ShellFsStat, ShellHandle, ShellOps, ShellSetAttr, WriteReply, observe_entries, try_with_escalation};
 
 /// NFSv4 backend wrapping a pooled `Nfs4Client` with lazy session establishment.
 ///
@@ -45,8 +44,9 @@ impl V4Ops {
         Self { client, session: tokio::sync::Mutex::new(None), cred_cache: CredCache::new(), instance_id: V4_INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed), io_sizes: std::sync::OnceLock::new() }
     }
 
-    fn make_v4(&self, uid: u32, gid: u32) -> Nfs4Client {
-        self.client.with_credential(Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], self.client.machinename())), uid, gid)
+    /// The pooled client re-keyed to `id` (UID, primary GID, supplementary groups).
+    fn make_v4(&self, id: &Identity) -> Nfs4Client {
+        self.client.with_credential(id.credential(self.client.machinename()), id.uid, id.gid)
     }
 
     /// Ensure a session exists, creating one on first call.
@@ -310,8 +310,26 @@ impl ShellOps for V4Ops {
     // -- Navigation --
 
     async fn lookup(&self, dir: &ShellHandle, name: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
-        let (fh, info) = self.client.lookup(dir.as_bytes(), name).await.map_err(v4_err)?;
-        Ok((ShellHandle(fh), v4_info(&info)))
+        // LOOKUP needs search permission on `dir`: escalate like any refusal.
+        let dir_bytes = dir.as_bytes().to_vec();
+        let (fh, info) = try_with_escalation(
+            &self.identity(),
+            &self.cred_cache,
+            dir,
+            getattr_owner_v4(&self.client, dir.as_bytes()),
+            is_v4_acces,
+            |id| {
+                let c = self.make_v4(&id);
+                let d = dir_bytes.clone();
+                let name = name.to_owned();
+                async move { c.lookup(&d, &name).await.map_err(v4_err) }
+            },
+            "NFS4ERR_ACCESS: lookup denied (exhausted credential ladder)",
+        )
+        .await?;
+        let info = v4_info(&info);
+        self.observed().record([(info.uid, info.gid)]);
+        Ok((ShellHandle(fh), info))
     }
 
     async fn lookup_path(&self, start: &ShellHandle, path: &str) -> anyhow::Result<(ShellHandle, ShellFileInfo)> {
@@ -349,11 +367,12 @@ impl ShellOps for V4Ops {
                     cur = ShellHandle(fh);
                 },
                 name => {
-                    let (fh, info) = self.client.lookup(cur.as_bytes(), name).await.map_err(v4_err)?;
+                    // Escalating LOOKUP, so every directory on the path gets the ladder.
+                    let (fh, info) = self.lookup(&cur, name).await?;
                     if i == last_idx {
-                        return Ok((ShellHandle(fh), v4_info(&info)));
+                        return Ok((fh, info));
                     }
-                    cur = ShellHandle(fh);
+                    cur = fh;
                 },
             }
         }
@@ -372,21 +391,23 @@ impl ShellOps for V4Ops {
     async fn list_dir(&self, dir: &ShellHandle) -> anyhow::Result<Vec<ShellEntry>> {
         let base = &self.client;
         let d = dir.clone();
-        try_with_escalation(
-            (base.uid(), base.gid()),
+        let entries = try_with_escalation(
+            &self.identity(),
             &self.cred_cache,
             dir,
             getattr_owner_v4(base, dir.as_bytes()),
             is_v4_acces,
-            |uid, gid| {
-                let rd = self.make_v4(uid, gid);
+            |id| {
+                let rd = self.make_v4(&id);
                 let b = Arc::clone(base);
                 let fh = d.clone();
                 async move { list_dir_v4(&b, &rd, &fh).await }
             },
             "NFS4ERR_ACCESS: cannot list directory (exhausted credential ladder)",
         )
-        .await
+        .await?;
+        observe_entries(self.observed(), &entries);
+        Ok(entries)
     }
 
     // -- File I/O --
@@ -394,13 +415,13 @@ impl ShellOps for V4Ops {
     async fn read_at(&self, fh: &ShellHandle, offset: u64, count: u32) -> anyhow::Result<ReadReply> {
         let handle_bytes = fh.as_bytes().to_vec();
         try_with_escalation(
-            (self.client.uid(), self.client.gid()),
+            &self.identity(),
             &self.cred_cache,
             fh,
             getattr_owner_v4(&self.client, fh.as_bytes()),
             is_v4_acces,
-            |uid, gid| {
-                let c = self.make_v4(uid, gid);
+            |id| {
+                let c = self.make_v4(&id);
                 let h = handle_bytes.clone();
                 async move { read_at_v4(&c, &h, offset, count).await }
             },
@@ -521,9 +542,17 @@ impl ShellOps for V4Ops {
         self.client.machinename()
     }
 
+    fn identity(&self) -> Identity {
+        Identity::new(self.client.uid(), self.client.gid(), &self.client.groups())
+    }
+
+    fn observed(&self) -> &ObservedIdentities {
+        &self.cred_cache.observed
+    }
+
     fn change_identity(&mut self, uid: u32, gid: u32, hostname: &str) -> anyhow::Result<()> {
-        let cred = Credential::Sys(AuthSys::new(uid, gid, hostname));
-        self.client = Arc::new(self.client.with_credential(cred, uid, gid));
+        let id = self.identity().switched(uid, gid);
+        self.client = Arc::new(self.client.with_credential(id.credential(hostname), uid, gid));
         *self.session.get_mut() = None;
         self.cred_cache.flush();
         Ok(())
@@ -591,9 +620,10 @@ impl ShellOps for V4Ops {
         Ok(())
     }
 
-    fn with_credential(&self, uid: u32, gid: u32, hostname: &str) -> Self {
-        let cred = Credential::Sys(AuthSys::with_groups(uid, gid, &[gid], hostname));
-        Self::new(Arc::new(self.client.with_credential(cred, uid, gid)))
+    fn with_credential(&self, id: &Identity, hostname: &str) -> Self {
+        let mut ops = Self::new(Arc::new(self.client.with_credential(id.credential(hostname), id.uid, id.gid)));
+        ops.cred_cache = self.cred_cache.sharing_observations();
+        ops
     }
 }
 

@@ -22,15 +22,15 @@ These findings apply to NFSv4 with the same severity as v3. The protocol changes
 
 | Finding | Name | Severity | Why NFSv4 Does Not Help |
 |---------|------|----------|------------------------|
-| [F-1.1](../identity/F-1.1-uid-gid-spoofing.md) | UID/GID Spoofing | Critical | AUTH_SYS is still the default authentication mechanism on most NFSv4 deployments. The SECINFO operation can signal that krb5 is required, but only if the administrator configures it. Default configurations accept AUTH_SYS. |
+| [F-1.1](../identity/F-1.1-uid-gid-spoofing.md) | UID/GID Spoofing | High | AUTH_SYS is still the default authentication mechanism on most NFSv4 deployments. The SECINFO operation can signal that krb5 is required, but only if the administrator configures it. Default configurations accept AUTH_SYS. |
 | [F-1.2](../identity/F-1.2-root-squash-bypass.md) | Root Squash Bypass | High | root_squash behavior is identical in v4. UID 0 is mapped to nobody; every other UID is trusted without verification. |
-| [F-1.3](../identity/F-1.3-auxiliary-group-injection.md) | Auxiliary Group Injection | High | The AUTH_SYS `gids<16>` array is still client-asserted in v4. Including the shadow group GID grants group-read access. |
+| [F-1.3](../identity/F-1.3-auxiliary-group-injection.md) | Auxiliary Group Injection | Critical | The AUTH_SYS `gids<16>` array is still client-asserted in v4. Including the shadow group GID grants group-read access. |
 | [F-1.4](../identity/F-1.4-machine-name-spoofing.md) | Machine Name Spoofing | Low | The `machinename` field in AUTH_SYS is still unverified. Log poisoning works the same way. |
 | [F-1.5](../identity/F-1.5-credential-replay.md) | Credential Replay | High | AUTH_SYS over NFSv4 has no nonce or sequence number. Captured RPCs are replayable. NFSv4.1 sessions with RPCSEC_GSS address this, but v4.0 with AUTH_SYS does not. |
 | [F-1.7](../identity/F-1.7-rpcsec-gss-flavor-downgrade.md) | RPCSEC_GSS Flavor Downgrade | High | SECINFO may advertise both AUTH_SYS and krb5. A client freely chooses AUTH_SYS. Identical to the v3 MOUNT auth_flavors problem. |
-| [F-1.8](../identity/F-1.8-auth-tooweak-kerberos-enforced.md) | AUTH_TOOWEAK Oracle | High | NFSv4 returns NFS4ERR_WRONGSEC when AUTH_SYS is used against a krb5-only export. This confirms the export exists and requires Kerberos, an information leak that helps the attacker enumerate security policies. |
+| [F-1.8](../identity/F-1.8-auth-tooweak-kerberos-enforced.md) | AUTH_TOOWEAK Oracle | Info | NFSv4 returns NFS4ERR_WRONGSEC when AUTH_SYS is used against a krb5-only export. This confirms the export exists and requires Kerberos, an information leak that helps the attacker enumerate security policies. |
 | [F-2.7](../access-control/F-2.7-nfsd-acl-blindness.md) | NFS Daemon ACL Blindness | Critical | File handles in NFSv4 are still bearer tokens. The kernel checks `(client_auth_domain, fsid)` in the export cache, not whether the client was authorized to receive the specific handle. `shell --handle <hex>` works over NFSv4. |
-| [F-3.1](../network/F-3.1-plaintext-wire-protocol.md) | Plaintext Traffic | High | NFSv4 does not mandate encryption. Default deployments run in cleartext on port 2049. krb5p or RPC-with-TLS must be explicitly configured. |
+| [F-3.1](../network/F-3.1-plaintext-wire-protocol.md) | Plaintext Traffic | Info | NFSv4 does not mandate encryption. Default deployments run in cleartext on port 2049. krb5p or RPC-with-TLS must be explicitly configured. |
 | [F-3.3](../network/F-3.3-ip-spoofing-host-trust.md) | IP Spoofing | High | NFSv4 export ACLs still rely on source IP when AUTH_SYS is in use. |
 | [F-4.1](../privesc/F-4.1-no-root-squash.md) | no_root_squash | Critical | Export squash options apply identically to v4. uid=0 gets full root access with `CAP_MAC_OVERRIDE`. |
 | [F-4.2](../privesc/F-4.2-suid-sgid-escalation.md) | SUID/SGID Creation | High | NFSv4 SETATTR can set mode bits including SUID. Same attack, different RPC encoding. |
@@ -46,9 +46,11 @@ These findings are specific to NFSv4 or are new attack surfaces introduced by th
 | [F-2.11](../access-control/F-2.11-nfsv4-lookupp-export-escape.md) | LOOKUPP Export Escape | Critical | LOOKUPP returns the parent directory of any file handle. From a subdirectory export, a single `cd ..` reaches the filesystem root. No handle construction, no filesystem fingerprinting, no brute force. This is the v4 equivalent of F-2.1 but requires zero sophistication. |
 | [F-2.12](../access-control/F-2.12-nfsv4-lookupp-cross-export-lateral.md) | LOOKUPP Cross-Export Lateral | High | From any export, LOOKUPP to the pseudo-FS parent and LOOKUP into sibling exports. Bypasses MOUNT-level IP ACLs entirely because NFSv4 does not use MOUNT. The `exports` shell command enumerates reachable siblings. |
 | [F-5.5](../info-disclosure/F-5.5-nfsv4-pseudo-fs-leakage.md) | Pseudo-FS Structure Leakage | Low | The pseudo-filesystem connects all exports under a shared namespace. READDIR from PUTROOTFH reveals the names and structure of all exports, including IP-restricted ones. Replaces F-5.1 (MOUNT EXPORT) with a harder-to-firewall equivalent. |
-| F-5.13 | Named Attributes Exposed | Low | OPENATTR + READDIR on the export root enumerates xattrs: POSIX ACLs, SELinux labels, file capabilities. Reveals the MAC/DAC enforcement posture. |
+| [F-5.13](../info-disclosure/F-5.13-nfsv4-named-attributes-exposed.md) | Named Attributes Exposed | Low | OPENATTR + READDIR on the export root enumerates xattrs: POSIX ACLs, SELinux labels, file capabilities. Reveals the MAC/DAC enforcement posture. |
 | [F-3.6](../network/F-3.6-mixed-secinfo-zones.md) | Mixed Security Zones (Per-Path SECINFO) | Medium | SECINFO on subdirectories may return different auth flavors than the export root. When the root requires krb5 but a subdirectory accepts AUTH_SYS, the attacker bypasses the stronger requirement by directly accessing the subdirectory with weaker credentials. Detected by `analyze`. |
 | [F-3.7](../network/F-3.7-auth-dh-obsolete.md) | AUTH_DH in SECINFO | Medium | NFSv4 SECINFO can advertise AUTH_DH (flavor 3). The 192-bit DH + 56-bit DES is trivially breakable. |
+| [F-6.2](../dos/F-6.2-grace-period-dos.md) | Grace Period Blocking | Medium | After a server restart, the grace period rejects READ, WRITE, and non-reclaim locking requests with NFS4ERR_GRACE; repeated restarts keep the server in it. Out of scope: documented only, no nfswolf module exercises it. |
+| [F-6.3](../dos/F-6.3-setclientid-state-destruction.md) | SETCLIENTID State Destruction | Medium | SETCLIENTID with a legitimate client's owner string and a new verifier, followed by SETCLIENTID_CONFIRM, destroys that client's open, lock, and delegation state (NFSv4.0). Out of scope: documented only, no nfswolf module exercises it. |
 
 ## Protocol-specific exploitation notes
 
@@ -72,7 +74,7 @@ The COMPOUND operation model (RFC 7530 Section 14) batches multiple operations i
 
 ### NFSv4 credential escalation in nfswolf
 
-Credential escalation in the NFSv4 shell works via `try_with_escalation()`, the same shared mechanism used by v3. The credential ladder (owner-first, group match, root, observed identities, service accounts) operates identically. The difference is in the transport: v4 changes credentials mid-session by swapping the AUTH_SYS fields in subsequent COMPOUND calls, while v3 uses the pooled transport's credential swap. Both are transparent to the shell user; the `uid`, `gid`, and `impersonate` commands work the same way across all three NFS versions.
+Credential escalation in the NFSv4 shell works via `try_with_escalation()`, the same shared mechanism used by v3. The credential ladder (caller with more groups, owner, group match, root, observed owners, service accounts, every rung claiming the file's and the operator's groups) operates identically. The difference is in the transport: v4 changes credentials mid-session by swapping the AUTH_SYS fields in subsequent COMPOUND calls, while v3 uses the pooled transport's credential swap. Both are transparent to the shell user; the `uid`, `gid`, and `impersonate` commands work the same way across all three NFS versions.
 
 ### NFSv4-only servers
 

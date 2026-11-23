@@ -66,7 +66,7 @@ Controls whether the server commits data to stable storage before replying to th
 !!! warning "Data integrity risk"
     `async` violates the NFS protocol contract: the client believes its write is committed, but the data may exist only in the server's page cache. A power failure or kernel panic loses that data with no client-side indication. Use `sync` unless you accept this risk for throwaway data (build caches, scratch space).
 
-nfswolf detects `async` exports during analysis and flags them as a data-integrity concern.
+nfswolf does not check for `async`; audit it on the server with `exportfs -v`.
 
 ### `wdelay` / `no_wdelay`
 
@@ -96,7 +96,7 @@ Like `nohide`, but recursive: ALL filesystems mounted anywhere under the export 
 !!! danger "Recursive sub-mount exposure ([F-7.3](../../config/F-7.3-nohide-crossmnt-exposure.md))"
     `crossmnt` on a high-level directory (e.g., `/`) exposes every mounted filesystem on the server. Bind mounts, tmpfs instances, procfs, sysfs: anything under the export tree becomes accessible. This is the most common way administrators accidentally expose the entire server filesystem.
 
-    nfswolf detects `crossmnt` during analysis and reports every reachable sub-mount.
+    `nfswolf analyze` flags `nohide`/`crossmnt` when an entry in the export root sits on a different fsid, and lists those sub-mounts (F-7.3).
 
 ```bash title="/etc/exports — dangerous"
 # crossmnt on / exposes proc, sys, dev, and every mounted filesystem
@@ -209,7 +209,7 @@ Controls whether UID 0 (root) from the client is mapped to the anonymous user (t
 !!! danger "Critical: `no_root_squash` ([F-4.1](../../privesc/F-4.1-no-root-squash.md), [F-7.5](../../config/F-7.5-squash-misconfiguration.md))"
     `no_root_squash` trusts the client's root user as root on the server. An attacker with root on any allowed client (or anyone spoofing UID 0 with AUTH_SYS) gets full root access to every file on the export. Combined with `rw`, they can plant SUID root binaries, create device nodes, or overwrite `/etc/shadow`.
 
-    This is the single most dangerous export option. nfswolf's scanner checks for it first and reports it as Critical severity. The `escape` subcommand exploits it to demonstrate full filesystem access.
+    This is the single most dangerous export option. `nfswolf analyze` detects it with a squash probe (a file created as uid 0 and checked for root ownership) and reports F-4.1 at Critical severity. The `escape` subcommand exploits it to demonstrate full filesystem access.
 
 ```bash title="/etc/exports — good vs. bad"
 # Bad: full root trust

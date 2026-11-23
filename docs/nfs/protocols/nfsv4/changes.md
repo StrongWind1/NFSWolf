@@ -13,7 +13,7 @@ v4: Client → nfsd:2049
 
 **Security impact:** Firewall rules are simpler in both directions. Defenders only need to manage one port. Attackers only need one port open. If port 2049 is filtered, NFSv4 is completely unreachable; there is no UDP fallback and no alternate port discovery mechanism.
 
-nfswolf's scanner detects v4 by sending `COMPOUND([PUTROOTFH])` directly to port 2049 (`probe_nfs4()`). This works even when portmapper (port 111) is completely filtered -- a v4-only server is discoverable without any auxiliary services.
+nfswolf's scanner detects v4 by sending `COMPOUND([PUTROOTFH])` directly to port 2049 (`probe_nfs_versions_tcp()`, which sends the v2 and v3 NULL probes over the same connection). This works even when portmapper (port 111) is completely filtered -- a v4-only server is discoverable without any auxiliary services.
 
 ## 2. No MOUNT protocol
 
