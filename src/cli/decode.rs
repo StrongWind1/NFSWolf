@@ -36,6 +36,11 @@ pub(crate) fn run(args: &DecodeArgs) -> anyhow::Result<()> {
         return decode_aws_file_gateway(&bytes);
     }
 
+    // NetApp ONTAP (WAFL): 44-byte handles, completely different from knfsd.
+    if os == crate::engine::file_handle::OsGuess::NetAppOntap {
+        return decode_netapp_ontap(&bytes);
+    }
+
     // Header (bytes 0-3)
     let version = bytes.first().copied().unwrap_or(0);
     let auth_type = bytes.get(1).copied().unwrap_or(0);
@@ -386,6 +391,86 @@ fn decode_aws_file_gateway(raw: &[u8]) -> anyhow::Result<()> {
     println!("    index (bytes 1-3 and 13) can enumerate all NFS shares on this gateway.");
     println!("    NFSv4 LOOKUPP escapes the export boundary and discovers sibling shares.");
     println!("    Handles are bearer tokens: a handle from one share works without mounting it.");
+    println!();
+
+    Ok(())
+}
+
+/// Decode a NetApp ONTAP (WAFL) file handle.
+///
+/// Format (44 bytes, confirmed on FSx for ONTAP, NetApp Release 9.19.1P4D1):
+///
+///   bytes  0- 3:  `00000000` -- header/padding (always zero)
+///   bytes  4- 7:  volume ID (4 bytes, sequential per SVM volume)
+///   bytes  8-11:  `00000000` -- padding
+///   bytes 12-15:  flags (observed: `40000000`)
+///   bytes 16-19:  generation / unique ID (4 bytes, per-volume)
+///   bytes 20-35:  repeat of bytes 4-19 (parent = self for directory roots)
+///   bytes 36-39:  flags (observed: `40000000`)
+///   bytes 40-43:  `00000000` -- padding
+///
+/// The file-identifier block (bytes 4-19) is repeated at bytes 20-35 for
+/// directory roots; for non-root files, the second block identifies the parent.
+///
+/// Oracle: STALE for wrong volume ID (right structure), BADHANDLE for zeroed
+/// generation or truncated handles.  Stricter than Linux knfsd.
+#[expect(clippy::unnecessary_wraps, reason = "signature matches run() return type for early return")]
+fn decode_netapp_ontap(raw: &[u8]) -> anyhow::Result<()> {
+    println!("  {}", "NetApp ONTAP (WAFL)".bold().underline());
+    println!("    {} Not a Linux knfsd handle. NetApp WAFL file handle format.", "[ONTAP]".bold().yellow());
+    println!();
+
+    // File identifier block (bytes 4-19)
+    let vol_id = raw.get(4..8).map(hex_str).unwrap_or_default();
+    let file_pad = raw.get(8..12).map(hex_str).unwrap_or_default();
+    let file_flags = raw.get(12..16).map(hex_str).unwrap_or_default();
+    let file_gen = raw.get(16..20).map(hex_str).unwrap_or_default();
+
+    // Parent identifier block (bytes 20-35)
+    let par_vol = raw.get(20..24).map(hex_str).unwrap_or_default();
+    let par_pad = raw.get(24..28).map(hex_str).unwrap_or_default();
+    let par_flags = raw.get(28..32).map(hex_str).unwrap_or_default();
+    let par_gen = raw.get(32..36).map(hex_str).unwrap_or_default();
+
+    let is_root = raw.get(4..20) == raw.get(20..36);
+
+    // Tail flags
+    let tail = raw.get(36..44).map(hex_str).unwrap_or_default();
+
+    println!("  {}", "File Identifier (bytes 4-19)".bold().underline());
+    println!("    volume_id    = {vol_id}");
+    println!("    padding      = {file_pad}");
+    println!("    flags        = {file_flags}");
+    println!("    generation   = {file_gen}");
+    println!();
+
+    println!("  {}", "Parent Identifier (bytes 20-35)".bold().underline());
+    println!("    volume_id    = {par_vol}");
+    println!("    padding      = {par_pad}");
+    println!("    flags        = {par_flags}");
+    println!("    generation   = {par_gen}");
+    if is_root {
+        println!("    {} file == parent (directory root)", "(note)".dimmed());
+    }
+    println!();
+
+    println!("  {} {}", "Tail (bytes 36-43):".bold(), tail);
+    println!();
+
+    println!("  {}", "Fingerprint".bold().underline());
+    println!("    OS:         NetAppOntap");
+    println!("    Filesystem: WAFL");
+    println!();
+
+    println!("  {}", "Assessment".bold().underline());
+    println!("    {} WAFL handles cannot be forged via the Linux knfsd escape constructors.", "[ONTAP]".bold().yellow());
+    println!("    The generation field is structurally validated: zeroing it returns BADHANDLE.");
+    println!("    Volume ID mutations return STALE (right structure, wrong target).");
+    println!("    NFSv4 LOOKUPP traverses junctions and reaches the SVM root and sibling volumes.");
+    println!("    Handles are bearer tokens: a handle from /vol1 works when connected via /.");
+    if is_root {
+        println!("    This is a directory root (file == parent). Likely a MOUNT export root.");
+    }
     println!();
 
     Ok(())

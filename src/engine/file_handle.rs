@@ -21,6 +21,10 @@ pub(crate) enum OsGuess {
     HpUx,
     /// AWS Storage Gateway S3 File Gateway: 16-byte handles starting with 0x43.
     AwsStorageGateway,
+    /// NetApp ONTAP (WAFL): 44-byte handles starting with 00000000, with a
+    /// repeated 16-byte file-identifier block.  Confirmed on FSx for ONTAP
+    /// (NetApp Release 9.19.1).
+    NetAppOntap,
     Unknown,
 }
 
@@ -169,6 +173,13 @@ impl FileHandleAnalyzer {
         // Linux: version=1, auth_type=0
         if data.first().copied() == Some(0x01) && data.get(1).copied() == Some(0x00) {
             return OsGuess::Linux;
+        }
+
+        // NetApp ONTAP (WAFL): 44-byte handles, bytes 0-3 = 00000000, and the
+        // 16-byte file-identifier block at bytes 4-19 is repeated at bytes 20-35.
+        // Confirmed on FSx for ONTAP (NetApp Release 9.19.1P4D1).
+        if data.len() == 44 && data.get(..4) == Some(&[0, 0, 0, 0]) && data.get(4..20) == data.get(20..36) {
+            return OsGuess::NetAppOntap;
         }
 
         // AWS Storage Gateway S3 File Gateway: exactly 16 bytes, byte 0 = 0x43 ('C').
@@ -884,6 +895,12 @@ impl FileHandleAnalyzer {
                 // once you know one handle.
                 (8.0, vec!["share index (1 byte, sequential)".into()])
             },
+            OsGuess::NetAppOntap => {
+                // WAFL handles carry a 4-byte volume ID and a 4-byte generation.
+                // The volume ID is predictable (sequential); the generation is
+                // the real entropy source, observed as a 32-bit value.
+                (32.0, vec!["WAFL generation (4 bytes)".into()])
+            },
             OsGuess::HpUx | OsGuess::Unknown => (32.0, vec!["unknown fields".into()]),
         };
 
@@ -1563,5 +1580,66 @@ mod tests {
             0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, // UUID high (non-zero)
         ]);
         assert_ne!(FileHandleAnalyzer::fingerprint_fs(&fh), FsType::Zfs);
+    }
+
+    // --- NetApp ONTAP (WAFL) fingerprinting ---
+
+    /// Real SVM root handle from FSx for ONTAP (NetApp Release 9.19.1P4D1).
+    fn ontap_root_handle() -> FileHandle {
+        FileHandle::from_bytes(&hex_to_bytes("00000000d36a15800000000040000000aa240800d36a15800000000040000000aa2408004000000000000000"))
+    }
+
+    /// Real /vol1 handle from FSx for ONTAP.
+    fn ontap_vol1_handle() -> FileHandle {
+        FileHandle::from_bytes(&hex_to_bytes("00000000d46a15800000000040000000c1da036bd46a15800000000040000000c1da036b4000000000000000"))
+    }
+
+    fn hex_to_bytes(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn fingerprint_ontap_root_handle() {
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&ontap_root_handle()), OsGuess::NetAppOntap);
+    }
+
+    #[test]
+    fn fingerprint_ontap_vol1_handle() {
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&ontap_vol1_handle()), OsGuess::NetAppOntap);
+    }
+
+    #[test]
+    fn ontap_not_linux() {
+        // ONTAP handles must NOT be fingerprinted as Linux (byte 0 = 0x00, not 0x01).
+        assert_ne!(FileHandleAnalyzer::fingerprint_os(&ontap_root_handle()), OsGuess::Linux);
+        // And escape must produce nothing.
+        assert!(FileHandleAnalyzer::construct_root_candidates(&ontap_root_handle()).is_empty());
+    }
+
+    #[test]
+    fn ontap_entropy_32_bits() {
+        let analysis = FileHandleAnalyzer::estimate_entropy(&ontap_root_handle());
+        assert!((analysis.entropy_bits - 32.0).abs() < 1.0, "ONTAP generation is 32 bits");
+    }
+
+    #[test]
+    fn ontap_handles_differ_by_volume() {
+        // The two handles share the repeated-block structure but differ in bytes 4 and 16-19.
+        let r = ontap_root_handle();
+        let v = ontap_vol1_handle();
+        assert_ne!(r.as_bytes(), v.as_bytes());
+        // Both must fingerprint as ONTAP.
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&r), OsGuess::NetAppOntap);
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&v), OsGuess::NetAppOntap);
+    }
+
+    #[test]
+    fn ontap_44_bytes_non_repeated_is_not_ontap() {
+        // A 44-byte handle where bytes 4-19 != bytes 20-35 should NOT match ONTAP.
+        let mut data = [0u8; 44];
+        data[4] = 0xAA;
+        data[20] = 0xBB; // different from bytes 4-19
+        let fh = FileHandle::from_bytes(&data);
+        assert_ne!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::NetAppOntap);
     }
 }
