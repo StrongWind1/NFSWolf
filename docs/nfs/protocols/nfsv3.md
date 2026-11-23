@@ -165,7 +165,7 @@ struct entryplus3 {
 
 A single READDIRPLUS on a directory with 100 files replaces 201 RPCs (1 READDIR + 100 LOOKUP + 100 GETATTR) with 1 RPC. Beyond the performance gain, the returned data is a goldmine:
 
-- **UID/GID harvesting** -- every file's owner UID and group GID are exposed. nfswolf's credential ladder (`credential_ladder_with()`) feeds READDIRPLUS results into `observed_identities()` to rank real UIDs by frequency, then uses those identities for targeted escalation instead of blind spraying.
+- **UID/GID harvesting** -- every file's owner UID and group GID are exposed. nfswolf's credential ladder (`credential_ladder_with()`) takes a list of observed identities and tries them ahead of the service-account guesses, so identities harvested from READDIRPLUS can drive targeted escalation instead of blind spraying. The current callers (shell, FUSE mount, `escape`, the probe helpers) pass an empty list, so in practice the ladder runs owner, owner's group, root, then the service accounts.
 - **Permission mapping** -- mode bits for every file reveal which entries are world-readable, which have SUID/SGID set, and which are writable by specific groups.
 - **Handle collection** -- file handles for every entry are returned without individual LOOKUP calls. These handles can be reused across credentials (bearer token property) and persisted for future sessions.
 - **Size and timestamp analysis** -- file sizes reveal large databases and backups worth exfiltrating. Recent modification times indicate active files.

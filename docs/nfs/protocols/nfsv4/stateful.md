@@ -51,7 +51,7 @@ Confirms the client identity. The server activates the client's lease and begins
 
 ### nfswolf implementation
 
-`Nfs4Session` in `crates/nfs-v4/src/session.rs` manages the SETCLIENTID lifecycle. Session establishment is automatic when `V4Ops` connects. Lease renewal runs in the background. The verifier is derived from the process start time and the id_string uses a randomized component to prevent collision with legitimate clients.
+`Nfs4Session` in `crates/nfs-v4/src/session.rs` manages the SETCLIENTID lifecycle. `V4Ops` establishes a session lazily, the first time a command needs OPEN state (creating a file), under the client name `nfswolf-<n>`: one name per `V4Ops` instance, so the per-credential instances made during escalation never share a seqid stream. Each `establish` sends a fresh verifier built from the clock, the process ID and a per-call counter. The shell holds no long-lived state: every OPEN is closed within the command that made it, reads and SETATTR use the anonymous stateid, and nothing calls `renew`. An idle session's lease is left to lapse; when the server answers a later OPEN or OPEN_CONFIRM with `NFS4ERR_BAD_SEQID`, `NFS4ERR_STALE_CLIENTID` or `NFS4ERR_EXPIRED`, the shell drops the session and establishes a new one.
 
 ## Stateids
 

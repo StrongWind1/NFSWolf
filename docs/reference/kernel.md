@@ -1,6 +1,6 @@
 # Kernel source map
 
-A condensed reference to the Linux kernel NFS server (knfsd) code paths that underpin nfswolf's findings. All file paths and line numbers reference **Linux 7.1.8**. The full 3000-line function-level walkthrough lives in `ref/linux-kernel/BREAKDOWN.md` in the nfswolf repository.
+A condensed reference to the Linux kernel NFS server (knfsd) code paths that underpin nfswolf's findings. All file paths and line numbers reference **Linux 7.1.8**. This page summarizes a longer function-level walkthrough (about 3,200 lines) that the maintainers keep in `ref/linux-kernel/BREAKDOWN.md`, part of a local reference checkout that is gitignored and not shipped in the repository.
 
 ---
 
@@ -254,6 +254,6 @@ The `exportfs_decode_fh_raw()` call at nfsfh.c:306 delegates to the filesystem's
 
 ## Further reading
 
-- **Full kernel breakdown:** `ref/linux-kernel/BREAKDOWN.md` in the nfswolf repository (3200 lines, function-level detail for every security-relevant code path)
-- **Kernel source files:** `ref/linux-kernel/` contains copied kernel headers (`nfsfh.h`, `nfsfh.c`, `export.c`, `exportfs.h`) for local reference
-- **RFC references:** `ref/rfc/` -- RFC 1094 (NFSv2), RFC 1813 (NFSv3), RFC 7530 (NFSv4), RFC 5531 (RPC v2), RFC 2623 (NFS security), RFC 9289 (NFS over TLS)
+- **Full kernel breakdown:** `ref/linux-kernel/BREAKDOWN.md` (about 3,200 lines, function-level detail for every security-relevant code path). It is part of the maintainers' local `ref/` checkout, which is gitignored and not in the repository; this page is its public summary.
+- **Kernel source files:** the same local checkout holds copied kernel sources (`nfsfh.h`, `nfsfh.c`, `export.c`, `exportfs.h`); the upstream files are in the Linux 7.1.8 tree under `fs/nfsd/` and `include/linux/`
+- **RFC references:** the [RFC Index](rfcs.md) -- RFC 1094 (NFSv2), RFC 1813 (NFSv3), RFC 7530 (NFSv4), RFC 5531 (RPC v2), RFC 2623 (NFS security), RFC 9289 (NFS over TLS)

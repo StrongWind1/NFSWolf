@@ -96,15 +96,15 @@ The `fileid_type` tells the server how to decode the file-identification bytes. 
 | Value | Name | Size | Layout | Filesystems |
 |-------|------|------|--------|-------------|
 | 0x00 | `FILEID_ROOT` | 0 bytes | (none) | Export root on any FS. No inode data needed. |
-| 0x01 | `FILEID_INO32_GEN` | 8 bytes | `inode(4) generation(4)` | ext2/3/4, JFS, f2fs, ReiserFS, VFAT, NTFS3, SquashFS |
+| 0x01 | `FILEID_INO32_GEN` | 8 bytes | `inode(4) generation(4)` | ext2/3/4, JFS, f2fs, ReiserFS, VFAT, NTFS3, SquashFS, and XFS when every inode number fits in 32 bits. ZFS and ISO 9660 also report type 1 but carry their own payload (`zfid_short_t`, block/offset/gen) |
 | 0x02 | `FILEID_INO32_GEN_PARENT` | 16 bytes | `ino(4) gen(4) parent_ino(4) parent_gen(4)` | ext2/3/4 with subtree_check |
 | 0x4d | `BTRFS_WITHOUT_PARENT` | 20 bytes | `objectid(8) root_objectid(8) generation(4)` | BTRFS |
 | 0x4e | `BTRFS_WITH_PARENT` | 32 bytes | above + `parent_objectid(8) parent_gen(4)` | BTRFS with parent |
 | 0x4f | `BTRFS_WITH_PARENT_ROOT` | 40 bytes | above + `parent_root_objectid(8)` | BTRFS cross-subvolume |
 | 0x51 | `UDF_WITHOUT_PARENT` | 12 bytes | `block(4) partref(2) unused(2) generation(4)` | UDF |
 | 0x61 | `NILFS_WITHOUT_PARENT` | 20 bytes | `cno(8) ino(8) gen(4)` | NILFS2 |
-| 0x71 | `FAT_WITHOUT_PARENT` | 12 bytes | `gen(4) i_pos_hi(1) i_pos_lo(4)` | VFAT/exFAT |
-| 0x81 | `FILEID_INO64_GEN` | 12 bytes | `inode(8) generation(4)` | XFS, EROFS |
+| 0x71 | `FAT_WITHOUT_PARENT` | 12 bytes | 32-bit generation + 40-bit `i_pos` (directory entry position) | VFAT/exFAT |
+| 0x81 | `FILEID_INO64_GEN` | 12 bytes | `inode(8) generation(4)` | XFS once inode numbers can exceed 32 bits, EROFS |
 | 0x82 | `FILEID_INO64_GEN_PARENT` | 24 bytes | `ino(8) gen(4) parent_ino(8) parent_gen(4)` | XFS with subtree_check |
 | 0xb1 | `BCACHEFS_WITHOUT_PARENT` | 16 bytes | `inode(8) subvol(4) gen(4)` | bcachefs |
 | 0xff | `FILEID_INVALID` | -- | -- | Error sentinel, never used in valid handles |
@@ -116,15 +116,15 @@ When constructing an escape handle targeting the filesystem root directory, the 
 | Filesystem | Root Inode | Generation | Notes |
 |------------|-----------|------------|-------|
 | ext2/3/4 | 2 | 0 | Always inode 2; generation ignored on root |
-| XFS v5 | 128 | 0 | `FILEID_INO64_GEN`. XFS v4: 64 or 32 |
+| XFS | 128, 64 or 32 | 0 | Depends on inode size and mkfs layout; nfswolf probes all three. `FILEID_INO32_GEN` or `FILEID_INO64_GEN`, whichever the seed handle uses |
 | BTRFS | 256 | 0 | objectid=256 (default subvol), root_objectid=5 (fs-tree) |
 | JFS | 2 | 0 | Same as ext4 |
 | f2fs | 3 | 0 | Root inode is 3, not 2 |
 | ReiserFS | 2 | 1 | Generation is 1, not 0 |
 | NTFS3 | 5 | 5 | MFT root record; generation = MFT sequence number |
 | VFAT | 1 | 0 | Root cluster |
-| SquashFS | 7 | 0 | Offset-based, not a true inode |
-| ZFS | 3 | 0 | `zfid_short_t`, gen ignored |
+| SquashFS | Set by mksquashfs | 0 | Inode numbers are assigned when the image is built; nfswolf's static table probes 2 and 7 |
+| ZFS | 34 | 0 | Root object 34 in a `zfid_short_t` (`zf_len` 2 + object 6 + gen 4 bytes) under fileid_type 1; gen=0 accepted for the root object |
 | EROFS | 36 | 0 | `FILEID_INO64_GEN`, nid=36 is typical root |
 | NILFS2 | 2 | 0 | cno=0 (current checkpoint) |
 | bcachefs | 4096 | 0 | inum=4096, subvol=1 |
@@ -254,7 +254,7 @@ With `no_subtree_check` (the kernel default since 2.6.25), exporting a subdirect
 The construction rules are straightforward:
 
 1. **Preserve the fsid** -- copy all fsid bytes from the seed handle unchanged
-2. **Change the fileid_type** -- set byte 3 to the correct type for the target filesystem (0x01 for ext4, 0x4d for BTRFS, 0x81 for XFS)
+2. **Change the fileid_type** -- set byte 3 to the correct type for the target filesystem (0x01 for ext4, 0x4d for BTRFS, 0x01 or 0x81 for XFS). For inode-based filesystems nfswolf keeps the seed's own fileid_type, so an XFS seed with 64-bit inodes produces 0x81 candidates
 3. **Set the root inode** -- write the filesystem's root inode number and generation=0 into the fileid section
 4. **For compound UUID seeds (fsid_type=7)** -- also try a fsid_type=6 variant by stripping the `ino` field and keeping only the UUID
 
@@ -304,12 +304,43 @@ Where nfswolf obtains seed handles for analysis and escape:
 The [`decode`](../usage/decode.md) subcommand is a fully offline handle decoder. Given a hex-encoded handle, it parses every field (version, auth_type, fsid_type, fileid_type, fsid bytes, fileid bytes), identifies the OS and filesystem via `FileHandleAnalyzer`, and prints a security assessment. No network access required.
 
 ```bash
-nfswolf decode 01000702600002000000000001d96c9d9009c49daa193f721ec3fe9b6
+nfswolf decode 010007010100020000000000d96c9d9009c44daa193f721ec3fe9b6a0200000000000000
+```
+
+That 36-byte handle is an ext4 filesystem-root handle with full export context: fsid_type 7 (export inode 131073, export generation 0, then the 16-byte filesystem UUID) and fileid_type 1 (inode 2, generation 0). `decode` prints:
+
+```text
+  Handle: 36 bytes
+  010007010100020000000000d96c9d9009c44daa193f721ec3fe9b6a0200000000000000
+
+  Header
+    byte 0  version      = 1 (Linux knfsd)
+    byte 1  auth_type    = 0 (deprecated, always 0)
+    byte 2  fsid_type    = 7 (FSID_UUID16_INUM: export inode + generation + 16-byte UUID)
+    byte 3  fileid_type  = 0x01 (INO32_GEN: 32-bit inode + generation)
+
+  Filesystem ID (fsid)
+    export_ino   = 131073
+    export_gen   = 0
+    uuid         = d96c9d9009c44daa193f721ec3fe9b6a
+
+  File ID (fileid)
+    inode        = 2
+    generation   = 0
+
+  Fingerprint
+    OS:         Linux
+    Filesystem: Ext4
+
+  Assessment
+    [BEST] This handle has full export context and real inode data.
+    Handles are cross-protocol: this handle works on NFSv2, v3, and v4
+    (on servers that support the respective version).
 ```
 
 ### escape subcommand
 
-The [`escape`](../usage/escape.md) subcommand implements a seven-phase pipeline that gathers seed handles from all available sources (MOUNT v3, MOUNT v1, NFSv4 LOOKUP, upward traversal), constructs escape candidates for 18 filesystem types, probes them against the server using the STALE/BADHANDLE oracle, and reports which escapes succeed. The `--fast` flag runs a quick single-export probe (~10-80 RPCs).
+The [`escape`](../usage/escape.md) subcommand implements a seven-phase pipeline that gathers seed handles from all available sources (MOUNT v3, MOUNT v1, NFSv4 LOOKUP, upward traversal), constructs escape candidates for 17 filesystem types (all tested types except tmpfs), probes them against the server using the STALE/BADHANDLE oracle, and reports which escapes succeed. The `--fast` flag runs a quick single-export probe (~10-80 RPCs).
 
 ### brute-handle subcommand
 

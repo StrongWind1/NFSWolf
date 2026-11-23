@@ -193,4 +193,4 @@ struct LookupArgs {
 }
 ```
 
-The traits are implemented by hand for types whose wire encoding does not follow the mechanical field-by-field rule: `Opaque` (which needs special fixed-vs-variable handling), `List` (which uses XDR array encoding), and `Void` (zero bytes).
+The traits are implemented by hand for types whose wire encoding does not follow the mechanical field-by-field rule: `Opaque` (which needs special fixed-vs-variable handling), `List` (which encodes a bool-tagged linked list -- a `TRUE` word before each element and a `FALSE` word after the last, the RFC 4506 optional-data chain -- rather than a counted array), and `Void` (zero bytes).

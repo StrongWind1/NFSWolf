@@ -222,7 +222,7 @@ Every operation returns an `nfs4_status` value. The `nfs-v4` crate encodes 66 na
 
 | Predicate | Matches | Use |
 |-----------|---------|-----|
-| `is_permission_denied()` | `NFS4ERR_ACCESS`, `NFS4ERR_PERM`, `NFS4ERR_WRONGSEC` | Credential escalation decisions |
+| `is_permission_denied()` | `NFS4ERR_ACCESS`, `NFS4ERR_PERM` | Credential escalation decisions. `NFS4ERR_WRONGSEC` is not included: it says the flavor is wrong, which a different AUTH_SYS identity cannot fix |
 | `is_stale()` | `NFS4ERR_STALE` | Handle invalidation |
 | `is_not_found()` | `NFS4ERR_NOENT` | Path probing |
 

@@ -8,7 +8,7 @@ Technical reference material for nfswolf: protocol specifications, kernel intern
 |------|-------------|
 | [RFC Index](rfcs.md) | Every NFS-related RFC (55+ documents from 1987 to 2025), organized by category, with nfswolf relevance notes and obsolescence chains |
 | [Kernel Source Map](kernel.md) | Function-level walkthrough of the Linux 7.1.8 knfsd server, with every security-relevant code path mapped to nfswolf findings |
-| [Filesystem Escape Matrix](escape-matrix.md) | Per-filesystem escape support across 19 Linux filesystem types: which file handle layouts nfswolf can construct and which resist escape |
+| [Filesystem Escape Matrix](escape-matrix.md) | Per-filesystem escape support across 18 Linux filesystem types (22 tested configurations): which file handle layouts nfswolf can construct and which resist escape |
 | [Spec Completeness](spec-completeness.md) | Protocol coverage tracking -- which RFC procedures and fields are implemented in each of the 8 workspace crates |
 | [Changelog](changelog.md) | Release history and migration notes from v0.1.0 through the current release |
 
@@ -24,6 +24,4 @@ For guided explanations of protocols and attacks, see the [NFS](../nfs/index.md)
 
 ## Local copies
 
-nfswolf ships with local copies of all referenced RFCs in `ref/rfc/` (15 primary references cited in source code) and `ref/all_rfcs/` (complete NFS RFC corpus, 55+ documents). The Linux kernel NFS source breakdown is in `ref/linux-kernel/BREAKDOWN.md`, with copied kernel source files in `ref/linux-kernel/` for local reference.
-
-These are checked into the repository so the documentation and offline development both work without network access.
+The maintainers work against a local reference checkout under `ref/`: the RFCs cited in source code in `ref/rfc/`, the complete NFS RFC corpus in `ref/all_rfcs/`, and the Linux kernel NFS source breakdown in `ref/linux-kernel/BREAKDOWN.md` with copied kernel source files beside it. That directory is gitignored and not shipped in the repository. The [RFC Index](rfcs.md) links every RFC to its published text, and the [Kernel Source Map](kernel.md) summarizes the kernel breakdown.

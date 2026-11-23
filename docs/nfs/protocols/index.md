@@ -112,7 +112,7 @@ nfswolf (binary)
   src/proto/    -- pooling, circuit breaking, stealth, credential escalation
     |
     v
-  RpcTransport  -- the seam (one trait, one method: call)
+  RpcTransport  -- the seam (one trait, two methods: call, call_as)
     |
     v
   crates/       -- pure wire encoding/decoding, no policy

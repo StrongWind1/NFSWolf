@@ -117,23 +117,25 @@ NFSv4 file handles have the same internal byte structure as v2/v3 on Linux knfsd
 
 ## nfswolf NFSv4 support
 
-nfswolf implements the full NFSv4.0 protocol stack in the `nfs-v4` crate (248 tests). The implementation covers:
+nfswolf implements the full NFSv4.0 protocol stack in the `nfs-v4` crate. The implementation covers:
 
 - All 37 operations (ops 3-39) fully typed with response decoders
 - 66 named status codes with classification predicates
 - SETCLIENTID lifecycle, OPEN/CLOSE/LOCK state, crash recovery
 - Domain types (`Nfs4FileInfo`, `Nfs4DirEntry`, `Nfs4FileType`)
-- 45 public client methods in `Nfs4Client`
+- 40 public client methods in `Nfs4Client`
 - `V4Ops` implementing `ShellOps` for the unified 47-command shell
-- `Nfs4EscapeProbe` for the escape engine on v4-only servers
+- NFSv4 seeds and candidate probing in the `escape` pipeline, and `AnalyzerV4EscapeProbe` running `find_escape_root()` in the analyzer's v4 fallback, for v4-only servers
 - Auto-version detection probing v3, v2, then v4
 
 ### Two client variants
 
 | Client | Transport | Use case |
 |--------|-----------|----------|
-| `Nfs4Client` (pool-backed) | `PooledTransport` with circuit breaker, stealth, credential management | Shell, analyzer, escape engine |
-| `Nfs4DirectClient` (direct TCP) | Single TCP connection, no pool | Scanner v4 probe (`probe_nfs4()`) |
+| `Nfs4Client` (pool-backed) | `PooledTransport` with circuit breaker, stealth, credential management | Shell, FUSE mount, `escape` candidate probing and post-escape reads |
+| `Nfs4DirectClient` (direct TCP) | Single TCP connection, no pool | Analyzer (every v4 check, including its escape probe), `escape` seed gathering and LOOKUPP traversal, scanner pseudo-root READDIR, shell version detection |
+
+The scanner's v4 detection uses neither: `probe_nfs_versions_tcp()` sends NULL v2, NULL v3 and `COMPOUND([PUTROOTFH])` over one raw RPC connection.
 
 ### Auto-version detection
 

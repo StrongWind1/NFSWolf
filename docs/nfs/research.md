@@ -68,7 +68,7 @@ The preconditions documented in the report remain accurate today:
 3. The filesystem must have predictable inode and generation numbers (ext4, XFS, and BTRFS all qualify -- these are the defaults on Debian, Fedora, and SUSE respectively).
 4. The attacker must be able to send manipulated NFS requests from a privileged port (<1024), which requires root or `CAP_NET_BIND_SERVICE`.
 
-All four preconditions are met on a standard Linux distribution with default NFS export configuration. This research directly informs nfswolf's [F-2.1 export escape](../security/access-control/F-2.1-export-escape.md) implementation, which extends the original work to cover 18 of 19 Linux filesystem types (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660; only tmpfs resists because it does not implement `export_operations`).
+All four preconditions are met on a standard Linux distribution with default NFS export configuration. This research directly informs nfswolf's [F-2.1 export escape](../security/access-control/F-2.1-export-escape.md) implementation, which extends the original work to cover 17 of the 18 Linux filesystem types tested (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660; only tmpfs resists, because its root's generation number is random per mount and checked exactly -- see the [escape matrix](../reference/escape-matrix.md)).
 
 The Stony Brook report focused on ext4 and XFS, which were the dominant Linux filesystems at the time. Their handle format analysis showed that ext4 root is always at inode 2 with generation 0, and XFS root at inode 64 or 128 depending on inode size configuration. Subsequent work by HVS Consulting extended this to BTRFS (where handle semantics differ due to subvolume architecture), and nfswolf further extended it to 15 additional filesystem types by analyzing each filesystem's `encode_fh` and `fh_to_dentry` kernel functions to determine the handle structure and root directory constants.
 
@@ -118,7 +118,7 @@ The nfswolf repository includes a [3200-line kernel breakdown](../reference/kern
 
 ### Linux kernel NFS source analysis
 
-The kernel breakdown in `ref/linux-kernel/BREAKDOWN.md` represents a layer of analysis that sits between the protocol RFCs and the HVS Consulting application-level research. While the RFCs describe what the protocol is supposed to do and the HVS wiki documents what attackers can achieve, the kernel source analysis explains why specific attacks succeed or fail at the implementation level.
+The kernel breakdown (a function-level walkthrough the maintainers keep in a local `ref/linux-kernel/BREAKDOWN.md`, not shipped in the repository, and summarized in the [Kernel Source Map](../reference/kernel.md)) represents a layer of analysis that sits between the protocol RFCs and the HVS Consulting application-level research. While the RFCs describe what the protocol is supposed to do and the HVS wiki documents what attackers can achieve, the kernel source analysis explains why specific attacks succeed or fail at the implementation level.
 
 The analysis covers the Linux 7.1.8 NFS server (knfsd) as a layered architecture from RPC dispatch down to per-version procedure handlers. Several findings from this analysis are not documented in any RFC or prior research:
 
@@ -253,7 +253,7 @@ For researchers who want to trace nfswolf's findings back to their original sour
 | AUTH_SYS weakness | RFC 2623 Section 2.2.1, RFC 5531 Section 14 | F-1.1, F-1.2, F-1.3 |
 | Handle bearer token property | RFC 2623 Section 2.6, RFC 1094 Section 2.3.3 | F-2.1 through F-2.12 |
 | Export escape construction | Stony Brook FSL technical report, HVS Consulting wiki Section 5.1 | F-2.1, F-2.4, F-2.5 |
-| Kernel enforcement gaps | ref/linux-kernel/BREAKDOWN.md Sections 2.5, 6.1, 6.3, 6.4 | F-1.1, F-2.1, F-7.1 through F-7.7 |
+| Kernel enforcement gaps | [Kernel Source Map](../reference/kernel.md), summarizing the local kernel breakdown (Sections 2.5, 6.1, 6.3, 6.4) | F-1.1, F-2.1, F-7.1 through F-7.7 |
 | Client-side privilege escalation | HVS Consulting wiki Sections 5.2.1-5.2.3, Pentestmonkey | F-4.1 through F-4.4 |
 | Wire protocol exposure | RFC 1813 Section 8, RFC 9289 | F-3.1 through F-3.8 |
 | NFSv4 security negotiation | RFC 7530 Section 2.6 (SECINFO) | F-1.7, F-5.7 |

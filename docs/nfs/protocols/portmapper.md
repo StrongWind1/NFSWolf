@@ -229,9 +229,9 @@ nfswolf handles this gracefully: the scanner's `--skip-rpc` flag skips portmappe
 The portmapper and rpcbind clients live in the `onc-rpcbind` workspace crate:
 
 - **`PortmapperClient`** -- portmapper v2: `null()`, `set()`, `unset()`, `getport()`, `dump()`, `callit()`
-- **`RpcbindClient`** -- rpcbind v3/v4: `gettime()`, `getstat()`, `getaddr()`, `dump()`, `callit()`, `bcast()`, `getversaddr()`, `indirect()`, `getaddrlist()`, `uaddr2taddr()`, `taddr2uaddr()`
+- **`RpcbindClient`** -- rpcbind v3/v4: `set()`, `unset()`, `gettime()`, `getstat()`, `getaddr()`, `dump()`, `callit()`, `bcast()`, `getversaddr()`, `indirect()`, `getaddrlist()`, `uaddr2taddr()`, `taddr2uaddr()`
 
-Both clients are generic over `RpcTransport` and accept AUTH_NONE, matching the portmapper's own convention. The scanner wraps these in `src/proto/portmap.rs` with NIS detection, amplification measurement, and program-number resolution against the 1,251-entry IANA registry.
+Both clients are generic over raw I/O -- any stream implementing `onc-rpc-client`'s `AsyncRead` + `AsyncWrite`, such as a `TokioIo<TcpStream>` -- not over `RpcTransport`: each owns a bare `RpcClient` on that stream and sends AUTH_NONE, matching the portmapper's own convention. The scanner wraps these in `src/proto/portmap.rs` with NIS detection, amplification measurement, and program-number resolution against the 1,251-entry IANA registry.
 
 !!! info "Related findings"
     - [F-5.4: RPC Service Enumeration](../../security/info-disclosure/F-5.4-rpc-service-enumeration.md) -- DUMP leaks the full service map

@@ -13,7 +13,7 @@ RQUOTA version 1 defines two procedures on program 100011:
 | 0 | `NULL` | void | void | Standard RPC liveness probe |
 | 1 | `GETQUOTA` | path + UID | quota data or error | Returns disk quota and usage for the specified UID on the specified export |
 
-RQUOTA version 2 adds an extended GETQUOTA that accepts a quota type parameter (0 = user quota, 1 = group quota), enabling group quota queries. nfswolf currently uses version 1 only.
+RQUOTA version 2 adds an extended GETQUOTA that accepts a quota type parameter (0 = user quota, 1 = group quota), enabling group quota queries. nfswolf uses version 1 for user quotas and, when rquotad also registers version 2, version 2 with type 1 for group quotas.
 
 ### GETQUOTA request
 
@@ -139,7 +139,7 @@ RQUOTA is one of three UID discovery channels in nfswolf, each covering a differ
 
 ## nfswolf implementation
 
-The RQUOTA client lives in `src/proto/rquota.rs`. It provides a single function:
+The RQUOTA client lives in `src/proto/rquota.rs`. It provides two functions, `getquota` (version 1, user quota) and `getquota_v2` (version 2, user or group quota by `id_type`):
 
 ```rust
 pub(crate) async fn getquota(
@@ -149,11 +149,20 @@ pub(crate) async fn getquota(
     proxy: Option<&str>,
     stealth: &StealthConfig,
 ) -> anyhow::Result<GetquotaResult>
+
+pub(crate) async fn getquota_v2(
+    addr: SocketAddr,
+    export_path: &str,
+    id: u32,
+    id_type: u32, // 0 = user, 1 = group
+    proxy: Option<&str>,
+    stealth: &StealthConfig,
+) -> anyhow::Result<GetquotaResult>
 ```
 
-The function opens a direct TCP connection to the rquotad port, sends a GETQUOTA v1 request, and manually decodes the XDR response. It uses the shared sideband connection helper (`src/proto/sideband.rs`) for SOCKS5 proxy support and stealth pacing.
+Each function opens a direct TCP connection to the rquotad port, sends one GETQUOTA request, and manually decodes the XDR response. It uses the shared sideband connection helper (`src/proto/sideband.rs`) for SOCKS5 proxy support and stealth pacing.
 
-The analyzer (`src/engine/analyzer.rs`) calls `check_rquota()` per export, resolving the rquotad port via portmapper GETPORT and probing UIDs 0, 1000, and 65534. If any probe returns quota data with non-zero block or file counts, or a non-zero `bsize`, a finding is emitted.
+The analyzer (`src/engine/analyzer.rs`) calls `check_rquota()` per export, resolving the rquotad port via portmapper GETPORT and probing UIDs 0, 1000, and 65534 over version 1. If the portmapper also lists RQUOTA version 2, it probes GIDs 0, 100, 1000, and 65534 as group quotas with `getquota_v2`. If any probe returns quota data with non-zero block or file counts, or a non-zero `bsize`, a finding is emitted.
 
 !!! info "Related findings"
     - [F-5.15: rquotad Exposes UID Activity](../../security/info-disclosure/index.md#f-515-rquotad-exposes-uid-activity-via-quota-queries) -- the primary finding for RQUOTA-based user enumeration
