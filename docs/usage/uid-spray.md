@@ -3,7 +3,7 @@
 The `uid-spray` subcommand is a last-resort credential brute-force tool that iterates over UID/GID ranges to discover which identities have access to a specific file or directory on the NFS server. It uses the NFSv3 ACCESS procedure (RFC 1813 S3.3.4) as a permission oracle, testing each UID/GID combination and reporting which ones the server grants access to.
 
 !!! warning "Last resort"
-    You should rarely need this. The interactive [shell](shell.md) and [FUSE mount](mount.md) already run an automatic credential escalation ladder on every `NFS3ERR_ACCES`: file owner first, then the file's group, root, observed identities from directory listings, and common service accounts. The [escape](escape.md) subcommand bypasses export-level access checks entirely by constructing handles to the filesystem root. Reach for `uid-spray` only when both of those have failed and you need to enumerate the UID/GID space to confirm whether an export is truly inaccessible or to map which identities the server recognizes.
+    You should rarely need this. The interactive [shell](shell.md) and [FUSE mount](mount.md) already run an automatic credential escalation ladder on every `NFS3ERR_ACCES`: file owner first, then the file's group, root, and common service accounts. The [escape](escape.md) subcommand bypasses export-level access checks entirely by constructing handles to the filesystem root. Reach for `uid-spray` only when both of those have failed and you need to enumerate the UID/GID space to confirm whether an export is truly inaccessible or to map which identities the server recognizes.
 
 ## Usage
 

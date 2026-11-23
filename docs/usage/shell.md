@@ -1,6 +1,6 @@
 # Shell
 
-The `shell` subcommand opens an interactive readline REPL over a remote NFS export. It works entirely in userspace via raw ONC RPC calls, with no kernel NFS client needed, no `mount(8)`, and no root privileges on the attacker's machine. The shell supports 47 commands across navigation, file operations, credential manipulation, security scanning, and export escape.
+The `shell` subcommand opens an interactive readline REPL over a remote NFS export. It works entirely in userspace via raw ONC RPC calls, with no kernel NFS client needed, no `mount(8)`, and no root privileges on the attacker's machine. The shell supports 46 commands (plus 12 aliases) across navigation, file operations, credential manipulation, security scanning, and export escape.
 
 ## Usage
 
@@ -57,7 +57,11 @@ Target formats (same across every subcommand):
 | `--privileged-port` | Bind below port 1024 (for `secure` exports; requires root) |
 | `--proxy HOST:PORT` | SOCKS5 proxy |
 | `--delay MS`, `--jitter MS` | Stealth pacing between RPC calls |
-| `--nfs-port PORT` | Override NFS data port (default: 2049) |
+| `--nfs-port PORT` | Override NFS data port (default: portmapper lookup, else 2049) |
+| `--mount-port PORT` | Override the mountd port used for MOUNT |
+| `--rpc-port PORT` | Portmapper port for version detection and the MOUNT port lookup (default: 111) |
+| `--skip-rpc` | Never contact the portmapper (see [Auto-version detection](#auto-version-detection)) |
+| `-t`, `--timeout MS` | NFS version detection timeout (default: 2000). Once connected, every call has a fixed 30 s deadline |
 
 ## Shell features
 
@@ -67,7 +71,9 @@ When `--nfs-version` is omitted, the shell probes the server before connecting:
 
 1. **NFSv3** via portmapper GETPORT (program 100003, version 3) + RPC NULL verification
 2. **NFSv2** via portmapper GETPORT (program 100003, version 2) + RPC NULL verification
-3. **NFSv4** via direct COMPOUND to port 2049 (no portmapper required)
+3. **NFSv4** via direct COMPOUND to the NFS port (`--nfs-port`, default 2049; no portmapper required)
+
+Each probe is bounded by `--timeout` (default 2000 ms). The portmapper is queried on `--rpc-port` (default 111). With `--skip-rpc`, the portmapper is never contacted: v3 and then v2 are probed with an RPC NULL directly on the NFS port, then v4. An explicit `--nfs-port` skips the GETPORT step the same way.
 
 v3 is tried first because it is the most common deployment. v2 before v4 because v2 servers tend to have weaker security controls. v4 last because it works even when portmapper (TCP/111) is firewalled. GETPORT alone is not sufficient since some portmappers register all NFS versions against a daemon that only speaks a subset, so the shell sends a NULL RPC to verify each claim.
 
@@ -78,8 +84,7 @@ When the shell encounters a permission denial, it automatically tries different 
 1. File owner UID (from GETATTR)
 2. Caller UID with the file's GID
 3. Root (UID 0)
-4. Identities harvested from READDIRPLUS, ranked by frequency
-5. Common service accounts (www-data, nobody, etc.)
+4. Common service accounts (www-data, nobody, etc.)
 
 The ladder prunes itself based on mode bits: if `mode & 0o007 == 0`, service-account rungs are skipped because no "other" access exists. This works across all three NFS versions.
 
@@ -123,6 +128,7 @@ nfswolf@10.0.0.1:/ uid=1000 gid=1000>
 nfswolf@10.0.0.1:/etc uid=0 gid=0>
 nfswolf@10.0.0.1:/ [escaped] uid=0 gid=0>
 nfswolf@10.0.0.1:/ uid=33 gid=33 [v2]>
+nfswolf@10.0.0.1:/ uid=1000 gid=1000 [v4]>
 ```
 
 ## First session walkthrough
@@ -149,8 +155,9 @@ nfswolf@10.0.0.1:/ uid=33 gid=33 [v2]>
       password: s3cret_db_pass
 
     nfswolf@10.0.0.5:/ uid=1000 gid=1000> escape-root
-    [+] escaped to filesystem root (ext4, inode 2)
+    [+] escaped to filesystem root (Ext4, inode 2)  OS-ESCAPE
         handle: 01000007020000020000000001000000...
+        inode: 2  type: DIR  mode: 0755
 
     nfswolf@10.0.0.5:/ [escaped] uid=1000 gid=1000> cat /etc/shadow
     root:$6$xyz...:19500:0:99999:7:::
@@ -181,6 +188,8 @@ nfswolf@10.0.0.1:/ uid=33 gid=33 [v2]>
 
 ## MOUNT bypass with --handle
 
+The shell never consults `--skip-mountd`; it calls MOUNT whenever it needs an export's root handle on v2 or v3. To keep it away from mountd, give it a handle or use NFSv4 (`--nfs-version 4`), which has no MOUNT step.
+
 When portmapper or mountd is firewalled but you have a valid file handle (from a previous escape, brute-force, or packet capture), `--handle` connects directly to the NFS data port without any MOUNT RPC:
 
 ```bash
@@ -191,19 +200,19 @@ This is the intended workflow after `nfswolf escape` produces a root handle. Fil
 
 ## NFSv2 and NFSv4 shells
 
-All three protocol versions share the same 47-command set through the unified `NfsShell<O: ShellOps>` architecture. A few commands are version-specific:
+All three protocol versions share the same 46-command set through the unified `NfsShell<O: ShellOps>` architecture. A few commands are version-specific:
 
 | Command | v2 | v3 | v4 |
 |---------|:--:|:--:|:--:|
 | `root` (probe NFSPROC_ROOT) | Yes | -- | -- |
 | `mknod` (create device node) | -- | Yes | Yes |
-| `verifier` (write verifier probe) | -- | Yes | -- |
+| `verifier` (write verifier probe) | -- | Yes | Yes |
 
 NFSv2 identity changes work by reconnecting: new TCP socket + new AUTH_SYS credentials + re-MOUNT. NFSv3 and NFSv4 swap credentials on the existing connection without reconnecting.
 
 ## See also
 
-- [Shell Commands](shell-commands.md) -- Complete reference for all 47 commands
+- [Shell Commands](shell-commands.md) -- Complete reference for all 46 commands and 12 aliases
 - [Mount](mount.md) -- FUSE mount for using standard tools against NFS exports
 - [Escape](escape.md) -- Export escape algorithm and filesystem support matrix
 - [Global Options](global-options.md) -- All flags that apply across subcommands

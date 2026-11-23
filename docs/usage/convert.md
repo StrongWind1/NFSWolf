@@ -68,7 +68,7 @@ nfswolf convert -i results.json --format csv -o findings.csv
 nfswolf convert -i results.json --format markdown -o findings.md
 ```
 
-This avoids re-running the 30+ security checks (and the associated RPC traffic) for every output format you need.
+This avoids re-running the analyzer's checks (and the associated RPC traffic) for every output format you need.
 
 ## Related pages
 

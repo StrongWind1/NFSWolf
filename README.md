@@ -21,7 +21,7 @@
 
 ---
 
-NFSWolf covers the full NFS attack path in a single binary: scan a network for NFS, audit every export against 62 documented security findings, escape chrooted exports to the full filesystem across 18 filesystem types, drop into an interactive shell with automatic credential escalation, or FUSE-mount the export locally. Pure Rust, no `libnfs`, statically linked under musl. Replaces `showmount`, `nfsshell`, `nfsspy`, and the Metasploit NFS modules.
+NFSWolf covers the full NFS attack path in a single binary: scan a network for NFS, audit every export for 43 of the 62 documented security findings, escape chrooted exports to the full filesystem across 17 filesystem types, drop into an interactive shell with automatic credential escalation, or FUSE-mount the export locally. Pure-Rust protocol stack, no `libnfs`, statically linked under musl. Replaces `showmount`, `nfsshell`, `nfsspy`, and the Metasploit NFS modules.
 
 ## From scan to /etc/shadow in three commands
 
@@ -38,14 +38,18 @@ $ nfswolf scan 192.168.1.0/24
 $ nfswolf escape --fast 192.168.1.10:/srv/nfs
 [*] Escaping 192.168.1.10 (fast mode)
 [*] 1 unique seed handle(s) acquired
-[*] 3 candidates constructed (deduped from 5)
+[*] 38 candidates constructed (deduped from 47)
 [*] 1 tree-top(s) confirmed
 
+  Seeds acquired: 1 unique handles
+  Candidates constructed: 38 (deduped from 47)
+  Tree-tops confirmed: 1 (filtered 0 known export boundaries)
+
   Results:
-    [OS-ESCAPE]  ext4 inode 2  via MOUNT v3 /srv/nfs   [v3]  no_root_squash,rw
+    [OS-ESCAPE]  inode 2 gen=0 (ext2/3/4, JFS)  via MOUNT v3 /srv/nfs   [v3]  no_root_squash,rw
          handle: 0100070001000200000000000000000000000002ffffffff
-         likely the real filesystem root, best candidate to try first
-         rootfs dirs: bin, etc, usr, var (score: 4)
+         ext4 inode 2 gen-based handle; ...
+         rootfs dirs: bin, dev, etc, proc, sys, usr, var (score: 65)
 
   1 handle(s) found from 1 seeds. 1 confirmed server rootfs.
 
@@ -119,13 +123,13 @@ cosign verify-blob \
 
 ## What it does
 
-- **Escapes export boundaries** -- constructs file handles that bypass `subtree_check` on 18 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660), reaching the full filesystem root from a chrooted export. Cascades through MOUNT v3, v1, NFSv4 LOOKUP, and LOOKUPP.
-- **Escalates credentials automatically** -- when access is denied, an evidence-driven UID ladder tries the file owner, the caller's UID with the file's group, root, identities observed in directory listings, and common service accounts. No manual UID guessing.
-- **Audits 62 security findings** -- export misconfigurations, credential weaknesses, handle leaks, privilege escalation paths, and protocol downgrades. Each finding references its RFC section and includes severity, detection method, and remediation. Full catalog on the [docs site](https://strongwind.dev/NFSWolf/security/).
-- **Interactive shell** -- 47 commands across NFSv2, NFSv3, and NFSv4 with tab completion, recursive `get -r`/`put -r` with SHA-256 verification, `--handle` for MOUNT bypass, `-c` for scripting, `suid-scan`, `secrets-scan`, `last`/`lastb`/`lastlog` for login history, and auto-version detection.
+- **Escapes export boundaries** -- constructs file handles that bypass `subtree_check` on 17 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660), reaching the full filesystem root from a chrooted export. Cascades through MOUNT v3, v1, NFSv4 LOOKUP, and LOOKUPP.
+- **Escalates credentials automatically** -- when access is denied, an evidence-driven UID ladder tries the file owner, the caller's UID with the file's group, root, and common service accounts, skipping the service accounts when the mode bits rule them out. No manual UID guessing.
+- **Audits against a 62-finding catalog** -- `analyze` detects 43 of the 62 documented findings: export misconfigurations, credential weaknesses, handle leaks, privilege escalation paths, and protocol downgrades. Of the rest, 3 are denial-of-service findings kept out of scope and 16 are documented for manual testing. Each finding references its RFC section and includes severity, detection method, and remediation. Full catalog on the [docs site](https://strongwind.dev/NFSWolf/security/).
+- **Interactive shell** -- 46 commands (plus 12 aliases) across NFSv2, NFSv3, and NFSv4 with tab completion, recursive `get -r`/`put -r` with SHA-256 verification, `--handle` for MOUNT bypass, `-c` for scripting, `suid-scan`, `secrets-scan`, `last`/`lastb`/`lastlog` for login history, and auto-version detection.
 - **FUSE mount** -- mount any NFS export locally with spoofed credentials, per-inode credential escalation, and symlink rewriting on escaped roots. NFSv2, v3, and v4.
 - **Brute-forces handles** -- inode/generation cross-product sweep with STALE/BADHANDLE oracle discrimination and `--mask` nibble-mask mode for OS-agnostic file handle brute force.
-- **Zero dependencies** -- pure Rust, no `libnfs`, no C. Static musl binary runs on any Linux. Also builds for macOS and Windows.
+- **Pure-Rust protocol stack** -- no `libnfs`. The static musl binary has no C dependencies and runs on any Linux, but leaves out `mount`; the default build links libfuse3 for `nfswolf mount`. Also builds for macOS and Windows.
 
 <details>
 <summary><strong>Protocol and engine details</strong></summary>
@@ -146,13 +150,13 @@ cosign verify-blob \
 nfswolf scan 192.168.1.0/24
 
 # Security audit with HTML report:
-nfswolf analyze --json 192.168.1.10 > results.json
-nfswolf convert -i results.json -f html -o report.html
+nfswolf analyze 192.168.1.10 --json results.json
+nfswolf convert -i results.json --format html -o report.html
 
-# Escape an export to the filesystem root:
+# Escape one export to the filesystem root (fast, single-export mode):
 nfswolf escape --fast 192.168.1.10:/srv/nfs
 
-# Full escape -- all exports, all handle sources, all versions:
+# Full escape (the default) -- all exports, all handle sources, all versions:
 nfswolf escape 192.168.1.10 --json --read-shadow > escape.json
 
 # Interactive shell (auto-detects NFSv2/v3/v4):
@@ -182,12 +186,13 @@ nfswolf analyze 192.168.1.10 --delay 200 --jitter 50 --proxy 127.0.0.1:1080
 | Group | Subcommand | Purpose |
 |---|---|---|
 | Recon | `scan` | Network-wide NFS discovery (CIDR, target file, single host) |
-| Recon | `analyze` | Per-host security audit against the 62-finding catalog |
-| Recon | `escape` | Export escape across 18 filesystem types. `--fast` for single-export, `--all` for every handle source. `--json`, `--read-shadow`, `--all-handles` |
-| Connect | `shell` | Interactive REPL with 47 commands. Auto-detects NFSv2/v3/v4. `--handle` for MOUNT bypass, `-c` for scripting |
+| Recon | `analyze` | Per-host security audit: detects 43 of the 62 documented findings |
+| Recon | `escape` | Export escape across 17 filesystem types. Full mode (every export, every handle source) by default; `--fast` for a single export. `--json`, `--read-shadow`, `--all-handles` |
+| Connect | `shell` | Interactive REPL with 46 commands. Auto-detects NFSv2/v3/v4. `--handle` for MOUNT bypass, `-c` for scripting |
 | Connect | `mount` | FUSE mount with spoofed credentials (glibc build only) |
 | Advanced | `brute-handle` | Handle brute-force with STALE/BADHANDLE oracle. `--mask` nibble-mask mode |
 | Advanced | `uid-spray` | Last-resort UID/GID brute force |
+| Stealth | `clean` | Remove your mount-list entries (UMNTALL, then a looped UMNT over MOUNT v3/v1). `--list` shows the mount list |
 | Utilities | `convert` | Render analysis results to HTML / JSON / CSV / Markdown / text / console |
 | Utilities | `decode` | Offline file handle decoder with OS/FS fingerprint and security assessment |
 | Utilities | `completions` | Shell completions for bash, zsh, fish, PowerShell |
@@ -196,18 +201,20 @@ nfswolf analyze 192.168.1.10 --delay 200 --jitter 50 --proxy 127.0.0.1:1080
 <summary><strong>Global flags</strong></summary>
 
 ```
---uid <UID>              AUTH_SYS UID (default 1000; use 0 for root spoof)
---gid <GID>              AUTH_SYS primary GID (default 1000)
+-u / --uid <UID>         AUTH_SYS UID (default 1000; use 0 for root spoof)
+-g / --gid <GID>         AUTH_SYS primary GID (default 1000)
 --aux-gids <G1,G2,...>   Auxiliary GIDs (max 16 per RFC 1057 sec. 9.2)
 --hostname <NAME>        AUTH_SYS machinename field
 --privileged-port        Bind source port <1024 (may require CAP_NET_BIND_SERVICE / root)
 --proxy <HOST:PORT>      Route all RPC through SOCKS5 (no-auth) proxy
---nfs-port <PORT>        Override NFS service port (default: portmapper lookup)
---mount-port <PORT>      Override mountd port (default: portmapper lookup)
---rpc-port <PORT>        Override portmapper/rpcbind port (default: 111)
---skip-rpc               Skip portmapper probes (use when port 111 is firewalled)
---skip-mountd            Skip MOUNT daemon queries (NFSv4 pseudo-FS still runs)
---timeout <MS>           Per-RPC timeout in milliseconds (default 3000)
+--nfs-port <PORT>        Override NFS service port, every subcommand (default: portmapper lookup)
+--mount-port <PORT>      Override mountd port for every MOUNT call (default: portmapper lookup)
+--rpc-port <PORT>        Override portmapper/rpcbind port for every query (default: 111)
+--skip-rpc               Never contact the portmapper; NFS uses --nfs-port or 2049,
+                         MOUNT uses --mount-port or probes 2049 and 20048
+--skip-mountd            Skip MOUNT queries in scan and analyze (NFSv4 pseudo-FS still runs)
+-t / --timeout <MS>      Probe timeout (default: scan 3000, analyze 5000,
+                         shell/mount version detection 2000); sessions use a fixed 30 s
 --delay <MS>             Baseline inter-RPC delay (stealth pacing)
 --jitter <MS>            Random jitter added to each delay
 --no-color               Strip ANSI colors
@@ -221,7 +228,7 @@ nfswolf analyze 192.168.1.10 --delay 200 --jitter 50 --proxy 127.0.0.1:1080
 
 - Does not exploit RPCSEC_GSS / Kerberized mounts (detection only).
 - Does not attack NFS-over-TLS channels (detects `NONE`/`TLS_V1` negotiation only).
-- Does not modify server state without `--allow-write`.
+- Does not write to an export from `shell` or `mount` without `--allow-write`. (`analyze` creates and removes a probe file during its squash checks, and `clean` deletes mount-list entries.)
 - Does not run without an authorized target specified on the command line.
 
 ## Platform support
@@ -248,14 +255,14 @@ The NFS protocol stack is split into eight standalone crates, published on [crat
 | [`nfs-mount`](https://crates.io/crates/nfs-mount) | MOUNT v1/v3 (RFC 1094 / RFC 1813) |
 | [`nfs-v2`](https://crates.io/crates/nfs-v2) | NFSv2 (RFC 1094): all 18 procedures |
 | [`nfs-v3`](https://crates.io/crates/nfs-v3) | NFSv3 (RFC 1813): all 22 procedures + domain types |
-| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): all 37 ops, 66 status codes, stateful client, 45 public methods |
+| [`nfs-v4`](https://crates.io/crates/nfs-v4) | NFSv4.0 (RFC 7530): all 37 ops, 66 status codes, stateful client |
 
 </details>
 
 <details>
 <summary><strong>Development</strong></summary>
 
-Conventional commit messages (`feat:`, `fix:`, `docs:`). 808 tests across 8 workspace crates and the binary.
+Conventional commit messages (`feat:`, `fix:`, `docs:`). 900+ tests across 8 workspace crates and the binary.
 
 ```sh
 make hooks        # install the repo pre-commit hook

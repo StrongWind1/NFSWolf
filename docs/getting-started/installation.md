@@ -1,6 +1,6 @@
 # Installation
 
-NFSWolf is distributed as a single binary with no runtime dependencies. Pick whichever installation method fits your workflow.
+NFSWolf is distributed as a single binary. The static musl build has no runtime dependencies; the `-full` builds need libfuse3 for `nfswolf mount`. Pick whichever installation method fits your workflow.
 
 !!! warning "Authorization required"
     NFSWolf is a security research tool. Only use it against systems you own or have explicit written authorization to test. Unauthorized access to computer systems is illegal in most jurisdictions.
@@ -28,7 +28,7 @@ NFSWolf is distributed as a single binary with no runtime dependencies. Pick whi
     This tracks the latest commit. If you want a specific tag:
 
     ```bash
-    cargo install --git https://github.com/StrongWind1/NFSWolf --tag v1.2.0
+    cargo install --git https://github.com/StrongWind1/NFSWolf --tag v1.3.1
     ```
 
 === "Pre-built binary"
@@ -145,7 +145,7 @@ nfswolf --version
 ```
 
 ```
-nfswolf 1.2.0
+nfswolf 1.3.1
 ```
 
 ```bash
@@ -155,9 +155,46 @@ nfswolf --help
 ??? example "Full `--help` output"
 
     ```
-    NFS security scanner, analyzer and exploitation toolkit for authorized assessments.
+    Pure-Rust NFS (v2/v3/v4) security toolkit: recon, analysis, export-escape, FUSE mount, and an
+    interactive shell for authorized red-team and pentest work.
 
     Usage: nfswolf [OPTIONS] <COMMAND>
+
+      -u, --uid <UID>             AUTH_SYS UID to present to the NFS server (spoofed  --  server trusts
+                                  this) [default: 1000]
+      -g, --gid <GID>             AUTH_SYS GID to present to the NFS server [default: 1000]
+          --hostname <NAME>       Client hostname injected into AUTH_SYS credentials (spoofed) [default:
+                                  localhost]
+          --aux-gids <G1,G2,...>  Auxiliary GIDs in AUTH_SYS (comma-separated, e.g. `--aux-gids 42,15`).
+                                  Capped at 16 per RFC 1057 S9.2. Useful for the shadow GID trick: add
+                                  42 (Debian/Ubuntu shadow group) or 15 (SUSE shadow) to read
+                                  /etc/shadow without no_root_squash
+          --privileged-port       Bind from a privileged source port (<1024). Required by servers with
+                                  the `secure` export option. Needs root or CAP_NET_BIND_SERVICE
+          --proxy <HOST:PORT>     Route all connections through a SOCKS5 proxy
+      -t, --timeout <MS>          Probe timeout in milliseconds. Defaults: 3000 for scan probes, 5000
+                                  for analyze probes, 2000 for shell/mount NFS version detection. Calls
+                                  on an established NFS session keep a fixed 30 s deadline
+          --nfs-port <PORT>       Override the NFS port (skip portmapper GETPORT). Applies to every
+                                  subcommand that opens an NFS connection
+          --mount-port <PORT>     Override the mount-daemon port (skip portmapper GETPORT). Applies to
+                                  every MOUNT call in every subcommand
+          --rpc-port <PORT>       Override the portmapper/rpcbind port (default 111). Applies to every
+                                  portmapper query in every subcommand
+          --skip-rpc              Never contact the portmapper/rpcbind (DUMP, GETPORT, port 111), in any
+                                  subcommand. NFS then uses --nfs-port or 2049; MOUNT uses --mount-port
+                                  or probes the well-known mountd ports 2049 and 20048
+          --skip-mountd           Skip MOUNT daemon queries (EXPORT, MNT, DUMP) in scan and analyze.
+                                  NFSv4 pseudo-FS discovery still runs. shell and mount skip MOUNT with
+                                  --handle instead
+          --delay <MS>            Delay between RPC calls in milliseconds (stealth mode) [default: 0]
+          --jitter <MS>           Random jitter added to each delay (0 = no jitter) [default: 0]
+          --no-color              Disable ANSI colour output (also set by NO_COLOR env var)
+      -v, --verbose...            Increase log verbosity (-v info, -vv debug, -vvv trace)
+      -q, --quiet                 Suppress status lines; only emit findings and errors
+      -h, --help                  Print help
+      -V, --version               Print version
+
 
     Commands:
       Recon:
@@ -170,6 +207,8 @@ nfswolf --help
       Advanced:
         brute-handle  Brute-force file handles via the STALE/BADHANDLE oracle
         uid-spray     UID/GID spray (last-resort credential discovery)
+      Stealth:
+        clean         Remove mount list entries from an NFS server
       Utilities:
         convert       Render an `analyze --json` dump to HTML/MD/CSV/TXT/console
         decode        Decode an NFS file handle and print every field

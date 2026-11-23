@@ -43,26 +43,28 @@ The server processes these constructed handles exactly as it would a handle obta
 
 ### Supported filesystem types
 
-The escape engine supports 18 of 19 common Linux filesystem types. Each has a different root inode number and handle layout:
+The escape engine constructs root handles for 17 Linux filesystem types. tmpfs is the one tested type that resists, because its generation numbers are random per mount. Each filesystem has its own root inode (or object, block, or node ID) and handle layout:
 
 | Filesystem | Root inode/object | Handle format | Notes |
 |------------|------------------|---------------|-------|
-| ext2/3/4 | 2 | INO32_GEN | Most common, generation 0 |
-| XFS | 128 | INO64_GEN | 64-bit inode field |
-| BTRFS | 256+ (subvolume) | BTRFS_WITHOUT_PARENT (0x4d) | Scans subvolume IDs 5, 256..271 |
-| ZFS | 3 | INO32_GEN | ZFS-on-Linux, custom constructor |
-| f2fs | 3 | INO32_GEN | Generation 0 |
-| JFS | 2 | INO32_GEN | Generation 0 |
-| NILFS2 | 2 | NILFS_WITHOUT_PARENT (0x61) | Includes checkpoint number |
-| ReiserFS | 2 | INO32_GEN | Generation 1 (not 0) |
-| VFAT | 1 | FAT_WITHOUT_PARENT (0x71) | Root inode 1 |
-| NTFS3 | 5 | INO32_GEN | Generation 5 |
-| UDF | variable | UDF_WITHOUT_PARENT (0x51) | Block-based addressing |
-| bcachefs | 4096 | BCACHEFS_WITHOUT_PARENT (0xb1) | Includes subvolume ID |
-| SquashFS | 1 | INO32_GEN | Read-only filesystem |
-| EROFS | 36+ | INO64_GEN | Read-only, 64-bit inodes |
-| ISO9660 | varies | INO32_GEN | Read-only optical media |
-| tmpfs | -- | -- | Only type that resists escape (no stable inodes) |
+| ext2 | 2 | INO32_GEN (0x01) | Generation 0. Compound-UUID seeds (fsid_type 7) get INO32_GEN_PARENT (0x02) variants |
+| ext3 | 2 | INO32_GEN (0x01) | Same candidate as ext2 |
+| ext4 | 2 | INO32_GEN (0x01) | Most common, same candidate as ext2 |
+| XFS | 128, 64, or 32 | INO32_GEN (0x01), or INO64_GEN (0x81) when the seed uses it | 128 on v5, 64 on v4, 32 on v4 with 1024-byte inodes; generation 0 |
+| BTRFS | objectid 256 in subvolume 5, 256..271 | BTRFS_WITHOUT_PARENT (0x4d) | Subvolume 5 is the FS tree; `--btrfs-subvols` (default 16) sets how many user subvolume IDs from 256 a full run tries, `--fast` tries two |
+| ZFS | object 34 | `zfid_short_t` in fileid_type 0x01 | Generation 0 is accepted for the root object |
+| f2fs | 3 | INO32_GEN (0x01) | Generation 0 |
+| JFS | 2 | INO32_GEN (0x01) | Generation 0 |
+| NILFS2 | 2 | NILFS_WITHOUT_PARENT (0x61) | Checkpoint number 0, generation 0 |
+| ReiserFS | 2 | INO32_GEN (0x01) | Generation 1 (not 0) |
+| VFAT | 1 | INO32_GEN (0x01) | Generation 0; FAT exports mounted `nfs=nostale_ro` use FAT_WITHOUT_PARENT (0x71) handles, which nfswolf does not construct |
+| NTFS3 | 5 | INO32_GEN (0x01) | Generation 5 |
+| UDF | block 66, 130, 258, 2, 64, 128, 256, or 512 | UDF_WITHOUT_PARENT (0x51) | Root is a logical block that varies per volume; generation 0 passes the lenient check |
+| bcachefs | 4096, subvolume 1 | BCACHEFS_WITHOUT_PARENT (0xb1) | Generation 0 |
+| SquashFS | set by mksquashfs | INO32_GEN (0x01) | Read-only; the static table probes inodes 2 and 7, and the full run's inode sweep covers the rest of the low range |
+| EROFS | nid 36 | INO64_GEN (0x81) | Read-only; the generation is ignored |
+| ISO9660 | block 18 through 30 | Packed block/offset in fileid_type 0x01 | Read-only optical media; root block depends on the authoring tool |
+| tmpfs | -- | -- | Resists escape: random generation per mount |
 
 ## The seven-phase pipeline
 
@@ -86,7 +88,7 @@ flowchart TD
     P5 --> P6
 
     P1 --- N1["MOUNT v3, MOUNT v1, NFSv4 LOOKUP,\nMOUNT DUMP, pseudo-FS walk,\nWebNFS, PUTROOTFH, NFSPROC_ROOT,\nchild entries, upward traversal"]
-    P2 --- N2["Known root inodes per filesystem,\nBTRFS subvol sweep,\nZFS/EROFS/NILFS2/bcachefs/UDF/ISO9660\nspecialized constructors,\nbrute-force inode range"]
+    P2 --- N2["Known root inodes per filesystem,\nBTRFS subvol sweep,\nZFS/EROFS/NILFS2/bcachefs/UDF/ISO9660/FAT\nspecialized constructors,\nbrute-force inode range"]
     P3 --- N3["GETATTR for validity,\nLOOKUP '..' == self for tree-top,\ncredential escalation on ACCES"]
     P4 --- N4["Remove handles matching\nexport boundaries,\ncollapse duplicates by bytes"]
     P4b --- N5["List directory entries,\nmatch against /proc, /sys, /dev,\n/etc, /usr, /var, /boot, etc."]
@@ -104,11 +106,11 @@ In fast mode, Phase 1 tries only the operator-specified export across v3, v2, an
 
 ### Phase 2: Construct candidates
 
-Pure computation, no network calls. For each seed, the engine extracts the fsid and constructs handles with root inode numbers for every known filesystem type. The `FileHandleAnalyzer` generates INO32_GEN candidates (inodes 1-5 with generations 0-5), INO64_GEN candidates (for XFS/EROFS), BTRFS subvolume handles (subvol IDs 5 and 256 through 256+N), and filesystem-specific root constructors for ZFS, EROFS, NILFS2, bcachefs, UDF, and ISO9660. In full mode, a brute-force pass scans inodes 6 through `--max-root-scan` (default 200) with generation 0. Candidates are deduplicated by handle bytes before probing.
+Pure computation, no network calls. For each seed, the engine extracts the fsid and constructs handles with root inode numbers for every known filesystem type. The `FileHandleAnalyzer` generates INO32_GEN candidates (inodes 1-5 with generations 0-5), INO64_GEN candidates (for XFS/EROFS), BTRFS subvolume handles (subvol IDs 5 and 256 through 256+N), and filesystem-specific root constructors for ZFS, EROFS, NILFS2, bcachefs, UDF, ISO9660, and FAT. In full mode, a brute-force pass scans inodes 6 through `--max-root-scan` (default 200) with generation 0. Candidates are deduplicated by handle bytes before probing.
 
 ### Phase 3: Probe candidates
 
-Each candidate is tested against the server with GETATTR (checking that the inode exists and is a directory) followed by LOOKUP ".." (confirming that the parent is the handle itself, the filesystem root property). Probing runs across all available NFS versions in full mode, or only the version that succeeded in Phase 1 when using `--fast`. When GETATTR returns `NFS3ERR_ACCES` (permission denied due to `root_squash`), the handle is still valid -- the engine runs credential escalation through the evidence-driven ladder (file owner, matching GID, root, observed identities, common service accounts) and retries.
+Each candidate is tested against the server with GETATTR (checking that the inode exists and is a directory) followed by LOOKUP ".." (confirming that the parent is the handle itself, the filesystem root property). Probing runs across all available NFS versions in full mode, or only the version that succeeded in Phase 1 when using `--fast`. When GETATTR returns `NFS3ERR_ACCES` (permission denied due to `root_squash`), the handle is still valid -- the engine runs credential escalation through the evidence-driven ladder (file owner, matching GID, root, common service accounts) and retries.
 
 ### Phase 4: Dedup and filter
 
@@ -154,7 +156,7 @@ The escape pipeline is shared across several entry points:
 
 - **`nfswolf escape`** -- the primary CLI subcommand documented here.
 - **`nfswolf scan --auto-escape`** -- runs `escape --fast` automatically for each discovered export during scanning.
-- **`nfswolf shell escape-root`** -- runs the same `find_escape_root()` algorithm from within the interactive shell, using the current shell handle as the seed.
+- **`nfswolf shell escape-root`** -- runs the same fast pipeline as `escape --fast` from within the interactive shell, against the host and export the shell was opened on, and switches the shell root to the result.
 - **`nfswolf shell --handle HEX`** -- accepts an escape handle directly to start a shell session at the filesystem root.
 
 ## Typical workflow

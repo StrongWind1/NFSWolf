@@ -2,13 +2,13 @@
 
 Complete reference for every nfswolf command and flag. For narrative walkthroughs, see the individual subcommand pages in the NFSWolf tab.
 
-Target syntax is consistent across all subcommands: `host:/export`, `host --export /p`, or `host --handle HEX`. IPv6 must be bracketed: `[2001:db8::1]:/export`.
+Subcommands that work on a single export take the target as `host:/export` or `host --export /p`. `shell` and `mount` also accept `host --handle HEX` to skip MOUNT and use a raw file handle as the root; `brute-handle` takes its seed handle with `--seed-handle HEX`. IPv6 must be bracketed: `[2001:db8::1]:/export`.
 
 ---
 
 ## nfswolf
 
-Global options inherited by every subcommand.
+Global options inherited by every subcommand. They can be given before or after the subcommand name.
 
 ### Identity
 
@@ -23,12 +23,12 @@ Global options inherited by every subcommand.
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--privileged-port` | bool | `false` | Bind from a privileged source port (<1024). Required by servers with the `secure` export option. Needs root or `CAP_NET_BIND_SERVICE`. |
+| `--privileged-port` | bool | `false` | Bind from a privileged source port (<1024). Required by servers with the `secure` export option. Honored by every MOUNT call in every subcommand, `scan` included. Needs root or `CAP_NET_BIND_SERVICE`. |
 | `--proxy` | `HOST:PORT` | -- | Route all connections through a SOCKS5 proxy |
-| `-t`, `--timeout` | `MS` | `3000` | Connection timeout in milliseconds |
-| `--nfs-port` | `PORT` | -- | Override the NFS port (skip portmapper). Applies to shell, mount, escape, brute-handle, uid-spray. |
-| `--mount-port` | `PORT` | -- | Override the mount-daemon port (skip portmapper) |
-| `--rpc-port` | `PORT` | -- | Override the portmapper/rpcbind port (default 111) |
+| `-t`, `--timeout` | `MS` | per subcommand | Probe timeout in milliseconds. When omitted: 3000 for `scan` probes, 5000 for `analyze` probes, 2000 for NFS version detection in `shell` and `mount`. An explicit value applies to all of them. Calls on an established NFS session keep a fixed 30 s deadline that this flag does not change. |
+| `--nfs-port` | `PORT` | -- | Override the NFS port (skip portmapper GETPORT). Applies to every subcommand that opens an NFS connection, `analyze` included, and to every pooled NFS connection. |
+| `--mount-port` | `PORT` | -- | Override the mount-daemon port (skip portmapper GETPORT). Applies to every MOUNT call in every subcommand, including those made inside pooled connections. |
+| `--rpc-port` | `PORT` | `111` | Override the portmapper/rpcbind port. Applies to every portmapper/rpcbind query: `scan` and `analyze` discovery, `shell`/`mount` version detection, and the MOUNT port lookups in `escape`, `brute-handle`, `uid-spray`, `clean`, `shell`, and `mount`. |
 
 ### Stealth
 
@@ -41,8 +41,8 @@ Global options inherited by every subcommand.
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--skip-rpc` | bool | `false` | Skip all portmapper/rpcbind probes (DUMP, GETPORT, port 111). Use when portmapper is firewalled and NFS port is known. |
-| `--skip-mountd` | bool | `false` | Skip all MOUNT daemon queries (EXPORT, MNT, DUMP). NFSv4 pseudo-FS discovery still runs. |
+| `--skip-rpc` | bool | `false` | Never contact the portmapper/rpcbind (DUMP, GETPORT, port 111), in any subcommand. NFS uses `--nfs-port` or 2049. MOUNT uses `--mount-port`, or probes the well-known mountd ports 2049 and 20048. `shell`/`mount` version detection probes v3 then v2 with an RPC NULL on the NFS port, then v4. |
+| `--skip-mountd` | bool | `false` | Skip MOUNT daemon queries (EXPORT, MNT, DUMP) in `scan` and `analyze`. NFSv4 pseudo-FS discovery still runs; `analyze` discovers exports through it and runs its NFSv4 per-export checks. No effect on `shell`, `mount`, or `escape`: `shell` and `mount` bypass MOUNT with `--handle` or `--nfs-version 4`, and `escape` gathers NFSv4 seeds on its own when MOUNT does not answer. |
 
 ### Output
 
@@ -90,18 +90,17 @@ nfswolf analyze [OPTIONS] [TARGET]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `TARGET` | positional | -- | Target NFS server: IP or hostname. Omit if using `-f`. Trailing `:/path` is accepted but the export portion is ignored (analyze enumerates exports itself). |
-| `-f`, `--file` | `FILE` | -- | File of targets, one per line |
+| `-f`, `--file` | `FILE` | -- | File of targets, one per line. `--targets` is accepted as an alias. |
 | `--test-read` | `PATH` | `/etc/shadow` | Test if a remote file is readable after export escape. Tries multiple credentials (root, shadow GIDs, current uid). Can be specified multiple times. |
 | `--test-read-gids` | `G1,G2,...` | `0,42,15` | GIDs to try when testing file readability (root, Debian shadow, SUSE shadow) |
 | `--test-read-uids` | `U1,U2,...` | `0` | UIDs to try when testing file readability |
-| `--v4-depth` | `N` | `2` | NFSv4 directory tree depth for overview |
 | `--json` | `[FILE]` | -- | Emit machine-readable JSON. With no value, goes to stdout. With a path, written to that file. |
 
 ---
 
 ## nfswolf escape
 
-Escape an export to the filesystem root via subtree_check bypass. Seven-phase pipeline: gather seeds, construct candidates, probe, deduplicate, detect rootfs, score, and report.
+Escape an export to the filesystem root via subtree_check bypass. Seven-phase pipeline: gather seeds, construct candidates, probe, deduplicate, detect rootfs, score, and report. Full mode is the default: every export and every handle source (MOUNT v3, MOUNT v1, NFSv4) on every NFS version. `--fast` limits the run to one export.
 
 ```
 nfswolf escape [OPTIONS] <TARGET>
@@ -124,7 +123,7 @@ nfswolf escape [OPTIONS] <TARGET>
 
 ## nfswolf shell
 
-Interactive NFS exploration shell with 47 commands over NFSv2, v3, and v4. See [Shell Commands](shell-commands.md) for the interactive command reference.
+Interactive NFS exploration shell with 46 commands (plus 12 aliases) over NFSv2, v3, and v4. See [Shell Commands](shell-commands.md) for the interactive command reference.
 
 ```
 nfswolf shell [OPTIONS] <TARGET>
@@ -190,6 +189,7 @@ nfswolf brute-handle [OPTIONS] <TARGET>
 | `--inode-end` | `INODE` | `500` | End of the inode range (inclusive) |
 | `--gen-start` | `GEN` | `0` | Start of the generation range |
 | `--gen-end` | `GEN` | `0` | End of the generation range (inclusive). Full search space: `(inode_end - inode_start + 1) * (gen_end - gen_start + 1)`. |
+| `--mask` | `HEXMASK` | -- | Nibble-mask mode: a hex handle with `?` for each unknown nibble (up to 16). Enumerates every combination, connecting straight to the NFS port without MOUNT; `--seed-handle`, `--inode-*`, and `--gen-*` are ignored, `--max-attempts` still caps the probe count. Works against any server OS. |
 
 ---
 
@@ -214,6 +214,23 @@ nfswolf uid-spray [OPTIONS] <TARGET>
 | `--max-attempts` | `N` | `100000` | Refuse to start a sweep larger than this. Guard against accidental 4.3B probe cross products. Raise deliberately if needed. |
 | `--path` | `PATH` | `/` | Path to check access against |
 | `--attempt-delay` | `MS` | `0` | Delay between attempts in ms (independent of global `--delay`) |
+
+---
+
+## nfswolf clean
+
+Remove your entries from the server's mount list (the advisory rmtab that `showmount -a` reports). Sends MNTPROC_UMNTALL, then a looped MNTPROC_UMNT over MOUNT v3 and v1 with a stall detector. Linux mountd matches UMNT by TCP source IP, not AUTH_SYS machinename, so only entries recorded under your source IP can be removed. File handles already issued stay valid. See [Clean](clean.md).
+
+```
+nfswolf clean [OPTIONS] <TARGET>
+```
+
+### Options
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `TARGET` | positional | required | Target NFS server (IP or hostname) |
+| `--list` | bool | `false` | Show the current mount list (MNTPROC_DUMP) without removing anything |
 
 ---
 

@@ -1,6 +1,6 @@
 # Analyze
 
-The `analyze` subcommand performs a security audit of one or more NFS servers, running 30+ checks across 62 documented findings. It enumerates exports, tests authentication weaknesses, probes for export escape vulnerabilities, checks squash configuration, and reports every finding with a severity rating, evidence, and remediation guidance.
+The `analyze` subcommand performs a security audit of one or more NFS servers. It detects 43 of the 62 documented findings; of the other 19, the three denial-of-service findings (F-6.x) are out of scope and 16 are documented for manual testing. It enumerates exports, tests authentication weaknesses, probes for export escape vulnerabilities, checks squash configuration, and reports every finding with a severity rating, evidence, and remediation guidance.
 
 ```
 nfswolf analyze <TARGET> [OPTIONS]
@@ -28,7 +28,7 @@ The analyzer accepts a single host or a file of hosts. Unlike [scan](scan.md), i
 | Flag | Default | Description |
 |------|---------|-------------|
 | `<TARGET>` | -- | Positional: IP or hostname. Required unless `-f` is used. |
-| `-f`, `--file <FILE>` | -- | File of targets, one per line. |
+| `-f`, `--file <FILE>` | -- | File of targets, one per line. `--targets <FILE>` is accepted as an alias. |
 
 ### Behavior
 
@@ -37,7 +37,6 @@ The analyzer accepts a single host or a file of hosts. Unlike [scan](scan.md), i
 | `--test-read <PATH>` | `/etc/shadow` | Remote file to test for readability after export escape. Can be specified multiple times for different paths. |
 | `--test-read-gids <G1,G2,...>` | `0,42,15` | GIDs to try when testing file readability (comma-separated). 0 = root, 42 = Debian/Ubuntu shadow group, 15 = SUSE shadow group. |
 | `--test-read-uids <U1,U2,...>` | `0` | UIDs to try when testing file readability (comma-separated). |
-| `--v4-depth <N>` | `2` | NFSv4 directory tree depth for the pseudo-FS overview. |
 
 ### Output
 
@@ -55,31 +54,32 @@ These are set on the `nfswolf` command itself, before the `analyze` subcommand. 
 | `-u`, `--uid <UID>` / `-g`, `--gid <GID>` | AUTH_SYS credentials for the initial connection. The analyzer also tries escalated credentials internally. |
 | `--aux-gids <G1,G2,...>` | Auxiliary GIDs in AUTH_SYS. Adding 42 (Debian shadow group) can unlock `/etc/shadow` reads without `no_root_squash`. |
 | `--hostname <NAME>` | Spoofed client hostname in AUTH_SYS credentials. |
-| `--nfs-port <PORT>` | Override the NFS port (skip portmapper). |
-| `--mount-port <PORT>` | Override the mount-daemon port. |
-| `--rpc-port <PORT>` | Override the portmapper/rpcbind port. |
-| `--skip-rpc` / `--skip-mountd` | Skip portmapper or MOUNT daemon queries. |
+| `--nfs-port <PORT>` | Override the NFS port (skip portmapper GETPORT). Honored by every NFS connection the analyzer opens. |
+| `--mount-port <PORT>` | Override the mount-daemon port for every MOUNT call. |
+| `--rpc-port <PORT>` | Override the portmapper/rpcbind port (default 111) for every portmapper and rpcbind query. |
+| `--skip-rpc` | Never contact the portmapper. Portmapper checks are skipped; NFS uses `--nfs-port` or 2049, and MOUNT uses `--mount-port` or probes 2049 and 20048. |
+| `--skip-mountd` | Skip MOUNT EXPORT, MNT, and DUMP. Exports are discovered through the NFSv4 pseudo-filesystem instead, and the NFSv4 per-export checks run against them. |
 | `--proxy <HOST:PORT>` | Route all connections through a SOCKS5 proxy. |
-| `-t`, `--timeout <MS>` | Connection timeout (default 3000ms). |
+| `-t`, `--timeout <MS>` | Probe timeout (default 5000 ms for analyze). |
 | `--delay <MS>` / `--jitter <MS>` | Stealth pacing between RPC calls. |
-| `--privileged-port` | Bind from a source port below 1024. |
+| `--privileged-port` | Bind from a source port below 1024, for MOUNT and NFS calls. |
 | `-q`, `--quiet` | Suppress status lines; only emit findings. |
 
 ## What it checks
 
-The analyzer runs every check unconditionally. There are no opt-in flags for individual checks. Findings are organized by attack category, each referencing an ID from the [findings catalog](../security/index.md).
+The analyzer runs every check unconditionally. There are no opt-in flags for individual checks. Findings are organized by attack category, each referencing an ID from the [findings catalog](../security/index.md). The table below covers the whole catalog of 62 findings; `analyze` detects 43 of them. The three F-6.x denial-of-service findings are out of scope, and the remaining 16 are documented for manual testing.
 
 ### Finding categories
 
 | Category | IDs | What it covers |
 |----------|-----|---------------|
-| Authentication & Authorization Bypass | F-1.1 through F-1.8 | AUTH_SYS trust, UID/GID spoofing, root squash bypass, auxiliary group injection, machine name spoofing, credential replay, NFSv2 downgrade, RPCSEC_GSS flavor downgrade, AUTH_TOOWEAK oracle |
-| File Handle Security | F-2.1 through F-2.12 | Export escape via filesystem root handle, handle guessing/brute force, Windows handle signing, BTRFS subvolume construction, stale handle reuse, bind mount escape, bearer token property, cross-export lateral access, WebNFS public handle, SIGN_FH bypass, NFSv4 LOOKUPP escape |
-| Network & Transport Security | F-3.1 through F-3.9 | Plaintext traffic interception, portmapper UDP amplification, IP spoofing, STRIPTLS downgrade, portmapper bypass, UDP MOUNT handle theft, AUTH_DH, RPC-with-TLS, AUTH_SHORT session credentials |
-| Server Configuration Issues | F-4.1 through F-4.6 | `no_root_squash` exploitation, SUID/SGID binary creation, device node creation via MKNOD, symlink escape, SELinux/MAC label bypass, unrestricted chown |
+| Identity Attacks | F-1.1 through F-1.8 | AUTH_SYS trust, UID/GID spoofing, root squash bypass, auxiliary group injection, machine name spoofing, credential replay, NFSv2 downgrade, RPCSEC_GSS flavor downgrade, AUTH_TOOWEAK oracle |
+| Access Control Bypass | F-2.1 through F-2.12 | Export escape via filesystem root handle, handle guessing/brute force, Windows handle signing, BTRFS subvolume construction, stale handle reuse, bind mount escape, bearer token property, cross-export lateral access, WebNFS public handle, SIGN_FH bypass, NFSv4 LOOKUPP escape |
+| Network Attacks | F-3.1 through F-3.9 | Plaintext traffic interception, portmapper UDP amplification, IP spoofing, STRIPTLS downgrade, portmapper bypass, UDP MOUNT handle theft, AUTH_DH, RPC-with-TLS, AUTH_SHORT session credentials |
+| Privilege Escalation | F-4.1 through F-4.6 | `no_root_squash` exploitation, SUID/SGID binary creation, device node creation via MKNOD, symlink escape, SELinux/MAC label bypass, unrestricted chown |
 | Information Disclosure | F-5.1 through F-5.17 | Export list enumeration, READDIRPLUS handle harvesting, NIS credential extraction, RPC service enumeration, NFSv4 pseudo-FS leakage, metadata on access denial, filesystem fingerprinting, AUTH_NONE attribute leak, execute-only file disclosure, pNFS layout downgrade, POSIX ACL exposure, rquotad UID oracle |
 | Denial of Service | F-6.x | Out of scope (NLM lock attacks, grace-period blocking, SETCLIENTID state destruction) |
-| Privilege Escalation | F-7.1 through F-7.7 | Wildcard exports, insecure port bypass, nohide/crossmnt exposure, missing nosuid/nodev, all_squash misconfiguration, audit logging gaps, FreeBSD truncated subnet fingerprint |
+| Configuration Weaknesses | F-7.1 through F-7.7 | Wildcard exports, insecure port bypass, nohide/crossmnt exposure, missing nosuid/nodev, all_squash misconfiguration, audit logging gaps, FreeBSD truncated subnet fingerprint |
 
 ### Severity levels
 
@@ -100,55 +100,38 @@ The analyzer itself supports two output modes: console (default) and JSON. For o
     The default output is an ANSI-colored structured report to stdout:
 
     ```
-    ═══════════════════════════════════════════════════════
-     NFS Security Analysis: 10.129.40.115
-    ═══════════════════════════════════════════════════════
+    +========================================+
+    |  NFS Security Analysis: 10.129.40.115  |
+    +========================================+
 
-      OS:  Linux 5.x  |  NFS:  v3, v4
+      OS:  Linux  |  NFS:  v3, v4
       Impl:  Linux knfsd (GARBAGE_ARGS on null-name LOOKUP)
       Timestamp:  2025-04-12T14:23:01Z
 
-    ── Exports ──────────────────────────────────────────
+      Exports  -------------------------------------------------
+    ╭──────────────┬─────────────────┬──────────┬────────────────────────┬─────────────────────╮
+    │ Path         │ Allowed clients │ Auth     │ Flags                  │ Handle (partial)    │
+    ├──────────────┼─────────────────┼──────────┼────────────────────────┼─────────────────────┤
+    │ /srv/data    │ *               │ AUTH_SYS │ WILDCARD AUTH_SYS_ONLY │ 0100070003000100... │
+    │ /srv/backups │ 10.0.0.0/24     │ AUTH_SYS │ AUTH_SYS_ONLY          │ 0100070005000100... │
+    ╰──────────────┴─────────────────┴──────────┴────────────────────────┴─────────────────────╯
 
-    ╭──────────────┬─────────┬──────────┬─────────────────┬──────────────────╮
-    │ Path         │ Clients │ Auth     │ Flags           │ Handle           │
-    ├──────────────┼─────────┼──────────┼─────────────────┼──────────────────┤
-    │ /srv/data    │ *       │ AUTH_SYS │ WILDCARD        │ 01000700030001.. │
-    │              │         │          │ AUTH_SYS_ONLY   │                  │
-    │ /srv/backups │ *       │ AUTH_SYS │ WILDCARD        │ 01000700050001.. │
-    │              │         │          │ AUTH_SYS_ONLY   │                  │
-    ╰──────────────┴─────────┴──────────┴─────────────────┴──────────────────╯
+      File Handles  --------------------------------------------
+      /srv/data: 0100070003000100020000000000000028ce886800000000
+      /srv/backups: 0100070005000100020000000000000045af129a00000000
 
-    ── File Handles ─────────────────────────────────────
+      Findings  ------------------------------------------------
+      Findings: 3 critical, 2 high, 1 low/info
 
-        /srv/data       0100070003000100020000000000000028ce886800000000
-        /srv/backups    0100070005000100020000000000000045af129a00000000
-
-    ── Findings ─────────────────────────────────────────
-
-      CRITICAL  2  |  HIGH  3  |  MEDIUM  4  |  LOW  2  |  INFO  1
-
-      [CRITICAL]  F-2.1  no_root_squash enabled on /srv/data
-        UID 0 can create files owned by root. The server does not
-        remap root credentials to an anonymous identity.
-        Evidence: created .nfswolf_squash_probe as uid=0, confirmed owner=0
-        Remediation: add root_squash to the export options in /etc/exports
-
-      [HIGH]  F-3.1  Export escape via subtree_check bypass on /srv/data
-        Parent directory traversal reached inode 2 (filesystem root).
-        The export is on ext4; no_subtree_check is the kernel default.
-        Evidence: GETATTR on constructed handle returned valid attrs, inode=2
-        Remediation: enable subtree_check or use a dedicated filesystem per export
-
-      [HIGH]  F-4.1  /etc/shadow readable via escaped handle
-        After escaping /srv/data, /etc/shadow is readable as uid=0.
-        Evidence: root:$6$rounds=65536$...:19847:0:99999:7:::
-        Remediation: enable root_squash, restrict export ACLs, use Kerberos
-
-      [MEDIUM]  F-1.1  Exports visible to any host (wildcard ACL)
-        /srv/data and /srv/backups are exported to * with no IP restriction.
-        Evidence: MOUNT EXPORT returned allowed_hosts=[]
-        Remediation: restrict exports to specific IP ranges in /etc/exports
+      [CRITICAL]  /srv/data  F-2.1  Export escape possible -- filesystem root accessible via crafted handle
+        Evidence: constructed ext4 root handle (inode 2) accepted; GETATTR returned a directory
+      [CRITICAL]  /srv/data  F-4.1  no_root_squash detected  --  uid=0 credentials not remapped
+        Evidence: probe file created as uid=0 is owned by uid 0
+      [CRITICAL]  /srv/data  F-1.3  Sensitive file readable via UID/GID credential
+        Evidence: /etc/shadow readable as uid=0 gid=0 via escaped handle
+      [HIGH]      /srv/data  F-7.1  Export accessible to all hosts (world-accessible export)
+      [HIGH]      /srv/data  F-1.1  Export uses AUTH_SYS only (no Kerberos)
+      [INFO]      F-3.1  NFS traffic is unencrypted  --  no RPCSEC_GSS privacy advertised
     ```
 
 === "JSON"
@@ -192,11 +175,11 @@ The analyzer itself supports two output modes: console (default) and JSON. For o
             ],
             "findings": [
               {
-                "id": "F-2.1",
-                "title": "no_root_squash enabled on /srv/data",
+                "id": "F-4.1",
+                "title": "no_root_squash detected  --  uid=0 credentials not remapped",
                 "severity": "critical",
                 "description": "UID 0 can create files owned by root...",
-                "evidence": "created .nfswolf_squash_probe as uid=0...",
+                "evidence": "probe file created as uid=0 is owned by uid 0",
                 "remediation": "add root_squash to the export options...",
                 "export": "/srv/data"
               }
