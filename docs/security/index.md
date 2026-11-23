@@ -174,7 +174,7 @@ Every finding in the catalog, sorted by ID. The **Detected By** column lists the
 | F-5.7 | [Case-Insensitive Filesystem](info-disclosure/F-5.7-case-insensitive-fs.md) | Low | Info Disclosure | `analyze` (PATHCONF) |
 | F-5.8 | [AUTH_NONE Metadata Leak](info-disclosure/F-5.8-auth-none-metadata-leak.md) | Low | Info Disclosure | `analyze` (AUTH_NONE GETATTR) |
 | F-5.9 | [Execute-Only File Content Disclosure](info-disclosure/F-5.9-read-if-exec-content-disclosure.md) | Low | Info Disclosure | `analyze` (Linux knfsd fingerprint) |
-| F-5.10 | [Solaris NFS Server Detected (time_delta)](info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Info | Info Disclosure | `analyze` (FSINFO) |
+| F-5.10 | [Non-Linux NFS Server Detected (time_delta)](info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Info | Info Disclosure | `analyze` (FSINFO) |
 | F-5.11 | [Filesystem Lacks Link/Symlink Support](info-disclosure/F-5.11-filesystem-lacks-link-symlink.md) | Info | Info Disclosure | `analyze` (FSINFO) |
 | F-5.12 | [Near Inode Exhaustion](info-disclosure/F-5.12-near-inode-exhaustion.md) | Medium | Info Disclosure | `analyze` (FSSTAT) |
 | F-5.13 | [NFSv4 Named Attributes Exposed](info-disclosure/F-5.13-nfsv4-named-attributes-exposed.md) | Low | Info Disclosure | `analyze` (OPENATTR) |

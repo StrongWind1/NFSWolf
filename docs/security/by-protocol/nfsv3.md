@@ -68,7 +68,7 @@ NFSv3 (RFC 1813) is the most commonly deployed NFS version and the primary targe
 | [F-5.7](../info-disclosure/F-5.7-case-insensitive-fs.md) | Case-Insensitive FS | PATHCONF `case_insensitive=true` fingerprints Windows NFS / NTFS. Filename collision attacks become possible. |
 | [F-5.8](../info-disclosure/F-5.8-auth-none-metadata-leak.md) | AUTH_NONE Metadata Leak | GETATTR with AUTH_NONE on a valid handle leaks attributes. Automounter exemption (RFC 2623 Section 2.3.2). |
 | [F-5.9](../info-disclosure/F-5.9-read-if-exec-content-disclosure.md) | Execute-Only Disclosure | `nfsd_permission()` retries READ with MAY_EXEC when MAY_READ fails. Execute-only files become readable. |
-| [F-5.10](../info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Solaris Time Delta Fingerprint | FSINFO time_delta of {0, 1000} nanoseconds identifies Solaris NFS servers, enabling targeted attack selection. |
+| [F-5.10](../info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Non-Linux Time Delta Fingerprint | FSINFO time_delta of {0, 1000} identifies non-Linux NFS servers (Solaris, NetApp ONTAP), enabling targeted attack selection. |
 | F-5.11 | No Link/Symlink Support | FSINFO properties field lacks FSF3_LINK or FSF3_SYMLINK. Narrows attack surface (F-4.4 inapplicable). |
 | F-5.16 | Silly-Rename Detection | `.nfs*` filenames in READDIRPLUS indicate active open-unlinked state and NFS client activity. |
 | [F-3.8](../network/F-3.8-rpc-with-tls.md) | RPC-with-TLS Supported | Informational. TLS encrypts the wire but AUTH_SYS inside TLS still allows UID forgery. |

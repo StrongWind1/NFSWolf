@@ -25,6 +25,8 @@ pub(crate) enum OsGuess {
     /// repeated 16-byte file-identifier block.  Confirmed on FSx for ONTAP
     /// (NetApp Release 9.19.1).
     NetAppOntap,
+    /// Amazon EFS: 128-byte opaque handles (the NFS maximum), not forgeable.
+    AmazonEfs,
     Unknown,
 }
 
@@ -187,6 +189,13 @@ impl FileHandleAnalyzer {
         // where NN is a sequential share index (observed: 01, 02, ...).
         if data.len() == 16 && data.first().copied() == Some(0x43) {
             return OsGuess::AwsStorageGateway;
+        }
+
+        // Amazon EFS: 128-byte opaque handles (NFS4_FHSIZE maximum), not knfsd.
+        // EFS uses the full 128-byte handle space; no other known server does.
+        // The first two bytes are NOT the Linux [01 00] marker.
+        if data.len() == 128 && data.first().copied() != Some(0x01) {
+            return OsGuess::AmazonEfs;
         }
 
         // FreeBSD: starts with fsid (8 bytes) that often has high values
@@ -868,6 +877,12 @@ impl FileHandleAnalyzer {
                 // The volume ID is predictable (sequential); the generation is
                 // the real entropy source, observed as a 32-bit value.
                 (32.0, vec!["WAFL generation (4 bytes)".into()])
+            },
+            OsGuess::AmazonEfs => {
+                // EFS handles are 128-byte opaque tokens.  The internal structure
+                // is unknown; treating the whole handle as the entropy source.
+                // Brute-force is infeasible at any realistic attempt rate.
+                (128.0 * 8.0, vec!["opaque 128-byte handle (unknown internal structure)".into()])
             },
             OsGuess::HpUx | OsGuess::Unknown => (32.0, vec!["unknown fields".into()]),
         };
@@ -1570,5 +1585,43 @@ mod tests {
         data[20] = 0xBB; // different from bytes 4-19
         let fh = FileHandle::from_bytes(&data);
         assert_ne!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::NetAppOntap);
+    }
+
+    // --- Amazon EFS fingerprinting ---
+
+    #[test]
+    fn fingerprint_efs_128_byte_handle() {
+        // Real EFS handle: 128 bytes, byte 0 = 0x0a (not 0x01).
+        let mut data = [0x42u8; 128];
+        data[0] = 0x0a; // not the knfsd 0x01 marker
+        let fh = FileHandle::from_bytes(&data);
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::AmazonEfs);
+    }
+
+    #[test]
+    fn efs_not_linux() {
+        let mut data = [0x42u8; 128];
+        data[0] = 0x0a;
+        let fh = FileHandle::from_bytes(&data);
+        assert_ne!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::Linux);
+        assert!(FileHandleAnalyzer::construct_root_candidates(&fh).is_empty());
+    }
+
+    #[test]
+    fn efs_entropy_high() {
+        let mut data = [0x42u8; 128];
+        data[0] = 0x0a;
+        let fh = FileHandle::from_bytes(&data);
+        let analysis = FileHandleAnalyzer::estimate_entropy(&fh);
+        assert!(analysis.entropy_bits > 100.0, "EFS handles are 128 bytes of opaque data");
+    }
+
+    #[test]
+    fn linux_128_bytes_not_efs() {
+        // A 128-byte handle with byte 0 = 0x01 is Linux, not EFS.
+        let mut data = [0u8; 128];
+        data[0] = 0x01;
+        let fh = FileHandle::from_bytes(&data);
+        assert_eq!(FileHandleAnalyzer::fingerprint_os(&fh), OsGuess::Linux);
     }
 }

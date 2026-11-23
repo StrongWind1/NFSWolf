@@ -335,7 +335,13 @@ impl Analyzer {
         // With --skip-rpc the versions come from an RPC NULL per version on the
         // NFS port instead, and the portmapper-only checks (NIS, amplification)
         // are skipped.
-        let nfs_versions = if self.net.skip_rpc { probe_nfs_versions_direct(addr, nfs_port, self.net.proxy.as_deref(), &self.stealth, self.probe_timeout()).await } else { self.portmap.detect_nfs_versions(addr).await.unwrap_or_default() };
+        let mut nfs_versions = if self.net.skip_rpc { probe_nfs_versions_direct(addr, nfs_port, self.net.proxy.as_deref(), &self.stealth, self.probe_timeout()).await } else { self.portmap.detect_nfs_versions(addr).await.unwrap_or_default() };
+        // When the portmapper is unreachable (e.g. EFS: port 111 closed) but
+        // port 2049 is open, the version list may be empty.  Probe NFSv4
+        // directly so the later flat-namespace check and v4 fallback work.
+        if nfs_versions.is_empty() && !self.net.skip_rpc && crate::cli::shell::verify_nfs_version_tcp(addr.ip(), nfs_port, 4, self.probe_timeout(), self.net.proxy.as_deref()).await {
+            nfs_versions.push(4);
+        }
         let version_strings: Vec<String> = nfs_versions.iter().map(|v| format!("NFSv{v}")).collect();
 
         // Global checks that don't need a mounted export.
@@ -367,6 +373,17 @@ impl Analyzer {
         // walking the pseudo-filesystem and detecting fsid boundaries.
         if exports.is_empty() {
             exports = discover_v4_exports(addr, nfs_port, self.net.proxy.as_deref(), &self.stealth, self.probe_timeout()).await;
+        }
+        // Flat-namespace servers (Amazon EFS, some appliances): the pseudo-root
+        // IS the real filesystem — no fsid boundaries, no child exports.  When
+        // the walk returns nothing but the server answers NFSv4, synthesize a
+        // single "/" export so the per-export checks have something to test.
+        if exports.is_empty()
+            && nfs_versions.contains(&4)
+            && let Some(root_export) = probe_v4_flat_namespace(addr, nfs_port, self.net.proxy.as_deref(), &self.stealth, self.probe_timeout()).await
+        {
+            tracing::info!("NFSv4 flat namespace detected -- treating root as a single export");
+            exports.push(root_export);
         }
         check_export_acls(&exports, &mut findings);
 
@@ -2652,17 +2669,23 @@ const FSF3_CANSETTIME: u32 = 0x0010;
 async fn check_fsinfo_properties(nfs3: &Nfs3Client, root_fh: &FileHandle, export_path: &str, findings: &mut Vec<Finding>) {
     let Ok(info) = nfs3.info_fs(root_fh).await else { return };
 
-    // Solaris fingerprint: time_delta = {0, 1000} means microsecond granularity.
+    // Non-Linux fingerprint: time_delta = {0, 1000} means microsecond granularity.
+    // Linux knfsd uses nanosecond ({0, 1}).  Microsecond granularity is seen on
+    // Solaris, NetApp ONTAP (WAFL) and some appliances.  It is NOT specific to
+    // Solaris; don't claim it is.
     if info.time_delta.seconds == 0 && info.time_delta.nseconds == 1000 {
         findings.push(make_finding(
             &FindingSpec {
                 id: "F-5.10",
-                title: "Solaris NFS server detected (microsecond time_delta)",
+                title: "Non-Linux NFS server detected (microsecond time_delta)",
                 desc: "FSINFO reports time_delta={0, 1000} (1-microsecond granularity). \
                        Linux knfsd uses nanosecond (time_delta={0, 1}). Microsecond granularity \
-                       is characteristic of Solaris NFS servers.",
+                       is seen on Solaris, NetApp ONTAP and other non-Linux NFS servers. \
+                       Handle formats may differ from the Linux knfsd layout the escape \
+                       engine targets.",
                 evidence: &format!("time_delta={{{}, {}}}", info.time_delta.seconds, info.time_delta.nseconds),
-                remediation: "Informational -- adjust escape strategy for Solaris NFS handle formats.",
+                remediation: "Informational -- check the EXCHANGE_ID fingerprint to identify the server, \
+                              and adjust escape strategy for non-Linux handle formats.",
                 export: Some(export_path),
             },
             Severity::Info,
@@ -3367,4 +3390,45 @@ async fn discover_v4_exports(addr: SocketAddr, nfs_port: u16, proxy: Option<&str
         tracing::info!(count = exports.len(), "NFSv4 pseudo-FS walk discovered exports");
     }
     exports
+}
+
+/// Detect a flat-namespace NFSv4 server (e.g. Amazon EFS) where the pseudo-root
+/// IS the real filesystem — there are no fsid boundaries and no child exports.
+///
+/// Checks whether the pseudo-root has real file content (non-empty READDIR) by
+/// issuing PUTROOTFH + READDIR.  If the root contains entries, the server is a
+/// flat namespace and we return a synthetic export entry for "/" so the analyzer's
+/// per-export checks can run.
+async fn probe_v4_flat_namespace(addr: SocketAddr, nfs_port: u16, proxy: Option<&str>, stealth: &StealthConfig, timeout: std::time::Duration) -> Option<ExportEntry> {
+    use crate::proto::nfs4::types::ArgOp;
+
+    let mut client = connect_nfs4_root(addr, nfs_port, proxy, stealth, timeout).await?;
+
+    // Try to list the pseudo-root.  On a flat-namespace server this returns
+    // real directory entries (files, subdirectories); on a pure pseudo-FS it
+    // returns only the export mount-point names, which discover_v4_exports
+    // already handled.  We get here only when that walk found nothing, so any
+    // READDIR content means the root itself is the filesystem.
+    let root_fh = client.get_root_fh().await.ok()?;
+    let entries = client.list_dir(&root_fh).await.ok()?;
+
+    // Filter out "." and "..".
+    let real_entries: Vec<&String> = entries.iter().filter(|n| *n != "." && *n != "..").collect();
+    if real_entries.is_empty() {
+        return None;
+    }
+
+    // Confirm it's not a pseudo-FS by checking SECINFO on the first real entry.
+    // A pseudo-FS directory returns NFS4ERR_WRONGSEC for SECINFO; a real export
+    // returns auth flavors.  On a flat namespace, the root path itself is "/".
+    let first_entry = real_entries.first()?;
+    let ops = vec![ArgOp::Putrootfh, ArgOp::Secinfo((*first_entry).clone())];
+    let secinfo_ok = client.compound(ops).await.is_ok_and(|r| r.status == 0);
+
+    if secinfo_ok {
+        tracing::info!(entries = real_entries.len(), "NFSv4 flat namespace: root has real content");
+        Some(ExportEntry { path: "/".to_owned(), allowed_hosts: Vec::new(), auth_flavors: vec![1], handle_hex: String::new() })
+    } else {
+        None
+    }
 }

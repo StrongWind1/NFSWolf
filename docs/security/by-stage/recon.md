@@ -19,7 +19,7 @@ NFS reconnaissance is uniquely productive because the protocol's sideband servic
 | [F-5.11](../info-disclosure/F-5.11-filesystem-lacks-link-symlink.md) | Filesystem Lacks Link/Symlink Support | Info | `analyze` | FSINFO properties without FSF3_LINK or FSF3_SYMLINK rule out symlink and hardlink attacks |
 | [F-5.8](../info-disclosure/F-5.8-auth-none-metadata-leak.md) | Export Root Attributes Leaked via AUTH_NONE | Low | `analyze` | Export root uid, gid, mode, size, and timestamps leaked to unauthenticated clients |
 | [F-5.9](../info-disclosure/F-5.9-read-if-exec-content-disclosure.md) | Execute-Only File Content Disclosure | Low | `analyze` | Files with mode 0111 (execute-only) are readable via the READ_IF_EXEC fallback |
-| [F-5.10](../info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Solaris NFS Server Detected (time_delta) | Info | `analyze` | FSINFO time_delta of {0, 1000} ns fingerprints Solaris NFS servers |
+| [F-5.10](../info-disclosure/F-5.10-solaris-time-delta-fingerprint.md) | Non-Linux NFS Server Detected (time_delta) | Info | `analyze` | FSINFO time_delta of {0, 1000} ns fingerprints non-Linux NFS servers |
 | [F-5.5](../info-disclosure/F-5.5-nfsv4-pseudo-fs-leakage.md) | NFSv4 Pseudo-Filesystem Structure Leakage | Low | `scan` | Export directory structure visible via PUTROOTFH + READDIR without MOUNT |
 | [F-5.3](../info-disclosure/F-5.3-nis-credential-extraction.md) | NIS Domain Detection | High | `scan`, `analyze` | NIS programs (100004/100007) in portmapper indicate credential stores |
 | [F-5.6](../info-disclosure/F-5.6-metadata-on-access-denial.md) | Metadata Disclosed on Access Denial | Low | `analyze` | uid, gid, mode, and size leaked in post_op_attr on NFS3ERR_ACCES/PERM responses |

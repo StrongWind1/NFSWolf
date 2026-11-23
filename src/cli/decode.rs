@@ -41,6 +41,11 @@ pub(crate) fn run(args: &DecodeArgs) -> anyhow::Result<()> {
         return decode_netapp_ontap(&bytes);
     }
 
+    // Amazon EFS: 128-byte opaque handles.
+    if os == crate::engine::file_handle::OsGuess::AmazonEfs {
+        return decode_amazon_efs(&bytes);
+    }
+
     // Header (bytes 0-3)
     let version = bytes.first().copied().unwrap_or(0);
     let auth_type = bytes.get(1).copied().unwrap_or(0);
@@ -471,6 +476,45 @@ fn decode_netapp_ontap(raw: &[u8]) -> anyhow::Result<()> {
     if is_root {
         println!("    This is a directory root (file == parent). Likely a MOUNT export root.");
     }
+    println!();
+
+    Ok(())
+}
+
+/// Decode an Amazon EFS file handle.
+///
+/// EFS handles are 128-byte opaque tokens with no known internal structure.
+/// They are the maximum NFS handle size (NFS4_FHSIZE) and are not forgeable.
+/// The 64-bit inode numbers reported by GETATTR are large random values, not
+/// sequential, confirming handles cannot be predicted from inode enumeration.
+#[expect(clippy::unnecessary_wraps, reason = "signature matches run() return type for early return")]
+fn decode_amazon_efs(raw: &[u8]) -> anyhow::Result<()> {
+    println!("  {}", "Amazon Elastic File System (EFS)".bold().underline());
+    println!("    {} Opaque 128-byte handle. Not a Linux knfsd format.", "[EFS]".bold().yellow());
+    println!();
+
+    // Show first and last 16 bytes as a sample
+    let head = raw.get(..16).map(hex_str).unwrap_or_default();
+    let tail = raw.get(112..128).map(hex_str).unwrap_or_default();
+
+    println!("  {}", "Structure".bold().underline());
+    println!("    size         = {} bytes (NFS4_FHSIZE maximum)", raw.len());
+    println!("    head (0-15)  = {head}");
+    println!("    tail (112-)  = {tail}");
+    println!("    internal     = opaque (no known field layout)");
+    println!();
+
+    println!("  {}", "Fingerprint".bold().underline());
+    println!("    OS:         AmazonEfs");
+    println!("    Filesystem: EFS (managed AWS NFS)");
+    println!();
+
+    println!("  {}", "Assessment".bold().underline());
+    println!("    {} Handles are opaque and not forgeable. Brute-force is infeasible.", "[EFS]".bold().yellow());
+    println!("    EFS supports NFSv4.0 and 4.1. It trusts AUTH_SYS uid/gid by default");
+    println!("    (no_root_squash unless the file system policy denies ClientRootAccess).");
+    println!("    There are no export boundaries to escape -- the entire file system is");
+    println!("    one flat namespace. The attack surface is uid/gid trust, not handle forgery.");
     println!();
 
     Ok(())
