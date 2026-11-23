@@ -1,8 +1,9 @@
 //! Deep security analysis of NFS servers.
 //!
-//! Every analysis runs the full check matrix -- there are no opt-in flags
-//! for individual checks. Some of those checks are mildly intrusive (the
-//! squash and no_root_squash probes create a test file and remove it again).
+//! Every analysis runs the full read-only check matrix. The only opt-in is
+//! `--allow-write`, which adds the squash and no_root_squash probes: they
+//! create a test file and remove it again, so without the flag `analyze`
+//! never modifies the server (design rule 8).
 //!
 //! Output split: human-readable to stdout by default; pass `--json` to emit
 //! machine-readable JSON instead (to stdout, or to a file with `--json FILE`).
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use clap::Parser;
 use colored::Colorize as _;
 
-use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_TARGET};
+use crate::cli::{GlobalOpts, H_BEHAVIOR, H_OUTPUT, H_PERMISSIONS, H_TARGET};
 use crate::engine::analyzer::{AnalysisResult, AnalyzeConfig, Analyzer};
 use crate::proto::auth::{AuthSys, Credential};
 use crate::proto::circuit::CircuitBreaker;
@@ -71,6 +72,13 @@ pub(crate) struct AnalyzeArgs {
     /// Applied to each --test-read path. Default: 0
     #[arg(long = "test-read-uids", value_delimiter = ',', help_heading = H_BEHAVIOR)]
     pub test_read_uids: Vec<u32>,
+
+    /// Run the write probes: create and remove a test file as uid 0 and as
+    /// uid 99999 in each writable export. They are the only checks for
+    /// no_root_squash (F-4.1), all_squash with anonuid=0 (F-7.5) and honoured
+    /// forged UIDs (F-1.2). Without this flag analyze never writes.
+    #[arg(long, help_heading = H_PERMISSIONS)]
+    pub allow_write: bool,
 
     /// Emit machine-readable JSON instead of human-readable output. With no value
     /// it goes to stdout (`nfswolf analyze target --json > results.json`); with a
@@ -220,7 +228,8 @@ async fn run_single(host: &str, args: &AnalyzeArgs, globals: &GlobalOpts) -> any
         .with_stealth(StealthConfig::new(globals.delay, globals.jitter))
         .with_net(globals.connect_opts())
         .with_skip_mountd(globals.skip_mountd)
-        .with_timeout(globals.timeout.map(std::time::Duration::from_millis));
+        .with_timeout(globals.timeout.map(std::time::Duration::from_millis))
+        .with_allow_write(args.allow_write);
     let config = AnalyzeConfig { host: host_for_config, port: globals.nfs_port.unwrap_or(2049), test_paths: args.effective_test_paths(), test_uids: args.effective_test_uids(), test_gids: args.effective_test_gids() };
     tracing::info!(%host, "running security checks");
     analyzer.analyze(&config).await
@@ -241,6 +250,10 @@ fn print_result(r: &AnalysisResult) {
         println!("  {}  {}", "Impl:".dimmed(), fp);
     }
     println!("  {}  {}", "Timestamp:".dimmed(), r.timestamp);
+    if let Some(summary) = r.write_probes_summary() {
+        let line = if r.write_probes == Some(true) { summary.normal() } else { summary.yellow() };
+        println!("  {}  {}", "Write probes:".dimmed(), line);
+    }
     println!();
 
     // Exports table

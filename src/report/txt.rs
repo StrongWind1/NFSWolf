@@ -20,6 +20,9 @@ pub(crate) fn render(results: &[AnalysisResult], out: &mut dyn Write) -> anyhow:
             writeln!(out, "Impl: {}", sanitize_control(fp))?;
         }
         writeln!(out, "NFS versions: {}", result.nfs_versions.join(", "))?;
+        if let Some(summary) = result.write_probes_summary() {
+            writeln!(out, "Write probes: {summary}")?;
+        }
         writeln!(out, "Timestamp: {}", result.timestamp)?;
         writeln!(out)?;
 

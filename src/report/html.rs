@@ -78,6 +78,12 @@ fn push_host_section(result: &AnalysisResult, html: &mut String) {
     html.push_str(&html_escape(&result.nfs_versions.join(", ")));
     html.push_str("</p>\n");
 
+    if let Some(summary) = result.write_probes_summary() {
+        html.push_str("<p class=\"meta\">Write probes: ");
+        html.push_str(&html_escape(summary));
+        html.push_str("</p>\n");
+    }
+
     if result.findings.is_empty() {
         html.push_str("<p class=\"no-findings\">No findings.</p>\n");
     } else {

@@ -61,6 +61,24 @@ pub(crate) struct AnalysisResult {
     pub nfs_versions: Vec<String>,
     pub exports: Vec<ExportAnalysis>,
     pub findings: Vec<Finding>,
+    /// Whether the write probes ran (`analyze --allow-write`). They are the
+    /// only checks for F-1.2, F-4.1 and F-7.5, so a report without them must
+    /// say so. `None` for dumps from versions that did not record it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_probes: Option<bool>,
+}
+
+impl AnalysisResult {
+    /// One-line statement of write-probe coverage for report headers, or
+    /// `None` when the dump does not record it.
+    #[must_use]
+    pub(crate) const fn write_probes_summary(&self) -> Option<&'static str> {
+        match self.write_probes {
+            Some(true) => Some("run (test file created and removed as uid 0 and uid 99999)"),
+            Some(false) => Some("not run -- F-1.2, F-4.1 and F-7.5 were not tested (rerun analyze with --allow-write)"),
+            None => None,
+        }
+    }
 }
 
 /// Analysis of a single export.
@@ -188,9 +206,9 @@ use crate::util::stealth::StealthConfig;
 
 /// Configuration for a full analysis run against one host.
 ///
-/// Every check the analyzer knows about runs unconditionally; the only
-/// per-run knobs are which paths/UIDs/GIDs to use for the file-access
-/// probes.
+/// Every read-only check the analyzer knows about runs unconditionally; the
+/// write probes run only with `Analyzer::with_allow_write`. The per-run knobs
+/// are which paths/UIDs/GIDs to use for the file-access probes.
 #[derive(Debug)]
 pub(crate) struct AnalyzeConfig {
     /// Target hostname or IP address.
@@ -236,6 +254,9 @@ pub(crate) struct Analyzer {
     pub skip_mountd: bool,
     /// Probe timeout override (`--timeout`); `None` keeps [`PROBE_TIMEOUT`].
     pub timeout: Option<std::time::Duration>,
+    /// Run the write probes (`--allow-write`, design rule 8). They create and
+    /// remove a test file in each writable export.
+    pub allow_write: bool,
 }
 
 /// Default timeout for one analyzer probe (a connect, a COMPOUND, a sideband call).
@@ -251,7 +272,7 @@ impl Analyzer {
     /// Construct an Analyzer from pre-built clients.
     #[must_use]
     pub(crate) fn new(nfs3: Arc<Nfs3Client>, mount: NfsMountClient, portmap: PortmapClient, pool: Arc<ConnectionPool>, circuit: Arc<CircuitBreaker>, hostname: String, aux_gids: Vec<u32>) -> Self {
-        Self { nfs3, mount, portmap, stealth: StealthConfig::none(), pool, circuit, hostname, aux_gids, net: ConnectOpts::default(), skip_mountd: false, timeout: None }
+        Self { nfs3, mount, portmap, stealth: StealthConfig::none(), pool, circuit, hostname, aux_gids, net: ConnectOpts::default(), skip_mountd: false, timeout: None, allow_write: false }
     }
 
     /// Use the global network options (proxy, ports, `--skip-rpc`) for every
@@ -273,6 +294,13 @@ impl Analyzer {
     #[must_use]
     pub(crate) const fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Allow the write probes (`--allow-write`).
+    #[must_use]
+    pub(crate) const fn with_allow_write(mut self, allow_write: bool) -> Self {
+        self.allow_write = allow_write;
         self
     }
 
@@ -383,7 +411,7 @@ impl Analyzer {
         let os_guess = export_analyses.iter().find_map(|ea| if ea.file_handle.is_empty() { None } else { FileHandle::from_hex(&ea.file_handle).ok() });
         let os_string = os_guess.map(|fh| check_os_fingerprint(&fh, &nfs_versions));
 
-        Ok(AnalysisResult { host: config.host.clone(), timestamp, os_guess: os_string, impl_fingerprint, nfs_versions: version_strings, exports: export_analyses, findings })
+        Ok(AnalysisResult { host: config.host.clone(), timestamp, os_guess: os_string, impl_fingerprint, nfs_versions: version_strings, exports: export_analyses, findings, write_probes: Some(self.allow_write) })
     }
 
     /// Build a pool-backed NFSv3 client for the given export.
@@ -514,12 +542,15 @@ impl Analyzer {
         // Symlink attack preconditions (F-4.4)  --  any world-writable directory.
         check_symlink_preconditions(&export_nfs3, &fh, &entry.path, findings).await;
 
-        // Squash probes write a small payload, then clean up. Run the non-root
-        // (uid=99999) probe first: its observed UID is the discriminator that tells
-        // genuine no_root_squash (F-4.1) apart from all_squash+anonuid=0 (F-7.5),
-        // both of which land a uid=0 write as root.
-        let squash_anon_uid = check_squash_config(&export_nfs3, &fh, &entry.path, findings).await;
-        check_no_root_squash(&export_nfs3, &fh, &entry.path, squash_anon_uid, findings).await;
+        // Squash probes create a file, then remove it, so they run only with
+        // --allow-write (design rule 8). Run the non-root (uid=99999) probe
+        // first: its observed UID is the discriminator that tells genuine
+        // no_root_squash (F-4.1) apart from all_squash+anonuid=0 (F-7.5), both
+        // of which land a uid=0 write as root.
+        if self.allow_write {
+            let squash_anon_uid = check_squash_config(&export_nfs3, &fh, &entry.path, findings).await;
+            check_no_root_squash(&export_nfs3, &fh, &entry.path, squash_anon_uid, findings).await;
+        }
 
         // `insecure` export option (F-7.2): probe by issuing MNT from an unprivileged
         // source port (>= 1024). If the server accepts, the `insecure` option is active.
@@ -1585,7 +1616,7 @@ async fn check_symlink_preconditions(nfs3: &Nfs3Client, root_fh: &FileHandle, ex
     }
 }
 
-/// Probe for no_root_squash by creating a test file as uid=0 (F-4.1).
+/// Probe for no_root_squash by creating a test file as uid=0 (F-4.1, needs --allow-write).
 ///
 /// Creates a temporary file with AUTH_SYS uid=0 credentials. If the resulting
 /// file is owned by root (GETATTR uid=0), uid=0 was NOT remapped. Per RFC 1813
@@ -1634,7 +1665,7 @@ async fn check_no_root_squash(nfs3: &Nfs3Client, dir_fh: &FileHandle, export_pat
     }
 }
 
-/// Probe squash configuration by creating a test file as uid=99999 (F-1.2 / F-7.5).
+/// Probe squash configuration by creating a test file as uid=99999 (F-1.2 / F-7.5, needs --allow-write).
 ///
 /// Creates a temporary file with a non-root arbitrary UID and inspects the
 /// resulting ownership to detect all_squash, anonuid=0 (critical), and other
