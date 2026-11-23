@@ -95,7 +95,7 @@ pub(crate) const V3V4_SHELL_COMMANDS: &[&str] = &[
     "world-writable",
 ];
 
-/// v2 command list: base + root (no mknod or verifier).
+/// v2 command list: base + root (NFSv2 has no MKNOD procedure and no COMMIT, so no mknod or verifier).
 pub(crate) const V2_SHELL_COMMANDS: &[&str] = &[
     "append",
     "cat",
@@ -1814,8 +1814,9 @@ impl<O: ShellOps> NfsShell<O> {
         if self.ops.version_name() == "NFSv2" {
             println!("  root                       probe NFSPROC_ROOT (obsolete MOUNT bypass)");
         }
-        if self.ops.version_name() == "NFSv3" {
-            println!("  verifier                   probe write verifier (reboot oracle, RFC 1813 S3.3.21)");
+        // NFSv2 has no COMMIT, so no write verifier to probe.
+        if matches!(self.ops.version_name(), "NFSv3" | "NFSv4") {
+            println!("  verifier                   probe write verifier (reboot oracle, RFC 1813 S3.3.21, RFC 7530 S16.3)");
         }
         println!();
         println!("{}", "Local:".bold().underline());

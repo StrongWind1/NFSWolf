@@ -73,9 +73,10 @@ pub(crate) struct ShellArgs {
     pub nfs_version: Option<u32>,
 
     /// AUTH_SHORT session token (hex). Replays a server-issued opaque token
-    /// as the RPC credential instead of AUTH_SYS. Obtain from a packet
-    /// capture or from the analyzer's F-3.9 active probe against non-Linux
-    /// NFS servers (Solaris, NetApp ONTAP).
+    /// as the RPC credential instead of AUTH_SYS. Take it from the reply
+    /// verifier in a packet capture of a client of a server that issues
+    /// AUTH_SHORT (Solaris, NetApp ONTAP); `analyze` flags exports that
+    /// advertise the flavor (F-3.9).
     #[arg(long, value_name = "HEX", help_heading = H_IDENTITY)]
     pub short_token: Option<String>,
 
