@@ -28,6 +28,11 @@ All notable changes to nfswolf are documented here. Versions follow [Semantic Ve
 - Give `--timeout` per-subcommand defaults: scan 3000 ms, analyze 5000 ms, shell/mount version detection 2000 ms
 - Make `--skip-rpc` mean no portmapper traffic in any subcommand (NFS on `--nfs-port` or 2049; MOUNT on `--mount-port` or the well-known ports 2049 and 20048)
 - Remove `analyze --v4-depth`, which was accepted but never used
+- Make `analyze` read-only by default; `--allow-write` runs the squash probes (F-1.2, F-4.1, F-7.5), and every report says whether they ran
+- Send `--aux-gids` with every credential: escalation rungs, shell `uid`/`gid`/`su`, and the FUSE ladder dropped them
+- Escalate shell LOOKUPs per path component, so `cd` and `cat` get through a directory the identity cannot search
+- Search UIDs and GIDs separately in the credential ladder: every rung claims the file's group, the operator's groups and the observed groups (up to 16)
+- Feed the owners seen in READDIRPLUS listings and LOOKUP replies to the ladder; show the supplementary groups in `id`
 - Breaking (`nfs-v4`): `LockState` gains `seqid`, `Nfs4Client::unlock` takes `&mut LockState`, `Fattr4Decoded` gains `filehandle`, `maxread` and `maxwrite`
 - Breaking (`nfs-v3`): `WriteAck` gains `verifier`
 - Add `#[xdr(other)]` open enums, `AsyncWrite::async_flush`, `Nfs4Client::transfer_limits`, capped NFSv3 listing and read helpers, and `TooLarge` errors in `nfs-v2` and `nfs-v4`

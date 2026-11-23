@@ -10,7 +10,7 @@ Server misconfiguration findings. These are not protocol vulnerabilities; the NF
 | F-7.2 | `insecure` Export Option | :material-information:{ .medium } Medium | RFC 2623 sec 2.1 | `analyze` (MNT from unprivileged port) | [Detail](F-7.2-privileged-port-bypass.md) |
 | F-7.3 | `nohide`/`crossmnt` Sub-Mount Exposure | :material-information:{ .medium } Medium | RFC 1813 sec 3.3.3 | `analyze` | [Detail](F-7.3-nohide-crossmnt-exposure.md) |
 | F-7.4 | Missing `nosuid`/`nodev` on Client Mount | :material-alert:{ .high } High | RFC 1094 sec 2.3.5 | Not detectable | [Detail](F-7.4-missing-nosuid-nodev.md) |
-| F-7.5 | `all_squash` with `anonuid=0` | :material-alert-circle:{ .critical } Critical | RFC 1813 sec 4.4 | `analyze` | [Detail](F-7.5-squash-misconfiguration.md) |
+| F-7.5 | `all_squash` with `anonuid=0` | :material-alert-circle:{ .critical } Critical | RFC 1813 sec 4.4 | `analyze --allow-write` | [Detail](F-7.5-squash-misconfiguration.md) |
 | F-7.6 | Absence of Audit Logging | :material-information:{ .medium } Medium | Implementation-specific | Not detectable | [Detail](F-7.6-no-audit-logging.md) |
 | F-7.7 | FreeBSD-Style Truncated Subnet in Export ACL | :material-information-outline:{ .info } Info | Implementation-specific | `analyze` | [Detail](F-7.7-freebsd-truncated-subnet.md) |
 
@@ -72,7 +72,7 @@ This is a documented gap in nfswolf's detection capability. The `nosuid` and `no
 
 The administrator's intent with `all_squash` is usually to restrict access by mapping all clients to a low-privilege account. Setting `anonuid=0` inverts this completely. Every file read, write, and attribute change operates with full root authority.
 
-**Detection**: `nfswolf analyze` performs a squash probe: it creates a test file with a non-root UID and checks whether the resulting ownership is root. If `all_squash` is active and `anonuid=0`, the file is owned by root regardless of the client's claimed UID.
+**Detection**: `nfswolf analyze --allow-write` performs a squash probe: it creates a test file with a non-root UID and checks whether the resulting ownership is root. Without `--allow-write`, `analyze` does not write and does not test this. If `all_squash` is active and `anonuid=0`, the file is owned by root regardless of the client's claimed UID.
 
 ---
 

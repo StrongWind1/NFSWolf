@@ -7,8 +7,8 @@ nfswolf analyze <TARGET> [OPTIONS]
 nfswolf analyze -f <FILE> [OPTIONS]
 ```
 
-!!! warning "Mildly intrusive"
-    Some checks are intrusive: squash probes create and remove a test file, `no_root_squash` detection creates a temporary directory. All probes clean up after themselves, but the server will log the operations. Use `--delay` and `--jitter` for stealth if needed.
+!!! warning "Read-only unless you pass `--allow-write`"
+    By default `analyze` never writes to the server. With `--allow-write` it adds the squash probes: in each writable export it creates a test file (`.nfswolf_squash_probe`) as uid 99999 and then as uid 0, reads back its owner, and removes it. Those probes are the only checks for F-1.2, F-4.1 and F-7.5, so without the flag the report says those three were not tested. The server logs every probe either way; use `--delay` and `--jitter` for pacing.
 
 ## Target formats
 
@@ -38,6 +38,12 @@ The analyzer accepts a single host or a file of hosts. Unlike [scan](scan.md), i
 | `--test-read-gids <G1,G2,...>` | `0,42,15` | GIDs to try when testing file readability (comma-separated). 0 = root, 42 = Debian/Ubuntu shadow group, 15 = SUSE shadow group. |
 | `--test-read-uids <U1,U2,...>` | `0` | UIDs to try when testing file readability (comma-separated). |
 
+### Permissions
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--allow-write` | off | Run the write probes: create and remove a test file as uid 99999 and as uid 0 in each writable export. They are the only checks for honoured forged UIDs (F-1.2), `no_root_squash` (F-4.1) and `all_squash` with `anonuid=0` (F-7.5). Every report records whether they ran. |
+
 ### Output
 
 | Flag | Default | Description |
@@ -52,7 +58,7 @@ These are set on the `nfswolf` command itself, before the `analyze` subcommand. 
 | Flag | Effect on analyze |
 |------|-------------------|
 | `-u`, `--uid <UID>` / `-g`, `--gid <GID>` | AUTH_SYS credentials for the initial connection. The analyzer also tries escalated credentials internally. |
-| `--aux-gids <G1,G2,...>` | Auxiliary GIDs in AUTH_SYS. Adding 42 (Debian shadow group) can unlock `/etc/shadow` reads without `no_root_squash`. |
+| `--aux-gids <G1,G2,...>` | Auxiliary GIDs in AUTH_SYS, sent with every credential the analyzer builds. Adding 42 (Debian shadow group) can unlock `/etc/shadow` reads without `no_root_squash`. |
 | `--hostname <NAME>` | Spoofed client hostname in AUTH_SYS credentials. |
 | `--nfs-port <PORT>` | Override the NFS port (skip portmapper GETPORT). Honored by every NFS connection the analyzer opens. |
 | `--mount-port <PORT>` | Override the mount-daemon port for every MOUNT call. |
@@ -67,7 +73,7 @@ These are set on the `nfswolf` command itself, before the `analyze` subcommand. 
 
 ## What it checks
 
-The analyzer runs every check unconditionally. There are no opt-in flags for individual checks. Findings are organized by attack category, each referencing an ID from the [findings catalog](../security/index.md). The table below covers the whole catalog of 62 findings; `analyze` detects 43 of them. The three F-6.x denial-of-service findings are out of scope, and the remaining 16 are documented for manual testing.
+The analyzer runs every read-only check unconditionally; `--allow-write` adds the three write probes (F-1.2, F-4.1, F-7.5). Findings are organized by attack category, each referencing an ID from the [findings catalog](../security/index.md). The table below covers the whole catalog of 62 findings; `analyze` detects 43 of them. The three F-6.x denial-of-service findings are out of scope, and the remaining 16 are documented for manual testing.
 
 ### Finding categories
 
@@ -97,7 +103,7 @@ The analyzer itself supports two output modes: console (default) and JSON. For o
 
 === "Console"
 
-    The default output is an ANSI-colored structured report to stdout:
+    The default output is an ANSI-colored structured report to stdout. This run used `--allow-write`; without it the `Write probes` line says the probes were not run and F-4.1 cannot appear:
 
     ```
     +========================================+
@@ -107,6 +113,7 @@ The analyzer itself supports two output modes: console (default) and JSON. For o
       OS:  Linux  |  NFS:  v3, v4
       Impl:  Linux knfsd (GARBAGE_ARGS on null-name LOOKUP)
       Timestamp:  2025-04-12T14:23:01Z
+      Write probes:  run (test file created and removed as uid 0 and uid 99999)
 
       Exports  -------------------------------------------------
     ╭──────────────┬─────────────────┬──────────┬────────────────────────┬─────────────────────╮

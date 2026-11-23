@@ -79,14 +79,20 @@ v3 is tried first because it is the most common deployment. v2 before v4 because
 
 ### Auto-credential escalation
 
-When the shell encounters a permission denial, it automatically tries different AUTH_SYS credentials using an evidence-driven ladder:
+When the shell encounters a permission denial, it automatically tries different AUTH_SYS credentials using an evidence-driven ladder. It runs for every refused operation: listing, reading, and each LOOKUP along a path, so `cd` and `cat` get through a directory your identity cannot search.
 
-1. File owner UID (from GETATTR)
-2. Caller UID with the file's GID
-3. Root (UID 0)
-4. Common service accounts (www-data, nobody, etc.)
+First your own identity is tried exactly as given, `--aux-gids` included. Then the rungs, in order:
 
-The ladder prunes itself based on mode bits: if `mode & 0o007 == 0`, service-account rungs are skipped because no "other" access exists. This works across all three NFS versions.
+1. Your own UID and GID, claiming the extended group list described below
+2. File owner UID (from GETATTR)
+3. Your UID with the file's GID as the primary group
+4. Root (UID 0)
+5. The most common owners seen in directory listings and lookups (up to 8)
+6. Common service accounts (www-data, nobody, etc.)
+
+UIDs and GIDs are searched separately. The server grants group access when the file's group matches the primary GID or any supplementary GID, and AUTH_SYS carries up to 16 of them, so every rung claims the file's group, your `--gid` and `--aux-gids`, and the groups seen owning files, whatever UID it tries. That keeps working under `root_squash`: Linux knfsd remaps a claimed uid 0 and gid 0 to the anonymous identity but keeps every other group, so `--uid 0 --aux-gids 522` still reads a file that group 522 can read.
+
+The ladder prunes itself based on mode bits: if `mode & 0o007 == 0`, the observed-owner and service-account rungs are skipped because no "other" access exists. The identity that works is cached per file handle. This works across all three NFS versions.
 
 ### Tab completion
 
@@ -208,7 +214,7 @@ All three protocol versions share the same 46-command set through the unified `N
 | `mknod` (create device node) | -- | Yes | Yes |
 | `verifier` (write verifier probe) | -- | Yes | Yes |
 
-NFSv2 identity changes work by reconnecting: new TCP socket + new AUTH_SYS credentials + re-MOUNT. NFSv3 and NFSv4 swap credentials on the existing connection without reconnecting.
+Identity changes swap the AUTH_SYS credential on the shared connection pool on every NFS version, with no reconnect and no re-MOUNT, and keep the `--aux-gids` groups.
 
 ## See also
 

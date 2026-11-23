@@ -159,7 +159,7 @@ No single tool before nfswolf covered the complete NFS attack path in one binary
 Capabilities unique to nfswolf that no prior tool implemented:
 
 - **18-filesystem escape coverage**: export escape across ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, and ISO9660. Prior tools covered at most 4 filesystem types (ext4, XFS, BTRFS, ZFS).
-- **Evidence-driven credential ladder**: automatic UID/GID escalation based on file ownership and mode bits, with mode-bit pruning to skip unnecessary attempts. Prior tools either used fixed UID lists or required manual specification.
+- **Evidence-driven credential ladder**: automatic UID/GID escalation based on file ownership, mode bits and the owners seen in directory listings, with every rung claiming up to 16 supplementary groups and mode-bit pruning to skip unnecessary attempts. Prior tools either used fixed UID lists or required manual specification.
 - **Multi-version escape probing**: the escape pipeline gathers seeds from MOUNT v3, MOUNT v1, and NFSv4 LOOKUP, then probes constructed handles across all three NFS versions. This covers scenarios where one version is firewalled or returns different results.
 - **Offline handle decoder**: the `decode` subcommand dissects NFS file handles without any network access, printing every field (header, fsid, fileid) with OS/filesystem fingerprinting and security assessment. No prior tool offered offline handle analysis.
 - **Single static binary**: nfswolf compiles to a single musl-static binary with no runtime dependencies, deployable on jump boxes, containers, and embedded NAS appliances without installing language runtimes or development libraries.

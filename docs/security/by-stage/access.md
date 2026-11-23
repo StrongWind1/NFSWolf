@@ -35,7 +35,7 @@ A typical initial access chain against a default NFS server:
 
 1. **MOUNT the export.** `nfswolf shell target:/export` sends MOUNT MNT, which returns the root file handle. MOUNT checks the client's IP against the export ACL, but wildcard exports (F-7.1) accept any source address. The handle is now a permanent bearer token (F-2.7).
 
-2. **Choose an identity.** The shell defaults to `uid=0, gid=0`, but `root_squash` (the default) maps this to `nobody`. The credential ladder automatically tries the file owner's UID, then the caller with the file's group, then root, then common service accounts. Any non-zero UID bypasses root squash entirely (F-1.2).
+2. **Choose an identity.** The shell defaults to `uid=0, gid=0`, but `root_squash` (the default) maps this to `nobody`. The credential ladder automatically tries the caller with more groups, the file owner's UID, the caller with the file's group, root, the most common owners seen in listings, then common service accounts, and every rung claims the file's group and the operator's groups. Group access survives root squash: only uid 0 and gid 0 are remapped. Any non-zero UID bypasses root squash entirely (F-1.2).
 
 3. **Read the directory.** READDIRPLUS returns file names, attributes, and handles for every entry in a single call. No per-file access check occurs at the READDIRPLUS level; the server returns handles for files the caller cannot read, trusting per-operation checks later.
 

@@ -74,7 +74,7 @@ The COMPOUND operation model (RFC 7530 Section 14) batches multiple operations i
 
 ### NFSv4 credential escalation in nfswolf
 
-Credential escalation in the NFSv4 shell works via `try_with_escalation()`, the same shared mechanism used by v3. The credential ladder (owner-first, group match, root, service accounts) operates identically. The difference is in the transport: v4 changes credentials mid-session by swapping the AUTH_SYS fields in subsequent COMPOUND calls, while v3 uses the pooled transport's credential swap. Both are transparent to the shell user; the `uid`, `gid`, and `impersonate` commands work the same way across all three NFS versions.
+Credential escalation in the NFSv4 shell works via `try_with_escalation()`, the same shared mechanism used by v3. The credential ladder (caller with more groups, owner, group match, root, observed owners, service accounts, every rung claiming the file's and the operator's groups) operates identically. The difference is in the transport: v4 changes credentials mid-session by swapping the AUTH_SYS fields in subsequent COMPOUND calls, while v3 uses the pooled transport's credential swap. Both are transparent to the shell user; the `uid`, `gid`, and `impersonate` commands work the same way across all three NFS versions.
 
 ### NFSv4-only servers
 

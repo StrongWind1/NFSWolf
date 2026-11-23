@@ -37,7 +37,7 @@ nfswolf shell 10.0.0.1:/srv -u 0 -g 42
 
 ### `--aux-gids <G1,G2,...>`
 
-Auxiliary GIDs added to the AUTH_SYS credential, comma-separated. Capped at 16 per RFC 1057 S9.2. These are checked for group-permission bits on every file access.
+Auxiliary GIDs added to the AUTH_SYS credential, comma-separated. Capped at 16 per RFC 1057 S9.2. These are checked for group-permission bits on every file access. They are sent with every credential nfswolf builds: the initial one, every rung of the credential ladder, and the identity after a shell `uid`, `gid` or `su`. Linux `root_squash` remaps only uid 0 and gid 0, so `--uid 0 --aux-gids 522` still grants group 522 access.
 
 ```bash
 # Add the shadow group (42 on Debian, 15 on SUSE) to read /etc/shadow

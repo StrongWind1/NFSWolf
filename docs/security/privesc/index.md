@@ -8,7 +8,7 @@ The common thread: NFS faithfully stores whatever the client sends (SUID bits, d
 
 | Finding | Title | Severity | RFC Basis | Detected by | Write-up |
 |---------|-------|----------|-----------|-------------|----------|
-| F-4.1 | no_root_squash Exploitation | :material-alert-circle:{ .critical } Critical | RFC 1813 sec 4.4, RFC 2623 sec 2.5 | `analyze`, `shell uid 0` | [Detail](F-4.1-no-root-squash.md) |
+| F-4.1 | no_root_squash Exploitation | :material-alert-circle:{ .critical } Critical | RFC 1813 sec 4.4, RFC 2623 sec 2.5 | `analyze --allow-write`, `shell uid 0` | [Detail](F-4.1-no-root-squash.md) |
 | F-4.2 | SUID/SGID Binary Creation | :material-alert:{ .high } High | RFC 1094 sec 2.3.5 | `shell suid-scan`, `mount` | [Detail](F-4.2-suid-sgid-escalation.md) |
 | F-4.3 | Device Node Creation via MKNOD | :material-alert:{ .high } High | RFC 1813 sec 3.3.11 | `shell mknod` | [Detail](F-4.3-device-node-creation.md) |
 | F-4.4 | Symlink Escape | :material-alert:{ .high } High | RFC 1813 sec 3.3.5, sec 3.3.10 | `analyze`, `shell symlink` | [Detail](F-4.4-symlink-escape.md) |
@@ -28,7 +28,7 @@ The kernel grants NFS root `CAP_NFSD_SET`, which includes `CAP_FS_MASK` and `CAP
 
 **RFC basis**: "This superuser permission may not be allowed on the server, since anyone who can become superuser on their client could gain access to all remote files." (RFC 1813 sec 4.4)
 
-**Detection**: `nfswolf analyze` performs a squash probe -- writes a test file as UID 0 and checks whether the resulting ownership is root or nobody.
+**Detection**: `nfswolf analyze --allow-write` performs a squash probe -- writes a test file as UID 0 and checks whether the resulting ownership is root or nobody. Without `--allow-write`, `analyze` does not write and does not test this.
 
 ---
 

@@ -104,7 +104,7 @@ This has direct implications for credential escalation:
 
 ### ACL data feeds the credential ladder
 
-nfswolf's credential ladder (`src/engine/credential.rs`) works from the file's owner, group and mode bits; it does not read ACL entries. That makes the ACL entries `analyze` reports (F-5.14) worth acting on by hand with the shell's `uid`/`gid` commands, because they expose access paths that file ownership alone misses. A file owned by `root:root` with mode `0700` and an ACL entry for `uid=1001` is invisible to ownership-based scanning.
+nfswolf's credential ladder (`src/engine/credential.rs`) works from the file's owner, group and mode bits and the owners seen in directory listings; it does not read ACL entries. That makes the ACL entries `analyze` reports (F-5.14) worth acting on by hand with the shell's `uid`/`gid` commands, because they expose access paths that file ownership alone misses. A file owned by `root:root` with mode `0700` and an ACL entry for `uid=1001` is invisible to ownership-based scanning.
 
 ## nfswolf implementation
 

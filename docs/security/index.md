@@ -131,7 +131,7 @@ Every finding in the catalog, sorted by ID. The **Detected By** column lists the
 | ID | Name | Severity | Category | Detected By |
 |----|------|----------|----------|-------------|
 | F-1.1 | [UID/GID Spoofing](identity/F-1.1-uid-gid-spoofing.md) | High | Identity | `analyze` (AUTH_SYS-only export), `uid-spray`, `shell uid/impersonate`, `mount --uid` |
-| F-1.2 | [Root Squash Bypass](identity/F-1.2-root-squash-bypass.md) | High | Identity | `analyze` (squash probe) |
+| F-1.2 | [Root Squash Bypass](identity/F-1.2-root-squash-bypass.md) | High | Identity | `analyze --allow-write` (squash probe) |
 | F-1.3 | [Auxiliary Group Injection](identity/F-1.3-auxiliary-group-injection.md) | Critical | Identity | `analyze` (shadow GID), `shell gid`, `mount --aux-gids` |
 | F-1.4 | [Machine Name Spoofing](identity/F-1.4-machine-name-spoofing.md) | Low | Identity | `--hostname` global flag |
 | F-1.5 | [Credential Replay](identity/F-1.5-credential-replay.md) | High | Identity | Passive -- precondition via F-3.1 |
@@ -159,7 +159,7 @@ Every finding in the catalog, sorted by ID. The **Detected By** column lists the
 | F-3.7 | [AUTH_DH Advertised](network/F-3.7-auth-dh-obsolete.md) | Medium | Network | `analyze` (flavor 3 detection) |
 | F-3.8 | [RPC-with-TLS Supported](network/F-3.8-rpc-with-tls.md) | Info | Network | `analyze` (AUTH_TLS NULL probe) |
 | F-3.9 | [AUTH_SHORT Session Credentials](network/F-3.9-auth-short-session-credentials.md) | Low | Network | `analyze` (flavor 2 detection) |
-| F-4.1 | [no_root_squash Exploitation](privesc/F-4.1-no-root-squash.md) | Critical | Privilege Escalation | `analyze`, `mount --uid 0 --allow-write` |
+| F-4.1 | [no_root_squash Exploitation](privesc/F-4.1-no-root-squash.md) | Critical | Privilege Escalation | `analyze --allow-write`, `mount --uid 0 --allow-write` |
 | F-4.2 | [SUID/SGID Binary Creation](privesc/F-4.2-suid-sgid-escalation.md) | High | Privilege Escalation | `shell suid-scan`, `mount` + `chmod u+s` |
 | F-4.3 | [Device Node Creation](privesc/F-4.3-device-node-creation.md) | High | Privilege Escalation | `shell mknod` |
 | F-4.4 | [Symlink Escape](privesc/F-4.4-symlink-escape.md) | High | Privilege Escalation | `analyze`, `shell symlink` |
@@ -189,6 +189,6 @@ Every finding in the catalog, sorted by ID. The **Detected By** column lists the
 | F-7.2 | [Privileged Port Bypass](config/F-7.2-privileged-port-bypass.md) | Medium | Configuration | `analyze` (MNT from unprivileged port) |
 | F-7.3 | [nohide/crossmnt Exposure](config/F-7.3-nohide-crossmnt-exposure.md) | Medium | Configuration | `analyze` (sub-mount fsid comparison) |
 | F-7.4 | [Missing nosuid/nodev](config/F-7.4-missing-nosuid-nodev.md) | High | Configuration | Not server-observable (client-side) |
-| F-7.5 | [all_squash with anonuid=0](config/F-7.5-squash-misconfiguration.md) | Critical | Configuration | `analyze` |
+| F-7.5 | [all_squash with anonuid=0](config/F-7.5-squash-misconfiguration.md) | Critical | Configuration | `analyze --allow-write` |
 | F-7.6 | [No Audit Logging](config/F-7.6-no-audit-logging.md) | Medium | Configuration | Not remotely detectable (documented) |
 | F-7.7 | [FreeBSD-Style Truncated Subnet (OS Fingerprint)](config/F-7.7-freebsd-truncated-subnet.md) | Info | Configuration | `analyze` (MOUNT EXPORT ACL) |

@@ -12,7 +12,7 @@ Every finding in this category exploits the same root cause: the NFS server cann
 | ID | Finding | Severity | RFC Basis | Detection |
 |----|---------|----------|-----------|-----------|
 | [F-1.1](F-1.1-uid-gid-spoofing.md) | UID/GID Spoofing | High | RFC 5531 sec. 14, RFC 1057 sec. 9.2 | `analyze` (AUTH_SYS-only export), `uid-spray`, `shell uid/impersonate` |
-| [F-1.2](F-1.2-root-squash-bypass.md) | Root Squash Bypass via Non-Root UID | High | RFC 1813 sec. 4.4, RFC 2623 sec. 2.5 | `analyze` (squash probe) |
+| [F-1.2](F-1.2-root-squash-bypass.md) | Root Squash Bypass via Non-Root UID | High | RFC 1813 sec. 4.4, RFC 2623 sec. 2.5 | `analyze --allow-write` (squash probe) |
 | [F-1.3](F-1.3-auxiliary-group-injection.md) | Auxiliary Group Injection | **Critical** | RFC 1057 sec. 9.2 | `analyze` (shadow GID 42/15), `shell gid` |
 | [F-1.4](F-1.4-machine-name-spoofing.md) | Machine Name Spoofing / Log Poisoning | Low | RFC 1057 sec. 9.2, RFC 9289 sec. A.1 | `--hostname` global flag |
 | [F-1.5](F-1.5-credential-replay.md) | Credential Replay from Wire | High | RFC 1094 sec. 3.4, RFC 5531 sec. 9 | Passive (precondition: F-3.1) |
@@ -95,7 +95,7 @@ The typical identity attack proceeds through these stages:
 
 1. **Reconnaissance** -- `scan` enumerates exports, auth flavors, and NFS versions. If the export accepts AUTH_SYS, proceed directly to step 3. If it requires krb5, check for mixed flavors (F-1.7) or v2 availability (F-1.6).
 2. **Downgrade** -- If only krb5 is advertised, attempt NFSv2 downgrade or mixed-flavor exploitation. AUTH_TOOWEAK (F-1.8) confirms kerberos enforcement and leaks the handle for later use.
-3. **Credential forging** -- `shell uid <N>` or `uid-spray` forges AUTH_SYS credentials. The credential ladder targets the file owner first (F-1.2), then group injection (F-1.3), then root if no_root_squash is set (see F-4.1), then common service accounts.
+3. **Credential forging** -- `shell uid <N>` or `uid-spray` forges AUTH_SYS credentials. The credential ladder targets the file owner first (F-1.2), then group injection (F-1.3), then root if no_root_squash is set (see F-4.1), then the most common owners seen in directory listings, then common service accounts. Every rung claims the file's group and the operator's groups as supplementary GIDs.
 4. **Persistence** -- File handles obtained with any credential work with any other credential (F-2.7). Once access is established, handles persist across UID switches and server reboots.
 
 ## Mitigations

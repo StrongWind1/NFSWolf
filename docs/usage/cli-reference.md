@@ -94,6 +94,7 @@ nfswolf analyze [OPTIONS] [TARGET]
 | `--test-read` | `PATH` | `/etc/shadow` | Test if a remote file is readable after export escape. Tries multiple credentials (root, shadow GIDs, current uid). Can be specified multiple times. |
 | `--test-read-gids` | `G1,G2,...` | `0,42,15` | GIDs to try when testing file readability (root, Debian shadow, SUSE shadow) |
 | `--test-read-uids` | `U1,U2,...` | `0` | UIDs to try when testing file readability |
+| `--allow-write` | bool | `false` | Run the squash probes, which create and remove a test file as uid 99999 and uid 0 (the only checks for F-1.2, F-4.1, F-7.5). Without it `analyze` never writes. |
 | `--json` | `[FILE]` | -- | Emit machine-readable JSON. With no value, goes to stdout. With a path, written to that file. |
 
 ---

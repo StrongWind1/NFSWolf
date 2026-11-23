@@ -254,11 +254,11 @@ AUTH_SYS credentials are client-asserted (RFC 5531 sec. 14). The server trusts w
 
 ### whoami
 
-Print current AUTH_SYS identity: uid, gid, hostname. **Alias:** `id`
+Print current AUTH_SYS identity: uid, gid, the supplementary groups sent with it (`--gid` plus `--aux-gids`), and hostname. **Alias:** `id`
 
 ### uid
 
-Switch UID mid-session. On NFSv3/v4 this swaps credentials in-place. On NFSv2 it triggers a full reconnect.
+Switch UID mid-session. The credential is swapped in place on every NFS version, and the `--aux-gids` groups are kept.
 
 ```
 uid <n>
@@ -441,7 +441,7 @@ These commands operate on the local (attacker's) machine, not the remote NFS exp
 | `mknod` | -- | Yes | Yes | NFSv2 has no MKNOD procedure |
 | `root` | Yes | -- | -- | NFSPROC_ROOT is NFSv2 only |
 | `verifier` | -- | Yes | Yes | NFSv2 has no COMMIT |
-| `uid`/`gid`/`su` | Reconnect | In-place | In-place | NFSv2 requires new TCP socket |
+| `uid`/`gid`/`su` | In-place | In-place | In-place | Credential swap on the shared pool; `--aux-gids` kept |
 
 ## See also
 

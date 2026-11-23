@@ -278,4 +278,4 @@ nfswolf brute-handle 10.0.0.5:/srv --inode-start 2 --inode-end 1000
 ```
 
 !!! info "Auto-escalation"
-    The `shell` and `mount` subcommands automatically try alternative credentials when an operation fails with `NFS3ERR_ACCES`. The credential ladder tries the file owner first, then the caller with the file's group, then root, then common service accounts. You do not need to manually switch UIDs in most cases.
+    The `shell` and `mount` subcommands automatically try alternative credentials when an operation fails with `NFS3ERR_ACCES`. The credential ladder tries your own UID with more groups, then the file owner, then the caller with the file's group, then root, then the most common owners seen in listings, then common service accounts; every rung also claims your `--aux-gids` and the file's group. You do not need to manually switch UIDs in most cases.

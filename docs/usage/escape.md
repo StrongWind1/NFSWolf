@@ -110,7 +110,7 @@ Pure computation, no network calls. For each seed, the engine extracts the fsid 
 
 ### Phase 3: Probe candidates
 
-Each candidate is tested against the server with GETATTR (checking that the inode exists and is a directory) followed by LOOKUP ".." (confirming that the parent is the handle itself, the filesystem root property). Probing runs across all available NFS versions in full mode, or only the version that succeeded in Phase 1 when using `--fast`. When GETATTR returns `NFS3ERR_ACCES` (permission denied due to `root_squash`), the handle is still valid -- the engine runs credential escalation through the evidence-driven ladder (file owner, matching GID, root, common service accounts) and retries.
+Each candidate is tested against the server with GETATTR (checking that the inode exists and is a directory) followed by LOOKUP ".." (confirming that the parent is the handle itself, the filesystem root property). Probing runs across all available NFS versions in full mode, or only the version that succeeded in Phase 1 when using `--fast`. When GETATTR returns `NFS3ERR_ACCES` (permission denied due to `root_squash`), the handle is still valid -- the engine runs credential escalation through the evidence-driven ladder (file owner, matching GID, root, common service accounts, each claiming the operator's groups and the handle's group) and retries.
 
 ### Phase 4: Dedup and filter
 

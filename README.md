@@ -124,7 +124,7 @@ cosign verify-blob \
 ## What it does
 
 - **Escapes export boundaries** -- constructs file handles that bypass `subtree_check` on 17 filesystem types (ext2/3/4, XFS, BTRFS, ZFS, f2fs, JFS, NILFS2, ReiserFS, VFAT, NTFS3, UDF, bcachefs, SquashFS, EROFS, ISO9660), reaching the full filesystem root from a chrooted export. Cascades through MOUNT v3, v1, NFSv4 LOOKUP, and LOOKUPP.
-- **Escalates credentials automatically** -- when access is denied, an evidence-driven UID ladder tries the file owner, the caller's UID with the file's group, root, and common service accounts, skipping the service accounts when the mode bits rule them out. No manual UID guessing.
+- **Escalates credentials automatically** -- when access is denied, including on a directory along the path, an evidence-driven ladder tries your own UID with an extended group list, the file owner, your UID with the file's group, root, the most common owners seen in directory listings, and common service accounts. UIDs and GIDs are searched separately: every rung claims up to 16 groups (the file's group, your `--gid`/`--aux-gids`, the groups seen owning files), so group access survives `root_squash`, which only remaps uid 0 and gid 0. Service accounts are skipped when the mode bits rule them out. No manual UID guessing.
 - **Audits against a 62-finding catalog** -- `analyze` detects 43 of the 62 documented findings: export misconfigurations, credential weaknesses, handle leaks, privilege escalation paths, and protocol downgrades. Of the rest, 3 are denial-of-service findings kept out of scope and 16 are documented for manual testing. Each finding references its RFC section and includes severity, detection method, and remediation. Full catalog on the [docs site](https://strongwind.dev/NFSWolf/security/).
 - **Interactive shell** -- 46 commands (plus 12 aliases) across NFSv2, NFSv3, and NFSv4 with tab completion, recursive `get -r`/`put -r` with SHA-256 verification, `--handle` for MOUNT bypass, `-c` for scripting, `suid-scan`, `secrets-scan`, `last`/`lastb`/`lastlog` for login history, and auto-version detection.
 - **FUSE mount** -- mount any NFS export locally with spoofed credentials, per-inode credential escalation, and symlink rewriting on escaped roots. NFSv2, v3, and v4.
@@ -228,7 +228,7 @@ nfswolf analyze 192.168.1.10 --delay 200 --jitter 50 --proxy 127.0.0.1:1080
 
 - Does not exploit RPCSEC_GSS / Kerberized mounts (detection only).
 - Does not attack NFS-over-TLS channels (detects `NONE`/`TLS_V1` negotiation only).
-- Does not write to an export from `shell` or `mount` without `--allow-write`. (`analyze` creates and removes a probe file during its squash checks, and `clean` deletes mount-list entries.)
+- Does not write to an export without `--allow-write`: not from `shell` or `mount`, and not from `analyze`, whose squash probes (F-1.2, F-4.1, F-7.5) run only with the flag. (`clean` deletes mount-list entries; that is its job.)
 - Does not run without an authorized target specified on the command line.
 
 ## Platform support

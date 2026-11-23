@@ -16,6 +16,9 @@ The next release is 2.0.0: the breaking `nfs-v4` and `nfs-v3` library API change
 
 ### Fixed
 
+- **`--aux-gids` was dropped as soon as escalation started** -- every credential-ladder rung, the shell's `uid`/`gid`/`su`, and the FUSE ladder rebuilt the AUTH_SYS credential with only the primary GID, so a group granted through `--aux-gids` never reached the server once a first attempt was refused (for example `--uid 0 --aux-gids 522` under `root_squash`). The operator's groups now go with every credential.
+- **Shell lookups did not escalate** -- `cd`, `cat` and every other path walk failed at the first directory the identity could not search, before the read ladder ever ran. LOOKUP now walks the credential ladder per component, like directory listing and READ, on NFSv2, v3 and v4.
+- **`analyze` wrote to the server without `--allow-write`**, against the read-only default every other subcommand follows (see Changed).
 - **`put` over an existing, larger file kept its old tail.** The create step sent only the mode, and UNCHECKED CREATE / OPEN leave an existing file's size alone, so the result was the new data followed by the rest of the old file. `put`, `put -r` and `cp` now create with size 0, which truncates an existing file in the same call.
 - **NFSv2 `put` sent 64 KiB WRITEs**, over the protocol's 8 KiB `NFS_MAXDATA`, and a real server rejects them (`Garbage arguments`), so v2 uploads of more than 8 KiB failed. NFSv2 transfers now use 8 KiB, and offsets beyond NFSv2's 32-bit range are an error instead of silently becoming `u32::MAX`.
 - **The NFSv2 shell used a connection pool of its own** with the default four idle connections instead of the session's pool, unlike the v3 and v4 shells. It now shares the session pool and its credential, which also makes `--short-token` apply to v2 as it does to v3 and v4.
@@ -45,6 +48,9 @@ The next release is 2.0.0: the breaking `nfs-v4` and `nfs-v3` library API change
 
 ### Added
 
+- **Observed identities feed the credential ladder** -- the shell and FUSE mount count the owners of every READDIRPLUS entry and LOOKUP reply; the eight most common become ladder rungs, and their groups are claimed on every rung.
+- **`analyze --allow-write`** runs the squash probes; JSON results gain a `write_probes` field, and every report format says whether the probes ran.
+- The shell's `id`/`whoami` prints the supplementary groups sent with the credential.
 - `#[xdr(other)]` on one `u32` tuple variant of an `XdrCodec` enum makes it open: unlisted discriminants decode into that variant and pack back unchanged. Unit variants of data-carrying enums may give their discriminant as `= N`. Locals in the expanded code use mixed-site hygiene, and a malformed `#[xdr(...)]` attribute is reported as malformed rather than missing.
 - `AsyncWrite::async_flush` (default no-op, overridden by `TokioIo`), called after every request so a buffered stream cannot hold a request back.
 - `nfs_v3::decode_hex`, `Capped<T>`, `Nfs3Client::list_dir_capped` and `read_all_capped` (report whether the cap cut the result), and `From<WriteStable> for stable_how` (`write_at` accepts either).
@@ -54,6 +60,8 @@ The next release is 2.0.0: the breaking `nfs-v4` and `nfs-v3` library API change
 
 ### Changed
 
+- **`analyze` is read-only by default** -- the squash probes, which create and remove a test file as uid 99999 and uid 0 and are the only checks for F-1.2, F-4.1 and F-7.5, run only with `--allow-write`. Without it the report states that those three were not tested.
+- **The credential ladder searches UIDs and GIDs separately** -- every rung after the operator's own identity claims up to 16 supplementary groups: the file's group, the operator's `--gid`/`--aux-gids`, and the groups seen owning files. A new first rung tries the operator's own UID with those groups. Group access no longer depends on pairing the right UID with the right GID, and it survives `root_squash`, which remaps only uid 0 and gid 0 (`nfsd_setuser()`).
 - **Breaking (`nfs-v4`):** `LockState` has a `seqid` field, and `Nfs4Client::unlock` takes `&mut LockState` and no longer takes the session. `Fattr4Decoded` has `filehandle`, `maxread` and `maxwrite` fields.
 - **Breaking (`nfs-v3`):** `WriteAck` has a `verifier` field carrying the WRITE's write verifier. `Nfs3Client::commit_verifier` is documented as what it is: a COMMIT of the whole file.
 - `nfs_v3::FileType` has an `Unknown(u32)` variant.

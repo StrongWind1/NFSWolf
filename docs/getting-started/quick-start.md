@@ -69,10 +69,10 @@ nfswolf scan 10.0.0.0/24
 
 ## Step 2: Analyze security posture
 
-Run the full security audit against the server:
+Run the full security audit against the server. `--allow-write` adds the squash probes, which create and remove a test file; leave it off and `analyze` never writes, but then it cannot test `no_root_squash` (F-4.1):
 
 ```bash
-nfswolf analyze 10.0.0.1
+nfswolf analyze 10.0.0.1 --allow-write
 ```
 
 ??? example "Example output"
