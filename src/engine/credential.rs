@@ -447,3 +447,105 @@ mod identity_tests {
         assert!(observed.top_pairs(usize::MAX).len() <= OBSERVED_CAP);
     }
 }
+
+/// The ladder against a model of Linux knfsd's permission check, for the
+/// cases that matter: group-only files and directories under `root_squash`.
+#[cfg(test)]
+mod knfsd_model_tests {
+    use super::*;
+
+    const ANON: u32 = 65534;
+    const READ: u32 = 4;
+    const SEARCH: u32 = 1;
+
+    /// Server-side behaviour that changes the outcome.
+    #[derive(Clone, Copy)]
+    struct Server {
+        /// `root_squash`: uid 0 and gid 0 (primary and supplementary) become
+        /// the anonymous identity; every other id is kept (`nfsd_setuser()`).
+        root_squash: bool,
+        /// `rpc.mountd --manage-gids`: the client's supplementary groups are
+        /// replaced by the server's own lookup; only the primary GID counts.
+        manage_gids: bool,
+        /// knfsd lets the owner read regardless of mode
+        /// (`NFSD_MAY_OWNER_OVERRIDE`); other servers do not.
+        owner_override: bool,
+    }
+
+    const KNFSD: Server = Server { root_squash: true, manage_gids: false, owner_override: true };
+
+    /// Whether `id` may perform `want` (READ or SEARCH bits) on an object
+    /// owned by `owner` with permission bits `mode`: the squash, then the
+    /// single POSIX triad that applies (owner, else group, else other).
+    fn permitted(id: &Identity, s: Server, owner: (u32, u32), mode: u32, want: u32) -> bool {
+        let squash = |v: u32| if s.root_squash && v == 0 { ANON } else { v };
+        let uid = squash(id.uid);
+        let groups: Vec<u32> = id.groups.iter().map(|&g| squash(g)).collect();
+        if uid == 0 {
+            return true; // CAP_DAC_OVERRIDE
+        }
+        if uid == owner.0 {
+            return (s.owner_override && want == READ) || (mode >> 6) & want == want;
+        }
+        let in_group = if s.manage_gids { groups.first() == Some(&owner.1) } else { groups.contains(&owner.1) };
+        let bits = if in_group { mode >> 3 } else { mode };
+        bits & want == want
+    }
+
+    /// Position of the first identity that gets in: 0 for the caller as
+    /// given, n for the nth ladder rung, `None` if nothing works.
+    fn first_working(caller: &Identity, s: Server, owner: (u32, u32), mode: u32, want: u32) -> Option<usize> {
+        if permitted(caller, s, owner, mode, want) {
+            return Some(0);
+        }
+        let ladder = identity_ladder(caller, Some(owner), Some(mode), &ObservedIdentities::default());
+        ladder.iter().position(|id| permitted(id, s, owner, mode, want)).map(|i| i + 1)
+    }
+
+    /// The reported case: uid 1000 gid 1000 reading a root:522 file that only
+    /// its group may read, under root_squash.
+    #[test]
+    fn group_only_file_owned_by_root_is_read_on_the_first_rung() {
+        let caller = Identity::new(1000, 1000, &[]);
+        assert_eq!(first_working(&caller, KNFSD, (0, 522), 0o040, READ), Some(1));
+        assert_eq!(first_working(&caller, KNFSD, (0, 522), 0o640, READ), Some(1));
+    }
+
+    /// The same for a directory on the way to the file: LOOKUP needs search
+    /// permission, and a root:522 0050 directory grants it only to group 522.
+    #[test]
+    fn group_only_directory_is_searched_on_the_first_rung() {
+        let caller = Identity::new(1000, 1000, &[]);
+        assert_eq!(first_working(&caller, KNFSD, (0, 522), 0o050, SEARCH), Some(1));
+        assert_eq!(first_working(&caller, KNFSD, (0, 522), 0o750, SEARCH), Some(1));
+    }
+
+    /// A server that ignores supplementary groups still honours the primary
+    /// GID, which a later rung sets to the file's group.
+    #[test]
+    fn manage_gids_server_is_reached_through_the_primary_gid() {
+        let caller = Identity::new(1000, 1000, &[]);
+        let server = Server { manage_gids: true, ..KNFSD };
+        let found = first_working(&caller, server, (0, 522), 0o040, READ);
+        assert!(found.is_some_and(|n| n <= 3), "found at {found:?}");
+    }
+
+    /// Owning a group-only file locks the owner out on a server without
+    /// knfsd's owner override. Root squashed to nobody, claiming the group,
+    /// is no longer the owner and reads through the group triad.
+    #[test]
+    fn owner_locked_out_of_a_group_only_file_gets_in_through_the_group() {
+        let caller = Identity::new(1000, 522, &[]);
+        let server = Server { owner_override: false, ..KNFSD };
+        assert!(!permitted(&caller, server, (1000, 522), 0o040, READ));
+        assert!(first_working(&caller, server, (1000, 522), 0o040, READ).is_some());
+    }
+
+    /// A file no group or other may read, owned by root, stays unreadable
+    /// under root_squash -- the ladder must not claim otherwise.
+    #[test]
+    fn root_only_file_under_root_squash_is_out_of_reach() {
+        let caller = Identity::new(1000, 1000, &[522]);
+        assert_eq!(first_working(&caller, Server { owner_override: false, ..KNFSD }, (0, 0), 0o600, READ), None);
+    }
+}
