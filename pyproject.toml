@@ -7,7 +7,7 @@ requires-python = ">=3.11,<3.15"
 package = false
 
 [dependency-groups]
-docs = ["mkdocs-material>=9.0"]
+docs = ["mkdocs-material>=9.8.2"]
 
 [tool.ty.environment]
 python-version = "3.11"
